@@ -1,0 +1,83 @@
+name: せどりアプリ進捗自動更新
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:  # 手動実行も可能
+
+jobs:
+  update-progress:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: コードをチェックアウト
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 全履歴を取得して変更を分析
+    
+    - name: Node.js環境セットアップ
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+    
+    - name: Gemini CLIインストール
+      run: |
+        npm install -g @google/generative-ai
+        
+    - name: 最新の変更を分析
+      id: analyze
+      run: |
+        # 最新コミットの情報を取得
+        COMMIT_MSG=$(git log -1 --pretty=format:"%s")
+        CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+        
+        echo "コミットメッセージ: $COMMIT_MSG"
+        echo "変更ファイル: $CHANGED_FILES"
+        
+        # 進捗レポートを生成（簡易版）
+        PROGRESS_REPORT=$(cat << EOF
+        # 📊 せどりアプリ開発進捗更新
+        
+        **日時**: $(date '+%Y年%m月%d日 %H:%M')
+        
+        ## 📝 今回の変更
+        - **コミット**: $COMMIT_MSG
+        - **変更ファイル**: $CHANGED_FILES
+        
+        ## 🎯 進捗状況
+        - 開発継続中
+        - 自動進捗更新システム稼働中
+        
+        ---
+        *GitHub Actionsにより自動生成*
+        EOF
+        )
+        
+        echo "PROGRESS_REPORT<<EOF" >> $GITHUB_OUTPUT
+        echo "$PROGRESS_REPORT" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+    
+    - name: Notionページを更新
+      run: |
+        curl -X PATCH "https://api.notion.com/v1/blocks/${{ secrets.NOTION_PAGE_ID }}/children" \
+          -H "Authorization: Bearer ${{ secrets.NOTION_TOKEN }}" \
+          -H "Content-Type: application/json" \
+          -H "Notion-Version: 2022-06-28" \
+          -d '{
+            "children": [
+              {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                  "rich_text": [
+                    {
+                      "type": "text",
+                      "text": {
+                        "content": "'"${{ steps.analyze.outputs.PROGRESS_REPORT }}"'"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }'
