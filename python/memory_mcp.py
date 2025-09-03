@@ -172,11 +172,11 @@ def compute_ean13_check_digit(jan_12: str) -> str:
 def ean13_validate_for_report(cell_raw: str, *, clean: bool) -> Optional[Dict[str, Any]]:
     """
     normalize 用：JANセルを clean 後の値で EAN-13 検証し、問題があれば dict を返す。
-    問題なければ None を返す。
-    empty と ean13 が重複しないようにここで制御。
+    問題なければ None を返す。empty と ean13 が重複しないようにここで制御。
     """
-    raw = "" if cell_raw is None else str(cell_raw).strip()
-    target = clean_jan(raw) if clean else raw
+    # [T-CSV-007] Use new cleaning pipeline
+    # The `clean` flag is respected inside get_cleaned_value
+    target = get_cleaned_value(cell_raw, "jan")
 
     # empty は専用ルールのみ（ean13と重複させない）
     if target == "":
@@ -184,14 +184,14 @@ def ean13_validate_for_report(cell_raw: str, *, clean: bool) -> Optional[Dict[st
 
     # 数字・桁数チェック
     if not target.isdigit():
-        return {"rule": "ean13", "value": target, "raw_value": (raw if raw != target else ""), "message": "数字ではありません"}
+        return {"rule": "ean13", "value": target, "raw_value": (str(cell_raw or '').strip() if str(cell_raw or '').strip() != target else ""), "message": "数字ではありません"}
     if len(target) != 13:
-        return {"rule": "ean13", "value": target, "raw_value": (raw if raw != target else ""), "message": f"桁数不正 ({len(target)})"}
+        return {"rule": "ean13", "value": target, "raw_value": (str(cell_raw or '').strip() if str(cell_raw or '').strip() != target else ""), "message": f"桁数不正 ({len(target)})"}
 
     # チェックデジット
     calc = compute_ean13_check_digit(target[:12])
     if target[-1] != calc:
-        return {"rule": "ean13", "value": target, "raw_value": (raw if raw != target else ""), "calc": calc, "message": f"チェックデジット不一致 (期待値: {calc})"}
+        return {"rule": "ean13", "value": target, "raw_value": (str(cell_raw or '').strip() if str(cell_raw or '').strip() != target else ""), "calc": calc, "message": f"チェックデジット不一致 (期待値: {calc})"}
 
     return None
 
@@ -199,8 +199,7 @@ def ean13_validate_for_report(cell_raw: str, *, clean: bool) -> Optional[Dict[st
 # --- EAN-13: inspect用の列付与ユーティリティ -------------------------------
 JAN_KEYS = {"jan", "ean", "ean13", "barcode"}
 
-def _inspect_attach_ean13_columns(sample_rows: List[Dict], headers: List[str], *, clean: bool,
-                                  clean_jan_func, compute_checkdigit):
+def _inspect_attach_ean13_columns(sample_rows: List[Dict], headers: List[str], *, clean: bool):
     """inspect の sample 各行に ean13_* 列を付与（check_ean13=true のときだけ呼ぶ）"""
     # JANらしい列を特定
     jan_col = None
@@ -212,8 +211,9 @@ def _inspect_attach_ean13_columns(sample_rows: List[Dict], headers: List[str], *
         return  # 見つからなければ何もしない
 
     for row in sample_rows:
-        raw = str(row.get(jan_col) or "").strip()
-        target = clean_jan_func(raw) if clean else raw
+        raw_val = row.get(jan_col)
+        # [T-CSV-007] Use new cleaning pipeline
+        target = get_cleaned_value(raw_val, jan_col) if clean else str(raw_val or '').strip()
 
         # 既定値
         row["ean13_is_valid"] = False
@@ -230,62 +230,78 @@ def _inspect_attach_ean13_columns(sample_rows: List[Dict], headers: List[str], *
             row["ean13_reason"] = f"桁数不正 ({len(target)})"
             continue
 
-        calc = compute_checkdigit(target[:12])
+        calc = compute_ean13_check_digit(target[:12])
         row["ean13_calc_check_digit"] = calc
         if target[-1] == calc:
             row["ean13_is_valid"] = True
         else:
             row["ean13_reason"] = f"チェックデジット不一致 (期待値: {calc})"
 
-def validate_ean13(jan: str) -> Dict[str, Any]:
-    """EAN-13コードを検証し、詳細な結果をdictで返す"""
-    if not jan or not jan.isdigit():
-        return {"is_valid": False, "calc_check_digit": "", "reason": "数字ではありません"}
-    if len(jan) != 13:
-        return {"is_valid": False, "calc_check_digit": "", "reason": f"{len(jan)}桁です（13桁ではありません）"}
-    
-    body = jan[:12]
-    actual_check_digit = jan[12]
-    
-    calc_check_digit = compute_ean13_check_digit(body)
-    
-    if actual_check_digit == calc_check_digit:
-        return {"is_valid": True, "calc_check_digit": calc_check_digit, "reason": ""}
-    else:
-        return {"is_valid": False, "calc_check_digit": calc_check_digit, "reason": "チェックデジット不一致"}
-
-# --- Cleaning Utilities (T-CSV-007) ---
-INVISIBLE_CHARS_PATTERN = re.compile(r'[\u200B\u200C\u200D\uFEFF\u2060\u00A0]')
+# [T-CSV-007] Expanded and refactored cleaning utilities
+INVISIBLE_CHARS_PLUS_PATTERN = re.compile(r'[\u200B-\u200D\uFEFF\u2060\u00A0\u180E\u200E\u200F\u202A-\u202E]')
 DASH_CHARS_PATTERN = re.compile(r'[‐-‒–—−]')
+PRICE_CHARS_PATTERN = re.compile(r'[￥¥,円]')
 
-def clean_invisible(value: str) -> str:
-    return INVISIBLE_CHARS_PATTERN.sub('', value) if value else value
+def clean_invisible_plus(value: str) -> str:
+    """Remove a wide range of invisible or zero-width characters."""
+    return INVISIBLE_CHARS_PLUS_PATTERN.sub('', value) if value else value
 
 def clean_dash(value: str) -> str:
+    """Normalize various dash-like characters to a standard hyphen."""
     return DASH_CHARS_PATTERN.sub('-', value) if value else value
 
-def clean_text(value: str) -> str:
+def clean_nfkc(value: str) -> str:
+    """Apply NFKC normalization to handle full-width characters."""
     if not isinstance(value, str):
         return value
-    cleaned = value.strip(' \t\n\r\f\v\u3000')
-    cleaned = clean_invisible(cleaned)
+    # Special handling for 'ー' (chōonpu) which can be mangled by NFKC
     placeholder = "___CHOUON___";
-    cleaned = cleaned.replace('ー', placeholder)
+    cleaned = value.replace('ー', placeholder)
     cleaned = unicodedata.normalize('NFKC', cleaned)
     cleaned = cleaned.replace(placeholder, 'ー')
-    cleaned = clean_dash(cleaned)
     return cleaned
 
+def clean_price(value: str) -> str:
+    """Clean price-specific characters like currency symbols and commas."""
+    if value is None: return ""
+    return PRICE_CHARS_PATTERN.sub('', str(value))
+
 def clean_jan(value: str) -> str:
+    """(Existing) Keep only digits after NFKC normalization for JAN/EAN codes."""
     if not isinstance(value, str):
         return value
     normalized = unicodedata.normalize('NFKC', value)
     return re.sub(r'\D', '', normalized)
 
-def get_cleaner(column_name: str):
-    if (column_name or "").lower() in JAN_KEYS:
-        return clean_jan
-    return clean_text
+# [T-CSV-007] New master cleaning pipeline function
+def get_cleaned_value(value: Any, column_name: str) -> str:
+    """
+    Apply a standard cleaning pipeline to a value based on its column name.
+    Order: trim -> invisible -> nfkc -> dash -> column-specific
+    """
+    if value is None:
+        return ""
+    
+    text = str(value)
+    
+    # 1. Trim whitespace
+    cleaned = text.strip(' \t\n\r\f\v\u3000')
+    # 2. Remove invisible characters
+    cleaned = clean_invisible_plus(cleaned)
+    # 3. NFKC normalization (handles full-width chars)
+    cleaned = clean_nfkc(cleaned)
+    # 4. Unify dashes
+    cleaned = clean_dash(cleaned)
+
+    # 5. Column-specific cleaning
+    col_lower = (column_name or "").lower()
+    if col_lower in JAN_KEYS:
+        # This specifically removes non-digits, which is stricter than the base pipeline
+        cleaned = re.sub(r'\D', '', cleaned)
+    elif "price" in col_lower or "cost" in col_lower:
+        cleaned = clean_price(cleaned)
+        
+    return cleaned
 
 # ========= アプリ =========
 app = FastAPI(title="HIRIO Memory MCP (pseudo)")
@@ -418,7 +434,7 @@ def pin(req: PinReq, Authorization: Optional[str] = Header(None)):
 files_router = APIRouter(prefix="/files", tags=["files"])
 
 # 許可ルート（; 区切り）。未指定は D:\HIRIO\workspace
-ALLOWED_ROOTS = [Path(p) for p in os.environ.get("ALLOWED_ROOTS", r"D:\\HIRIO\\workspace").split(";") if p.strip()]
+ALLOWED_ROOTS = [Path(p) for p in os.environ.get("ALLOWED_ROOTS", r"D:\HIRIO\workspace").split(";") if p.strip()]
 ALLOWED_ROOTS = [p.resolve() for p in ALLOWED_ROOTS]
 
 def _is_in_allowed(p: Path) -> bool:
@@ -850,7 +866,8 @@ def csv_inspect(req: InspectReq, Authorization: Optional[str] = Header(None), ch
         "mtime": datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="seconds")
     }
     if clean:
-        meta["cleaning"] = ["trim","nfkc","remove_invisible","dash_unify","jan_digits_only"]
+        # [T-CSV-007] Reflect new cleaning steps in metadata
+        meta["cleaning"] = ["trim_whitespace", "remove_invisible_plus", "normalize_nfkc", "unify_dashes", "column_specific(jan,price,cost)"]
 
     sample = []
     if headers and len(rows) > 1:
@@ -858,13 +875,25 @@ def csv_inspect(req: InspectReq, Authorization: Optional[str] = Header(None), ch
             sample_row = {headers[i] if i < len(headers) else f"_{i}":(r[i] if i < len(r) else "") for i in range(max(len(headers), len(r)))}
             sample.append(sample_row)
 
+    sample = []
+    if headers and len(rows) > 1:
+        for r in rows[1:]:
+            sample_row = {headers[i] if i < len(headers) else f"_{i}": (r[i] if i < len(r) else "") for i in range(max(len(headers), len(r)))}
+            sample.append(sample_row)
+
+    # [T-CSV-007] Apply cleaning to sample if requested
+    if clean:
+        cleaned_sample = []
+        for r in sample:
+            cleaned_row = {col: get_cleaned_value(val, col) for col, val in r.items()}
+            cleaned_sample.append(cleaned_row)
+        sample = cleaned_sample
+
     if check_ean13:
         _inspect_attach_ean13_columns(
             sample_rows=sample,
             headers=headers,
-            clean=clean,
-            clean_jan_func=clean_jan,
-            compute_checkdigit=compute_ean13_check_digit
+            clean=clean
         )
             
     return {"meta": meta, "encoding": enc, "newline": nl,
@@ -951,17 +980,19 @@ def csv_normalize(req: NormalizeReq, Authorization: Optional[str] = Header(None)
         
         rec_to_process = raw_rec
         if clean:
-            cleaned_rec = {col: get_cleaner(col)(val) for col, val in raw_rec.items()}
+            # [T-CSV-007] Apply new cleaning pipeline
+            cleaned_rec = {col: get_cleaned_value(val, col) for col, val in raw_rec.items()}
             rec_to_process = cleaned_rec
         
         if req.trim_whitespace:
+            # This is now part of get_cleaned_value, but we keep it for backward compatibility if clean=false
             rec_to_process = {k: (v.strip() if isinstance(v, str) else v) for k, v in rec_to_process.items()}
 
         out_row_values = [ rec_to_process.get(col, "") for col in out_cols ]
         
         rownum = (1 if has_header else 0) + 1 + in_count
         rowdict_for_validation = { col: out_row_values[i] if i < len(out_row_values) else "" for i, col in enumerate(out_cols) }
-        # Validation logic refactored to handle JAN columns exclusively.
+        
         if check_ean13:
             rowdict_for_std_validation = dict(rowdict_for_validation)
             jan_issues = []
@@ -1029,7 +1060,8 @@ def csv_normalize(req: NormalizeReq, Authorization: Optional[str] = Header(None)
         "validation": report_meta
     }
     if clean:
-        report["cleaning"] = ["trim","nfkc","remove_invisible","dash_unify","jan_digits_only"]
+        # [T-CSV-007] Reflect new cleaning steps in metadata
+        report["cleaning"] = ["trim_whitespace", "remove_invisible_plus", "normalize_nfkc", "unify_dashes", "column_specific(jan,price,cost)"]
 
     return {"ok": True, "dry_run": req.dry_run, "report": report}
 
