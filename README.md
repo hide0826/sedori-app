@@ -2,10 +2,15 @@
 せどり事業自動化アプリ
 # せどりアプリ Python実装仕様書（改良版）
 
+[![Latest release](https://img.shields.io/github/v/release/hide0826/sedori-app?display_name=tag&sort=semver)](https://github.com/hide0826/sedori-app/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/hide0826/sedori-app/progress-update.yml?label=CI)](https://github.com/hide0826/sedori-app/actions)
+[![Made with Python](https://img.shields.io/badge/Made%20with-Python-blue)](#)
+# せどり事業自動化アプリ (HIRIO) — v0.3.3
+
+
 ## 🎯 概要
 
 中古店舗せどりの事務業務を完全自動化するPythonアプリケーション。Excel依存を脱却し、データ整合性・処理速度・拡張性を大幅改善。
-
 ---
 
 ## 📋 基本機能（Excel移植＋改良版）
