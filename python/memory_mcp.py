@@ -171,27 +171,24 @@ def compute_ean13_check_digit(jan_12: str) -> str:
 
 def ean13_validate_for_report(cell_raw: str, *, clean: bool) -> Optional[Dict[str, Any]]:
     """
-    normalize 用：JANセルを clean 後の値で EAN-13 検証し、問題があれば dict を返す。
-    問題なければ None を返す。empty と ean13 が重複しないようにここで制御。
+    normalize用：JANセルを clean 後の値で EAN-13 検証し、NGなら dict を返す（OKなら None）。
+    report 用に value=検証対象（=clean後）、raw_value=元値（変化があった時だけ）を入れる。
     """
-    # [T-CSV-007] Use new cleaning pipeline
-    # The `clean` flag is respected inside get_cleaned_value
-    target = get_cleaned_value(cell_raw, "jan")
+    raw = "" if cell_raw is None else str(cell_raw).strip()
+    target = clean_jan(raw) if clean else raw
 
-    # empty は専用ルールのみ（ean13と重複させない）
+    # empty は ean13 と重複させない
     if target == "":
         return {"rule": "empty", "value": "", "message": "empty value"}
 
-    # 数字・桁数チェック
     if not target.isdigit():
-        return {"rule": "ean13", "value": target, "raw_value": (str(cell_raw or '').strip() if str(cell_raw or '').strip() != target else ""), "message": "数字ではありません"}
+        return {"rule": "ean13", "value": target, "raw_value": (raw if raw != target else ""), "message": "数字ではありません"}
     if len(target) != 13:
-        return {"rule": "ean13", "value": target, "raw_value": (str(cell_raw or '').strip() if str(cell_raw or '').strip() != target else ""), "message": f"桁数不正 ({len(target)})"}
+        return {"rule": "ean13", "value": target, "raw_value": (raw if raw != target else ""), "message": f"桁数不正 ({len(target)})"}
 
-    # チェックデジット
     calc = compute_ean13_check_digit(target[:12])
     if target[-1] != calc:
-        return {"rule": "ean13", "value": target, "raw_value": (str(cell_raw or '').strip() if str(cell_raw or '').strip() != target else ""), "calc": calc, "message": f"チェックデジット不一致 (期待値: {calc})"}
+        return {"rule": "ean13", "value": target, "raw_value": (raw if raw != target else ""), "calc": calc, "message": f"チェックデジット不一致 (期待値: {calc})"}
 
     return None
 
