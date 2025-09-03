@@ -17,6 +17,58 @@ INDEX_PATH = MEMORY_ROOT / "index.jsonl"
 MEMORY_ROOT.mkdir(parents=True, exist_ok=True)
 INDEX_PATH.touch(exist_ok=True)
 
+# [T-CSV-005] Add presets
+PRESETS: Dict[str, Dict[str, Any]] = {
+    "sedori_basic": {
+        "header_map": {
+            "title": "name", "name": "name",
+            "JAN": "jan", "jan": "jan",
+            "ASIN": "asin", "asin": "asin",
+            "price": "price",
+            "cost": "cost",
+        },
+        "required_headers": ["name", "jan", "asin", "price", "cost"],
+        "order": ["name", "jan", "asin", "price", "cost"],
+    },
+    "amazon_jp": {
+        "header_map": {
+            "商品名": "name", "タイトル": "name", "title": "name",
+            "JAN": "jan", "JANコード": "jan", "バーコード": "jan", "jan": "jan",
+            "ASIN": "asin", "asin": "asin",
+            "販売予定価格": "price", "参考価格": "price", "価格": "price", "price": "price",
+            "仕入れ価格": "cost", "原価": "cost", "cost": "cost",
+            "SKU": "sku", "sku": "sku",
+            "仕入れ日": "purchase_date", "purchase_date": "purchase_date",
+        },
+        "required_headers": ["name", "jan", "asin", "price", "cost"],
+        "order": ["name", "jan", "asin", "price", "cost", "sku", "purchase_date"],
+    },
+    "mercari": {
+        "header_map": {
+            "商品名": "name", "name": "name", "title": "name",
+            "バーコード": "jan", "jan": "jan",
+            "asin": "asin",
+            "販売価格": "price", "price": "price",
+            "原価": "cost", "cost": "cost",
+            "SKU": "sku", "sku": "sku",
+        },
+        "required_headers": ["name", "price", "cost"],
+        "order": ["name", "jan", "asin", "price", "cost", "sku"],
+    },
+    "yahoo_shopping": {
+        "header_map": {
+            "商品名": "name", "name": "name", "title": "name",
+            "JANコード": "jan", "jan": "jan",
+            "asin": "asin",
+            "販売価格": "price", "price": "price",
+            "原価": "cost", "cost": "cost",
+            "商品コード": "sku", "SKU": "sku", "sku": "sku",
+        },
+        "required_headers": ["name", "price"],
+        "order": ["name", "jan", "asin", "price", "cost", "sku"],
+    },
+}
+
 # ========= モデル =========
 class Meta(BaseModel):
     title: str = Field(..., description="1行タイトル")
@@ -117,9 +169,34 @@ def compute_ean13_check_digit(jan_12: str) -> str:
     check_digit = (10 - (total_sum % 10)) % 10
     return str(check_digit)
 
-# --- EAN-13: inspect用の列付与ユーティリティ -------------------------------
-from typing import Optional, List, Dict
+def ean13_validate_for_report(cell_raw: str, *, clean: bool) -> Optional[Dict[str, Any]]:
+    """
+    normalize 用：JANセルを clean 後の値で EAN-13 検証し、問題があれば dict を返す。
+    問題なければ None を返す。
+    empty と ean13 が重複しないようにここで制御。
+    """
+    raw = "" if cell_raw is None else str(cell_raw).strip()
+    target = clean_jan(raw) if clean else raw
 
+    # empty は専用ルールのみ（ean13と重複させない）
+    if target == "":
+        return {"rule": "empty", "value": "", "message": "empty value"}
+
+    # 数字・桁数チェック
+    if not target.isdigit():
+        return {"rule": "ean13", "value": target, "raw_value": (raw if raw != target else ""), "message": "数字ではありません"}
+    if len(target) != 13:
+        return {"rule": "ean13", "value": target, "raw_value": (raw if raw != target else ""), "message": f"桁数不正 ({len(target)})"}
+
+    # チェックデジット
+    calc = compute_ean13_check_digit(target[:12])
+    if target[-1] != calc:
+        return {"rule": "ean13", "value": target, "raw_value": (raw if raw != target else ""), "calc": calc, "message": f"チェックデジット不一致 (期待値: {calc})"}
+
+    return None
+
+
+# --- EAN-13: inspect用の列付与ユーティリティ -------------------------------
 JAN_KEYS = {"jan", "ean", "ean13", "barcode"}
 
 def _inspect_attach_ean13_columns(sample_rows: List[Dict], headers: List[str], *, clean: bool,
@@ -525,34 +602,6 @@ app.include_router(files_router)
 import csv, io
 # import os, base64, re, unicodedata # already imported
 
-# ==== CSV プリセット読み込み ================================================
-# memory_mcp.py から見たリポジトリルート（sedori-app）を推定
-REPO_ROOT = Path(__file__).resolve().parents[1]
-CSV_PRESET_DIR = REPO_ROOT / "config" / "csv_presets"
-CSV_PRESET_DIR.mkdir(parents=True, exist_ok=True)
-
-def _load_csv_preset(name: str) -> dict:
-    """
-    config/csv_presets/<name>.json を読む（UTF-8）。
-    例のキー:
-      {
-        "header_map": {"JAN":"jan","商品名":"name",...},
-        "order": ["jan","name","price","stock"],
-        "required_headers": ["jan","name","price"],
-        "encoding_out": "cp932",        # 省略可
-        "newline_out": "CRLF",          # "CRLF" | "LF" （省略可）
-        "trim_whitespace": true,        # 省略可
-        "drop_empty_rows": true         # 省略可
-      }
-    """
-    p = CSV_PRESET_DIR / f"{name}.json"
-    if not p.exists():
-        raise HTTPException(status_code=404, detail=f"preset not found: {name}")
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"preset load failed: {e}")
-
 # --- atomic write helper -----------------------------------------------------
 def _atomic_write_bytes(p: Path, data: bytes, backup: bool = True) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -735,7 +784,6 @@ def _csv_norm_header(name: str) -> str:
     name = name.strip()
     name = _ws.sub(" ", name)
     return name
-
 def _csv_open_reader_text(p: Path, encoding: str, dialect) -> csv.DictReader:
     text = p.read_text(encoding=encoding, errors="replace")
     return csv.DictReader(io.StringIO(text), dialect=dialect)
@@ -807,7 +855,7 @@ def csv_inspect(req: InspectReq, Authorization: Optional[str] = Header(None), ch
     sample = []
     if headers and len(rows) > 1:
         for r in rows[1:]:
-            sample_row = {headers[i] if i < len(headers) else f"_{i}": (r[i] if i < len(r) else "") for i in range(max(len(headers), len(r)))}
+            sample_row = {headers[i] if i < len(headers) else f"_{i}":(r[i] if i < len(r) else "") for i in range(max(len(headers), len(r)))}
             sample.append(sample_row)
 
     if check_ean13:
@@ -827,12 +875,15 @@ def csv_inspect(req: InspectReq, Authorization: Optional[str] = Header(None), ch
 def csv_normalize(req: NormalizeReq, Authorization: Optional[str] = Header(None), check_ean13: bool = Query(False), clean: bool = Query(False)):
     _auth(Authorization)
     
-    # === preset の適用（request明示 > preset > デフォルト） ===
+    # [T-CSV-005] Apply preset if specified
     fields_set = getattr(req, "__fields_set__", set())
     preset = {}
     if req.preset:
-        preset = _load_csv_preset(req.preset)
+        if req.preset not in PRESETS:
+            raise HTTPException(status_code=400, detail=f"preset not found: {req.preset}")
+        preset = PRESETS[req.preset]
 
+    # [T-CSV-005] Merge preset and request settings (request wins)
     if "header_map" in preset and isinstance(preset["header_map"], dict):
         merged = dict(preset["header_map"])
         merged.update(req.header_map or {})
@@ -840,9 +891,11 @@ def csv_normalize(req: NormalizeReq, Authorization: Optional[str] = Header(None)
 
     def _apply_if_unset(field: str, preset_key: str = None):
         k = preset_key or field
+        # Apply from preset only if not explicitly set in the request
         if k in preset and field not in fields_set:
             setattr(req, field, preset[k])
 
+    # Apply all relevant fields from the preset if they weren't in the request
     for f in ("order", "required_headers", "trim_whitespace", "drop_empty_rows", "encoding_out", "newline_out", "validate"):
         _apply_if_unset(f)
 
@@ -894,7 +947,7 @@ def csv_normalize(req: NormalizeReq, Authorization: Optional[str] = Header(None)
     in_count = 0; out_count = 0
     for row in rows_iter:
         in_count += 1
-        raw_rec = {mapped[i] if i < len(mapped) else f"c{i}": (row[i] if i < len(row) else "") for i in range(max(len(mapped), len(row)))}
+        raw_rec = {mapped[i] if i < len(mapped) else f"c{i}":(row[i] if i < len(row) else "") for i in range(max(len(mapped), len(row)))}
         
         rec_to_process = raw_rec
         if clean:
@@ -908,38 +961,25 @@ def csv_normalize(req: NormalizeReq, Authorization: Optional[str] = Header(None)
         
         rownum = (1 if has_header else 0) + 1 + in_count
         rowdict_for_validation = { col: out_row_values[i] if i < len(out_row_values) else "" for i, col in enumerate(out_cols) }
-        validator.feed(rowdict_for_validation, rownum)
-
+        # Validation logic refactored to handle JAN columns exclusively.
         if check_ean13:
+            rowdict_for_std_validation = dict(rowdict_for_validation)
+            jan_issues = []
             for col_name in jan_cols_to_check:
-                # If the main validator already flagged the cell as empty, we can skip further EAN checks.
-                is_already_empty = any(
-                    iss["row"] == rownum and iss["column"] == col_name and iss["rule"] == "empty"
-                    for iss in validator.issues
-                )
-                if is_already_empty:
-                    continue
-
-                # Get the raw value from the original record for this row.
-                raw_val = raw_rec.get(col_name)
-                target_raw = str(raw_val or "").strip()
-
-                # If cleaning is enabled, use the cleaned value for validation.
-                target = clean_jan(target_raw) if clean else target_raw
-
-                # Skip EAN validation for what is now an empty string.
-                if target == "":
-                    continue
-
-                # Perform EAN-13 validation on the (potentially cleaned) target value.
-                if not target.isdigit():
-                    validator.issues.append({"row": rownum, "column": col_name, "rule": "ean13", "value": target, "raw_value": (target_raw if target_raw!=target else ""), "message": "数字ではありません"})
-                elif len(target) != 13:
-                    validator.issues.append({"row": rownum, "column": col_name, "rule": "ean13", "value": target, "raw_value": (target_raw if target_raw!=target else ""), "message": f"桁数不正 ({len(target)})"})
-                else:
-                    calc = compute_ean13_check_digit(target[:12])
-                    if target[-1] != calc:
-                        validator.issues.append({"row": rownum, "column": col_name, "rule": "ean13", "value": target, "raw_value": (target_raw if target_raw!=target else ""), "calc": calc, "message": f"チェックデジット不一致 (期待値: {calc})"})
+                if col_name in rowdict_for_std_validation:
+                    raw_val = raw_rec.get(col_name)
+                    hit = ean13_validate_for_report(raw_val, clean=clean)
+                    if hit:
+                        issue = {"row": rownum, "column": col_name}
+                        issue.update(hit)
+                        jan_issues.append(issue)
+                    # Remove from dict to prevent standard validation
+                    del rowdict_for_std_validation[col_name]
+            
+            validator.feed(rowdict_for_std_validation, rownum)
+            validator.issues.extend(jan_issues)
+        else:
+            validator.feed(rowdict_for_validation, rownum)
 
         if req.drop_empty_rows and all((str(x) == "" for x in out_row_values)):
             continue
