@@ -1,0 +1,1 @@
+Core components like config and schemas
