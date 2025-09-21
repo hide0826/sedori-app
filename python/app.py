@@ -16,6 +16,14 @@ def create_app() -> FastAPI:
     def health():
         return {"status": "ok"}
 
+    from routers.csv import router as csv_router
+    from routers.ssot_rules import router as ssot_router
+    from routers.repricer import router as repricer_router
+
+    app.include_router(csv_router)
+    app.include_router(ssot_router)
+    app.include_router(repricer_router)
+
     return app
 
 app = create_app()
