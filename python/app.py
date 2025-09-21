@@ -20,7 +20,7 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     # ルーターのインポートと登録
-    from routers.csv_router import router as csv_router
+    from routers.csv import router as csv_router
     from routers.ssot_rules import router as ssot_router
     from routers.repricer import router as repricer_router
 
@@ -37,4 +37,4 @@ app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:create_app", host="127.0.0.1", port=8000, reload=True, factory=True)
+    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
