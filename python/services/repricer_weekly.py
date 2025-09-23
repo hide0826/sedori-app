@@ -1,164 +1,187 @@
 from __future__ import annotations
-from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Tuple, List
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Dict, Any
 import pandas as pd
+import numpy as np
 import re
+import math
+import json
+from python.core.config import CONFIG_PATH
 
 @dataclass
 class RepriceOutputs:
-    updated_df: pd.DataFrame           # 改定後CSV用
-    red_list_df: pd.DataFrame          # 赤字商品
-    long_term_df: pd.DataFrame         # 12ヶ月超の除外通知
-    switched_to_trace_df: pd.DataFrame # 60日超でpriceTrace=1へ切替
+    updated_df: pd.DataFrame
+    excluded_df: pd.DataFrame
+    log_df: pd.DataFrame
+    q4_switched_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    date_unknown_df: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 def clean_sku(sku: str) -> str:
-    """
-    SKUから不要な文字列を除去する前処理
-    - ="..." パターンを除去（Excel等からの読み込み対応）
-    - 先頭の=" と末尾の" を削除
-    """
     if not sku or not isinstance(sku, str):
         return ""
-
-    # ="..." パターンを除去
     if sku.startswith('="') and sku.endswith('"'):
-        sku = sku[2:-1]  # 先頭の=" と末尾の" を除去
-
+        sku = sku[2:-1]
     return sku.strip()
 
-
 def parse_listing_date_from_sku(sku: str) -> datetime | None:
-    """
-    実際のSKU形式から日付を解析
-    優先順位:
-    1. YYYY_MMDD_xxxx → YYYY/MM/DD
-    2. YYYYMMDD-xxxx → YYYY/MM/DD
-    3. YYYY_MM_DD_xxxx → YYYY/MM/DD
-    4. YYMMDD-xxxx → 20YY/MM/DD
-    5. pr_xxxx_YYYYMMDD_xxxx → YYYYMMDD部分抽出
-    6. その他は日付解析不可
-    """
     try:
-        if not sku or not isinstance(sku, str):
-            return None
-
-        # SKU前処理を適用
+        if not sku or not isinstance(sku, str): return None
         sku = clean_sku(sku)
-        if not sku:
-            return None
-
-        # パターン1: YYYY_MMDD_xxxx (例: 2024_0503_item)
-        pattern1 = r'^(\d{4})_(\d{2})(\d{2})_'
-        match = re.match(pattern1, sku)
-        if match:
-            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
-            return _create_date_if_valid(year, month, day)
-
-        # パターン2: YYYYMMDD-xxxx (例: 20240503-item)
-        pattern2 = r'^(\d{4})(\d{2})(\d{2})-'
-        match = re.match(pattern2, sku)
-        if match:
-            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
-            return _create_date_if_valid(year, month, day)
-
-        # パターン3: YYYY_MM_DD_xxxx (例: 2024_05_03_item)
-        pattern3 = r'^(\d{4})_(\d{2})_(\d{2})_'
-        match = re.match(pattern3, sku)
-        if match:
-            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
-            return _create_date_if_valid(year, month, day)
-
-        # パターン4: YYMMDD-xxxx (例: 240503-item) → 20YY年として解釈
-        pattern4 = r'^(\d{2})(\d{2})(\d{2})-'
-        match = re.match(pattern4, sku)
-        if match:
-            yy, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
-            year = 2000 + yy
-            return _create_date_if_valid(year, month, day)
-
-        # パターン5: pr_xxxx_YYYYMMDD_xxxx (例: pr_abc_20240503_def)
-        pattern5 = r'pr_[^_]+_(\d{4})(\d{2})(\d{2})_'
-        match = re.search(pattern5, sku)
-        if match:
-            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
-            return _create_date_if_valid(year, month, day)
-
-        # どのパターンにも一致しない場合
+        if not sku: return None
+        patterns = [
+            (r'^(\d{4})_(\d{2})(\d{2})_', False),
+            (r'^(\d{4})(\d{2})(\d{2})-', False),
+            (r'^(\d{4})_(\d{2})_(\d{2})_', False),
+            (r'^(\d{2})(\d{2})(\d{2})-', True),
+            (r'pr_[^_]+_(\d{4})(\d{2})(\d{2})_', False)
+        ]
+        for pattern, is_yy in patterns:
+            match = re.search(pattern, sku)
+            if match:
+                year = 2000 + int(match.group(1)) if is_yy else int(match.group(1))
+                month, day = int(match.group(2)), int(match.group(3))
+                return _create_date_if_valid(year, month, day)
         return None
     except Exception:
         return None
 
-
 def _create_date_if_valid(year: int, month: int, day: int) -> datetime | None:
-    """日付の妥当性をチェックしてdatetimeオブジェクトを作成"""
     try:
-        # 基本的な範囲チェック
-        if year < 1900 or year > 2100:
-            return None
-        if month < 1 or month > 12:
-            return None
-        if day < 1 or day > 31:
-            return None
-
-        # datetimeで実際の日付妥当性をチェック（2月30日などを弾く）
+        if not (1900 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31): return None
         return datetime(year, month, day)
     except ValueError:
-        # 無効な日付（例: 2月30日）
         return None
 
-def weekly_reprice(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
+def get_rule_for_days(days: int, rules: Dict[str, Any]) -> Dict[str, Any] | None:
+    if days <= 0: return None
+    
+    # 経過日数がルールのキー（30, 60...）を超えない最大のものを探す
+    # 例: 75日の場合、"60"のルールが適用される
+    applicable_days = 0
+    for rule_days_str in rules.keys():
+        rule_days = int(rule_days_str)
+        if rule_days <= days and rule_days > applicable_days:
+            applicable_days = rule_days
+            
+    return rules.get(str(applicable_days))
+
+def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
     df = df.copy()
 
-    # 前提列（Plister在庫CSV想定）: SKU, price, akaji, priceTrace など
-    for col in ["SKU", "price", "akaji"]:
-        if col not in df.columns:
-            df[col] = None
+    # --- 1. 設定ファイル読み込み ---
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    rules = config.get("reprice_rules", {})
+    q4_rule_enabled = config.get("q4_rule_enabled", True) # デフォルトは有効
 
-    # 出品日推定
+    # --- 2. 前処理・データ準備 ---
+    for col in ["SKU", "price", "akaji", "priceTrace"]:
+        if col not in df.columns: df[col] = 0 if col != "SKU" else ""
+    
+    df['price'] = pd.to_numeric(df['price'], errors='coerce').fillna(0)
+    df['akaji'] = pd.to_numeric(df['akaji'], errors='coerce').fillna(0)
+    df['priceTrace'] = pd.to_numeric(df['priceTrace'], errors='coerce').fillna(0).astype(int)
+
     df["listed_at"] = df["SKU"].apply(parse_listing_date_from_sku)
+    df["days_since_listed"] = df["listed_at"].apply(lambda x: (today - x).days if pd.notna(x) else np.nan)
+    
+    # --- 3. 処理優先順位に基づく分類 ---
+    log_records = []
+    
+    # 3.1: 365日超 → 対象外
+    excluded_mask = df["days_since_listed"] > 365
+    excluded_df = df[excluded_mask].copy()
+    df = df[~excluded_mask]
+    if not excluded_df.empty:
+        for idx in excluded_df.index: log_records.append({'index': idx, 'sku': excluded_df.loc[idx, 'SKU'], 'days': excluded_df.loc[idx, 'days_since_listed'], 'action': 'exclude', 'reason': 'Over 365 days'})
 
-    # None値を持つ行に対する安全な日数計算
-    def calculate_days_since_listed(listed_at):
-        if pd.isna(listed_at) or listed_at is None:
-            return None
-        return (today - listed_at).days
+    # 3.2: Q4商品特例 (10月第1週)
+    q4_switched_df = pd.DataFrame()
+    if q4_rule_enabled and today.month == 10 and today.day <= 7:
+        q4_mask = df['SKU'].str.contains('Q4', na=False)
+        if q4_mask.any():
+            df.loc[q4_mask, "priceTrace"] = 1
+            q4_switched_df = df[q4_mask].copy()
+            for idx in q4_switched_df.index: log_records.append({'index': idx, 'sku': q4_switched_df.loc[idx, 'SKU'], 'days': q4_switched_df.loc[idx, 'days_since_listed'], 'action': 'priceTrace', 'reason': 'Q4 Special Rule'})
 
-    df["days_since_listed"] = df["listed_at"].apply(calculate_days_since_listed)
+    # 3.3: 日付不明商品 → 据え置き
+    date_unknown_mask = df["days_since_listed"].isna()
+    date_unknown_df = df[date_unknown_mask].copy()
+    df = df[~date_unknown_mask]
+    if not date_unknown_df.empty:
+        for idx in date_unknown_df.index: log_records.append({'index': idx, 'sku': date_unknown_df.loc[idx, 'SKU'], 'days': -1, 'action': 'maintain', 'reason': 'Date unknown'})
 
-    # 12ヶ月超（365日超）は対象外 → 通知用抽出（日付不明は除外）
-    long_term_df = df[(df["days_since_listed"].notna()) & (df["days_since_listed"] > 365)].copy()
+    # --- 4. 設定ルール適用 ---
+    df['new_price'] = df['price'].copy()
+    df['new_priceTrace'] = df['priceTrace'].copy()
 
-    # 60日超は改定しないで priceTrace=1 切替候補（日付不明は除外）
-    switched_to_trace_df = df[(df["days_since_listed"].notna()) & (df["days_since_listed"] > 60) & (df["days_since_listed"] <= 365)].copy()
-    if "priceTrace" not in df.columns:
-        df["priceTrace"] = 0
-    df.loc[switched_to_trace_df.index, "priceTrace"] = 1
+    for index, row in df.iterrows():
+        days = row['days_since_listed']
+        rule = get_rule_for_days(days, rules)
+        
+        if not rule:
+            log_records.append({'index': index, 'sku': row['SKU'], 'days': days, 'action': 'maintain', 'reason': 'No applicable rule'})
+            continue
 
-    # 改定対象: 0～60日（日付不明商品は日付取得できない旨を記録して対象外）
-    date_unknown_df = df[df["days_since_listed"].isna()].copy()
-    target = df[(df["days_since_listed"].notna()) & (df["days_since_listed"] >= 0) & (df["days_since_listed"] <= 60)].copy()
+        action = rule.get("action")
+        price = row['price']
+        akaji = row['akaji']
+        new_price = price
+        reason = f"Rule for {days} days"
 
-    # 週次 ±1%（暫定：まずは -1% のみ適用する例。後で条件を詰める）
-    target["new_price"] = (target["price"].astype(float) * 0.99).round(2)
+        if action == "priceTrace":
+            df.loc[index, 'new_priceTrace'] = rule.get("priceTrace", row['priceTrace'])
+        
+        elif action and action.startswith("price_down_"):
+            try:
+                percentage = int(action.split('_')[-1])
+                multiplier = 1 - (percentage / 100.0)
+                new_price = round(price * multiplier)
+                
+                # 利益率ガード
+                guard_price = math.ceil(akaji * 1.10)
+                if new_price < guard_price:
+                    new_price = guard_price
+                    reason += f" ({percentage}% down -> Profit Guard Applied)"
+                else:
+                    reason += f" ({percentage}% down)"
+            except (ValueError, IndexError):
+                 log_records.append({'index': index, 'sku': row['SKU'], 'days': days, 'action': 'maintain', 'reason': f'Invalid price_down action: {action}'})
+                 continue
+        
+        elif action == "price_down_ignore":
+            new_price = round(price * 0.99)
+            reason += " (Ignore Profit)"
 
-    # 赤字（new_price < akaji）
-    red_mask = target["new_price"] < target["akaji"].astype(float)
-    red_list_df = target[red_mask].copy()
+        elif action == "exclude":
+            # この行をDataFrameに追加してから元のDataFrameから削除
+            excluded_df = pd.concat([excluded_df, row.to_frame().T])
+            df.drop(index, inplace=True)
+            reason = "Excluded by rule"
+            # ループの次のイテレーションに進む
+            log_records.append({'index': index, 'sku': row['SKU'], 'days': days, 'action': action, 'reason': reason})
+            continue
 
-    # 改定反映（赤字は一旦 new_price にも反映しつつ、別CSVで把握）
-    df.loc[target.index, "price"] = target["new_price"]
+        df.loc[index, 'new_price'] = new_price
+        log_records.append({'index': index, 'sku': row['SKU'], 'days': days, 'action': action, 'reason': reason})
 
-    # 12ヶ月超は改定しない（price据え置き）
-    # switched_to_trace は上でpriceTrace=1に切替済み
+    # 'new_price'と'new_priceTrace'が存在する行のみ更新
+    if 'new_price' in df.columns:
+        df['price'] = df['new_price']
+        df.drop(columns=['new_price'], inplace=True)
+    if 'new_priceTrace' in df.columns:
+        df['priceTrace'] = df['new_priceTrace']
+        df.drop(columns=['new_priceTrace'], inplace=True)
 
-    # 日付不明商品は価格据え置き、priceTrace=0のまま維持
-    df.loc[date_unknown_df.index, "priceTrace"] = 0
+    # --- 5. 出力編集 ---
+    updated_df = pd.concat([df, date_unknown_df])
+    log_df = pd.DataFrame(log_records)
 
-    updated_df = df.copy()
     return RepriceOutputs(
         updated_df=updated_df,
-        red_list_df=red_list_df,
-        long_term_df=long_term_df,
-        switched_to_trace_df=switched_to_trace_df
+        excluded_df=excluded_df,
+        log_df=log_df,
+        q4_switched_df=q4_switched_df,
+        date_unknown_df=date_unknown_df
     )

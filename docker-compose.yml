@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hirio_api
+    ports:
+      - "8000:8000"
+    volumes:
+      # ローカルのプロジェクト全体をコンテナの/appディレクトリにマウント
+      # これにより、ローカルでのコード変更が即座にコンテナに反映される（ホットリロード）
+      - .:/app
+    environment:
+      # 必要に応じて環境変数を設定
+      - ENVIRONMENT=development
+      - DATABASE_URL=sqlite:///./test.db
+    restart: unless-stopped
+
+# 将来的にPWAフロントエンドを追加する場合の雛形
+# services:
+#   pwa:
+#     build:
+#       context: ./pwa  # pwaディレクトリをコンテキストに
+#       dockerfile: Dockerfile.pwa
+#     container_name: hirio_pwa
+#     ports:
+#       - "3000:3000"
+#     volumes:
+#       - ./pwa:/app
+#       - /app/node_modules
+#     restart: unless-stopped

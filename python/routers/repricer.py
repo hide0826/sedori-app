@@ -1,28 +1,66 @@
-from fastapi import APIRouter, UploadFile, File
+from fastapi import APIRouter, UploadFile, File, Body, HTTPException
+from pydantic import BaseModel, Field
+from typing import Dict, Optional, Literal
 import pandas as pd
 from datetime import datetime
+import json
 from services.repricer_weekly import weekly_reprice, parse_listing_date_from_sku
-from core.config import TMP_DIR
+from core.config import TMP_DIR, BASE_DIR
 from core.csv_utils import read_csv_with_fallback
 
 router = APIRouter(prefix="/repricer", tags=["repricer"])
 
+CONFIG_PATH = BASE_DIR / "config" / "reprice_rules.json"
+
+# --- Pydantic Models for Config ---
+class RepriceRule(BaseModel):
+    action: Literal[
+        "maintain", 
+        "priceTrace", 
+        "price_down_1", 
+        "price_down_2", 
+        "price_down_ignore", 
+        "exclude"
+    ]
+    priceTrace: Optional[int] = Field(None, ge=0, le=5)
+
+class RepriceConfig(BaseModel):
+    reprice_rules: Dict[str, RepriceRule]
+    updated_at: datetime
+
+# --- Config Endpoints ---
+@router.get("/config", response_model=RepriceConfig)
+def get_config():
+    """現在の価格改定設定を取得"""
+    if not CONFIG_PATH.exists():
+        raise HTTPException(status_code=404, detail="Config file not found")
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+@router.put("/config", response_model=RepriceConfig)
+def update_config(config: RepriceConfig = Body(...)):
+    """価格改定設定を更新"""
+    config.updated_at = datetime.now()
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(config.dict(), f, indent=2, default=str)
+        return config
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write config file: {e}")
+
+# --- Repricing Endpoints ---
 @router.post("/preview")
 async def preview(file: UploadFile = File(...)):
     content = await file.read()
     df = read_csv_with_fallback(content)
     
-    # 数値系のカラム型変換
-    for col in ["price", "akaji", "priceTrace"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    outputs = weekly_reprice(df, today=datetime.now())
+    outputs = apply_repricing_rules(df, today=datetime.now())
     return {
         "updated_rows": int(len(outputs.updated_df)),
-        "red_list": int(len(outputs.red_list_df)),
-        "long_term": int(len(outputs.long_term_df)),
-        "switched_to_trace": int(len(outputs.switched_to_trace_df)),
+        "excluded_rows": int(len(outputs.excluded_df)),
+        "q4_switched": int(len(outputs.q4_switched_df)),
+        "date_unknown": int(len(outputs.date_unknown_df)),
+        "log_rows": int(len(outputs.log_df)),
     }
 
 @router.post("/apply")
@@ -30,30 +68,23 @@ async def apply(file: UploadFile = File(...)):
     content = await file.read()
     df = read_csv_with_fallback(content)
     
-    for col in ["price", "akaji", "priceTrace"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    outputs = weekly_reprice(df, today=datetime.now())
+    outputs = apply_repricing_rules(df, today=datetime.now())
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     updated_path = TMP_DIR / f"updated_{stamp}.csv"
-    red_path = TMP_DIR / f"red_{stamp}.csv"
-    longterm_path = TMP_DIR / f"longterm_{stamp}.csv"
-    switched_path = TMP_DIR / f"switched_{stamp}.csv"
+    excluded_path = TMP_DIR / f"excluded_{stamp}.csv"
+    log_path = TMP_DIR / f"log_{stamp}.csv"
 
     outputs.updated_df.to_csv(updated_path, index=False, encoding="utf-8-sig")
-    outputs.red_list_df.to_csv(red_path, index=False, encoding="utf-8-sig")
-    outputs.long_term_df.to_csv(longterm_path, index=False, encoding="utf-8-sig")
-    outputs.switched_to_trace_df.to_csv(switched_path, index=False, encoding="utf-8-sig")
+    outputs.excluded_df.to_csv(excluded_path, index=False, encoding="utf-8-sig")
+    outputs.log_df.to_csv(log_path, index=False, encoding="utf-8-sig")
 
     return {
         "ok": True,
         "files": {
             "updated": str(updated_path),
-            "red": str(red_path),
-            "longterm": str(longterm_path),
-            "switched": str(switched_path),
+            "excluded": str(excluded_path),
+            "log": str(log_path),
         }
     }
 

@@ -1,0 +1,17 @@
+{
+  "reprice_rules": {
+    "30": {"action": "maintain", "priceTrace": 0},
+    "60": {"action": "priceTrace", "priceTrace": 1},
+    "90": {"action": "maintain", "priceTrace": 0},
+    "120": {"action": "price_down_1", "priceTrace": 0},
+    "150": {"action": "price_down_1", "priceTrace": 0},
+    "180": {"action": "price_down_1", "priceTrace": 0},
+    "210": {"action": "price_down_2", "priceTrace": 0},
+    "240": {"action": "price_down_2", "priceTrace": 0},
+    "270": {"action": "price_down_2", "priceTrace": 0},
+    "300": {"action": "price_down_ignore", "priceTrace": 0},
+    "330": {"action": "price_down_ignore", "priceTrace": 0},
+    "360": {"action": "exclude", "priceTrace": null}
+  },
+  "updated_at": "2025-09-23T10:00:00Z"
+}
