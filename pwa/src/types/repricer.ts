@@ -11,3 +11,26 @@ export interface RepriceConfig {
   };
   updated_at: string;
 }
+
+// Part 2: 結果表示用
+export interface ResultItem {
+  sku: string;
+  productName?: string;
+  daysSinceListed: number;
+  currentPrice: number;
+  newPrice: number;
+  action: string;
+  priceTraceChange?: string;
+}
+
+export interface ProcessingResult {
+  summary: {
+    total: number;
+    updated: number;
+    excluded: number;
+    actionCounts: Record<string, number>;
+  };
+  items: ResultItem[];
+  updatedCsvContent: string;
+  reportCsvContent: string;
+}

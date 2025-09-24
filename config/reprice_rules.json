@@ -1,54 +1,70 @@
 {
-  "q4_rule_enabled": true,
-  "reprice_rules": {
-    "30": {
-      "action": "price_down_ignore",
-      "priceTrace": 0
-    },
-    "60": {
+  "profit_guard_percentage": 1.1,
+  "excluded_skus": [
+    "excluded-sku-1",
+    "excluded-sku-2"
+  ],
+  "q4_rule_enabled": false,
+  "reprice_rules": [
+    {
+      "days_from": 30,
       "action": "priceTrace",
-      "priceTrace": 1
+      "value": 1
     },
-    "90": {
+    {
+      "days_from": 60,
+      "action": "priceTrace",
+      "value": 1
+    },
+    {
+      "days_from": 90,
+      "action": "price_down_1",
+      "value": 0
+    },
+    {
+      "days_from": 120,
       "action": "price_down_2",
-      "priceTrace": 0
+      "value": 50
     },
-    "120": {
-      "action": "price_down_1",
-      "priceTrace": 0
-    },
-    "150": {
-      "action": "price_down_1",
-      "priceTrace": 0
-    },
-    "180": {
-      "action": "price_down_1",
-      "priceTrace": 0
-    },
-    "210": {
-      "action": "price_down_2",
-      "priceTrace": 0
-    },
-    "240": {
+    {
+      "days_from": 150,
       "action": "price_down_3",
-      "priceTrace": 0
+      "value": 50
     },
-    "270": {
+    {
+      "days_from": 180,
+      "action": "price_down_4",
+      "value": 50
+    },
+    {
+      "days_from": 210,
       "action": "price_down_2",
-      "priceTrace": 0
+      "value": 50
     },
-    "300": {
-      "action": "price_down_3",
-      "priceTrace": 0
+    {
+      "days_from": 240,
+      "action": "priceTrace",
+      "value": 1
     },
-    "330": {
-      "action": "price_down_ignore",
-      "priceTrace": 0
+    {
+      "days_from": 270,
+      "action": "priceTrace",
+      "value": 1
     },
-    "360": {
-      "action": "exclude",
-      "priceTrace": null
+    {
+      "days_from": 300,
+      "action": "priceTrace",
+      "value": 1
+    },
+    {
+      "days_from": 330,
+      "action": "priceTrace",
+      "value": 1
+    },
+    {
+      "days_from": 360,
+      "action": "priceTrace",
+      "value": 1
     }
-  },
-  "updated_at": "2025-09-23T10:00:00Z"
+  ]
 }
