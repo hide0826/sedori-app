@@ -146,7 +146,7 @@ export default function RepricerSettingsTable() {
 
     const endpoint = mode === 'preview' 
       ? `${API_URL}/repricer/preview` 
-      : `${API_URL}/repricer/apply`;
+      : `${API_URL}/repricer/test-upload`; // apply から test-upload に変更
 
     try {
       console.log(`[${mode.toUpperCase()}] Sending request to ${endpoint}`);
