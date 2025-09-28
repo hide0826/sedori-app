@@ -50,83 +50,137 @@ def get_days_since_listed(sku: str, today: datetime) -> int:
     
     return -1
 
-def get_rule_for_days(days: int, rules: List[Dict[str, Any]]) -> Dict[str, Any]:
+def get_rule_for_days(days: int, rules: Dict[str, Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
     """
-    経過日数に応じたルールを返す（ルールは昇順ソートされていること）
+    経過日数に応じたルールキーとルールデータを返す
+    30日間隔設定システム対応
     """
-    for rule in rules:
-        if days <= rule["days_from"]:
-            return rule
-    return None
+    # 30日間隔でのルール検索: 30, 60, 90, ..., 360
+    for days_key in [30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 360]:
+        if days <= days_key:
+            rule_key = str(days_key)
+            if rule_key in rules:
+                return rule_key, rules[rule_key]
 
-def calculate_new_price(price: float, akaji: float, cost: float, rule: Dict[str, Any], days_since_listed: int, config: Dict[str, Any]) -> Tuple[str, str, float]:
+    # 365日超過の場合は対象外
+    return "over_365", {"action": "exclude", "priceTrace": 0}
+
+def calculate_new_price_and_trace(price: float, akaji: float, rule: Dict[str, Any], days_since_listed: int, config: Dict[str, Any]) -> Tuple[str, str, float, int]:
+    """
+    最新仕様：6種類のアクション対応
+    1. maintain: 維持
+    2. priceTrace: priceTrace設定のみ
+    3. price_down_1: 1%値下げ
+    4. price_down_2: 2%値下げ
+    5. profit_ignore_down: 利益無視値下げ(1%)
+    6. exclude: 対象外
+    """
     action = rule["action"]
+    new_price_trace = rule.get("priceTrace", 0)
     reason = f"Rule for {days_since_listed} days ({action})"
-    new_price = price # デフォルトは維持
+    new_price = price  # デフォルトは維持
 
-    if action == "price_down_1":
-        new_price = price - rule["value"]
+    if action == "maintain":
+        # 価格変更なし、priceTraceも変更なし
+        pass
+    elif action == "priceTrace":
+        # 価格変更なし、priceTraceを指定値に変更
+        pass
+    elif action == "price_down_1":
+        # 1%値下げ + 利益率ガード適用
+        new_price = round(price * 0.99)
+        guard_price = akaji * config.get("profit_guard_percentage", 1.1)
+        if new_price < guard_price:
+            new_price = round(guard_price)
+            reason += " (Profit Guard Applied)"
     elif action == "price_down_2":
-        new_price = price * (1 - rule["value"] / 100)
-    elif action == "price_trace":
-        new_price = akaji
-    
-    guard_price = akaji * config.get("profit_guard_percentage", 1.1)
-    if new_price < guard_price:
-        new_price = guard_price
-        reason += " (Profit Guard Applied)"
+        # 2%値下げ + 利益率ガード適用
+        new_price = round(price * 0.98)
+        guard_price = akaji * config.get("profit_guard_percentage", 1.1)
+        if new_price < guard_price:
+            new_price = round(guard_price)
+            reason += " (Profit Guard Applied)"
+    elif action == "profit_ignore_down":
+        # 1%値下げ、利益率ガードを無視
+        new_price = round(price * 0.99)
+        reason += " (Profit Guard Ignored)"
+    elif action == "exclude":
+        # 対象外、変更なし
+        reason = f"Excluded: {days_since_listed} days (manual handling required)"
 
-    return action, reason, int(new_price)
+    return action, reason, new_price, new_price_trace
 
 def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
+    """
+    30日間隔価格改定システム - 最新仕様対応
+    """
     config = load_config()
     log_data = []
     updated_inventory_data = []
     excluded_inventory_data = []
     excluded_skus = set(config.get("excluded_skus", []))
-    
-    rules = config["reprice_rules"]
-    # 防御的措置：ルールが古い辞書形式の場合、新しいリスト形式にその場で変換する
-    if isinstance(rules, dict):
-        rules_list = []
-        for days, rule_details in rules.items():
-            rule_details['days_from'] = int(days)
-            rules_list.append(rule_details)
-        rules = rules_list
 
-    # ルールをdays_fromで昇順にソート
-    sorted_rules = sorted(rules, key=lambda x: x["days_from"])
+    rules = config["reprice_rules"]
 
     for index, row in df.iterrows():
         sku = row.get("SKU", "")
         price = row.get("price", 0)
         akaji = row.get("akaji", 0)
-        cost = row.get("cost", 0)
+        price_trace = row.get("priceTrace", 0)
 
+        # 除外SKU処理
         if sku in excluded_skus:
-            log_data.append({"sku": sku, "days": -1, "action": "exclude", "reason": "Excluded SKU", "price": price, "new_price": price})
+            log_data.append({
+                "sku": sku, "days": -1, "action": "exclude",
+                "reason": "Excluded SKU", "price": price,
+                "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace
+            })
             excluded_inventory_data.append(row.to_dict())
             continue
 
         days_since_listed = get_days_since_listed(sku, today)
-        action = "maintain"
-        reason = "No applicable rule"
-        new_price = price
 
-        if days_since_listed != -1:
-            rule = get_rule_for_days(days_since_listed, sorted_rules)
-            if rule:
-                action, reason, new_price = calculate_new_price(price, akaji, cost, rule, days_since_listed, config)
-        else:
-            reason = "Date unknown"
+        # 日付不明の場合は維持
+        if days_since_listed == -1:
+            log_data.append({
+                "sku": sku, "days": days_since_listed, "action": "maintain",
+                "reason": "Date unknown (maintained)", "price": price,
+                "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace
+            })
+            row_dict = row.to_dict()
+            updated_inventory_data.append(row_dict)
+            continue
 
-        log_data.append({"sku": sku, "days": days_since_listed, "action": action, "reason": reason, "price": price, "new_price": new_price})
+        # 365日超過の商品は対象外
+        if days_since_listed > 365:
+            log_data.append({
+                "sku": sku, "days": days_since_listed, "action": "exclude",
+                "reason": "Over 365 days (manual handling required)", "price": price,
+                "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace
+            })
+            excluded_inventory_data.append(row.to_dict())
+            continue
 
+        # ルール適用
+        rule_key, rule = get_rule_for_days(days_since_listed, rules)
+        action, reason, new_price, new_price_trace = calculate_new_price_and_trace(
+            price, akaji, rule, days_since_listed, config
+        )
+
+        log_data.append({
+            "sku": sku, "days": days_since_listed, "action": action,
+            "reason": reason, "price": price, "new_price": new_price,
+            "priceTrace": price_trace, "new_priceTrace": new_price_trace
+        })
+
+        # Prister形式の全列を保持したまま価格とpriceTraceのみ更新
         row_dict = row.to_dict()
         if action == "exclude":
             excluded_inventory_data.append(row_dict)
         else:
+            # 価格とpriceTraceの更新（Prister形式の16列すべてを保持）
             row_dict['price'] = new_price
+            row_dict['priceTrace'] = new_price_trace
             updated_inventory_data.append(row_dict)
 
     log_df = pd.DataFrame(log_data)

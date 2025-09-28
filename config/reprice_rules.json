@@ -5,66 +5,54 @@
     "excluded-sku-2"
   ],
   "q4_rule_enabled": false,
-  "reprice_rules": [
-    {
-      "days_from": 30,
+  "reprice_rules": {
+    "30": {
+      "action": "maintain",
+      "priceTrace": 0
+    },
+    "60": {
       "action": "priceTrace",
-      "value": 1
+      "priceTrace": 1
     },
-    {
-      "days_from": 60,
+    "90": {
       "action": "priceTrace",
-      "value": 1
+      "priceTrace": 1
     },
-    {
-      "days_from": 90,
-      "action": "price_down_1",
-      "value": 0
+    "120": {
+      "action": "priceTrace",
+      "priceTrace": 1
     },
-    {
-      "days_from": 120,
+    "150": {
+      "action": "priceTrace",
+      "priceTrace": 1
+    },
+    "180": {
+      "action": "priceTrace",
+      "priceTrace": 1
+    },
+    "210": {
+      "action": "priceTrace",
+      "priceTrace": 1
+    },
+    "240": {
       "action": "price_down_2",
-      "value": 50
+      "priceTrace": 0
     },
-    {
-      "days_from": 150,
-      "action": "price_down_3",
-      "value": 50
-    },
-    {
-      "days_from": 180,
-      "action": "price_down_4",
-      "value": 50
-    },
-    {
-      "days_from": 210,
+    "270": {
       "action": "price_down_2",
-      "value": 50
+      "priceTrace": 0
     },
-    {
-      "days_from": 240,
-      "action": "priceTrace",
-      "value": 1
+    "300": {
+      "action": "profit_ignore_down",
+      "priceTrace": 0
     },
-    {
-      "days_from": 270,
-      "action": "priceTrace",
-      "value": 1
+    "330": {
+      "action": "profit_ignore_down",
+      "priceTrace": 0
     },
-    {
-      "days_from": 300,
-      "action": "priceTrace",
-      "value": 1
-    },
-    {
-      "days_from": 330,
-      "action": "priceTrace",
-      "value": 1
-    },
-    {
-      "days_from": 360,
-      "action": "priceTrace",
-      "value": 1
+    "360": {
+      "action": "exclude",
+      "priceTrace": 0
     }
-  ]
+  }
 }

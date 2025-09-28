@@ -13,10 +13,7 @@ const ACTIONS = [
   { value: 'priceTrace', label: 'priceTrace設定' },
   { value: 'price_down_1', label: '1%値下げ' },
   { value: 'price_down_2', label: '2%値下げ' },
-  { value: 'price_down_3', label: '3%値下げ' },
-  { value: 'price_down_4', label: '4%値下げ' },
-  { value: 'price_down_5', label: '5%値下げ' },
-  { value: 'price_down_ignore', label: '利益無視値下げ' },
+  { value: 'profit_ignore_down', label: '利益無視値下げ' },
   { value: 'exclude', label: '対象外' },
 ];
 const PRICE_TRACE_OPTIONS = [
@@ -58,7 +55,9 @@ export default function RepricerSettingsTable() {
       if (!res.ok) {
         throw new Error(`Failed to fetch config: ${res.statusText}`);
       }
-      const data: RepriceConfig = await res.json();
+      const response = await res.json();
+      // API レスポンス形式に対応: {success: true, config: {...}}
+      const data: RepriceConfig = response.success ? response.config : response;
       setConfig(data);
       setQ4RuleEnabled(data.q4_rule_enabled ?? true);
     } catch (e: any) {
@@ -90,7 +89,7 @@ export default function RepricerSettingsTable() {
     }
   };
 
-  const handleRuleChange = (days: number, field: 'action' | 'value', value: any) => {
+  const handleRuleChange = (days: number, field: 'action' | 'priceTrace', value: any) => {
     setConfig((prevConfig) => {
       if (!prevConfig) return null;
 
@@ -105,9 +104,9 @@ export default function RepricerSettingsTable() {
         // 「アクション」が変更された場合の連動ロジック
         if (field === 'action') {
           if (value !== 'priceTrace') {
-            ruleToUpdate.value = 0; // priceTraceでないならvalueをリセット
-          } else if (ruleToUpdate.value === 0 || ruleToUpdate.value === null) {
-            ruleToUpdate.value = 1; // priceTraceに変更され、値が0ならデフォルトの1を設定
+            ruleToUpdate.priceTrace = 0; // priceTraceでないならpriceTraceをリセット
+          } else if (ruleToUpdate.priceTrace === 0 || ruleToUpdate.priceTrace === null) {
+            ruleToUpdate.priceTrace = 1; // priceTraceに変更され、値が0ならデフォルトの1を設定
           }
         }
       }
@@ -144,9 +143,9 @@ export default function RepricerSettingsTable() {
     const formData = new FormData();
     formData.append('file', selectedFile);
 
-    const endpoint = mode === 'preview' 
-      ? `${API_URL}/repricer/preview` 
-      : `${API_URL}/repricer/test-upload`; // apply から test-upload に変更
+    const endpoint = mode === 'preview'
+      ? `${API_URL}/repricer/preview`
+      : `${API_URL}/repricer/apply`;
 
     try {
       console.log(`[${mode.toUpperCase()}] Sending request to ${endpoint}`);
@@ -158,13 +157,27 @@ export default function RepricerSettingsTable() {
       const resBody = await res.text();
       if (!res.ok) {
         let errorDetail = res.statusText;
+        let userFriendlyMessage = '';
+
         try {
             const errorJson = JSON.parse(resBody);
             errorDetail = errorJson.detail || errorDetail;
         } catch (e) {
             errorDetail = resBody.substring(0, 200) || errorDetail;
         }
-        throw new Error(`APIエラー: ${res.status} - ${errorDetail}`);
+
+        // CSVフォーマットエラーの場合は分かりやすいメッセージに変換
+        if (errorDetail.includes('Required columns missing') || errorDetail.includes('price')) {
+          userFriendlyMessage = 'CSVファイルの形式が正しくありません。必要な列：SKU, price, akaji が含まれているか確認してください。';
+        } else if (errorDetail.includes('CSV file is empty')) {
+          userFriendlyMessage = 'CSVファイルが空です。データが含まれているか確認してください。';
+        } else if (errorDetail.includes('Could not read or parse')) {
+          userFriendlyMessage = 'CSVファイルの読み込みに失敗しました。ファイル形式を確認してください。';
+        } else {
+          userFriendlyMessage = `APIエラー: ${res.status} - ${errorDetail}`;
+        }
+
+        throw new Error(userFriendlyMessage);
       }
       
       const result: ProcessingResult = JSON.parse(resBody);
@@ -248,8 +261,8 @@ export default function RepricerSettingsTable() {
                     </td>
                     <td className="py-2 px-4 border-b">
                       <select
-                        value={rule.value ?? 0}
-                        onChange={(e) => handleRuleChange(days, 'value', parseInt(e.target.value))}
+                        value={rule.priceTrace ?? 0}
+                        onChange={(e) => handleRuleChange(days, 'priceTrace', parseInt(e.target.value))}
                         disabled={rule.action !== 'priceTrace'}
                         className="w-full p-2 border rounded disabled:bg-gray-200"
                       >
@@ -277,6 +290,40 @@ export default function RepricerSettingsTable() {
       {/* --- CSVファイル処理セクション --- */}
       <div className="mt-8 pt-6 border-t-2 border-gray-200">
         <h2 className="text-xl font-bold mb-4">CSVファイル処理</h2>
+
+        {/* CSV要件の説明 */}
+        <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+          <h3 className="text-sm font-semibold text-blue-800 mb-2">📋 Prister CSVファイル形式対応</h3>
+          <p className="text-sm text-blue-700 mb-2">PristerエクスポートCSVファイル（16列形式）に対応しています：</p>
+          <div className="text-sm text-blue-700 mb-2">
+            <strong>必須列:</strong> SKU, price, akaji
+          </div>
+          <details className="text-sm text-blue-700">
+            <summary className="cursor-pointer font-semibold mb-1">📄 全対応列一覧（クリックで展開）</summary>
+            <ul className="list-disc ml-5 space-y-1 mt-2">
+              <li><strong>SKU</strong>: 商品識別子（日付形式: 2025_09_20_商品名）</li>
+              <li><strong>ASIN</strong>: Amazon商品識別子</li>
+              <li><strong>title</strong>: 商品タイトル</li>
+              <li><strong>number</strong>: 数量</li>
+              <li><strong>price</strong>: 現在価格（改定対象）</li>
+              <li><strong>cost</strong>: 仕入れ価格</li>
+              <li><strong>akaji</strong>: 赤字価格（利益ガード用）</li>
+              <li><strong>takane</strong>: 高値設定</li>
+              <li><strong>condition</strong>: 商品状態</li>
+              <li><strong>conditionNote</strong>: 状態説明</li>
+              <li><strong>priceTrace</strong>: priceTrace設定（改定対象）</li>
+              <li><strong>leadtime</strong>: リードタイム</li>
+              <li><strong>amazon-fee</strong>: Amazon手数料</li>
+              <li><strong>shipping-price</strong>: 送料</li>
+              <li><strong>profit</strong>: 利益</li>
+              <li><strong>add-delete</strong>: 追加/削除フラグ</li>
+            </ul>
+            <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-xs">
+              <strong>注意:</strong> Excel数式記法（="値"）で保存されたCSVファイルも自動対応します
+            </div>
+          </details>
+        </div>
+
         <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center bg-gray-50">
           <input
             type="file"
