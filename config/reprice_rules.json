@@ -19,27 +19,27 @@
       "priceTrace": 1
     },
     "120": {
-      "action": "priceTrace",
-      "priceTrace": 1
+      "action": "price_down_1",
+      "priceTrace": 0
     },
     "150": {
-      "action": "priceTrace",
-      "priceTrace": 1
+      "action": "price_down_1",
+      "priceTrace": 0
     },
     "180": {
-      "action": "priceTrace",
-      "priceTrace": 1
+      "action": "price_down_1",
+      "priceTrace": 0
     },
     "210": {
-      "action": "priceTrace",
-      "priceTrace": 1
+      "action": "price_down_1",
+      "priceTrace": 0
     },
     "240": {
-      "action": "price_down_2",
+      "action": "price_down_1",
       "priceTrace": 0
     },
     "270": {
-      "action": "price_down_2",
+      "action": "price_down_1",
       "priceTrace": 0
     },
     "300": {
@@ -51,7 +51,7 @@
       "priceTrace": 0
     },
     "360": {
-      "action": "exclude",
+      "action": "profit_ignore_down",
       "priceTrace": 0
     }
   }

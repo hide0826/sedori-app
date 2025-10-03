@@ -7,12 +7,40 @@ interface ResultsDisplayProps {
 }
 
 export default function ResultsDisplay({ result }: ResultsDisplayProps) {
-  const { summary, items, updatedCsvContent, reportCsvContent } = result;
+  const { summary, items, updatedCsvContent, reportCsvContent, updatedCsvEncoding } = result;
   // デバッグログ追加
   console.log('ResultsDisplay - First 3 items:', items.slice(0, 3));
+  console.log('ResultsDisplay - Encoding:', updatedCsvEncoding);
 
-  const handleDownload = (content: string, fileName: string) => {
-    const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
+  const handleDownload = (content: string, fileName: string, encoding?: string) => {
+    let blob: Blob;
+
+    // CP932 Base64 エンコーディングの場合
+    if (encoding === 'cp932-base64') {
+      console.log('Decoding CP932 Base64 content for:', fileName);
+      try {
+        // Base64 デコード
+        const binaryString = atob(content);
+
+        // CP932 バイナリに変換
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+
+        // Blob 作成（CP932 バイナリとして保存）
+        blob = new Blob([bytes], { type: 'text/csv' });
+        console.log('Successfully decoded CP932 Base64, blob size:', blob.size);
+      } catch (error) {
+        console.error('Failed to decode Base64:', error);
+        // フォールバック: 通常の文字列として保存
+        blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
+      }
+    } else {
+      // 通常の UTF-8 文字列
+      blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
+    }
+
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
     link.setAttribute('download', fileName);
@@ -52,7 +80,7 @@ export default function ResultsDisplay({ result }: ResultsDisplayProps) {
       {/* ダウンロードボタン */}
       <div className="my-6 flex justify-center space-x-4">
         <button
-          onClick={() => handleDownload(updatedCsvContent, 'updated.csv')}
+          onClick={() => handleDownload(updatedCsvContent, 'updated.csv', updatedCsvEncoding)}
           className="bg-purple-500 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded"
         >
           改定CSVダウンロード

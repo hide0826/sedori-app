@@ -10,6 +10,7 @@ from services.repricer_weekly import apply_repricing_rules
 from core.config import BASE_DIR
 BASE_DIR_TMP = BASE_DIR / "python" / "tmp"
 from core.csv_utils import read_csv_with_fallback
+import numpy as np
 
 # --- Trace蛻励・譛邨ょ沂繧・ｼ・ict/繧ｪ繝悶ず繧ｧ繧ｯ繝井ｸ｡蟇ｾ蠢懶ｼ・---
 def _to_snake(camel: str) -> str:
@@ -188,6 +189,10 @@ async def apply(file: UploadFile = File(...)):
     # a) 蜿ｩ縺九ｌ縺溯ｨ倬鹸
     _tap("[HIT] /repricer/apply")
 
+    print("=" * 50)
+    print("DEBUG: /apply endpoint called")
+    print("=" * 50)
+
     # 譌｢蟄・
     outputs = apply_repricing_rules(df, today=datetime.now())
 
@@ -235,18 +240,83 @@ async def apply(file: UploadFile = File(...)):
     excluded_path = BASE_DIR_TMP / f"excluded_{stamp}.csv"
     log_path = BASE_DIR_TMP / f"log_{stamp}.csv"
 
-    # rename priceTrace -> trace
+    # rename priceTrace -> trace + Excel formula removal
+    print(f"=== DEBUG: Starting rename and formula removal ===")
+    try:
+        # NamedTuple不変性対応: renameの結果を新変数に保存
+        if "priceTrace" in outputs.updated_df.columns and "trace" not in outputs.updated_df.columns:
+            updated_df_renamed = outputs.updated_df.rename(columns={"priceTrace": "trace"})
+            print(f"=== DEBUG: Renamed priceTrace -> trace ===")
+        else:
+            updated_df_renamed = outputs.updated_df.copy()
+            print(f"=== DEBUG: No rename needed, copied updated_df ===")
 
+        # CSV出力直前: 全セルから ="..." 形式を除去（最終防衛ライン）
+        print(f"=== DEBUG: Removing Excel formula prefix before CSV output ===")
 
-    if "priceTrace" in outputs.updated_df.columns and "trace" not in outputs.updated_df.columns:
+        def remove_formula_from_cell(x):
+            """セル値から ="..." を除去"""
+            if isinstance(x, str) and x.startswith('="') and x.endswith('"'):
+                return x[2:-1]  # =" と " を除去
+            return x
 
+        # updated_df の全列に適用
+        for col in updated_df_renamed.columns:
+            updated_df_renamed[col] = updated_df_renamed[col].apply(remove_formula_from_cell)
+        print(f"=== DEBUG: Formula removed from updated_df ({len(updated_df_renamed.columns)} columns) ===")
 
-        outputs.updated_df = outputs.updated_df.rename(columns={"priceTrace": "trace"})
+        # excluded_df の全列に適用
+        excluded_df_cleaned = outputs.excluded_df.copy()
+        for col in excluded_df_cleaned.columns:
+            excluded_df_cleaned[col] = excluded_df_cleaned[col].apply(remove_formula_from_cell)
+        print(f"=== DEBUG: Formula removed from excluded_df ({len(excluded_df_cleaned.columns)} columns) ===")
 
+        # log_df の全列に適用
+        log_df_cleaned = outputs.log_df.copy()
+        for col in log_df_cleaned.columns:
+            log_df_cleaned[col] = log_df_cleaned[col].apply(remove_formula_from_cell)
+        print(f"=== DEBUG: Formula removed from log_df ({len(log_df_cleaned.columns)} columns) ===")
 
-    outputs.updated_df.to_csv(updated_path, index=False, encoding="utf-8-sig")
-    outputs.excluded_df.to_csv(excluded_path, index=False, encoding="utf-8-sig")
-    outputs.log_df.to_csv(log_path, index=False, encoding="utf-8-sig")
+        print(f"=== DEBUG: Excel formula prefix removed from all DataFrames ===")
+    except Exception as e:
+        print(f"=== ERROR: Formula removal failed: {e} ===")
+        import traceback
+        traceback.print_exc()
+        # フォールバック: 元のDataFrameを使用
+        updated_df_renamed = outputs.updated_df.copy()
+        excluded_df_cleaned = outputs.excluded_df.copy()
+        log_df_cleaned = outputs.log_df.copy()
+
+    # デバッグ: CSV出力直前のデータを確認
+    print(f"=== DEBUG: Before CSV output ===")
+    print(f"Updated DF shape: {updated_df_renamed.shape}")
+    print(f"Updated DF columns: {list(updated_df_renamed.columns)}")
+    if len(updated_df_renamed) > 0:
+        print(f"First row sample:")
+        for col in updated_df_renamed.columns:
+            val = updated_df_renamed[col].iloc[0]
+            print(f"  {col}: {str(val)[:50] if pd.notna(val) else 'NaN'}")
+        if 'conditionNote' in updated_df_renamed.columns:
+            cond_note = updated_df_renamed['conditionNote'].iloc[0]
+            print(f"conditionNote full: {cond_note}")
+            # cp932でエンコード可能かテスト
+            try:
+                cond_note_encoded = str(cond_note).encode('cp932')
+                print(f"conditionNote cp932 encode: SUCCESS ({len(cond_note_encoded)} bytes)")
+            except UnicodeEncodeError as e:
+                print(f"conditionNote cp932 encode: FAILED - {e}")
+
+    updated_df_renamed.to_csv(updated_path, index=False,
+        encoding="cp932", line_terminator="\r\n", quoting=csv.QUOTE_ALL, errors='replace')
+    excluded_df_cleaned.to_csv(excluded_path, index=False,
+        encoding="cp932", line_terminator="\r\n", quoting=csv.QUOTE_ALL, errors='replace')
+    log_df_cleaned.to_csv(log_path, index=False,
+        encoding="cp932", line_terminator="\r\n", quoting=csv.QUOTE_ALL, errors='replace')
+
+    print(f"=== DEBUG: CSV files written ===")
+    print(f"  {updated_path}")
+    print(f"  {excluded_path}")
+    print(f"  {log_path}")
 
     return {
         "ok": True,

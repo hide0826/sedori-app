@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Tuple, NamedTuple
 import json
 import re
 from python.core.config import CONFIG_PATH
+from python.core.csv_utils import normalize_dataframe_for_cp932
 
 class RepriceOutputs(NamedTuple):
     log_df: pd.DataFrame
@@ -186,5 +187,11 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
     log_df = pd.DataFrame(log_data)
     updated_df = pd.DataFrame(updated_inventory_data)
     excluded_df = pd.DataFrame(excluded_inventory_data)
+
+    # CSV出力前の正規化を無効化（元ファイルのフォーマットを完全保持するため）
+    # 元のバイト列ベースの処理に切り替えたため、ここでの文字列変換は不要
+    # log_df = normalize_dataframe_for_cp932(log_df)
+    # updated_df = normalize_dataframe_for_cp932(updated_df)
+    # excluded_df = normalize_dataframe_for_cp932(excluded_df)
 
     return RepriceOutputs(log_df=log_df, updated_df=updated_df, excluded_df=excluded_df)

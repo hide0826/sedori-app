@@ -32,5 +32,6 @@ export interface ProcessingResult {
   };
   items: ResultItem[];
   updatedCsvContent: string;
+  updatedCsvEncoding?: string; // "cp932-base64" などのエンコーディング情報
   reportCsvContent: string;
 }
