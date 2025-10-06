@@ -12,6 +12,7 @@ services:
       # ローカルのプロジェクト全体をコンテナの/appディレクトリにマウント
       # これにより、ローカルでのコード変更が即座にコンテナに反映される（ホットリロード）
       - .:/app
+    working_dir: /app/python
     environment:
       # 必要に応じて環境変数を設定
       - ENVIRONMENT=development

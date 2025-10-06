@@ -22,4 +22,4 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # FastAPIサーバーを起動するコマンド
 # 0.0.0.0で待ち受けることで、コンテナ外からのアクセスを許可する
 # --reloadオプションを復元
-CMD ["uvicorn", "python.app:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
