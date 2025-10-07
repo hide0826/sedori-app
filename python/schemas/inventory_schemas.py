@@ -5,7 +5,7 @@ inventory_schemas.py
 作成日: 2025-10-06
 """
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 class InventoryItem(BaseModel):
     """
@@ -28,3 +28,26 @@ class InventoryItem(BaseModel):
     condition_note: Optional[str] = None
     sku: Optional[str] = None
     other_cost: Optional[float] = None
+
+class SKUGenerationRequest(BaseModel):
+    """SKU生成リクエスト"""
+    purchase_date: str  # "2024-10-07"
+    condition: str      # "中古(非常に良い)"
+    product_name: str   # 商品名
+    
+class SKUGenerationResponse(BaseModel):
+    """SKU生成レスポンス"""
+    sku: str
+    condition_code: str
+    q_tag: str
+    sequence: int
+
+class BulkSKUGenerationRequest(BaseModel):
+    """一括SKU生成リクエスト"""
+    products: List[dict]  # [{purchase_date, condition, product_name, ...}, ...]
+
+class BulkSKUGenerationResponse(BaseModel):
+    """一括SKU生成レスポンス"""
+    success: bool
+    processed: int
+    results: List[dict]  # [{original_data..., sku, condition_code, q_tag}, ...]
