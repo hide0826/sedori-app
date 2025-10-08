@@ -7,10 +7,11 @@ inventory_service.py
 import pandas as pd
 import chardet
 import io
-from typing import Tuple
 import json
 from pathlib import Path
 from datetime import datetime
+from typing import Tuple, List
+from fastapi.responses import StreamingResponse
 
 # コンディションマッピング（Amazonコンディション番号）
 CONDITION_MAP = {
@@ -160,6 +161,95 @@ def generate_sku(
         sku += f"-{q_tag}"
     
     return sku
+
+
+def split_by_comment(products: List[dict]) -> Tuple[List[dict], List[dict]]:
+    """
+    コメント欄の有無で商品を振り分け
+    
+    Args:
+        products: SKU生成済み商品リスト
+        
+    Returns:
+        (出品対象リスト, 出品除外リスト)
+    """
+    listing_products = []    # コメント空
+    excluded_products = []   # コメントあり
+    
+    for product in products:
+        comment = product.get("コメント", "")
+        
+        # None, 空文字、空白のみをチェック
+        if not comment or str(comment).strip() == "":
+            listing_products.append(product)
+        else:
+            excluded_products.append(product)
+    
+    return listing_products, excluded_products
+
+
+def generate_listing_csv_content(products: List[dict]) -> bytes:
+    """
+    出品用CSV生成（参照CSV形式完全準拠）
+    """
+    if not products:
+        return b""
+
+    # 参照CSVの列構造（ヘッダー）
+    ref_columns = [
+        "SKU", "ASIN", "JAN", "title", "add_number", "price", "cost", 
+        "akaji", "takane", "condition", "conditionNote", "priceTrace", 
+        "leadtime", "merchant_shipping_group_name"
+    ]
+
+    # 入力データと参照CSVの列名のマッピング
+    column_mapping = {
+        "sku": "SKU",
+        "ASIN": "ASIN",
+        "JAN": "JAN",
+        "商品名": "title",
+        "仕入れ個数": "add_number",
+        "販売予定価格": "price",
+        "仕入れ価格": "cost",
+        "見込み利益": "akaji",
+        "condition_code": "condition",
+        "コンディション説明": "conditionNote"
+    }
+
+    # 出力用データリストを作成
+    output_data = []
+    for product in products:
+        row = {key: product.get(key, "") for key in product}
+        row["condition"] = product.get("condition_code", "") # condition_codeを使用
+        output_data.append(row)
+
+    # DataFrame作成
+    df = pd.DataFrame(output_data)
+    df = df.rename(columns=column_mapping)
+
+    # 出力用DataFrameを初期化
+    output_df = pd.DataFrame()
+
+    # 列の順序と存在を保証
+    for col in ref_columns:
+        if col in df.columns:
+            output_df[col] = df[col]
+        else:
+            output_df[col] = ""  # 存在しない列は空文字で埋める
+
+    # Excelの科学的記数法を回避
+    for col in ["SKU", "ASIN", "JAN"]:
+        if col in output_df.columns:
+            output_df[col] = output_df[col].apply(
+                lambda x: f'="{x}"' if pd.notna(x) and x != "" else ""
+            )
+
+    # CSV生成
+    output = io.BytesIO()
+    output_df.to_csv(output, index=False, encoding="shift-jis", errors="replace")
+    
+    return output.getvalue()
+
 
 async def process_inventory_csv(file_content: bytes) -> Tuple[pd.DataFrame, dict]:
     """

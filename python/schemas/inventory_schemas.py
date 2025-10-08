@@ -51,3 +51,16 @@ class BulkSKUGenerationResponse(BaseModel):
     success: bool
     processed: int
     results: List[dict]  # [{original_data..., sku, condition_code, q_tag}, ...]
+
+class ProcessListingRequest(BaseModel):
+    """出品CSV処理リクエスト"""
+    products: List[dict]  # SKU生成済み商品データ
+
+class ProcessListingResponse(BaseModel):
+    """出品CSV処理レスポンス"""
+    success: bool
+    listing_count: int
+    excluded_count: int
+    listing_products: List[dict]
+    excluded_products: List[dict]
+    message: str

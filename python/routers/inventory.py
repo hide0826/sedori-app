@@ -5,14 +5,25 @@ inventory.py
 作成日: 2025-10-06
 """
 from fastapi import APIRouter, UploadFile, File, HTTPException
-from services.inventory_service import process_inventory_csv
+from fastapi.responses import StreamingResponse
+import io
+
+from services.inventory_service import (
+    process_inventory_csv,
+    generate_sku,
+    convert_condition,
+    detect_q_tag,
+    split_by_comment,
+    generate_listing_csv_content
+)
 from schemas.inventory_schemas import (
     SKUGenerationRequest,
     SKUGenerationResponse,
     BulkSKUGenerationRequest,
-    BulkSKUGenerationResponse
+    BulkSKUGenerationResponse,
+    ProcessListingRequest,
+    ProcessListingResponse
 )
-from services.inventory_service import generate_sku, convert_condition, detect_q_tag
 
 router = APIRouter(prefix="/api/inventory", tags=["inventory"])
 
@@ -113,3 +124,61 @@ async def generate_bulk_sku(request: BulkSKUGenerationRequest):
         processed=len(results),
         results=results
     )
+
+
+@router.post("/process-listing", response_model=ProcessListingResponse)
+async def process_listing(request: ProcessListingRequest):
+    """
+    出品CSV処理（振り分け + データ返却）
+    
+    1. コメント欄で振り分け
+    2. 統計情報とデータを返却
+    3. フロントでCSVダウンロード用
+    """
+    try:
+        # コメント欄振り分け
+        listing_products, excluded_products = split_by_comment(request.products)
+        
+        return ProcessListingResponse(
+            success=True,
+            listing_count=len(listing_products),
+            excluded_count=len(excluded_products),
+            listing_products=listing_products,
+            excluded_products=excluded_products,
+            message=f"出品対象: {len(listing_products)}件、除外: {len(excluded_products)}件"
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/export-listing-csv")
+async def export_listing_csv(request: ProcessListingRequest):
+    """
+    出品用CSV直接ダウンロード
+    
+    コメント欄が空の商品のみをCSV出力（Shift-JIS）
+    """
+    try:
+        # コメント欄振り分け
+        listing_products, _ = split_by_comment(request.products)
+        
+        if not listing_products:
+            raise HTTPException(status_code=400, detail="出品対象の商品がありません")
+        
+        # CSV生成
+        csv_bytes = generate_listing_csv_content(listing_products)
+        
+        # StreamingResponse
+        return StreamingResponse(
+            io.BytesIO(csv_bytes),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": "attachment; filename=listing.csv"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
