@@ -5,7 +5,7 @@ inventory.py
 作成日: 2025-10-06
 """
 from fastapi import APIRouter, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 import io
 
 from services.inventory_service import (
@@ -170,9 +170,9 @@ async def export_listing_csv(request: ProcessListingRequest):
         csv_bytes = generate_listing_csv_content(listing_products)
         
         # StreamingResponse
-        return StreamingResponse(
-            io.BytesIO(csv_bytes),
-            media_type="text/csv",
+        return Response(
+            content=csv_bytes,
+            media_type="application/octet-stream",  # バイナリとして扱う
             headers={
                 "Content-Disposition": "attachment; filename=listing.csv"
             }

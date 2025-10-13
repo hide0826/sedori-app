@@ -1,0 +1,71 @@
+{
+  "profit_guard_percentage": 1.1,
+  "excluded_skus": [
+    "excluded-sku-1",
+    "excluded-sku-2"
+  ],
+  "q4_rule_enabled": false,
+  "reprice_rules": [
+    {
+      "days_from": 30,
+      "action": "maintain",
+      "value": null
+    },
+    {
+      "days_from": 60,
+      "action": "priceTrace",
+      "value": null
+    },
+    {
+      "days_from": 90,
+      "action": "priceTrace",
+      "value": null
+    },
+    {
+      "days_from": 120,
+      "action": "price_down_1",
+      "value": null
+    },
+    {
+      "days_from": 150,
+      "action": "price_down_1",
+      "value": null
+    },
+    {
+      "days_from": 180,
+      "action": "price_down_1",
+      "value": null
+    },
+    {
+      "days_from": 210,
+      "action": "price_down_1",
+      "value": null
+    },
+    {
+      "days_from": 240,
+      "action": "price_down_1",
+      "value": null
+    },
+    {
+      "days_from": 270,
+      "action": "price_down_1",
+      "value": null
+    },
+    {
+      "days_from": 300,
+      "action": "price_down_ignore",
+      "value": null
+    },
+    {
+      "days_from": 330,
+      "action": "price_down_ignore",
+      "value": null
+    },
+    {
+      "days_from": 360,
+      "action": "price_down_ignore",
+      "value": null
+    }
+  ],
+  "updated_at": "2025-10-10 23:04:09.383188"
+}

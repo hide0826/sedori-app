@@ -6,6 +6,40 @@ import re
 from python.core.config import CONFIG_PATH
 from python.core.csv_utils import normalize_dataframe_for_cp932
 
+def preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    DataFrameの前処理: Excel数式記法の完全除去
+    """
+    print(f"[DEBUG preprocess] Called with shape: {df.shape}")
+    
+    # 処理前のサンプルを出力
+    if len(df) > 0:
+        print(f"[DEBUG preprocess] BEFORE - First row price (raw): {df['price'].iloc[0] if 'price' in df.columns else 'N/A'}")
+        print(f"[DEBUG preprocess] BEFORE - First row conditionNote (raw): {df['conditionNote'].iloc[0] if 'conditionNote' in df.columns else 'N/A'}")
+    
+    # すべての列でExcel数式記法を除去（文字列列・数値列両方）
+    for col in df.columns:
+        if df[col].dtype == 'object':  # 文字列列
+            df[col] = df[col].astype(str).str.replace(r'^="(.*)"$', r'\1', regex=True)
+    
+    # 処理後のサンプルを出力
+    if len(df) > 0:
+        print(f"[DEBUG preprocess] AFTER Excel formula removal - price: {df['price'].iloc[0] if 'price' in df.columns else 'N/A'}")
+        print(f"[DEBUG preprocess] AFTER Excel formula removal - conditionNote: {df['conditionNote'].iloc[0] if 'conditionNote' in df.columns else 'N/A'}")
+    
+    # 数値列を明示的に変換
+    numeric_cols = ['price', 'cost', 'akaji', 'takane', 'number', 'priceTrace', 
+                    'leadtime', 'amazon-fee', 'shipping-price', 'profit']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            if len(df) > 0:
+                print(f"[DEBUG preprocess] {col} after numeric conversion: {df[col].iloc[0]}")
+    
+    print(f"[DEBUG preprocess] Completed. Final shape: {df.shape}")
+    return df
+
+
 class RepriceOutputs(NamedTuple):
     log_df: pd.DataFrame
     updated_df: pd.DataFrame
@@ -66,45 +100,56 @@ def get_rule_for_days(days: int, rules: Dict[str, Dict[str, Any]]) -> Tuple[str,
     # 365日超過の場合は対象外
     return "over_365", {"action": "exclude", "priceTrace": 0}
 
-def calculate_new_price_and_trace(price: float, akaji: float, rule: Dict[str, Any], days_since_listed: int, config: Dict[str, Any]) -> Tuple[str, str, float, int]:
+def calculate_new_price_and_trace(price: float, akaji: float, rule: Dict[str, Any], days_since_listed: int, config: Dict[str, Any], current_price_trace: int) -> Tuple[str, str, float, int]:
     """
     最新仕様：6種類のアクション対応
-    1. maintain: 維持
-    2. priceTrace: priceTrace設定のみ
-    3. price_down_1: 1%値下げ
-    4. price_down_2: 2%値下げ
-    5. profit_ignore_down: 利益無視値下げ(1%)
-    6. exclude: 対象外
+    1. maintain: 維持（価格もTraceも変更なし）
+    2. priceTrace: Traceのみ変更（価格は変更なし）
+    3. price_down_1: 価格のみ1%値下げ（Traceは変更なし）
+    4. price_down_2: 価格のみ2%値下げ（Traceは変更なし）
+    5. profit_ignore_down: 価格のみ1%値下げ・ガード無視（Traceは変更なし）
+    6. exclude: 対象外（変更なし）
     """
     action = rule["action"]
-    new_price_trace = rule.get("priceTrace", 0)
     reason = f"Rule for {days_since_listed} days ({action})"
-    new_price = price  # デフォルトは維持
+
+    # 計算前にfloatに変換
+    price = float(price)
+    akaji = float(akaji)
+
+    # デフォルト: 変更なし
+    new_price = price
+    new_price_trace = current_price_trace  # 現在値を維持
 
     if action == "maintain":
         # 価格変更なし、priceTraceも変更なし
         pass
+
     elif action == "priceTrace":
-        # 価格変更なし、priceTraceを指定値に変更
-        pass
+        # priceTraceのみ変更、価格は変更なし
+        new_price_trace = rule.get("priceTrace", 0)
+
     elif action == "price_down_1":
-        # 1%値下げ + 利益率ガード適用
+        # 価格のみ1%値下げ、priceTraceは変更なし
         new_price = round(price * 0.99)
         guard_price = akaji * config.get("profit_guard_percentage", 1.1)
         if new_price < guard_price:
             new_price = round(guard_price)
             reason += " (Profit Guard Applied)"
+
     elif action == "price_down_2":
-        # 2%値下げ + 利益率ガード適用
+        # 価格のみ2%値下げ、priceTraceは変更なし
         new_price = round(price * 0.98)
         guard_price = akaji * config.get("profit_guard_percentage", 1.1)
         if new_price < guard_price:
             new_price = round(guard_price)
             reason += " (Profit Guard Applied)"
+
     elif action == "profit_ignore_down":
-        # 1%値下げ、利益率ガードを無視
+        # 価格のみ1%値下げ（利益率ガード無視）、priceTraceは変更なし
         new_price = round(price * 0.99)
         reason += " (Profit Guard Ignored)"
+
     elif action == "exclude":
         # 対象外、変更なし
         reason = f"Excluded: {days_since_listed} days (manual handling required)"
@@ -114,6 +159,7 @@ def calculate_new_price_and_trace(price: float, akaji: float, rule: Dict[str, An
 def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
     """
     30日間隔価格改定システム - 最新仕様対応
+    注: preprocessは呼び出し元（repricer.py）で実行済み
     """
     config = load_config()
     log_data = []
@@ -165,7 +211,7 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
         # ルール適用
         rule_key, rule = get_rule_for_days(days_since_listed, rules)
         action, reason, new_price, new_price_trace = calculate_new_price_and_trace(
-            price, akaji, rule, days_since_listed, config
+            price, akaji, rule, days_since_listed, config, price_trace
         )
 
         log_data.append({

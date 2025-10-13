@@ -57,22 +57,22 @@ export default function ResultsDisplay({ result }: ResultsDisplayProps) {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
         <div className="bg-gray-100 p-4 rounded-lg text-center">
           <div className="text-sm text-gray-600">処理対象</div>
-          <div className="text-2xl font-bold">{summary.total}</div>
+          <div className="text-2xl font-bold">{summary.log_rows ?? 0}</div>
         </div>
         <div className="bg-green-100 p-4 rounded-lg text-center">
           <div className="text-sm text-green-600">更新</div>
-          <div className="text-2xl font-bold text-green-800">{summary.updated}</div>
+          <div className="text-2xl font-bold text-green-800">{summary.updated_rows ?? 0}</div>
         </div>
         <div className="bg-red-100 p-4 rounded-lg text-center">
           <div className="text-sm text-red-600">対象外</div>
-          <div className="text-2xl font-bold text-red-800">{summary.excluded}</div>
+          <div className="text-2xl font-bold text-red-800">{summary.excluded_rows ?? 0}</div>
         </div>
         <div className="bg-blue-100 p-4 rounded-lg text-center col-span-2 md:col-span-2">
             <div className="text-sm text-blue-600 mb-1">アクション別件数</div>
             <div className="text-xs text-blue-800 flex flex-wrap justify-center gap-x-2">
-                {Object.entries(summary.actionCounts).map(([action, count]) => (
+                {summary && summary.actionCounts ? Object.entries(summary.actionCounts).map(([action, count]) => (
                     <span key={action} className="font-mono">{action}: {count}</span>
-                ))}
+                )) : <span>(データなし)</span>}
             </div>
         </div>
       </div>

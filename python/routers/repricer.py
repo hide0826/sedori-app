@@ -58,39 +58,21 @@ def _fill_price_trace_change_on_items(result: dict | object, trace_label: str = 
     try:
         items = result.get("items") if isinstance(result, dict) else getattr(result, "items", None)
     except Exception:
-        pass
         items = None
     if not items:
-        print("[TRACE_PATCH] no items")
         return result
 
-    filled = 0
     for it in items:
         try:
             action = _read_field(it, "action")
             val = _read_field(it, "priceTraceChange")
             if action == "priceTrace" and (val is None or str(val).strip() == ""):
                 _write_field(it, "priceTraceChange", trace_label)
-                filled += 1
         except Exception:
-            pass
             continue
 
-    print(f"[TRACE_PATCH] filled={filled} items; label={trace_label}")
     return result
 # --- /Trace蛻励・譛邨ょ沂繧・---
-
-# --- audit / csv helpers ---
-def _tap(msg: str):
-    # BASE_DIR/python/tmp/trace_patch.log に書き込む（失敗しても無視）
-    try:
-        logp = (BASE_DIR / "python" / "tmp") / "trace_patch.log"
-        logp.parent.mkdir(parents=True, exist_ok=True)
-        with open(logp, "a", encoding="utf-8") as f:
-            from datetime import datetime
-            f.write(f"{datetime.now().isoformat(timespec='seconds')} {msg}\n")
-    except Exception:
-        pass
 
 def _get_len(obj, key: str) -> int:
     try:
@@ -100,13 +82,13 @@ def _get_len(obj, key: str) -> int:
         return int(len(v)) if v is not None else 0
     except Exception:
         return 0
-# --- /audit / csv helpers ---
+
 def _rebuild_report_csv_with_trace(items: list) -> str:
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
     w.writerow(["sku", "days", "action", "reason", "price", "new_price", "trace"])
     for it in (items or []):
-        rf = _read_field  # 譌｢蟄倥・隱ｭ縺ｿ髢｢謨ｰ繧貞・蛻ｩ逕ｨ
+        rf = _read_field
         sku = (rf(it, "sku") or "")
         days = (rf(it, "days") or rf(it, "daysSinceListed") or "")
         action = (rf(it, "action") or "")
@@ -116,7 +98,6 @@ def _rebuild_report_csv_with_trace(items: list) -> str:
         trace = (rf(it, "priceTraceChange") or rf(it, "price_trace_change") or "")
         w.writerow([sku, days, action, reason, price, new_price, trace])
     return buf.getvalue()
-# --- /audit / csv helpers ---
 
 router = APIRouter(prefix="/repricer", tags=["repricer"])
 
@@ -186,54 +167,9 @@ async def apply(file: UploadFile = File(...)):
     content = await file.read()
     df = read_csv_with_fallback(content)
     
-    # a) 蜿ｩ縺九ｌ縺溯ｨ倬鹸
-    _tap("[HIT] /repricer/apply")
 
-    print("=" * 50)
-    print("DEBUG: /apply endpoint called")
-    print("=" * 50)
-
-    # 譌｢蟄・
     outputs = apply_repricing_rules(df, today=datetime.now())
-
-    # b) 蜻ｼ縺ｳ蜃ｺ縺礼峩蠕後・逶｣譟ｻ
-    try:
-        _items = outputs.get("items") if isinstance(outputs, dict) else getattr(outputs, "items", [])
-        _blank = 0
-        if _items:
-            for _it in _items:
-                act = _read_field(_it, "action")
-                val = _read_field(_it, "priceTraceChange")
-                if act == "priceTrace" and (val is None or str(val).strip() == ""):
-                    _blank += 1
-        _tap(f"[AUDIT] before blank={_blank}, total={len(_items) if _items else 0}")
-    except Exception as e:
-        _tap(f"[AUDIT] before error={e}")
-
-    # c) 遨ｺ繧貞沂繧√ｋ・・BA譛螳牙､縺ｧ・・    _fill_price_trace_change_on_items(outputs, trace_label="FBA譛螳牙､")
-
-    # d) 蝓九ａ縺溷ｾ後・逶｣譟ｻ
-    try:
-        _items = outputs.get("items") if isinstance(outputs, dict) else getattr(outputs, "items", [])
-        _blank = 0
-        if _items:
-            for _it in _items:
-                act = _read_field(_it, "action")
-                val = _read_field(_it, "priceTraceChange")
-                if act == "priceTrace" and (val is None or str(val).strip() == ""):
-                    _blank += 1
-        _tap(f"[AUDIT] after blank={_blank}, total={len(_items) if _items else 0}")
-    except Exception as e:
-        _tap(f"[AUDIT] after error={e}")
-
-    # e) CSV 繧剃ｸ頑嶌縺榊・逕滓・
-    try:
-        items = outputs.get("items") if isinstance(outputs, dict) else getattr(outputs, "items", [])
-        if items is not None:
-            report_csv = _rebuild_report_csv_with_trace(items)
-            _tap(f"[TRACE_CSV] rebuilt reportCsvContent rows={len(items) if items else 0}")
-    except Exception as e:
-        _tap(f"[TRACE_CSV] rebuild skipped: {e}")
+    _fill_price_trace_change_on_items(outputs, trace_label="FBA譛螳牙､")
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     updated_path = BASE_DIR_TMP / f"updated_{stamp}.csv"
@@ -241,18 +177,14 @@ async def apply(file: UploadFile = File(...)):
     log_path = BASE_DIR_TMP / f"log_{stamp}.csv"
 
     # rename priceTrace -> trace + Excel formula removal
-    print(f"=== DEBUG: Starting rename and formula removal ===")
     try:
         # NamedTuple不変性対応: renameの結果を新変数に保存
         if "priceTrace" in outputs.updated_df.columns and "trace" not in outputs.updated_df.columns:
             updated_df_renamed = outputs.updated_df.rename(columns={"priceTrace": "trace"})
-            print(f"=== DEBUG: Renamed priceTrace -> trace ===")
         else:
             updated_df_renamed = outputs.updated_df.copy()
-            print(f"=== DEBUG: No rename needed, copied updated_df ===")
 
         # CSV出力直前: 全セルから ="..." 形式を除去（最終防衛ライン）
-        print(f"=== DEBUG: Removing Excel formula prefix before CSV output ===")
 
         def remove_formula_from_cell(x):
             """セル値から ="..." を除去"""
@@ -263,23 +195,18 @@ async def apply(file: UploadFile = File(...)):
         # updated_df の全列に適用
         for col in updated_df_renamed.columns:
             updated_df_renamed[col] = updated_df_renamed[col].apply(remove_formula_from_cell)
-        print(f"=== DEBUG: Formula removed from updated_df ({len(updated_df_renamed.columns)} columns) ===")
 
         # excluded_df の全列に適用
         excluded_df_cleaned = outputs.excluded_df.copy()
         for col in excluded_df_cleaned.columns:
             excluded_df_cleaned[col] = excluded_df_cleaned[col].apply(remove_formula_from_cell)
-        print(f"=== DEBUG: Formula removed from excluded_df ({len(excluded_df_cleaned.columns)} columns) ===")
 
         # log_df の全列に適用
         log_df_cleaned = outputs.log_df.copy()
         for col in log_df_cleaned.columns:
             log_df_cleaned[col] = log_df_cleaned[col].apply(remove_formula_from_cell)
-        print(f"=== DEBUG: Formula removed from log_df ({len(log_df_cleaned.columns)} columns) ===")
 
-        print(f"=== DEBUG: Excel formula prefix removed from all DataFrames ===")
     except Exception as e:
-        print(f"=== ERROR: Formula removal failed: {e} ===")
         import traceback
         traceback.print_exc()
         # フォールバック: 元のDataFrameを使用
@@ -287,24 +214,6 @@ async def apply(file: UploadFile = File(...)):
         excluded_df_cleaned = outputs.excluded_df.copy()
         log_df_cleaned = outputs.log_df.copy()
 
-    # デバッグ: CSV出力直前のデータを確認
-    print(f"=== DEBUG: Before CSV output ===")
-    print(f"Updated DF shape: {updated_df_renamed.shape}")
-    print(f"Updated DF columns: {list(updated_df_renamed.columns)}")
-    if len(updated_df_renamed) > 0:
-        print(f"First row sample:")
-        for col in updated_df_renamed.columns:
-            val = updated_df_renamed[col].iloc[0]
-            print(f"  {col}: {str(val)[:50] if pd.notna(val) else 'NaN'}")
-        if 'conditionNote' in updated_df_renamed.columns:
-            cond_note = updated_df_renamed['conditionNote'].iloc[0]
-            print(f"conditionNote full: {cond_note}")
-            # cp932でエンコード可能かテスト
-            try:
-                cond_note_encoded = str(cond_note).encode('cp932')
-                print(f"conditionNote cp932 encode: SUCCESS ({len(cond_note_encoded)} bytes)")
-            except UnicodeEncodeError as e:
-                print(f"conditionNote cp932 encode: FAILED - {e}")
 
     updated_df_renamed.to_csv(updated_path, index=False,
         encoding="cp932", line_terminator="\r\n", quoting=csv.QUOTE_ALL, errors='replace')
@@ -313,14 +222,13 @@ async def apply(file: UploadFile = File(...)):
     log_df_cleaned.to_csv(log_path, index=False,
         encoding="cp932", line_terminator="\r\n", quoting=csv.QUOTE_ALL, errors='replace')
 
-    print(f"=== DEBUG: CSV files written ===")
-    print(f"  {updated_path}")
-    print(f"  {excluded_path}")
-    print(f"  {log_path}")
+    # Build report CSV with trace information
+    items = outputs.get("items") if isinstance(outputs, dict) else getattr(outputs, "items", [])
+    report_csv = _rebuild_report_csv_with_trace(items) if items else ""
 
     return {
         "ok": True,
-          "reportCsvContent": report_csv,
+        "reportCsvContent": report_csv,
         "files": {
             "updated": str(updated_path),
             "excluded": str(excluded_path),

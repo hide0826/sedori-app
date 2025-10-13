@@ -89,28 +89,28 @@ export default function RepricerSettingsTable() {
     }
   };
 
-  const handleRuleChange = (days: number, field: 'action' | 'priceTrace', value: any) => {
+  const handleRuleChange = (days_from: number, field: 'action' | 'value', value: any) => {
     setConfig((prevConfig) => {
       if (!prevConfig) return null;
-
-      // Reactの状態の不変性を保証するため、ディープコピーを作成
-      const newConfig = JSON.parse(JSON.stringify(prevConfig));
-      const dayKey = days.toString();
-      const ruleToUpdate = newConfig.reprice_rules[dayKey];
-
-      if (ruleToUpdate) {
-        ruleToUpdate[field] = value;
-
-        // 「アクション」が変更された場合の連動ロジック
-        if (field === 'action') {
-          if (value !== 'priceTrace') {
-            ruleToUpdate.priceTrace = 0; // priceTraceでないならpriceTraceをリセット
-          } else if (ruleToUpdate.priceTrace === 0 || ruleToUpdate.priceTrace === null) {
-            ruleToUpdate.priceTrace = 1; // priceTraceに変更され、値が0ならデフォルトの1を設定
+  
+      const newRules = prevConfig.reprice_rules.map(rule => {
+        if (rule.days_from === days_from) {
+          const updatedRule = { ...rule, [field]: value };
+  
+          // 連動ロジック
+          if (field === 'action') {
+            if (value !== 'priceTrace') {
+              updatedRule.value = 0;
+            } else if (updatedRule.value === 0 || updatedRule.value === null) {
+              updatedRule.value = 1;
+            }
           }
+          return updatedRule;
         }
-      }
-      return newConfig;
+        return rule;
+      });
+  
+      return { ...prevConfig, reprice_rules: newRules };
     });
   };
   
@@ -230,28 +230,22 @@ export default function RepricerSettingsTable() {
             </tr>
           </thead>
           <tbody>
-            {Object.keys(config.reprice_rules)
-              .map(Number)
-              .sort((a, b) => a - b)
-              .filter(days => config.reprice_rules[days.toString()])
-              .map((days, index, sortedDays) => {
-                const rule = config.reprice_rules[days.toString()];
-                
-                const formatDynamicDayLabel = (currentDays: number, currentIndex: number): string => {
-                  if (currentIndex === 0) {
-                    return `1-${currentDays}日`;
-                  }
-                  const prevDays = sortedDays[currentIndex - 1];
-                  return `${prevDays + 1}-${currentDays}日`;
+            {config.reprice_rules
+              .sort((a, b) => a.days_from - b.days_from)
+              .map((rule) => {
+                const getDaysRange = (daysFrom: number): string => {
+                  const start = daysFrom - 29;
+                  const end = daysFrom;
+                  return `${start}-${end}日`;
                 };
 
                 return (
-                  <tr key={days} className="hover:bg-gray-50">
-                    <td className="py-2 px-4 border-b text-center font-mono">{formatDynamicDayLabel(days, index)}</td>
+                  <tr key={rule.days_from} className="hover:bg-gray-50">
+                    <td className="py-2 px-4 border-b text-center font-mono">{getDaysRange(rule.days_from)}</td>
                     <td className="py-2 px-4 border-b">
                       <select
                         value={rule.action}
-                        onChange={(e) => handleRuleChange(days, 'action', e.target.value)}
+                        onChange={(e) => handleRuleChange(rule.days_from, 'action', e.target.value)}
                         className="w-full p-2 border rounded"
                       >
                         {ACTIONS.map((opt) => (
@@ -261,8 +255,8 @@ export default function RepricerSettingsTable() {
                     </td>
                     <td className="py-2 px-4 border-b">
                       <select
-                        value={rule.priceTrace ?? 0}
-                        onChange={(e) => handleRuleChange(days, 'priceTrace', parseInt(e.target.value))}
+                        value={rule.value ?? 0}
+                        onChange={(e) => handleRuleChange(rule.days_from, 'value', parseInt(e.target.value))}
                         disabled={rule.action !== 'priceTrace'}
                         className="w-full p-2 border rounded disabled:bg-gray-200"
                       >
@@ -273,7 +267,7 @@ export default function RepricerSettingsTable() {
                     </td>
                   </tr>
                 );
-            })}
+              })}
           </tbody>
         </table>
       </div>

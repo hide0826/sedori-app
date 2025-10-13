@@ -1,9 +1,6 @@
 {
   "profit_guard_percentage": 1.1,
-  "excluded_skus": [
-    "excluded-sku-1",
-    "excluded-sku-2"
-  ],
+  "excluded_skus": [],
   "q4_rule_enabled": false,
   "reprice_rules": {
     "30": {
@@ -12,47 +9,48 @@
     },
     "60": {
       "action": "priceTrace",
-      "priceTrace": 1
+      "priceTrace": 1.0
     },
     "90": {
       "action": "priceTrace",
-      "priceTrace": 1
+      "priceTrace": 1.0
     },
     "120": {
       "action": "price_down_1",
-      "priceTrace": 0
+      "priceTrace": 7.0
     },
     "150": {
       "action": "price_down_1",
-      "priceTrace": 0
+      "priceTrace": 7.0
     },
     "180": {
       "action": "price_down_1",
-      "priceTrace": 0
+      "priceTrace": 7.0
     },
     "210": {
       "action": "price_down_1",
-      "priceTrace": 0
+      "priceTrace": 7.0
     },
     "240": {
       "action": "price_down_1",
-      "priceTrace": 0
+      "priceTrace": 7.0
     },
     "270": {
       "action": "price_down_1",
-      "priceTrace": 0
+      "priceTrace": 7.0
     },
     "300": {
       "action": "profit_ignore_down",
-      "priceTrace": 0
+      "priceTrace": 7.0
     },
     "330": {
       "action": "profit_ignore_down",
-      "priceTrace": 0
+      "priceTrace": 7.0
     },
     "360": {
       "action": "profit_ignore_down",
-      "priceTrace": 0
+      "priceTrace": 7.0
     }
-  }
+  },
+  "updated_at": "2025-10-11 23:04:36.276032"
 }

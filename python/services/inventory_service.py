@@ -12,6 +12,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Tuple, List
 from fastapi.responses import StreamingResponse
+from utils.csv_io import write_listing_csv
 
 # コンディションマッピング（Amazonコンディション番号）
 CONDITION_MAP = {
@@ -190,65 +191,131 @@ def split_by_comment(products: List[dict]) -> Tuple[List[dict], List[dict]]:
 
 def generate_listing_csv_content(products: List[dict]) -> bytes:
     """
-    出品用CSV生成（参照CSV形式完全準拠）
+    出品用CSV生成（CSV I/Oエンジン使用）
     """
+    # === デバッグ出力 START ===
+    print("\n=== CSV生成デバッグ ===")
+    print(f"商品数: {len(products)}")
+    
+    if products:
+        first = products[0]
+        print(f"1件目の商品名: {first.get('商品名')}")
+        print(f"商品名の型: {type(first.get('商品名'))}")
+        
+        if first.get('商品名'):
+            try:
+                utf8_hex = first.get('商品名').encode('utf-8').hex()
+                print(f"商品名 UTF-8 hex: {utf8_hex[:40]}...")
+                sjis_hex = first.get('商品名').encode('shift-jis').hex()
+                print(f"商品名 Shift-JIS hex: {sjis_hex[:40]}...")
+            except Exception as e:
+                print(f"エンコードエラー: {e}")
+        
+        print(f"コンディション説明: {first.get('コンディション説明', 'なし')}")
+    print("======================\n")
+    # === デバッグ出力 END ===
+    
     if not products:
         return b""
-
-    # 参照CSVの列構造（ヘッダー）
-    ref_columns = [
-        "SKU", "ASIN", "JAN", "title", "add_number", "price", "cost", 
-        "akaji", "takane", "condition", "conditionNote", "priceTrace", 
-        "leadtime", "merchant_shipping_group_name"
-    ]
-
-    # 入力データと参照CSVの列名のマッピング
-    column_mapping = {
-        "sku": "SKU",
-        "ASIN": "ASIN",
-        "JAN": "JAN",
-        "商品名": "title",
-        "仕入れ個数": "add_number",
-        "販売予定価格": "price",
-        "仕入れ価格": "cost",
-        "見込み利益": "akaji",
-        "condition_code": "condition",
-        "コンディション説明": "conditionNote"
-    }
-
-    # 出力用データリストを作成
-    output_data = []
-    for product in products:
-        row = {key: product.get(key, "") for key in product}
-        row["condition"] = product.get("condition_code", "") # condition_codeを使用
-        output_data.append(row)
-
-    # DataFrame作成
-    df = pd.DataFrame(output_data)
-    df = df.rename(columns=column_mapping)
-
-    # 出力用DataFrameを初期化
-    output_df = pd.DataFrame()
-
-    # 列の順序と存在を保証
-    for col in ref_columns:
-        if col in df.columns:
-            output_df[col] = df[col]
-        else:
-            output_df[col] = ""  # 存在しない列は空文字で埋める
-
-    # Excelの科学的記数法を回避
-    for col in ["SKU", "ASIN", "JAN"]:
-        if col in output_df.columns:
-            output_df[col] = output_df[col].apply(
-                lambda x: f'="{x}"' if pd.notna(x) and x != "" else ""
-            )
-
-    # CSV生成
-    output = io.BytesIO()
-    output_df.to_csv(output, index=False, encoding="shift-jis", errors="replace")
     
-    return output.getvalue()
+    # 列マッピング（仕入リスト → 出品CSV）
+    column_mapping = {
+        'sku': 'SKU',
+        'ASIN': 'ASIN',
+        'JAN': 'JAN',
+        '商品名': 'title',
+        '仕入れ個数': 'add_number',
+        '販売予定価格': 'price',
+        '仕入れ価格': 'cost',
+        '損益分岐点': 'akaji',
+        'コンディション説明': 'conditionNote'
+    }
+    
+    # データ変換
+    converted_data = []
+    for i, product in enumerate(products):
+        row = {}
+        
+        # === デバッグ: 1件目だけキー確認 ===
+        if i == 0:
+            print("\n=== product keys確認 ===")
+            print(f"productの全キー: {list(product.keys())}")
+            print(f"商品名の値: {product.get('商品名', 'キーなし')}")
+            print(f"title への変換: {product.get('商品名')}")
+            print("========================\n")
+        # =====================================
+        
+        # 列マッピング適用
+        for src, dst in column_mapping.items():
+            if src in product:
+                row[dst] = product[src]
+        
+        # コンディション番号変換
+        if 'コンディション' in product:
+            row['condition'] = convert_condition(product['コンディション'])
+        
+        # takane = 販売予定価格
+        if 'price' in row:
+            row['takane'] = row['price']
+        
+        # 空欄列
+        row.setdefault('priceTrace', '')
+        row.setdefault('leadtime', '')
+        row.setdefault('merchant_shipping_group_name', '')
+        
+        converted_data.append(row)
+    
+    # 出品CSV列順序
+    columns = [
+        'SKU', 'ASIN', 'JAN', 'title', 'add_number', 'price', 
+        'cost', 'akaji', 'takane', 'condition', 'conditionNote', 
+        'priceTrace', 'leadtime', 'merchant_shipping_group_name'
+    ]
+    
+    # CSV生成
+    # === デバッグ: 変換後データ確認 ===
+    print("\n=== converted_data確認 ===")
+    print(f"変換後データ件数: {len(converted_data)}")
+    if converted_data:
+        first = converted_data[0]
+        print(f"1件目のtitle: {first.get('title', 'なし')}")
+        print(f"title の型: {type(first.get('title'))}")
+        print(f"1件目のconditionNote: {first.get('conditionNote', 'なし')}")
+        print(f"全キー: {list(first.keys())}")
+    print("===========================\n")
+    # ====================================
+    
+    csv_bytes = write_listing_csv(
+        data=converted_data,
+        columns=columns,
+        excel_formula_cols=[]  # 参考CSVに合わせて数式記法なし
+    )
+    
+    # === デバッグ: 生成されたCSVの先頭確認 ===
+    print("\n=== 生成CSV確認 ===")
+    print(f"CSV bytes長: {len(csv_bytes)}")
+    
+    # 実ファイルとして保存
+    debug_file = Path("/app/data/debug_output.csv")
+    debug_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(debug_file, "wb") as f:
+        f.write(csv_bytes)
+    print(f"デバッグファイル保存: {debug_file}")
+    
+    # 全体をShift-JISでデコードしてみる
+    try:
+        decoded_full = csv_bytes.decode('shift-jis', errors='replace')
+        lines = decoded_full.split('\n')
+        print(f"CSVの行数: {len(lines)}")
+        print("先頭3行:")
+        for i, line in enumerate(lines[:3]):
+            print(f"  {i}: {line}")
+    except Exception as e:
+        print(f"デコードエラー: {e}")
+    print("==================\n")
+    # =========================================
+    
+    return csv_bytes
 
 
 async def process_inventory_csv(file_content: bytes) -> Tuple[pd.DataFrame, dict]:
