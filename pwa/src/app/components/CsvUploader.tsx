@@ -84,19 +84,58 @@ export default function CsvUploader({ onUploadSuccess }: CsvUploaderProps) {
     setError(null);
     setSuccess(null);
 
-    // Mock: Simulate API call delay
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    const formData = new FormData();
+    formData.append('file', selectedFile);
 
-    const mockData: InventoryItem[] = [
-      { jan: '4901234567890', productName: 'テスト商品1', purchasePrice: 1000, condition: '新品' },
-      { jan: '4901234567891', productName: 'テスト商品2', purchasePrice: 2000, condition: '中古' },
-      { jan: '4901234567892', productName: 'テスト商品3', purchasePrice: 1500, condition: '新品' }
-    ];
+    try {
+      const response = await fetch('http://localhost:8000/api/inventory/upload', {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer hirio-local-key' // Adjust as per your authentication
+        },
+        body: formData,
+      });
 
-    setIsLoading(false);
-    setSuccess('CSVアップロード成功！（モック）');
-    console.log('アップロードされたファイル:', selectedFile);
-    onUploadSuccess(mockData);
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`API Error: ${response.status} - ${errorText}`);
+      }
+
+      const result = await response.json();
+      if (!result.preview || !Array.isArray(result.preview)) {
+        throw new Error('予期せぬAPIレスポンス構造です。');
+      }
+
+      // Map backend response (preview) to frontend InventoryItem structure
+      const mappedData: InventoryItem[] = result.preview.map((item: any) => ({
+        purchaseDate: item.仕入れ日,
+        condition: item.コンディション,
+        asin: item.ASIN,
+        jan: item.JAN,
+        productName: item.商品名,
+        quantity: item.仕入れ個数,
+        purchasePrice: item.仕入れ価格,
+        plannedPrice: item.販売予定価格,
+        expectedProfit: item.見込み利益,
+        breakEven: item.損益分岐点,
+        comment: item.コメント,
+        referencePrice: item.参考価格,
+        shippingMethod: item.発送方法,
+        supplier: item.仕入れ先,
+        conditionNote: item.コンディション説明,
+        sku: item.SKU,
+        otherCost: item.その他費用,
+        priceTrace: item.priceTrace,
+      }));
+
+      setSuccess('CSVアップロード成功！');
+      onUploadSuccess(mappedData);
+    } catch (err: any) {
+      setError(err.message || 'ファイルのアップロード中にエラーが発生しました。');
+      console.error('Upload error:', err);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const dropZoneBorderColor = isDragOver

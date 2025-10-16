@@ -1,8 +1,27 @@
 import pandas as pd
+import io
+import json
+from pathlib import Path
 from typing import List, Tuple, Dict, Any
 from datetime import datetime
 
 from core.csv_utils import read_csv_with_fallback, normalize_dataframe_for_cp932
+from utils.csv_io import write_listing_csv
+
+# コンディションマッピング（Amazonコンディション番号）
+CONDITION_MAP = {
+    "中古(ほぼ新品)": "1",
+    "中古(非常に良い)": "2", 
+    "中古(良い)": "3",
+    "中古(可)": "4",
+    "コレクター商品(ほぼ新品)": "5",
+    "コレクター商品(非常に良い)": "6",
+    "コレクター商品(良い)": "7",
+    "コレクター商品(可)": "8",
+    "再生品": "10",
+    "新品(新品)": "11",
+    "新品": "11",
+}
 
 class InventoryService:
     @staticmethod
@@ -12,6 +31,10 @@ class InventoryService:
         """
         df = read_csv_with_fallback(content)
         df = normalize_dataframe_for_cp932(df)
+
+        # Debugging: Print DataFrame columns and a sample of data
+        print(f"DEBUG: DataFrame columns after normalization: {list(df.columns)}")
+        print(f"DEBUG: DataFrame head after normalization:\n{df.head().to_string()}")
 
         # ここでCSVの内容に基づいた統計情報を生成する（モック）
         stats = {
@@ -74,3 +97,79 @@ class InventoryService:
             "processed": len(results),
             "results": results
         }
+
+    @staticmethod
+    def generate_listing_csv_content(products: List[dict]) -> bytes:
+        """
+        商品リストから出品用CSVコンテンツを生成する（Shift-JISエンコーディング）。
+        参考フォーマット: D:\HIRIO\docs\参考データ\20250928_出品用CSV.csv
+        """
+        if not products:
+            return b""
+
+        # DataFrameに変換
+        df = pd.DataFrame(products)
+
+        # Apply condition mapping
+        if 'condition' in df.columns:
+            df['condition'] = df['condition'].map(CONDITION_MAP).fillna(df['condition'])
+
+        # Column mapping from frontend to output format
+        column_mapping = {
+            'sku': 'SKU',
+            'asin': 'ASIN', 
+            'jan': 'JAN',
+            'productName': 'title',
+            'quantity': 'add_number',
+            'plannedPrice': 'price',
+            'purchasePrice': 'cost',
+            'breakEven': 'akaji',
+            'conditionNote': 'conditionNote',
+            'priceTrace': 'priceTrace'
+        }
+
+        # Create output DataFrame with required columns
+        output_data = {}
+        
+        # Map existing columns
+        for old_col, new_col in column_mapping.items():
+            if old_col in df.columns:
+                output_data[new_col] = df[old_col]
+            else:
+                output_data[new_col] = ''
+        
+        # Add condition (already mapped above)
+        if 'condition' in df.columns:
+            output_data['condition'] = df['condition']
+        else:
+            output_data['condition'] = ''
+            
+        # Add empty columns as per reference format
+        output_data['takane'] = ''
+        output_data['leadtime'] = ''
+        output_data['merchant_shipping_group_name'] = ''
+
+        # Create final DataFrame
+        df_output = pd.DataFrame(output_data)
+
+        # If ASIN exists, JAN should be empty
+        if 'ASIN' in df_output.columns and 'JAN' in df_output.columns:
+            df_output['JAN'] = df_output.apply(lambda row: '' if pd.notna(row['ASIN']) and row['ASIN'] != '' else row['JAN'], axis=1)
+
+        # Define final column order matching reference format
+        final_columns = [
+            'SKU', 'ASIN', 'JAN', 'title', 'add_number', 'price', 'cost', 'akaji', 'takane',
+            'condition', 'conditionNote', 'priceTrace', 'leadtime', 'merchant_shipping_group_name'
+        ]
+        
+        # Reorder columns
+        df_final = df_output.reindex(columns=final_columns, fill_value='')
+
+        # Generate CSV content with header note
+        output = io.StringIO()
+        # Add header note as in reference file
+        output.write('ASIN、JANはどちらか一方のみ記載してください。,,,,,,,,,,,,,\n')
+        df_final.to_csv(output, index=False)
+        csv_content = output.getvalue()
+
+        return csv_content.encode('cp932', errors='replace')

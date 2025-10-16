@@ -13,11 +13,17 @@ export default function InventoryPage() {
   const [isGeneratingSku, setIsGeneratingSku] = useState<boolean>(false);
   const [skuError, setSkuError] = useState<string | null>(null);
   const [skuSuccess, setSkuSuccess] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState<boolean>(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportSuccess, setExportSuccess] = useState<string | null>(null);
 
   const handleCsvUploadSuccess = (data: InventoryItem[]) => {
     setInventoryData(data);
     setSkuError(null);
     setSkuSuccess(null);
+    setExportError(null);
+    setExportSuccess(null);
+    console.log("CSV Upload Success. Inventory data length:", data.length);
   };
 
   const handleInventoryDataChange = (newData: InventoryItem[]) => {
@@ -88,6 +94,7 @@ export default function InventoryPage() {
       setSkuSuccess('SKU生成が完了しました！');
       console.log('状態更新完了');
       console.log('成功メッセージ表示');
+      console.log("SKU Generation Success. Inventory data length:", updatedData.length);
     } catch (error: any) {
       setSkuError(error.message || 'SKU生成中にエラーが発生しました');
       console.error('=== SKU生成エラー ===');
@@ -101,7 +108,64 @@ export default function InventoryPage() {
     }
   };
 
+  const handleExportCsv = async () => {
+    setIsExporting(true);
+    setExportError(null);
+    setExportSuccess(null);
 
+    try {
+      // フロントエンドのInventoryItemをバックエンドのスキーマに変換
+      const productsToExport = inventoryData.map(item => ({
+        jan: item.jan,
+        productName: item.productName,
+        quantity: item.quantity,
+        plannedPrice: item.plannedPrice,
+        purchasePrice: item.purchasePrice,
+        breakEven: item.breakEven,
+        condition: item.condition,
+        sku: item.sku || '', // SKUがない場合は空文字列
+        asin: item.asin,
+        conditionNote: item.conditionNote,
+        priceTrace: item.priceTrace || 0
+      }));
+
+      const response = await fetch(`${API_BASE_URL}/api/inventory/export-listing-csv`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer hirio-local-key'
+        },
+        body: JSON.stringify({ products: productsToExport })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('API Error:', errorText);
+        throw new Error(`CSVエクスポートに失敗しました: ${response.status} - ${errorText}`);
+      }
+
+      // ファイルダウンロード処理
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'listing_export.csv';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+
+      setExportSuccess('CSVエクスポートが完了しました！');
+    } catch (error: any) {
+      setExportError(error.message || 'CSVエクスポート中にエラーが発生しました');
+      console.error('CSVエクスポートエラー:', error);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+
+  console.log("Current inventoryData length before rendering:", inventoryData.length);
   return (
     <main className="flex min-h-screen flex-col items-center p-4 bg-gray-50">
       <div className="w-full max-w-4xl mb-8">
@@ -122,23 +186,46 @@ export default function InventoryPage() {
         {inventoryData.length > 0 && (
           <div className="mt-8">
             <div className="mb-4 flex flex-col sm:flex-row justify-between items-center">
-              <button
-                onClick={handleGenerateSKU}
-                disabled={inventoryData.length === 0 || isGeneratingSku}
-                className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded disabled:bg-blue-300 transition-colors duration-200"
-              >
-                {isGeneratingSku ? 'SKU生成中...' : 'SKU一括生成'}
-              </button>
-              {skuSuccess && (
-                <div className="mt-2 sm:mt-0 p-2 bg-green-100 border border-green-400 text-green-700 rounded-md text-sm">
-                  {skuSuccess}
-                </div>
-              )}
-              {skuError && (
-                <div className="mt-2 sm:mt-0 p-2 bg-red-100 border border-red-400 text-red-700 rounded-md text-sm">
-                  エラー: {skuError}
-                </div>
-              )}
+              <div className="flex space-x-4 mb-4 sm:mb-0"> {/* ボタンを横並びにするためのdiv */}
+                <button
+                  onClick={handleGenerateSKU}
+                  disabled={inventoryData.length === 0 || isGeneratingSku}
+                  className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded disabled:bg-blue-300 transition-colors duration-200"
+                >
+                  {isGeneratingSku ? 'SKU生成中...' : 'SKU一括生成'}
+                </button>
+                {skuSuccess && (
+                  <button
+                    onClick={handleExportCsv}
+                    disabled={isExporting}
+                    className="bg-purple-500 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded disabled:bg-purple-300 transition-colors duration-200"
+                  >
+                    {isExporting ? 'エクスポート中...' : '出品CSVダウンロード'}
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-col space-y-2"> {/* メッセージを縦並びにするためのdiv */}
+                {skuSuccess && (
+                  <div className="p-2 bg-green-100 border border-green-400 text-green-700 rounded-md text-sm">
+                    {skuSuccess}
+                  </div>
+                )}
+                {skuError && (
+                  <div className="p-2 bg-red-100 border border-red-400 text-red-700 rounded-md text-sm">
+                    エラー: {skuError}
+                  </div>
+                )}
+                {exportSuccess && (
+                  <div className="p-2 bg-green-100 border border-green-400 text-green-700 rounded-md text-sm">
+                    {exportSuccess}
+                  </div>
+                )}
+                {exportError && (
+                  <div className="p-2 bg-red-100 border border-red-400 text-red-700 rounded-md text-sm">
+                    エラー: {exportError}
+                  </div>
+                )}
+              </div>
             </div>
             <InventoryDataGrid data={inventoryData} onDataChange={handleInventoryDataChange} />
           </div>
