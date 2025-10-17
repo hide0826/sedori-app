@@ -12,7 +12,7 @@ BASE_DIR_TMP = BASE_DIR / "python" / "tmp"
 from core.csv_utils import read_csv_with_fallback
 import numpy as np
 
-# --- Trace蛻励・譛邨ょ沂繧・ｼ・ict/繧ｪ繝悶ず繧ｧ繧ｯ繝井ｸ｡蟇ｾ蠢懶ｼ・---
+# --- Trace蛻励・譛€邨ょ沂繧・ｼ・ict/繧ｪ繝悶ず繧ｧ繧ｯ繝井ｸ｡蟇ｾ蠢懶ｼ・---
 def _to_snake(camel: str) -> str:
     # priceTraceChange -> price_trace_change
     return re.sub(r'(?<!^)(?=[A-Z])', '_', camel).lower()
@@ -54,7 +54,7 @@ def _write_field(obj, camel: str, value, snake: str | None = None):
     except Exception:
         pass
 
-def _fill_price_trace_change_on_items(result: dict | object, trace_label: str = "FBA譛螳牙､"):
+def _fill_price_trace_change_on_items(result: dict | object, trace_label: str = "FBA譛€螳牙€､"):
     try:
         items = result.get("items") if isinstance(result, dict) else getattr(result, "items", None)
     except Exception:
@@ -72,7 +72,7 @@ def _fill_price_trace_change_on_items(result: dict | object, trace_label: str = 
             continue
 
     return result
-# --- /Trace蛻励・譛邨ょ沂繧・---
+# --- /Trace蛻励・譛€邨ょ沂繧・---
 
 def _get_len(obj, key: str) -> int:
     try:
@@ -125,13 +125,23 @@ class RepriceConfig(BaseModel):
     reprice_rules: list[RepriceRule]
     updated_at: Optional[datetime] = None
 # --- Config Endpoints ---
-@router.get("/config", response_model=RepriceConfig)
+@router.get("/config")
 def get_config():
-    """Get repricer config"""
+    """Get repricer config and convert rules to a list."""
     if not CONFIG_PATH.exists():
         raise HTTPException(status_code=404, detail="Config file not found")
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+        config_data = json.load(f)
+    
+    # Convert reprice_rules from dict to list
+    rules_dict = config_data.get("reprice_rules", {})
+    rules_list = [
+        {"days_from": int(k), "action": _read_field(v, "action"), "value": _read_field(v, "priceTrace")}
+        for k, v in rules_dict.items()
+    ]
+    config_data["reprice_rules"] = rules_list
+    
+    return config_data
 
 @router.put("/config", response_model=RepriceConfig)
 def update_config(config: RepriceConfig = Body(...)):
@@ -239,7 +249,7 @@ async def apply(file: UploadFile = File(...)):
 @router.post("/debug")
 async def debug(file: UploadFile = File(...)):
     """
-    SKU譌･莉倩ｧ｣譫舌・繝・ヰ繝・げ逕ｨ繧ｨ繝ｳ繝峨・繧､繝ｳ繝・    譛蛻昴・10莉ｶ縺ｮSKU縺ｫ縺､縺・※隗｣譫千憾豕√ｒ霑斐☆
+    SKU譌･莉倩ｧ｣譫舌・繝・ヰ繝・げ逕ｨ繧ｨ繝ｳ繝峨・繧､繝ｳ繝・    譛€蛻昴・10莉ｶ縺ｮSKU縺ｫ縺､縺・※隗｣譫千憾豕√ｒ霑斐☆
     """
     content = await file.read()
     df = read_csv_with_fallback(content)
@@ -251,7 +261,7 @@ async def debug(file: UploadFile = File(...)):
 
     today = datetime.now()
 
-    # 譛蛻昴・10莉ｶ繧定ｧ｣譫・    debug_results = []
+    # 譛€蛻昴・10莉ｶ繧定ｧ｣譫・    debug_results = []
     for i, row in df.head(10).iterrows():
         sku = row.get('SKU', '')
 
@@ -285,15 +295,3 @@ async def debug(file: UploadFile = File(...)):
         "debug_sample": debug_results,
         "analysis_date": today.strftime("%Y-%m-%d %H:%M:%S")
     }
-
-
-
-
-
-
-
-
-
-
-
-
