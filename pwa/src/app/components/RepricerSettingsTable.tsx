@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { RepriceConfig, RepriceRule, ProcessingResult } from '@/types/repricer';
 import ResultsDisplay from './ResultsDisplay';
 
-const API_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
+const API_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
 
 // 定数を定義
 const DAYS_INTERVALS = [30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 360];
@@ -93,7 +93,8 @@ export default function RepricerSettingsTable() {
     setConfig((prevConfig) => {
       if (!prevConfig) return null;
   
-      const newRules = prevConfig.reprice_rules.map(rule => {
+      const rules = Array.isArray(prevConfig.reprice_rules) ? prevConfig.reprice_rules : [];
+      const newRules = rules.map(rule => {
         if (rule.days_from === days_from) {
           const updatedRule = { ...rule, [field]: value };
   
@@ -180,8 +181,22 @@ export default function RepricerSettingsTable() {
         throw new Error(userFriendlyMessage);
       }
       
-      const result: ProcessingResult = JSON.parse(resBody);
-      console.log(`[${mode.toUpperCase()}] Received response:`, result);
+      const apiResponse = JSON.parse(resBody);
+      console.log(`[${mode.toUpperCase()}] Received response:`, apiResponse);
+      console.log("Full API response object:", apiResponse); // Log the entire result object
+      
+      // バックエンドAPIレスポンスをProcessingResult型に変換
+      const result: ProcessingResult = {
+        summary: apiResponse.summary,
+        items: apiResponse.items,
+        updatedCsvContent: apiResponse.updatedCsvContent,
+        updatedCsvEncoding: apiResponse.updatedCsvEncoding,
+        reportCsvContent: apiResponse.reportCsvContent
+      };
+      console.log('Result before ResultsDisplay:', result);
+      console.log('First 3 SKU values from API:', apiResponse.items?.slice(0, 3).map(item => item.sku));
+      console.log('updatedCsvContent from API:', apiResponse.updatedCsvContent ? 'Present' : 'Missing');
+      console.log('reportCsvContent from API:', apiResponse.reportCsvContent ? 'Present' : 'Missing');
 
       setProcessingResult(result);
       setProcessingMessage(`${actionText}が完了しました。`);
@@ -230,7 +245,7 @@ export default function RepricerSettingsTable() {
             </tr>
           </thead>
           <tbody>
-            {config.reprice_rules
+            {(Array.isArray(config.reprice_rules) ? config.reprice_rules : [])
               .sort((a, b) => a.days_from - b.days_from)
               .map((rule) => {
                 const getDaysRange = (daysFrom: number): string => {

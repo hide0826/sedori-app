@@ -6,7 +6,7 @@ from datetime import datetime
 import json
 import io, csv, os
 import re
-from services.repricer_weekly import apply_repricing_rules
+from services.repricer_weekly import apply_repricing_rules, preprocess_dataframe
 from core.config import BASE_DIR
 BASE_DIR_TMP = BASE_DIR / "python" / "tmp"
 from core.csv_utils import read_csv_with_fallback
@@ -159,7 +159,8 @@ def update_config(config: RepriceConfig = Body(...)):
 async def preview(file: UploadFile = File(...)):
     content = await file.read()
     df = read_csv_with_fallback(content)
-    
+    df = preprocess_dataframe(df) # ここで前処理を実行
+
     outputs = apply_repricing_rules(df, today=datetime.now())
 
     # ---- safe summary (no-attr errors) ----
@@ -170,7 +171,15 @@ async def preview(file: UploadFile = File(...)):
         'date_unknown': _get_len(outputs, 'date_unknown_df'),
         'log_rows': _get_len(outputs, 'log_df'),
     }
-    return summary
+    
+    # outputs.items を直接使用
+    items = outputs.items
+    print(f"[DEBUG preview] First 3 items SKU values: {[item.get('sku', 'N/A') for item in items[:3]]}")
+    
+    return {
+        "summary": summary,
+        "items": items
+    }
 
 @router.post("/apply")
 async def apply(file: UploadFile = File(...)):
@@ -226,25 +235,40 @@ async def apply(file: UploadFile = File(...)):
 
 
     updated_df_renamed.to_csv(updated_path, index=False,
-        encoding="cp932", line_terminator="\r\n", quoting=csv.QUOTE_ALL, errors='replace')
+        encoding="cp932", lineterminator="\r\n", quoting=csv.QUOTE_ALL, errors='replace')
     excluded_df_cleaned.to_csv(excluded_path, index=False,
-        encoding="cp932", line_terminator="\r\n", quoting=csv.QUOTE_ALL, errors='replace')
+        encoding="cp932", lineterminator="\r\n", quoting=csv.QUOTE_ALL, errors='replace')
     log_df_cleaned.to_csv(log_path, index=False,
-        encoding="cp932", line_terminator="\r\n", quoting=csv.QUOTE_ALL, errors='replace')
+        encoding="cp932", lineterminator="\r\n", quoting=csv.QUOTE_ALL, errors='replace')
 
     # Build report CSV with trace information
     items = outputs.get("items") if isinstance(outputs, dict) else getattr(outputs, "items", [])
+    print(f"[DEBUG apply] First 3 items SKU values: {[item.get('sku', 'N/A') for item in items[:3]]}")
     report_csv = _rebuild_report_csv_with_trace(items) if items else ""
+    
+    # Generate updated CSV content for download
+    updated_csv_content = updated_df_renamed.to_csv(index=False, encoding="utf-8")
 
-    return {
+    response_data = {
         "ok": True,
         "reportCsvContent": report_csv,
+        "updatedCsvContent": updated_csv_content,
         "files": {
             "updated": str(updated_path),
             "excluded": str(excluded_path),
             "log": str(log_path),
+        },
+        "items": items,
+        "summary": {
+            'updated_rows': _get_len(outputs, 'updated_df'),
+            'excluded_rows': _get_len(outputs, 'excluded_df'),
+            'q4_switched': _get_len(outputs, 'q4_switched_df'),
+            'date_unknown': _get_len(outputs, 'date_unknown_df'),
+            'log_rows': _get_len(outputs, 'log_df'),
         }
     }
+    print("API Response:", response_data)
+    return response_data
 
 @router.post("/debug")
 async def debug(file: UploadFile = File(...)):

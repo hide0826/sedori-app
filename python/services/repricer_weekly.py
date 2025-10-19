@@ -3,8 +3,8 @@ from datetime import datetime
 from typing import List, Dict, Any, Tuple, NamedTuple
 import json
 import re
-from python.core.config import CONFIG_PATH
-from python.core.csv_utils import normalize_dataframe_for_cp932
+from core.config import CONFIG_PATH
+from core.csv_utils import normalize_dataframe_for_cp932
 
 def preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -19,19 +19,29 @@ def preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     
     # すべての列でExcel数式記法を除去（文字列列・数値列両方）
     for col in df.columns:
-        if df[col].dtype == 'object':  # 文字列列
+        # 文字列型またはオブジェクト型の列に対してのみ処理
+        if df[col].dtype == 'object':
+            # より確実な数式記法削除
             df[col] = df[col].astype(str).str.replace(r'^="(.*)"$', r'\1', regex=True)
+            # 念のため、より広範囲なパターンも削除
+            df[col] = df[col].str.replace(r'^="([^"]*)"$', r'\1', regex=True)
+            if len(df) > 0:
+                print(f"[DEBUG preprocess] AFTER Excel formula removal for {col}: {df[col].iloc[0]}")
     
     # 処理後のサンプルを出力
     if len(df) > 0:
         print(f"[DEBUG preprocess] AFTER Excel formula removal - price: {df['price'].iloc[0] if 'price' in df.columns else 'N/A'}")
         print(f"[DEBUG preprocess] AFTER Excel formula removal - conditionNote: {df['conditionNote'].iloc[0] if 'conditionNote' in df.columns else 'N/A'}")
+        print(f"[DEBUG preprocess] AFTER Excel formula removal - SKU: {df['SKU'].iloc[0] if 'SKU' in df.columns else 'N/A'}")
     
     # 数値列を明示的に変換
     numeric_cols = ['price', 'cost', 'akaji', 'takane', 'number', 'priceTrace', 
                     'leadtime', 'amazon-fee', 'shipping-price', 'profit']
     for col in numeric_cols:
         if col in df.columns:
+            # 数値変換前に、念のため再度Excel数式記法を除去
+            df[col] = df[col].astype(str).str.replace(r'^="(.*)"$', r'\1', regex=True)
+            df[col] = df[col].str.replace(r'^="([^"]*)"$', r'\1', regex=True)
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             if len(df) > 0:
                 print(f"[DEBUG preprocess] {col} after numeric conversion: {df[col].iloc[0]}")
@@ -44,6 +54,7 @@ class RepriceOutputs(NamedTuple):
     log_df: pd.DataFrame
     updated_df: pd.DataFrame
     excluded_df: pd.DataFrame
+    items: List[Dict[str, Any]]
 
 def load_config():
     with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
@@ -51,9 +62,13 @@ def load_config():
 
 def get_days_since_listed(sku: str, today: datetime) -> int:
     """
-    SKUから正規表現パターンのリストを使用して日付を抽出し、今日までの経過日数を計算する。
+    SKUから正規表現パターンのリストを使用して日付を抽出 し、今日までの経過日数を計算する。
     日付が抽出できない場合は-1を返す。
     """
+    # Excel数式記法を削除
+    if isinstance(sku, str) and sku.startswith('="') and sku.endswith('"'):
+        sku = sku[2:-1]  # =" と " を除去
+    
     # 将来のパターン追加を容易にするための正規表現リスト
     # パターンは優先順位の高い順に並べる
     patterns = [
@@ -132,7 +147,7 @@ def calculate_new_price_and_trace(price: float, akaji: float, rule: Dict[str, An
     elif action == "price_down_1":
         # 価格のみ1%値下げ、priceTraceは変更なし
         new_price = round(price * 0.99)
-        guard_price = akaji * config.get("profit_guard_percentage", 1.1)
+        guard_price = config.get("profit_guard_percentage", 1.1)
         if new_price < guard_price:
             new_price = round(guard_price)
             reason += " (Profit Guard Applied)"
@@ -140,7 +155,7 @@ def calculate_new_price_and_trace(price: float, akaji: float, rule: Dict[str, An
     elif action == "price_down_2":
         # 価格のみ2%値下げ、priceTraceは変更なし
         new_price = round(price * 0.98)
-        guard_price = akaji * config.get("profit_guard_percentage", 1.1)
+        guard_price = config.get("profit_guard_percentage", 1.1)
         if new_price < guard_price:
             new_price = round(guard_price)
             reason += " (Profit Guard Applied)"
@@ -171,6 +186,12 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
 
     for index, row in df.iterrows():
         sku = row.get("SKU", "")
+        print(f"[DEBUG apply_repricing_rules] Original SKU: {sku}")
+        # SKUからExcel数式記法を削除（念のため）
+        if isinstance(sku, str) and sku.startswith('="') and sku.endswith('"'):
+            sku = sku[2:-1]  # =" と " を除去
+            print(f"[DEBUG apply_repricing_rules] Cleaned SKU: {sku}")
+        
         price = row.get("price", 0)
         akaji = row.get("akaji", 0)
         price_trace = row.get("priceTrace", 0)
@@ -198,7 +219,7 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
             updated_inventory_data.append(row_dict)
             continue
 
-        # 365日超過の商品は対象外
+        # 365日超過の場合は対象外
         if days_since_listed > 365:
             log_data.append({
                 "sku": sku, "days": days_since_listed, "action": "exclude",
@@ -240,4 +261,8 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
     # updated_df = normalize_dataframe_for_cp932(updated_df)
     # excluded_df = normalize_dataframe_for_cp932(excluded_df)
 
-    return RepriceOutputs(log_df=log_df, updated_df=updated_df, excluded_df=excluded_df)
+    items_list = log_df.to_dict(orient='records')
+    print(f"[DEBUG apply_repricing_rules] items_list length: {len(items_list)}")
+    print(f"[DEBUG apply_repricing_rules] First 3 items_list: {items_list[:3]}")
+
+    return RepriceOutputs(log_df=log_df, updated_df=updated_df, excluded_df=excluded_df, items=items_list)

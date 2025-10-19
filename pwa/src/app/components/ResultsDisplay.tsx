@@ -10,6 +10,7 @@ export default function ResultsDisplay({ result }: ResultsDisplayProps) {
   const { summary, items, updatedCsvContent, reportCsvContent, updatedCsvEncoding } = result;
   // デバッグログ追加
   console.log('ResultsDisplay - First 3 items:', items.slice(0, 3));
+  console.log('ResultsDisplay - First 3 SKU values:', items.slice(0, 3).map(item => item.sku));
   console.log('ResultsDisplay - Encoding:', updatedCsvEncoding);
 
   const handleDownload = (content: string, fileName: string, encoding?: string) => {
@@ -67,31 +68,31 @@ export default function ResultsDisplay({ result }: ResultsDisplayProps) {
           <div className="text-sm text-red-600">対象外</div>
           <div className="text-2xl font-bold text-red-800">{summary.excluded_rows ?? 0}</div>
         </div>
-        <div className="bg-blue-100 p-4 rounded-lg text-center col-span-2 md:col-span-2">
-            <div className="text-sm text-blue-600 mb-1">アクション別件数</div>
-            <div className="text-xs text-blue-800 flex flex-wrap justify-center gap-x-2">
-                {summary && summary.actionCounts ? Object.entries(summary.actionCounts).map(([action, count]) => (
-                    <span key={action} className="font-mono">{action}: {count}</span>
-                )) : <span>(データなし)</span>}
-            </div>
+        <div className="bg-yellow-100 p-4 rounded-lg text-center">
+          <div className="text-sm text-yellow-600">Q4切替</div>
+          <div className="text-2xl font-bold text-yellow-800">{summary.q4_switched ?? 0}</div>
         </div>
       </div>
 
       {/* ダウンロードボタン */}
-      <div className="my-6 flex justify-center space-x-4">
-        <button
-          onClick={() => handleDownload(updatedCsvContent, 'updated.csv', updatedCsvEncoding)}
-          className="bg-purple-500 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded"
-        >
-          改定CSVダウンロード
-        </button>
-        <button
-          onClick={() => handleDownload(reportCsvContent, 'report.csv')}
-          className="bg-orange-500 hover:bg-orange-700 text-white font-bold py-2 px-4 rounded"
-        >
-          レポートCSVダウンロード
-        </button>
-      </div>
+      {updatedCsvContent && (
+        <div className="my-6 flex justify-center space-x-4">
+          <button
+            onClick={() => handleDownload(updatedCsvContent, 'updated.csv', updatedCsvEncoding)}
+            className="bg-purple-500 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded"
+          >
+            改定CSVダウンロード
+          </button>
+          {reportCsvContent && (
+            <button
+              onClick={() => handleDownload(reportCsvContent, 'report.csv')}
+              className="bg-orange-500 hover:bg-orange-700 text-white font-bold py-2 px-4 rounded"
+            >
+              レポートCSVダウンロード
+            </button>
+          )}
+        </div>
+      )}
 
       {/* 結果テーブル */}
       <div className="overflow-x-auto">
@@ -110,11 +111,17 @@ export default function ResultsDisplay({ result }: ResultsDisplayProps) {
             {items.map((item, index) => (
               <tr key={item.sku} className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                 <td className="py-2 px-3 border-b text-xs font-mono">{item.sku}</td>
-                <td className="py-2 px-3 border-b text-center">{item.daysSinceListed}</td>
-                <td className="py-2 px-3 border-b text-right">{item.currentPrice || 0}</td>
-                <td className="py-2 px-3 border-b text-right font-bold">{item.newPrice || 0}</td>
+                <td className="py-2 px-3 border-b text-center">{item.days || 0}</td>
+                <td className="py-2 px-3 border-b text-right">{item.price || 0}</td>
+                <td className="py-2 px-3 border-b text-right font-bold">{item.new_price || 0}</td>
                 <td className="py-2 px-3 border-b text-center">{item.action}</td>
-                <td className="py-2 px-3 border-b text-center">{item.priceTraceChange ?? '-'}</td>
+                <td className="py-2 px-3 border-b text-center">
+                  {item.priceTrace !== undefined && item.new_priceTrace !== undefined 
+                    ? `${item.priceTrace} → ${item.new_priceTrace}` 
+                    : item.priceTrace !== undefined 
+                      ? item.priceTrace 
+                      : '-'}
+                </td>
               </tr>
             ))}
           </tbody>

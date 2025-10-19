@@ -6,7 +6,7 @@ import CsvUploader from '../components/CsvUploader';
 import InventoryDataGrid from '../components/InventoryDataGrid';
 import { InventoryItem } from '@/types/repricer';
 
-const API_BASE_URL = 'http://127.0.0.1:8000'; // Define API base URL
+const API_BASE_URL = 'http://localhost:8000'; // Define API base URL
 
 export default function InventoryPage() {
   const [inventoryData, setInventoryData] = useState<InventoryItem[]>([]);
@@ -174,9 +174,9 @@ export default function InventoryPage() {
           <Link href="/" className="text-blue-600 hover:underline">
             価格改定
           </Link>
-          <Link href="/inventory" className="text-blue-600 hover:underline">
+          {/* <Link href="/inventory" className="text-blue-600 hover:underline">
             仕入管理
-          </Link>
+          </Link> */}
         </nav>
       </div>
 

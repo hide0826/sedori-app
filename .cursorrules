@@ -1,0 +1,122 @@
+# HIRIO プロジェクト開発ガイド
+
+## プロジェクト状況
+- **目標:** 中古せどり業務自動化システム
+- **フェーズ:** Phase 1（仕入管理システム）
+- **進捗:** 93.75% 完了（15/16 項目）
+- **現在:** フロント表示修正中
+- **稼働状況:** バックエンド API ✅ 正常動作、フロント 表示ズレ修正中
+
+## 技術スタック
+- **バックエンド:** FastAPI + Python + Pandas + Docker
+- **フロントエンド:** Next.js 15 + React 19 + TypeScript + Tailwind CSS
+- **ポート:** 8000 (API), 3001 (PWA)
+- **エンコーディング:** Shift-JIS (CSV出力)
+- **Docker:** compose で統一環境、ホットリロード有効
+
+## ファイル構成
+```
+D:\HIRIO\repo\sedori-app.github\
+├── python/
+│   ├── app.py
+│   ├── routers/
+│   │   └── repricer.py （価格改定 API）
+│   └── services/
+│       └── repricer_weekly.py （改定ルール適用）
+├── pwa/
+│   └── src/
+│       ├── app/
+│       │   ├── layout.tsx
+│       │   ├── page.tsx
+│       │   └── components/
+│       │       └── RepricerSettingsTable.tsx （←次修正対象）
+│       └── types/
+│           └── repricer.ts
+└── docs/
+    ├── development_history.md （進捗記録）
+    └── hirio_project_overview.md （仕様書）
+```
+
+## 現在のバックエンド API Response 例
+```json
+{
+  "summary": {
+    "updated_rows": 580,
+    "excluded_rows": 0,
+    "q4_switched": 0,
+    "date_unknown": 0,
+    "log_rows": 580
+  },
+  "items": [
+    {
+      "sku": "20250201-B0007RBX52-UM-1650-1",
+      "days": 258,
+      "action": "price_down_1",
+      "reason": "Rule for 258 days (price_down_1)",
+      "price": 4463,
+      "new_price": 4418,
+      "priceTrace": 0,
+      "new_priceTrace": 0
+    }
+  ]
+}
+```
+
+## 次のタスク
+
+### **緊急タスク: フロント表示修正（本番使用中）**
+**優先度:** 🔴 高（今日中に解決）
+
+**問題:**
+- 「出品日数」列が空 or 0 表示
+- 「現在価格」列が空 or 0 表示
+- 「改定後価格」列が空 or 0 表示
+- 「Trace変更」列が「-」表示
+
+**修正対象ファイル:**
+- `pwa/src/app/components/RepricerSettingsTable.tsx`
+
+**修正内容:**
+1. バックエンド response のキー名を確認
+2. フロント表示の変数にマッピング
+3. データ型の正規化（数値、文字列の統一）
+4. CSV アップロード → プレビュー表示で動作確認
+
+**見込み時間:** 1～2時間
+
+### **次々のタスク（工程5）**
+- 除外 CSV 生成機能
+- コメントあり SKU の処理
+- 見込み時間: 2～3時間
+
+## 開発ルール
+- ✅ 修正前にバックアップ作成
+- ✅ 1工程ずつ動作確認
+- ✅ Excel 数式記法: `="値"` 対応
+- ✅ Shift-JIS エンコーディング厳密管理
+- ✅ Docker ホットリロード活用
+- ✅ 修正内容を `development_history.md` に記録
+
+## コミュニケーション
+- 指示は日本語で OK
+- 修正完了後は動作確認結果を報告
+- 問題発生時は即座に報告
+- 進捗は development_history.md に記録
+```
+
+### **Step 3: ファイル保存**
+```
+Ctrl + S で保存
+```
+
+---
+
+## **完了したら、Cursor に指示します**
+
+**`.cursorrules` 作成完了したら、教えてください 👍**
+
+その後：
+```
+フロント表示修正を開始してください。
+RepricerSettingsTable.tsx でバックエンド API の
+レスポンスキーをフロント表示にマッピングしてください。

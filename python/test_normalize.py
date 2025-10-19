@@ -8,7 +8,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 sys.path.insert(0, 'D:/HIRIO/repo/sedori-app.github')
-from python.core.csv_utils import normalize_string_for_cp932
+from core.csv_utils import normalize_string_for_cp932
 
 # テストケース
 test_cases = [
