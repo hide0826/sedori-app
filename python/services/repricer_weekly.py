@@ -186,11 +186,9 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
 
     for index, row in df.iterrows():
         sku = row.get("SKU", "")
-        print(f"[DEBUG apply_repricing_rules] Original SKU: {sku}")
         # SKUからExcel数式記法を削除（念のため）
         if isinstance(sku, str) and sku.startswith('="') and sku.endswith('"'):
             sku = sku[2:-1]  # =" と " を除去
-            print(f"[DEBUG apply_repricing_rules] Cleaned SKU: {sku}")
         
         price = row.get("price", 0)
         akaji = row.get("akaji", 0)
@@ -262,7 +260,5 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
     # excluded_df = normalize_dataframe_for_cp932(excluded_df)
 
     items_list = log_df.to_dict(orient='records')
-    print(f"[DEBUG apply_repricing_rules] items_list length: {len(items_list)}")
-    print(f"[DEBUG apply_repricing_rules] First 3 items_list: {items_list[:3]}")
 
     return RepriceOutputs(log_df=log_df, updated_df=updated_df, excluded_df=excluded_df, items=items_list)

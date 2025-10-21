@@ -9,10 +9,11 @@ import re
 from services.repricer_weekly import apply_repricing_rules, preprocess_dataframe
 from core.config import BASE_DIR
 BASE_DIR_TMP = BASE_DIR / "python" / "tmp"
-from core.csv_utils import read_csv_with_fallback
+from core.csv_utils import read_csv_with_fallback, normalize_dataframe_for_cp932
+from utils.csv_io import write_listing_csv_from_dataframe, write_repricer_csv
 import numpy as np
 
-# --- Trace蛻励・譛€邨ょ沂繧・ｼ・ict/繧ｪ繝悶ず繧ｧ繧ｯ繝井ｸ｡蟇ｾ蠢懶ｼ・---
+# --- Trace関連のユーティリティ関数 ---
 def _to_snake(camel: str) -> str:
     # priceTraceChange -> price_trace_change
     return re.sub(r'(?<!^)(?=[A-Z])', '_', camel).lower()
@@ -72,7 +73,7 @@ def _fill_price_trace_change_on_items(result: dict | object, trace_label: str = 
             continue
 
     return result
-# --- /Trace蛻励・譛€邨ょ沂繧・---
+# --- /Trace関連のユーティリティ関数 ---
 
 def _get_len(obj, key: str) -> int:
     try:
@@ -85,7 +86,8 @@ def _get_len(obj, key: str) -> int:
 
 def _rebuild_report_csv_with_trace(items: list) -> str:
     buf = io.StringIO()
-    w = csv.writer(buf, lineterminator="\n")
+    # Always quote and use CRLF to avoid Excel column shifts
+    w = csv.writer(buf, lineterminator="\r\n", quoting=csv.QUOTE_ALL)
     w.writerow(["sku", "days", "action", "reason", "price", "new_price", "trace"])
     for it in (items or []):
         rf = _read_field
@@ -174,7 +176,6 @@ async def preview(file: UploadFile = File(...)):
     
     # outputs.items を直接使用
     items = outputs.items
-    print(f"[DEBUG preview] First 3 items SKU values: {[item.get('sku', 'N/A') for item in items[:3]]}")
     
     return {
         "summary": summary,
@@ -197,11 +198,8 @@ async def apply(file: UploadFile = File(...)):
 
     # rename priceTrace -> trace + Excel formula removal
     try:
-        # NamedTuple不変性対応: renameの結果を新変数に保存
-        if "priceTrace" in outputs.updated_df.columns and "trace" not in outputs.updated_df.columns:
-            updated_df_renamed = outputs.updated_df.rename(columns={"priceTrace": "trace"})
-        else:
-            updated_df_renamed = outputs.updated_df.copy()
+        # 列名は仕様に合わせてそのまま保持（priceTrace を維持）
+        updated_df_renamed = outputs.updated_df.copy()
 
         # CSV出力直前: 全セルから ="..." 形式を除去（最終防衛ライン）
 
@@ -234,8 +232,14 @@ async def apply(file: UploadFile = File(...)):
         log_df_cleaned = outputs.log_df.copy()
 
 
-    updated_df_renamed.to_csv(updated_path, index=False,
-        encoding="cp932", lineterminator="\r\n", quoting=csv.QUOTE_ALL, errors='replace')
+    # updated.csv はプライスター取込フォーマットで出力（writerの結果をそのまま保存）
+    try:
+        with open(updated_path, "wb") as f:
+            f.write(updated_csv_bytes)
+    except Exception:
+        # フォールバック（従来方式）
+        updated_df_renamed.to_csv(updated_path, index=False,
+            encoding="cp932", lineterminator="\r\n", quoting=csv.QUOTE_ALL, errors='replace')
     excluded_df_cleaned.to_csv(excluded_path, index=False,
         encoding="cp932", lineterminator="\r\n", quoting=csv.QUOTE_ALL, errors='replace')
     log_df_cleaned.to_csv(log_path, index=False,
@@ -243,16 +247,98 @@ async def apply(file: UploadFile = File(...)):
 
     # Build report CSV with trace information
     items = outputs.get("items") if isinstance(outputs, dict) else getattr(outputs, "items", [])
-    print(f"[DEBUG apply] First 3 items SKU values: {[item.get('sku', 'N/A') for item in items[:3]]}")
     report_csv = _rebuild_report_csv_with_trace(items) if items else ""
-    
-    # Generate updated CSV content for download
-    updated_csv_content = updated_df_renamed.to_csv(index=False, encoding="utf-8")
+    # Encode report CSV as cp932 base64 for Excel safety
+    try:
+        report_csv_bytes = report_csv.encode("cp932", errors="replace")
+    except Exception:
+        report_csv_bytes = report_csv.encode("utf-8", errors="replace")
+    import base64 as _b64
+    report_csv_content_b64 = _b64.b64encode(report_csv_bytes).decode("ascii")
+
+    # Generate updated CSV content for download (Prister upload format)
+    # Build a dataframe that matches the expected schema and values
+    try:
+        base_df = outputs.updated_df.copy()
+    except Exception:
+        base_df = updated_df_renamed.copy()
+
+    # 入力CSV互換のための正規化（文字化け/列崩れ対策・決定版）
+    base_df = normalize_dataframe_for_cp932(base_df)
+
+    # Map and derive fields
+    if "new_price" in base_df.columns:
+        base_df["price"] = base_df["new_price"]
+    if "new_priceTrace" in base_df.columns:
+        base_df["priceTrace"] = base_df["new_priceTrace"]
+    # number はそのまま
+    if "number" not in base_df.columns:
+        base_df["number"] = 1
+
+    # 出力列（conditionNoteをJ列に追加、priceTraceを保持）
+    desired_cols = [
+        "SKU", "ASIN", "title", "number", "price", "cost", "akaji", "takane",
+        "condition", "conditionNote", "priceTrace", "leadtime", "amazon-fee", "shipping-price", "profit", "add-delete",
+    ]
+    # Keep only desired columns in correct order (fill missing with empty string)
+    for col in desired_cols:
+        if col not in base_df.columns:
+            base_df[col] = ""
+    formatted_df = base_df[desired_cols]
+
+    # Format numeric columns as integer-like strings (no trailing .0)
+    num_cols = ["number", "price", "cost", "akaji", "takane", "condition", "priceTrace", "leadtime", "amazon-fee", "shipping-price", "profit"]
+    for col in num_cols:
+        if col in formatted_df.columns:
+            try:
+                formatted_df[col] = pd.to_numeric(formatted_df[col], errors="coerce").fillna(0).astype(int).astype(str)
+            except Exception:
+                formatted_df[col] = formatted_df[col].astype(str)
+
+    # Force text columns to Excel-safe formula style ="..." (to match historical files)
+    excel_text_cols = ["SKU", "ASIN", "title"]
+    for col in excel_text_cols:
+        if col in formatted_df.columns:
+            def _wrap(v: str) -> str:
+                v = "" if v is None else str(v)
+                # 既に ="..." ならそのまま
+                if v.startswith('="') and v.endswith('"'):
+                    return v
+                # 内部の"は2重化（CSVライタがさらに適切に処理）
+                v_escaped = v.replace('"', '""')
+                return f'="{v_escaped}"'
+            formatted_df[col] = formatted_df[col].apply(_wrap)
+
+    # conditionNote を空文字で追加（J列）
+    if 'conditionNote' not in formatted_df.columns:
+        formatted_df['conditionNote'] = ""
+
+    # desired_colsのみに絞り直し（念のため）
+    formatted_df = formatted_df[desired_cols]
+
+    # leadtime を空白に（0ではなく空文字）
+    if 'leadtime' in formatted_df.columns:
+        formatted_df['leadtime'] = ""
+
+    # ="..." 形式を除去（念のため）
+    for col in formatted_df.columns:
+        if formatted_df[col].dtype == 'object':
+            formatted_df[col] = (formatted_df[col]
+                                 .astype(str)
+                                 .str.replace(r'^=\"', '', regex=True)
+                                 .str.replace(r'\"$', '', regex=True))
+
+    # Repricing用CSV（説明行なし、ヘッダー+データのみ）
+    updated_csv_bytes = write_repricer_csv(formatted_df, desired_cols)
+    import base64 as _b64
+    updated_csv_content = _b64.b64encode(updated_csv_bytes).decode("ascii")
 
     response_data = {
         "ok": True,
-        "reportCsvContent": report_csv,
+        "reportCsvContent": report_csv_content_b64,
+        "reportCsvEncoding": "cp932-base64",
         "updatedCsvContent": updated_csv_content,
+        "updatedCsvEncoding": "cp932-base64",
         "files": {
             "updated": str(updated_path),
             "excluded": str(excluded_path),
@@ -267,13 +353,13 @@ async def apply(file: UploadFile = File(...)):
             'log_rows': _get_len(outputs, 'log_df'),
         }
     }
-    print("API Response:", response_data)
     return response_data
 
 @router.post("/debug")
 async def debug(file: UploadFile = File(...)):
     """
-    SKU譌･莉倩ｧ｣譫舌・繝・ヰ繝・げ逕ｨ繧ｨ繝ｳ繝峨・繧､繝ｳ繝・    譛€蛻昴・10莉ｶ縺ｮSKU縺ｫ縺､縺・※隗｣譫千憾豕√ｒ霑斐☆
+    SKU解析とデバッグ用のエンドポイント
+    最初の10行のSKUを解析して結果を返す
     """
     content = await file.read()
     df = read_csv_with_fallback(content)

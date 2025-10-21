@@ -6,6 +6,8 @@ import csv
 import io
 from typing import List, Dict
 
+EXCEL_HINT_ROW = ['ASIN、JANはどちらか一方のみ記載してください。']
+
 def write_listing_csv(data: List[Dict], 
                      columns: List[str],
                      excel_formula_cols: List[str] = None) -> bytes:
@@ -24,10 +26,10 @@ def write_listing_csv(data: List[Dict],
     
     # StringIO でCSV生成
     output = io.StringIO()
-    writer = csv.writer(output, lineterminator='\r\n')
+    writer = csv.writer(output, lineterminator='\r\n', quoting=csv.QUOTE_ALL, doublequote=True)
     
     # 説明行（1行目）
-    writer.writerow(['ASIN、JANはどちらか一方のみ記載してください。'])
+    writer.writerow(EXCEL_HINT_ROW)
     
     # ヘッダー行（2行目）
     writer.writerow(columns)
@@ -38,6 +40,10 @@ def write_listing_csv(data: List[Dict],
         for col in columns:
             value = row_dict.get(col, '')
             
+            # 事前の軽いサニタイズ（改行/タブ→空白）
+            if isinstance(value, str):
+                value = value.replace('\r', ' ').replace('\n', ' ').replace('\t', ' ')
+
             # Excel数式記法適用
             if col in excel_cols and value:
                 value = f'="{value}"'
@@ -50,4 +56,51 @@ def write_listing_csv(data: List[Dict],
     csv_str = output.getvalue()
     csv_bytes = csv_str.encode('cp932', errors='replace')
     
+    return csv_bytes
+
+def write_listing_csv_from_dataframe(df, columns: List[str], excel_formula_cols: List[str]) -> bytes:
+    """
+    DataFrameから出品用CSVを生成（厳密クォート・CRLF・cp932）。
+    """
+    records: List[Dict] = []
+    for _, row in df.iterrows():
+        rec: Dict[str, str] = {}
+        for col in columns:
+            v = row[col] if col in row else ''
+            rec[col] = '' if v is None else str(v)
+        records.append(rec)
+    return write_listing_csv(records, columns, excel_formula_cols)
+
+def write_repricer_csv(df, columns: List[str], excel_formula_cols: List[str] = None) -> bytes:
+    """
+    Repricing用CSV生成（説明行なし、ヘッダー+データのみ）。
+    - 全列QUOTE_ALL
+    - CRLF
+    - cp932（errors='replace'）
+    - 先頭の説明行や ="..." の付与は行わない
+    """
+    # records 構築
+    records: List[Dict] = []
+    for _, row in df.iterrows():
+        rec: Dict[str, str] = {}
+        for col in columns:
+            v = row[col] if col in row else ''
+            rec[col] = '' if v is None else str(v)
+        records.append(rec)
+
+    # CSV生成（ヘッダー+データのみ）
+    output = io.StringIO()
+    writer = csv.writer(output, lineterminator='\r\n', quoting=csv.QUOTE_ALL, doublequote=True)
+    writer.writerow(columns)
+    for row_dict in records:
+        row = []
+        for col in columns:
+            value = row_dict.get(col, '')
+            if isinstance(value, str):
+                value = value.replace('\r', ' ').replace('\n', ' ').replace('\t', ' ')
+            row.append(str(value) if value is not None else '')
+        writer.writerow(row)
+
+    csv_str = output.getvalue()
+    csv_bytes = csv_str.encode('cp932', errors='replace')
     return csv_bytes
