@@ -1,0 +1,26 @@
+---
+alwaysApply: true
+---
+# HIRIO PySide6 デスクトップアプリ開発ルール
+
+## 必須参照ファイル
+開発開始時に必ず以下のファイルを読み込んでください：
+- D:\HIRIO\docs\pyside6_desktop_app_specification.md （プロジェクト仕様）
+- D:\HIRIO\docs\cursor_development_progress.md （開発進捗）
+
+## プロジェクト概要
+- **目標**: PWAからPySide6デスクトップアプリ移行
+- **技術**: PySide6 + FastAPI + SQLite
+- **年内MVP**: 仕入管理システム完成
+- **既存機能**: 価格改定機能（FastAPI + PWA）は完成済み
+
+## 開発方針
+1. 既存FastAPIを活用
+2. 段階的移行（価格改定→新機能）
+3. 初心者向けの詳細な説明
+4. 各機能実装後に動作確認必須
+
+## 重要事項
+- 既存の価格改定機能は維持
+- 新機能はデスクトップアプリで実装
+- 既存APIとの統合を重視
