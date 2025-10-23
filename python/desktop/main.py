@@ -101,7 +101,7 @@ def main():
     exit_code = hirio_app.run()
     
     print("HIRIO アプリケーションを終了します")
-    sys.exit(exit_code)
+    return exit_code
 
 
 if __name__ == "__main__":

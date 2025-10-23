@@ -26,10 +26,11 @@ class RepricerWorker(QThread):
     result_ready = Signal(dict)
     error_occurred = Signal(str)
     
-    def __init__(self, csv_path, api_client):
+    def __init__(self, csv_path, api_client, is_preview=True):
         super().__init__()
         self.csv_path = csv_path
         self.api_client = api_client
+        self.is_preview = is_preview
         
     def run(self):
         """価格改定処理の実行"""
@@ -37,12 +38,18 @@ class RepricerWorker(QThread):
             # 進捗更新
             self.progress_updated.emit(10)
             
-            # CSVファイルの読み込み
-            df = pd.read_csv(self.csv_path, encoding='utf-8')
-            self.progress_updated.emit(30)
+            # API接続確認
+            if not self.api_client.test_connection():
+                raise Exception("FastAPIサーバーに接続できません。サーバーが起動しているか確認してください。")
             
-            # ダミーの価格改定処理（実際はAPI呼び出し）
-            result = self.simulate_repricing(df)
+            self.progress_updated.emit(20)
+            
+            # 実際のAPI呼び出し
+            if self.is_preview:
+                result = self.api_client.repricer_preview(self.csv_path)
+            else:
+                result = self.api_client.repricer_apply(self.csv_path)
+            
             self.progress_updated.emit(100)
             
             # 結果を返す
@@ -50,42 +57,6 @@ class RepricerWorker(QThread):
             
         except Exception as e:
             self.error_occurred.emit(str(e))
-    
-    def simulate_repricing(self, df):
-        """価格改定のシミュレーション（ダミー実装）"""
-        import random
-        import datetime
-        
-        items = []
-        for i, row in df.iterrows():
-            # ダミーデータの生成
-            days = random.randint(30, 365)
-            current_price = random.randint(1000, 10000)
-            price_change = random.randint(-500, 500)
-            new_price = max(100, current_price + price_change)
-            
-            item = {
-                'sku': f"20250101-{row.get('ASIN', 'UNKNOWN')}-{i+1:04d}",
-                'days': days,
-                'action': 'price_down_1' if price_change < 0 else 'price_up_1',
-                'reason': f"Rule for {days} days ({'price_down_1' if price_change < 0 else 'price_up_1'})",
-                'price': current_price,
-                'new_price': new_price,
-                'priceTrace': 0,
-                'new_priceTrace': 0
-            }
-            items.append(item)
-        
-        return {
-            'summary': {
-                'updated_rows': len(items),
-                'excluded_rows': 0,
-                'q4_switched': 0,
-                'date_unknown': 0,
-                'log_rows': len(items)
-            },
-            'items': items
-        }
 
 
 class RepricerWidget(QWidget):
@@ -118,87 +89,88 @@ class RepricerWidget(QWidget):
     def setup_file_selection(self):
         """ファイル選択エリアの設定"""
         file_group = QGroupBox("CSVファイル選択")
+        file_group.setMaximumHeight(80)  # 高さを制限
         file_layout = QHBoxLayout(file_group)
+        file_layout.setContentsMargins(5, 5, 5, 5)  # マージンを小さく
         
         # ファイルパス表示
         self.file_path_edit = QLineEdit()
         self.file_path_edit.setPlaceholderText("CSVファイルを選択してください")
         self.file_path_edit.setReadOnly(True)
+        self.file_path_edit.setMaximumHeight(30)  # 高さを制限
         file_layout.addWidget(self.file_path_edit)
         
         # ファイル選択ボタン
         self.select_file_btn = QPushButton("ファイル選択")
         self.select_file_btn.clicked.connect(self.select_csv_file)
+        self.select_file_btn.setMaximumHeight(30)  # 高さを制限
         file_layout.addWidget(self.select_file_btn)
         
-        # プレビューボタン
-        self.preview_btn = QPushButton("プレビュー")
+        # CSV内容プレビューボタン
+        self.csv_preview_btn = QPushButton("CSV内容表示")
+        self.csv_preview_btn.clicked.connect(self.show_csv_preview)
+        self.csv_preview_btn.setEnabled(False)
+        self.csv_preview_btn.setMaximumHeight(30)  # 高さを制限
+        file_layout.addWidget(self.csv_preview_btn)
+        
+        # 価格改定プレビューボタン
+        self.preview_btn = QPushButton("価格改定プレビュー")
         self.preview_btn.clicked.connect(self.preview_csv)
         self.preview_btn.setEnabled(False)
+        self.preview_btn.setMaximumHeight(30)  # 高さを制限
         file_layout.addWidget(self.preview_btn)
         
         self.layout().addWidget(file_group)
         
     def setup_content_area(self):
         """コンテンツエリアの設定"""
-        # スプリッターでプレビューと結果を分割
-        splitter = QSplitter(Qt.Horizontal)
+        # 3段構成：CSVプレビュー（上段）→ 価格改定結果（下段）
         
-        # 左側：プレビューエリア
-        self.setup_preview_area(splitter)
+        # 上段：CSVプレビュー（横に大きく）
+        self.setup_preview_area_full_width()
         
-        # 右側：結果表示エリア
-        self.setup_result_area(splitter)
-        
-        # スプリッターの比率設定
-        splitter.setSizes([400, 600])
-        
-        self.layout().addWidget(splitter)
-        
-    def setup_preview_area(self, parent):
-        """プレビューエリアの設定"""
-        preview_widget = QWidget()
-        preview_layout = QVBoxLayout(preview_widget)
-        
-        # プレビューラベル
-        preview_label = QLabel("CSVプレビュー")
-        preview_label.setFont(QFont("", 10, QFont.Bold))
-        preview_layout.addWidget(preview_label)
+        # 下段：価格改定結果
+        self.setup_result_area_full_width()
+    
+    def setup_preview_area_full_width(self):
+        """CSVプレビューエリアの設定（全幅）"""
+        preview_group = QGroupBox("CSVプレビュー")
+        preview_layout = QVBoxLayout(preview_group)
         
         # プレビューテーブル
         self.preview_table = QTableWidget()
         self.preview_table.setAlternatingRowColors(True)
         self.preview_table.horizontalHeader().setStretchLastSection(True)
+        self.preview_table.setMinimumHeight(200)  # 適度な高さを設定
         preview_layout.addWidget(self.preview_table)
         
-        parent.addWidget(preview_widget)
-        
-    def setup_result_area(self, parent):
-        """結果表示エリアの設定"""
-        result_widget = QWidget()
-        result_layout = QVBoxLayout(result_widget)
-        
-        # 結果ラベル
-        result_label = QLabel("価格改定結果")
-        result_label.setFont(QFont("", 10, QFont.Bold))
-        result_layout.addWidget(result_label)
+        self.layout().addWidget(preview_group)
+    
+    def setup_result_area_full_width(self):
+        """価格改定結果エリアの設定（全幅）"""
+        result_group = QGroupBox("価格改定結果")
+        result_layout = QVBoxLayout(result_group)
         
         # 結果テーブル
         self.result_table = QTableWidget()
         self.result_table.setAlternatingRowColors(True)
         self.result_table.horizontalHeader().setStretchLastSection(True)
+        self.result_table.setMinimumHeight(200)  # 適度な高さを設定
         result_layout.addWidget(self.result_table)
         
-        parent.addWidget(result_widget)
+        self.layout().addWidget(result_group)
+        
         
     def setup_action_buttons(self):
         """アクションボタンエリアの設定"""
         button_layout = QHBoxLayout()
+        button_layout.setContentsMargins(5, 5, 5, 5)  # マージンを小さく
         
         # 価格改定実行ボタン
         self.execute_btn = QPushButton("価格改定実行")
         self.execute_btn.clicked.connect(self.execute_repricing)
         self.execute_btn.setEnabled(False)
+        self.execute_btn.setMaximumHeight(35)  # 高さを制限
         self.execute_btn.setStyleSheet("""
             QPushButton {
                 background-color: #0078d4;
@@ -221,12 +193,14 @@ class RepricerWidget(QWidget):
         # 進捗バー
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
+        self.progress_bar.setMaximumHeight(25)  # 高さを制限
         button_layout.addWidget(self.progress_bar)
         
         # 結果保存ボタン
         self.save_btn = QPushButton("結果をCSV保存")
         self.save_btn.clicked.connect(self.save_results)
         self.save_btn.setEnabled(False)
+        self.save_btn.setMaximumHeight(35)  # 高さを制限
         button_layout.addWidget(self.save_btn)
         
         button_layout.addStretch()
@@ -245,25 +219,50 @@ class RepricerWidget(QWidget):
         if file_path:
             self.csv_path = file_path
             self.file_path_edit.setText(file_path)
+            self.csv_preview_btn.setEnabled(True)
             self.preview_btn.setEnabled(True)
             self.execute_btn.setEnabled(True)
             
     def preview_csv(self):
-        """CSVファイルのプレビュー"""
+        """CSVファイルのプレビュー（価格改定プレビュー）"""
+        if not self.csv_path:
+            return
+            
+        # 進捗バーの表示
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.preview_btn.setEnabled(False)
+        
+        # ワーカースレッドの作成と実行（プレビューモード）
+        self.worker = RepricerWorker(self.csv_path, self.api_client, is_preview=True)
+        self.worker.progress_updated.connect(self.progress_bar.setValue)
+        self.worker.result_ready.connect(self.on_preview_completed)
+        self.worker.error_occurred.connect(self.on_preview_error)
+        self.worker.start()
+        
+    def show_csv_preview(self):
+        """CSVファイルの内容プレビュー"""
         if not self.csv_path:
             return
             
         try:
             # CSVファイルの読み込み
-            df = pd.read_csv(self.csv_path, encoding='utf-8')
+            from utils.csv_io import csv_io
+            df = csv_io.read_csv(self.csv_path)
+            
+            if df is None:
+                QMessageBox.warning(self, "エラー", "CSVファイルの読み込みに失敗しました")
+                return
             
             # テーブルの設定
             self.preview_table.setRowCount(len(df))
             self.preview_table.setColumnCount(len(df.columns))
             self.preview_table.setHorizontalHeaderLabels(df.columns.tolist())
             
-            # データの設定
-            for i, row in df.iterrows():
+            # データの設定（最初の100行のみ表示）
+            display_rows = min(100, len(df))
+            for i in range(display_rows):
+                row = df.iloc[i]
                 for j, value in enumerate(row):
                     item = QTableWidgetItem(str(value))
                     self.preview_table.setItem(i, j, item)
@@ -271,10 +270,35 @@ class RepricerWidget(QWidget):
             # 列幅の自動調整
             self.preview_table.resizeColumnsToContents()
             
-            QMessageBox.information(self, "プレビュー完了", f"CSVファイルを読み込みました（{len(df)}行）")
+            QMessageBox.information(
+                self, 
+                "CSVプレビュー完了", 
+                f"CSVファイルを読み込みました\n行数: {len(df)}, 列数: {len(df.columns)}\n（表示: 最初の{display_rows}行）"
+            )
             
         except Exception as e:
             QMessageBox.warning(self, "エラー", f"CSVファイルの読み込みに失敗しました:\n{str(e)}")
+        
+    def on_preview_completed(self, result):
+        """プレビュー完了時の処理"""
+        self.progress_bar.setVisible(False)
+        self.preview_btn.setEnabled(True)
+        
+        # 結果テーブルの更新
+        self.update_result_table(result)
+        
+        QMessageBox.information(
+            self, 
+            "プレビュー完了", 
+            f"価格改定プレビューが完了しました\n更新予定行数: {result['summary']['updated_rows']}"
+        )
+        
+    def on_preview_error(self, error_message):
+        """プレビューエラー時の処理"""
+        self.progress_bar.setVisible(False)
+        self.preview_btn.setEnabled(True)
+        
+        QMessageBox.critical(self, "エラー", f"プレビューに失敗しました:\n{error_message}")
             
     def execute_repricing(self):
         """価格改定の実行"""
@@ -282,13 +306,25 @@ class RepricerWidget(QWidget):
             QMessageBox.warning(self, "エラー", "CSVファイルを選択してください")
             return
             
+        # 確認ダイアログ
+        reply = QMessageBox.question(
+            self, 
+            "価格改定実行確認", 
+            "価格改定を実行しますか？\nこの操作は元のCSVファイルを変更します。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+            
         # 進捗バーの表示
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.execute_btn.setEnabled(False)
         
-        # ワーカースレッドの作成と実行
-        self.worker = RepricerWorker(self.csv_path, self.api_client)
+        # ワーカースレッドの作成と実行（実行モード）
+        self.worker = RepricerWorker(self.csv_path, self.api_client, is_preview=False)
         self.worker.progress_updated.connect(self.progress_bar.setValue)
         self.worker.result_ready.connect(self.on_repricing_completed)
         self.worker.error_occurred.connect(self.on_repricing_error)
@@ -329,20 +365,29 @@ class RepricerWidget(QWidget):
         
         # データの設定
         for i, item in enumerate(items):
-            self.result_table.setItem(i, 0, QTableWidgetItem(item['sku']))
-            self.result_table.setItem(i, 1, QTableWidgetItem(str(item['days'])))
-            self.result_table.setItem(i, 2, QTableWidgetItem(item['action']))
-            self.result_table.setItem(i, 3, QTableWidgetItem(item['reason']))
-            self.result_table.setItem(i, 4, QTableWidgetItem(str(item['price'])))
-            self.result_table.setItem(i, 5, QTableWidgetItem(str(item['new_price'])))
-            self.result_table.setItem(i, 6, QTableWidgetItem(str(item['new_priceTrace'])))
+            # 既存APIレスポンスのキー名に合わせて取得
+            sku = item.get('sku', '')
+            days = item.get('days', 0)
+            action = item.get('action', '')
+            reason = item.get('reason', '')
+            price = item.get('price', 0)
+            new_price = item.get('new_price', 0)
+            price_trace_change = item.get('priceTraceChange', item.get('price_trace_change', 0))
+            
+            self.result_table.setItem(i, 0, QTableWidgetItem(str(sku)))
+            self.result_table.setItem(i, 1, QTableWidgetItem(str(days)))
+            self.result_table.setItem(i, 2, QTableWidgetItem(str(action)))
+            self.result_table.setItem(i, 3, QTableWidgetItem(str(reason)))
+            self.result_table.setItem(i, 4, QTableWidgetItem(str(price)))
+            self.result_table.setItem(i, 5, QTableWidgetItem(str(new_price)))
+            self.result_table.setItem(i, 6, QTableWidgetItem(str(price_trace_change)))
             
             # 価格変更に応じて色分け
-            if item['new_price'] > item['price']:
+            if new_price > price:
                 # 価格上昇：緑色
                 for j in range(7):
                     self.result_table.item(i, j).setBackground(QColor(200, 255, 200))
-            elif item['new_price'] < item['price']:
+            elif new_price < price:
                 # 価格下降：赤色
                 for j in range(7):
                     self.result_table.item(i, j).setBackground(QColor(255, 200, 200))
@@ -366,7 +411,22 @@ class RepricerWidget(QWidget):
         if file_path:
             try:
                 # 結果をCSVファイルに保存
-                df = pd.DataFrame(self.repricing_result['items'])
+                items = self.repricing_result['items']
+                
+                # 既存APIレスポンス形式に合わせたデータフレーム作成
+                data = []
+                for item in items:
+                    data.append({
+                        'SKU': item.get('sku', ''),
+                        '日数': item.get('days', 0),
+                        'アクション': item.get('action', ''),
+                        '理由': item.get('reason', ''),
+                        '現在価格': item.get('price', 0),
+                        '改定後価格': item.get('new_price', 0),
+                        'Trace変更': item.get('priceTraceChange', item.get('price_trace_change', 0))
+                    })
+                
+                df = pd.DataFrame(data)
                 df.to_csv(file_path, index=False, encoding='utf-8')
                 
                 QMessageBox.information(self, "保存完了", f"結果を保存しました:\n{file_path}")

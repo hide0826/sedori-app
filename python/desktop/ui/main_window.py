@@ -13,15 +13,54 @@ HIRIO メインウィンドウ
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QTabWidget, QMenuBar, QMenu, QStatusBar, QLabel,
-    QMessageBox, QSplitter
+    QMessageBox, QSplitter, QPushButton
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QAction, QKeySequence
+import subprocess
+import threading
+import time
 
 # プロジェクト内のモジュール
 from ui.repricer_widget import RepricerWidget
+from ui.repricer_settings_widget import RepricerSettingsWidget
 from ui.inventory_widget import InventoryWidget
 from ui.workflow_panel import WorkflowPanel
+
+
+class APIServerThread(QThread):
+    """FastAPIサーバー起動スレッド"""
+    server_started = Signal()
+    server_error = Signal(str)
+    
+    def __init__(self):
+        super().__init__()
+        self.process = None
+        
+    def run(self):
+        """FastAPIサーバーの起動"""
+        try:
+            # FastAPIサーバーを起動
+            self.process = subprocess.Popen([
+                "python", "-m", "uvicorn", 
+                "python.app:app", 
+                "--host", "localhost", 
+                "--port", "8000",
+                "--reload"
+            ], cwd="..")  # プロジェクトルートに移動
+            
+            # サーバー起動待機
+            time.sleep(3)
+            self.server_started.emit()
+            
+        except Exception as e:
+            self.server_error.emit(str(e))
+    
+    def stop_server(self):
+        """サーバーの停止"""
+        if self.process:
+            self.process.terminate()
+            self.process = None
 
 
 class MainWindow(QMainWindow):
@@ -30,13 +69,13 @@ class MainWindow(QMainWindow):
     def __init__(self, api_client):
         super().__init__()
         self.api_client = api_client
-        self.workflow_panel = None
+        self.api_server_thread = None
+        self.server_running = False
         
         # UIの初期化
         self.setup_ui()
         self.setup_menu()
         self.setup_status_bar()
-        self.setup_workflow_panel()
         
         # ウィンドウ設定
         self.setWindowTitle("HIRIO - せどり業務統合システム")
@@ -67,22 +106,15 @@ class MainWindow(QMainWindow):
         # レイアウトに追加
         main_layout.addWidget(self.tab_widget)
         
-        # ワークフローパネルの追加
-        try:
-            self.workflow_panel = WorkflowPanel(self.api_client)
-            print(f"WorkflowPanel created: {type(self.workflow_panel)}")
-            main_layout.addWidget(self.workflow_panel)
-            print("WorkflowPanel added to layout")
-        except Exception as e:
-            print(f"Error creating WorkflowPanel: {e}")
-            import traceback
-            traceback.print_exc()
-        
     def setup_tabs(self):
         """タブの設定"""
         # 価格改定タブ
         self.repricer_widget = RepricerWidget(self.api_client)
         self.tab_widget.addTab(self.repricer_widget, "価格改定")
+        
+        # 価格改定ルール設定タブ
+        self.repricer_settings_widget = RepricerSettingsWidget(self.api_client)
+        self.tab_widget.addTab(self.repricer_settings_widget, "価格改定ルール")
         
         # 仕入管理タブ
         self.inventory_widget = InventoryWidget(self.api_client)
@@ -138,15 +170,22 @@ class MainWindow(QMainWindow):
         # 表示メニュー
         view_menu = menubar.addMenu("表示(&V)")
         
-        # ワークフローパネルの表示/非表示
-        workflow_action = QAction("ワークフローパネル(&W)", self)
-        workflow_action.setCheckable(True)
-        workflow_action.setChecked(True)
-        workflow_action.triggered.connect(self.toggle_workflow_panel)
-        view_menu.addAction(workflow_action)
         
         # ツールメニュー
         tools_menu = menubar.addMenu("ツール(&T)")
+        
+        # FastAPIサーバー起動
+        self.start_server_action = QAction("FastAPIサーバー起動(&S)", self)
+        self.start_server_action.triggered.connect(self.start_fastapi_server)
+        tools_menu.addAction(self.start_server_action)
+        
+        # FastAPIサーバー停止
+        self.stop_server_action = QAction("FastAPIサーバー停止(&T)", self)
+        self.stop_server_action.triggered.connect(self.stop_fastapi_server)
+        self.stop_server_action.setEnabled(False)
+        tools_menu.addAction(self.stop_server_action)
+        
+        tools_menu.addSeparator()
         
         # API接続テスト
         api_test_action = QAction("API接続テスト(&A)", self)
@@ -177,10 +216,6 @@ class MainWindow(QMainWindow):
         # API接続チェック
         self.check_api_connection()
         
-    def setup_workflow_panel(self):
-        """ワークフローパネルの設定"""
-        # ワークフローパネルは既にsetup_uiで追加済み
-        pass
         
     def center_window(self):
         """ウィンドウを中央に配置"""
@@ -217,19 +252,86 @@ class MainWindow(QMainWindow):
         """設定画面を表示"""
         QMessageBox.information(self, "設定", "設定画面（開発予定）")
         
-    def toggle_workflow_panel(self, checked):
-        """ワークフローパネルの表示/非表示"""
-        if checked:
-            self.workflow_panel.show()
-        else:
-            self.workflow_panel.hide()
             
+    def start_fastapi_server(self):
+        """FastAPIサーバーの起動"""
+        if self.server_running:
+            QMessageBox.information(self, "サーバー起動", "FastAPIサーバーは既に起動しています")
+            return
+            
+        try:
+            self.status_label.setText("FastAPIサーバー起動中...")
+            
+            # サーバースレッドの作成と起動
+            self.api_server_thread = APIServerThread()
+            self.api_server_thread.server_started.connect(self.on_server_started)
+            self.api_server_thread.server_error.connect(self.on_server_error)
+            self.api_server_thread.start()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "サーバー起動エラー", f"FastAPIサーバーの起動に失敗しました:\n{str(e)}")
+    
+    def stop_fastapi_server(self):
+        """FastAPIサーバーの停止"""
+        if not self.server_running:
+            QMessageBox.information(self, "サーバー停止", "FastAPIサーバーは起動していません")
+            return
+            
+        try:
+            if self.api_server_thread:
+                self.api_server_thread.stop_server()
+                self.api_server_thread.quit()
+                self.api_server_thread.wait()
+                self.api_server_thread = None
+            
+            self.server_running = False
+            self.start_server_action.setEnabled(True)
+            self.stop_server_action.setEnabled(False)
+            self.status_label.setText("FastAPIサーバー停止")
+            self.api_status_label.setText("API: 停止")
+            self.api_status_label.setStyleSheet("color: red;")
+            
+            QMessageBox.information(self, "サーバー停止", "FastAPIサーバーを停止しました")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "サーバー停止エラー", f"FastAPIサーバーの停止に失敗しました:\n{str(e)}")
+    
+    def on_server_started(self):
+        """サーバー起動完了"""
+        self.server_running = True
+        self.start_server_action.setEnabled(False)
+        self.stop_server_action.setEnabled(True)
+        self.status_label.setText("FastAPIサーバー起動完了")
+        self.api_status_label.setText("API: 起動中")
+        self.api_status_label.setStyleSheet("color: orange;")
+        
+        # 接続テストを実行
+        QTimer.singleShot(2000, self.test_api_connection)
+    
+    def on_server_error(self, error_message):
+        """サーバー起動エラー"""
+        self.server_running = False
+        self.start_server_action.setEnabled(True)
+        self.stop_server_action.setEnabled(False)
+        self.status_label.setText("FastAPIサーバー起動失敗")
+        self.api_status_label.setText("API: エラー")
+        self.api_status_label.setStyleSheet("color: red;")
+        
+        QMessageBox.critical(self, "サーバー起動エラー", f"FastAPIサーバーの起動に失敗しました:\n{error_message}")
+    
     def test_api_connection(self):
         """API接続テスト"""
         try:
-            # ダミーのAPI接続テスト
-            self.status_label.setText("API接続テスト中...")
-            QTimer.singleShot(1000, self.api_test_completed)
+            if self.api_client.test_connection():
+                self.status_label.setText("API接続テスト完了")
+                self.api_status_label.setText("API: 接続済み")
+                self.api_status_label.setStyleSheet("color: green;")
+                QMessageBox.information(self, "API接続テスト", "FastAPIサーバーに正常に接続できました")
+            else:
+                self.status_label.setText("API接続テスト失敗")
+                self.api_status_label.setText("API: 接続失敗")
+                self.api_status_label.setStyleSheet("color: red;")
+                QMessageBox.warning(self, "API接続テスト", "FastAPIサーバーに接続できませんでした")
         except Exception as e:
             QMessageBox.warning(self, "API接続エラー", f"API接続に失敗しました:\n{str(e)}")
             

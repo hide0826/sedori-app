@@ -73,30 +73,133 @@ class WorkflowWorker(QThread):
             self.error_occurred.emit(str(e))
     
     def execute_step(self, step):
-        """ステップの実行（ダミー実装）"""
-        # 各ステップの処理時間（秒）
-        step_durations = {
-            0: 2,  # 1. 仕入データ取込
-            1: 3,  # 2. SKU生成
-            2: 2,  # 3. 出品CSV生成
-            3: 1,  # 4. ピッキングリスト生成
-            4: 2   # 5. 古物台帳生成
-        }
+        """ステップの実行"""
+        try:
+            if step.step_id == 0:
+                # 1. 仕入データ取込
+                self.execute_inventory_import()
+            elif step.step_id == 1:
+                # 2. SKU生成
+                self.execute_sku_generation()
+            elif step.step_id == 2:
+                # 3. 出品CSV生成
+                self.execute_listing_export()
+            elif step.step_id == 3:
+                # 4. ピッキングリスト生成
+                self.execute_picking_list()
+            elif step.step_id == 4:
+                # 5. 古物台帳生成
+                self.execute_antique_register()
+                
+        except Exception as e:
+            self.error_occurred.emit(f"ステップ {step.step_id + 1} でエラー: {str(e)}")
+    
+    def execute_inventory_import(self):
+        """仕入データ取込の実行"""
+        # ダミーデータの作成（実際の実装では、ファイル選択やAPI呼び出し）
+        import pandas as pd
+        dummy_data = pd.DataFrame({
+            'ASIN': ['B0001', 'B0002', 'B0003'],
+            '商品名': ['商品1', '商品2', '商品3'],
+            '価格': [1000, 2000, 3000]
+        })
         
-        duration = step_durations.get(step.step_id, 1)
-        steps = 20  # 進捗ステップ数
-        
-        for i in range(steps):
+        # 進捗更新
+        for i in range(10):
             if self.should_stop:
                 break
-                
-            # 一時停止のチェック
             while self.is_paused and not self.should_stop:
                 time.sleep(0.1)
+            time.sleep(0.2)
+            self.progress_updated.emit(int((i + 1) / 10 * 100))
+    
+    def execute_sku_generation(self):
+        """SKU生成の実行"""
+        try:
+            # ダミーデータでSKU生成
+            dummy_data = [
+                {'ASIN': 'B0001', '商品名': '商品1'},
+                {'ASIN': 'B0002', '商品名': '商品2'},
+                {'ASIN': 'B0003', '商品名': '商品3'}
+            ]
+            
+            result = self.api_client.inventory_generate_sku(dummy_data)
+            
+            # 進捗更新
+            for i in range(15):
+                if self.should_stop:
+                    break
+                while self.is_paused and not self.should_stop:
+                    time.sleep(0.1)
+                time.sleep(0.2)
+                self.progress_updated.emit(int((i + 1) / 15 * 100))
                 
-            time.sleep(duration / steps)
-            progress = int((i + 1) / steps * 100)
-            self.progress_updated.emit(progress)
+        except Exception as e:
+            raise Exception(f"SKU生成エラー: {str(e)}")
+    
+    def execute_listing_export(self):
+        """出品CSV生成の実行"""
+        try:
+            # ダミーデータで出品CSV生成
+            dummy_data = [
+                {'sku': '20250101-B0001-0001', '商品名': '商品1', '価格': 1000},
+                {'sku': '20250101-B0002-0002', '商品名': '商品2', '価格': 2000}
+            ]
+            
+            result = self.api_client.inventory_export_listing(dummy_data)
+            
+            # 進捗更新
+            for i in range(10):
+                if self.should_stop:
+                    break
+                while self.is_paused and not self.should_stop:
+                    time.sleep(0.1)
+                time.sleep(0.2)
+                self.progress_updated.emit(int((i + 1) / 10 * 100))
+                
+        except Exception as e:
+            raise Exception(f"出品CSV生成エラー: {str(e)}")
+    
+    def execute_picking_list(self):
+        """ピッキングリスト生成の実行"""
+        try:
+            # ダミーデータでピッキングリスト生成
+            dummy_data = [
+                {'sku': '20250101-B0001-0001', '商品名': '商品1'},
+                {'sku': '20250101-B0002-0002', '商品名': '商品2'}
+            ]
+            
+            result = self.api_client.picking_list_generate(dummy_data)
+            
+            # 進捗更新
+            for i in range(5):
+                if self.should_stop:
+                    break
+                while self.is_paused and not self.should_stop:
+                    time.sleep(0.1)
+                time.sleep(0.2)
+                self.progress_updated.emit(int((i + 1) / 5 * 100))
+                
+        except Exception as e:
+            raise Exception(f"ピッキングリスト生成エラー: {str(e)}")
+    
+    def execute_antique_register(self):
+        """古物台帳生成の実行"""
+        try:
+            # ダミーデータで古物台帳生成
+            result = self.api_client.antique_register_generate("2025-01-01", "2025-01-31")
+            
+            # 進捗更新
+            for i in range(10):
+                if self.should_stop:
+                    break
+                while self.is_paused and not self.should_stop:
+                    time.sleep(0.1)
+                time.sleep(0.2)
+                self.progress_updated.emit(int((i + 1) / 10 * 100))
+                
+        except Exception as e:
+            raise Exception(f"古物台帳生成エラー: {str(e)}")
     
     def pause_workflow(self):
         """ワークフローの一時停止"""
@@ -169,7 +272,7 @@ class WorkflowPanel(QWidget):
         for i, step in enumerate(self.steps):
             step_widget = self.create_step_widget(i, step)
             self.step_widgets.append(step_widget)
-            workflow_layout.addWidget(step_widget)
+            workflow_layout.addWidget(step_widget['frame'])  # フレームを追加
         
         self.layout().addWidget(workflow_group)
         

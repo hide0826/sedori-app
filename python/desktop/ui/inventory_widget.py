@@ -55,6 +55,9 @@ class InventoryWidget(QWidget):
         # 最下部：アクションボタンエリア
         self.setup_action_buttons()
         
+        # ワークフローパネルの追加
+        self.setup_workflow_panel()
+        
     def setup_file_operations(self):
         """ファイル操作エリアの設定"""
         file_group = QGroupBox("ファイル操作")
@@ -429,8 +432,63 @@ class InventoryWidget(QWidget):
             QMessageBox.warning(self, "エラー", "データがありません")
             return
             
-        QMessageBox.information(self, "SKU生成", "SKU生成機能（開発予定）")
-        # TODO: 実際のSKU生成ロジックを実装
+        try:
+            # データを辞書形式に変換
+            data_list = self.filtered_data.to_dict('records')
+            
+            # APIクライアントでSKU生成
+            result = self.api_client.inventory_generate_sku(data_list)
+            
+            if result['status'] == 'success':
+                # 生成されたSKUをテーブルに反映
+                self.update_table_with_sku(result['results'])
+                
+                # 統計情報の更新
+                self.update_stats()
+                
+                QMessageBox.information(
+                    self, 
+                    "SKU生成完了", 
+                    f"SKU生成が完了しました\n生成数: {result['generated_count']}件"
+                )
+                
+                # シグナル発火
+                self.sku_generated.emit(result['generated_count'])
+            else:
+                QMessageBox.warning(self, "SKU生成失敗", "SKU生成に失敗しました")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"SKU生成中にエラーが発生しました:\n{str(e)}")
+    
+    def update_table_with_sku(self, sku_results):
+        """SKU生成結果をテーブルに反映"""
+        try:
+            # 元データにSKU情報を追加
+            for result in sku_results:
+                if result['status'] == 'success':
+                    # 元データの該当行を特定（ASINや商品名でマッチング）
+                    original_data = result['original_data']
+                    generated_sku = result['generated_sku']
+                    q_tag = result['q_tag']
+                    
+                    # 元データの該当行を更新
+                    for i, row in self.inventory_data.iterrows():
+                        if (str(row.get('ASIN', '')) == str(original_data.get('ASIN', '')) and
+                            str(row.get('商品名', '')) == str(original_data.get('商品名', ''))):
+                            # SKU列とQ列を更新
+                            self.inventory_data.at[i, 'SKU'] = generated_sku
+                            if q_tag:
+                                self.inventory_data.at[i, 'Q列'] = q_tag
+                            break
+            
+            # フィルタデータも更新
+            self.filtered_data = self.inventory_data.copy()
+            
+            # テーブルの再描画
+            self.update_table()
+            
+        except Exception as e:
+            print(f"テーブル更新エラー: {e}")
         
     def export_csv(self):
         """CSV出力"""
@@ -454,10 +512,106 @@ class InventoryWidget(QWidget):
                 
     def export_listing_csv(self):
         """出品CSV生成"""
-        QMessageBox.information(self, "出品CSV生成", "出品CSV生成機能（開発予定）")
-        # TODO: 実際の出品CSV生成ロジックを実装
+        if self.filtered_data is None:
+            QMessageBox.warning(self, "エラー", "データがありません")
+            return
+            
+        try:
+            # データを辞書形式に変換
+            data_list = self.filtered_data.to_dict('records')
+            
+            # APIクライアントで出品CSV生成
+            result = self.api_client.inventory_export_listing(data_list)
+            
+            if result['status'] == 'success':
+                # ファイル保存ダイアログ
+                file_path, _ = QFileDialog.getSaveFileName(
+                    self,
+                    "出品CSVファイルを保存",
+                    "listing_export.csv",
+                    "CSVファイル (*.csv)"
+                )
+                
+                if file_path:
+                    # 生成されたデータをCSVファイルに保存
+                    import pandas as pd
+                    df = pd.DataFrame(result['data'])
+                    df.to_csv(file_path, index=False, encoding='utf-8')
+                    
+                    QMessageBox.information(
+                        self, 
+                        "出品CSV生成完了", 
+                        f"出品CSV生成が完了しました\n出力数: {result['exported_count']}件\n保存先: {file_path}"
+                    )
+            else:
+                QMessageBox.warning(self, "出品CSV生成失敗", "出品CSV生成に失敗しました")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"出品CSV生成中にエラーが発生しました:\n{str(e)}")
         
     def generate_antique_register(self):
         """古物台帳生成"""
-        QMessageBox.information(self, "古物台帳生成", "古物台帳生成機能（開発予定）")
-        # TODO: 実際の古物台帳生成ロジックを実装
+        if self.filtered_data is None:
+            QMessageBox.warning(self, "エラー", "データがありません")
+            return
+            
+        try:
+            # 日付範囲の入力ダイアログ（簡易版）
+            from PySide6.QtWidgets import QInputDialog
+            start_date, ok1 = QInputDialog.getText(
+                self, 
+                "古物台帳生成", 
+                "開始日を入力してください (YYYY-MM-DD):",
+                text="2025-01-01"
+            )
+            
+            if not ok1:
+                return
+                
+            end_date, ok2 = QInputDialog.getText(
+                self, 
+                "古物台帳生成", 
+                "終了日を入力してください (YYYY-MM-DD):",
+                text="2025-01-31"
+            )
+            
+            if not ok2:
+                return
+            
+            # APIクライアントで古物台帳生成
+            result = self.api_client.antique_register_generate(start_date, end_date)
+            
+            if result['status'] == 'success':
+                # ファイル保存ダイアログ
+                file_path, _ = QFileDialog.getSaveFileName(
+                    self,
+                    "古物台帳ファイルを保存",
+                    f"antique_register_{start_date}_{end_date}.csv",
+                    "CSVファイル (*.csv)"
+                )
+                
+                if file_path:
+                    # 生成されたデータをCSVファイルに保存
+                    import pandas as pd
+                    df = pd.DataFrame(result['items'])
+                    df.to_csv(file_path, index=False, encoding='utf-8')
+                    
+                    QMessageBox.information(
+                        self, 
+                        "古物台帳生成完了", 
+                        f"古物台帳生成が完了しました\n期間: {result['period']}\n件数: {result['total_items']}件\n合計金額: {result['total_value']:,}円\n保存先: {file_path}"
+                    )
+            else:
+                QMessageBox.warning(self, "古物台帳生成失敗", "古物台帳生成に失敗しました")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"古物台帳生成中にエラーが発生しました:\n{str(e)}")
+    
+    def setup_workflow_panel(self):
+        """ワークフローパネルの設定"""
+        try:
+            from ui.workflow_panel import WorkflowPanel
+            self.workflow_panel = WorkflowPanel(self.api_client)
+            self.layout().addWidget(self.workflow_panel)
+        except Exception as e:
+            print(f"ワークフローパネル作成エラー: {e}")
