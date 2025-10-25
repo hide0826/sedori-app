@@ -14,10 +14,25 @@ from PySide6.QtWidgets import (
     QProgressBar, QTextEdit, QGroupBox, QSplitter,
     QMessageBox, QFrame
 )
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSettings
 from PySide6.QtGui import QFont, QColor
 import pandas as pd
 from pathlib import Path
+from utils.error_handler import ErrorHandler, validate_csv_file, safe_execute
+
+
+class NumericTableWidgetItem(QTableWidgetItem):
+    """数値ソート用のカスタムTableWidgetItem"""
+    
+    def __init__(self, value):
+        super().__init__()
+        self.numeric_value = float(value) if value else 0.0
+    
+    def __lt__(self, other):
+        """小なり演算子をオーバーライドして数値比較を実装"""
+        if isinstance(other, NumericTableWidgetItem):
+            return self.numeric_value < other.numeric_value
+        return super().__lt__(other)
 
 
 class RepricerWorker(QThread):
@@ -67,6 +82,8 @@ class RepricerWidget(QWidget):
         self.api_client = api_client
         self.csv_path = None
         self.repricing_result = None
+        self.error_handler = ErrorHandler(self)
+        self.settings = QSettings("HIRIO", "DesktopApp")
         
         # UIの初期化
         self.setup_ui()
@@ -120,6 +137,7 @@ class RepricerWidget(QWidget):
         self.preview_btn.setMaximumHeight(30)  # 高さを制限
         file_layout.addWidget(self.preview_btn)
         
+        
         self.layout().addWidget(file_group)
         
     def setup_content_area(self):
@@ -142,6 +160,18 @@ class RepricerWidget(QWidget):
         self.preview_table.setAlternatingRowColors(True)
         self.preview_table.horizontalHeader().setStretchLastSection(True)
         self.preview_table.setMinimumHeight(200)  # 適度な高さを設定
+        
+        # 大量データ対応の最適化
+        self.preview_table.setSortingEnabled(True)  # ソート機能を有効化
+        self.preview_table.setSelectionBehavior(QTableWidget.SelectRows)  # 行選択
+        
+        # パフォーマンス向上のための設定
+        self.preview_table.setVerticalScrollMode(QTableWidget.ScrollPerPixel)
+        self.preview_table.setHorizontalScrollMode(QTableWidget.ScrollPerPixel)
+        
+        # 選択変更時の自動スクロール機能
+        self.preview_table.itemSelectionChanged.connect(self.on_preview_selection_changed)
+        
         preview_layout.addWidget(self.preview_table)
         
         self.layout().addWidget(preview_group)
@@ -156,6 +186,18 @@ class RepricerWidget(QWidget):
         self.result_table.setAlternatingRowColors(True)
         self.result_table.horizontalHeader().setStretchLastSection(True)
         self.result_table.setMinimumHeight(200)  # 適度な高さを設定
+        
+        # 大量データ対応の最適化
+        self.result_table.setSortingEnabled(True)  # ソート機能を有効化
+        self.result_table.setSelectionBehavior(QTableWidget.SelectRows)  # 行選択
+        
+        # パフォーマンス向上のための設定
+        self.result_table.setVerticalScrollMode(QTableWidget.ScrollPerPixel)
+        self.result_table.setHorizontalScrollMode(QTableWidget.ScrollPerPixel)
+        
+        # 選択変更時の自動スクロール機能
+        self.result_table.itemSelectionChanged.connect(self.on_result_selection_changed)
+        
         result_layout.addWidget(self.result_table)
         
         self.layout().addWidget(result_group)
@@ -209,19 +251,45 @@ class RepricerWidget(QWidget):
         
     def select_csv_file(self):
         """CSVファイルの選択"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "CSVファイルを選択",
-            "",
-            "CSVファイル (*.csv);;すべてのファイル (*)"
-        )
-        
-        if file_path:
-            self.csv_path = file_path
-            self.file_path_edit.setText(file_path)
-            self.csv_preview_btn.setEnabled(True)
-            self.preview_btn.setEnabled(True)
-            self.execute_btn.setEnabled(True)
+        try:
+            # 設定からデフォルトディレクトリを取得
+            default_dir = self.settings.value("directories/csv", "")
+            
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "CSVファイルを選択",
+                default_dir,  # 設定から取得したデフォルトディレクトリを指定
+                "CSVファイル (*.csv);;すべてのファイル (*)"
+            )
+            
+            if file_path:
+                # CSVファイルのバリデーション
+                try:
+                    validate_csv_file(file_path)
+                    self.csv_path = file_path
+                    self.file_path_edit.setText(file_path)
+                    self.csv_preview_btn.setEnabled(True)
+                    self.preview_btn.setEnabled(True)
+                    self.execute_btn.setEnabled(True)
+                    
+                    # ファイル選択完了後、自動的にCSVプレビューを表示
+                    QTimer.singleShot(100, self.show_csv_preview)
+                    
+                except Exception as e:
+                    user_message = self.error_handler.handle_exception(e, "CSVファイル選択")
+                    self.error_handler.show_error_dialog(
+                        self, 
+                        "ファイル選択エラー", 
+                        user_message
+                    )
+                    
+        except Exception as e:
+            user_message = self.error_handler.handle_exception(e, "ファイル選択ダイアログ")
+            self.error_handler.show_error_dialog(
+                self, 
+                "ファイル選択エラー", 
+                user_message
+            )
             
     def preview_csv(self):
         """CSVファイルのプレビュー（価格改定プレビュー）"""
@@ -246,6 +314,11 @@ class RepricerWidget(QWidget):
             return
             
         try:
+            # 進捗バーの表示
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setValue(0)
+            self.csv_preview_btn.setEnabled(False)
+            
             # CSVファイルの読み込み
             from utils.csv_io import csv_io
             df = csv_io.read_csv(self.csv_path)
@@ -254,30 +327,193 @@ class RepricerWidget(QWidget):
                 QMessageBox.warning(self, "エラー", "CSVファイルの読み込みに失敗しました")
                 return
             
+            self.progress_bar.setValue(30)
+            
+            # ソート機能を一時的に無効化（データ投入中はソートしない）
+            self.preview_table.setSortingEnabled(False)
+            
             # テーブルの設定
             self.preview_table.setRowCount(len(df))
             self.preview_table.setColumnCount(len(df.columns))
             self.preview_table.setHorizontalHeaderLabels(df.columns.tolist())
             
-            # データの設定（最初の100行のみ表示）
-            display_rows = min(100, len(df))
-            for i in range(display_rows):
+            self.progress_bar.setValue(50)
+            
+            # データの設定（全行表示）
+            for i in range(len(df)):
                 row = df.iloc[i]
                 for j, value in enumerate(row):
-                    item = QTableWidgetItem(str(value))
+                    # conditionNote列の場合は空文字列にする
+                    if df.columns[j].lower() == 'conditionnote':
+                        clean_value = ''
+                    else:
+                        # Excel数式記法のクリーンアップ
+                        clean_value = self.clean_excel_formula(str(value))
+                        
+                        # title列の場合は50文字に制限
+                        if df.columns[j].lower() == 'title' and len(clean_value) > 50:
+                            clean_value = clean_value[:50] + '...'
+                    
+                    item = QTableWidgetItem(clean_value)
+                    
+                    # title列の場合はツールチップで全文を表示
+                    if df.columns[j].lower() == 'title':
+                        original_value = self.clean_excel_formula(str(value))
+                        if len(original_value) > 50:
+                            item.setToolTip(original_value)
+                    
                     self.preview_table.setItem(i, j, item)
+                
+                # 大量データの場合、進捗を更新
+                if i % 50 == 0:  # 50行ごとに進捗更新
+                    progress = 50 + int((i / len(df)) * 40)  # 50-90%の範囲
+                    self.progress_bar.setValue(progress)
+            
+            self.progress_bar.setValue(90)
+            
+            # データ投入完了後、ソート機能を再有効化
+            self.preview_table.setSortingEnabled(True)
             
             # 列幅の自動調整
             self.preview_table.resizeColumnsToContents()
             
-            QMessageBox.information(
-                self, 
-                "CSVプレビュー完了", 
-                f"CSVファイルを読み込みました\n行数: {len(df)}, 列数: {len(df.columns)}\n（表示: 最初の{display_rows}行）"
-            )
+            self.progress_bar.setValue(100)
+            self.progress_bar.setVisible(False)
+            self.csv_preview_btn.setEnabled(True)
             
         except Exception as e:
+            self.progress_bar.setVisible(False)
+            self.csv_preview_btn.setEnabled(True)
             QMessageBox.warning(self, "エラー", f"CSVファイルの読み込みに失敗しました:\n{str(e)}")
+    
+    def on_preview_selection_changed(self):
+        """プレビューテーブルの選択変更時の処理"""
+        try:
+            # 選択された行を取得
+            selected_items = self.preview_table.selectedItems()
+            if not selected_items:
+                return
+            
+            # 最初の選択されたアイテムの行番号を取得
+            current_row = selected_items[0].row()
+            
+            # title列を探す
+            title_column = -1
+            for j in range(self.preview_table.columnCount()):
+                header_item = self.preview_table.horizontalHeaderItem(j)
+                if header_item and header_item.text().lower() == 'title':
+                    title_column = j
+                    break
+            
+            # title列が見つかった場合、その列にスクロール
+            if title_column >= 0:
+                # 水平スクロールでtitle列を表示
+                self.preview_table.scrollToItem(
+                    self.preview_table.item(current_row, title_column),
+                    QTableWidget.PositionAtCenter
+                )
+                
+                # title列のセルをハイライト
+                for j in range(self.preview_table.columnCount()):
+                    item = self.preview_table.item(current_row, j)
+                    if item:
+                        if j == title_column:
+                            # title列は黄色でハイライト
+                            item.setBackground(QColor(255, 255, 200))
+                        else:
+                            # 他の列は通常の背景色
+                            item.setBackground(QColor(255, 255, 255))
+                            
+        except Exception as e:
+            print(f"選択変更処理エラー: {e}")
+    
+    def on_result_selection_changed(self):
+        """価格改定結果テーブルの選択変更時の処理"""
+        try:
+            # 選択された行を取得
+            selected_items = self.result_table.selectedItems()
+            if not selected_items:
+                return
+            
+            # 最初の選択されたアイテムの行番号を取得
+            current_row = selected_items[0].row()
+            
+            # Title列を探す（価格改定結果では「Title」列）
+            title_column = -1
+            for j in range(self.result_table.columnCount()):
+                header_item = self.result_table.horizontalHeaderItem(j)
+                if header_item and header_item.text() == 'Title':
+                    title_column = j
+                    break
+            
+            # Title列が見つかった場合、その列にスクロール
+            if title_column >= 0:
+                # 水平スクロールでTitle列を表示
+                self.result_table.scrollToItem(
+                    self.result_table.item(current_row, title_column),
+                    QTableWidget.PositionAtCenter
+                )
+                
+                # Title列のセルをハイライト
+                for j in range(self.result_table.columnCount()):
+                    item = self.result_table.item(current_row, j)
+                    if item:
+                        if j == title_column:
+                            # Title列は黄色でハイライト
+                            item.setBackground(QColor(255, 255, 200))
+                        else:
+                            # 他の列は通常の背景色
+                            item.setBackground(QColor(255, 255, 255))
+                            
+        except Exception as e:
+            print(f"結果選択変更処理エラー: {e}")
+    
+    def clean_excel_formula(self, value: str) -> str:
+        """Excel数式記法のクリーンアップ"""
+        if not value:
+            return value
+            
+        # ="○○" 形式を ○○ に変換
+        if value.startswith('="') and value.endswith('"'):
+            return value[2:-1]  # =" と " を削除
+        
+        # ="○○ 形式（終了の"がない場合）を ○○ に変換
+        if value.startswith('="'):
+            return value[2:]  # =" を削除
+        
+        # ○○" 形式（開始の="がない場合）を ○○ に変換
+        if value.endswith('"') and not value.startswith('="'):
+            return value[:-1]  # " を削除
+            
+        return value
+    
+    def _format_trace_change(self, price_trace_change):
+        """Trace変更の日本語化
+        
+        マッピング:
+        0 = 維持
+        1 = FBA状態合わせ
+        2 = 状態合わせ
+        3 = FBA最安値
+        4 = 最安値
+        5 = カート価格
+        """
+        trace_value = int(price_trace_change) if price_trace_change else 0
+        
+        if trace_value == 0:
+            return "維持"
+        elif trace_value == 1:
+            return "FBA状態合わせ"
+        elif trace_value == 2:
+            return "状態合わせ"
+        elif trace_value == 3:
+            return "FBA最安値"
+        elif trace_value == 4:
+            return "最安値"
+        elif trace_value == 5:
+            return "カート価格"
+        else:
+            return f"不明 ({trace_value})"
         
     def on_preview_completed(self, result):
         """プレビュー完了時の処理"""
@@ -310,7 +546,7 @@ class RepricerWidget(QWidget):
         reply = QMessageBox.question(
             self, 
             "価格改定実行確認", 
-            "価格改定を実行しますか？\nこの操作は元のCSVファイルを変更します。",
+            "価格改定を実行しますか？\n※元のCSVファイルは変更されません。結果は別途保存できます。",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
@@ -357,79 +593,346 @@ class RepricerWidget(QWidget):
         """結果テーブルの更新"""
         items = result['items']
         
-        # テーブルの設定
+        # ソート機能を一時的に無効化（データ投入中はソートしない）
+        self.result_table.setSortingEnabled(False)
+        
+        # テーブルの設定（必要な列のみ）
         self.result_table.setRowCount(len(items))
-        columns = ['SKU', '日数', 'アクション', '理由', '現在価格', '改定後価格', 'Trace変更']
+        columns = ['SKU', 'ASIN', 'Title', '日数', 'アクション', '理由', '現在価格', '改定価格', 'Trace変更']
         self.result_table.setColumnCount(len(columns))
         self.result_table.setHorizontalHeaderLabels(columns)
         
         # データの設定
         for i, item in enumerate(items):
-            # 既存APIレスポンスのキー名に合わせて取得
-            sku = item.get('sku', '')
-            days = item.get('days', 0)
-            action = item.get('action', '')
-            reason = item.get('reason', '')
-            price = item.get('price', 0)
-            new_price = item.get('new_price', 0)
-            price_trace_change = item.get('priceTraceChange', item.get('price_trace_change', 0))
+            # 既存APIレスポンスのキー名に合わせて取得（型変換を追加）
+            sku = str(item.get('sku', ''))
+            asin = str(item.get('asin', ''))
+            title = str(item.get('title', ''))
+            days = int(item.get('days', 0)) if item.get('days') is not None else 0
+            action = str(item.get('action', ''))
+            reason = str(item.get('reason', ''))
+            price = float(item.get('price', 0)) if item.get('price') is not None else 0
+            new_price = float(item.get('new_price', 0)) if item.get('new_price') is not None else 0
+            # priceTraceChangeの安全な型変換
+            price_trace_change = 0
+            try:
+                trace_value = item.get('priceTraceChange', item.get('price_trace_change', 0))
+                if trace_value is not None and str(trace_value).strip():
+                    # 数値文字列の場合のみfloat変換
+                    if str(trace_value).replace('.', '').replace('-', '').isdigit():
+                        price_trace_change = float(trace_value)
+                    else:
+                        # 文字列の場合は0として扱う
+                        price_trace_change = 0
+            except (ValueError, TypeError):
+                price_trace_change = 0
             
-            self.result_table.setItem(i, 0, QTableWidgetItem(str(sku)))
-            self.result_table.setItem(i, 1, QTableWidgetItem(str(days)))
-            self.result_table.setItem(i, 2, QTableWidgetItem(str(action)))
-            self.result_table.setItem(i, 3, QTableWidgetItem(str(reason)))
-            self.result_table.setItem(i, 4, QTableWidgetItem(str(price)))
-            self.result_table.setItem(i, 5, QTableWidgetItem(str(new_price)))
-            self.result_table.setItem(i, 6, QTableWidgetItem(str(price_trace_change)))
+            # Trace変更の日本語化
+            trace_change_text = self._format_trace_change(price_trace_change)
             
-            # 価格変更に応じて色分け
-            if new_price > price:
-                # 価格上昇：緑色
-                for j in range(7):
-                    self.result_table.item(i, j).setBackground(QColor(200, 255, 200))
-            elif new_price < price:
-                # 価格下降：赤色
-                for j in range(7):
-                    self.result_table.item(i, j).setBackground(QColor(255, 200, 200))
+            # Excel数式記法のクリーンアップ
+            self.result_table.setItem(i, 0, QTableWidgetItem(self.clean_excel_formula(str(sku))))
+            self.result_table.setItem(i, 1, QTableWidgetItem(self.clean_excel_formula(str(asin))))
+            
+            # Title列の特別処理（50文字制限+ツールチップ）
+            title_clean = self.clean_excel_formula(str(title))
+            title_display = title_clean[:50] + '...' if len(title_clean) > 50 else title_clean
+            title_item = QTableWidgetItem(title_display)
+            if len(title_clean) > 50:
+                title_item.setToolTip(title_clean)  # ツールチップで全文表示
+            self.result_table.setItem(i, 2, title_item)
+            
+            # 日数列：数値としてソートするためにQt.UserRoleに数値を設定
+            days_item = NumericTableWidgetItem(days)
+            days_item.setText(self.clean_excel_formula(str(days)))
+            self.result_table.setItem(i, 3, days_item)
+            
+            self.result_table.setItem(i, 4, QTableWidgetItem(self.clean_excel_formula(str(action))))
+            self.result_table.setItem(i, 5, QTableWidgetItem(self.clean_excel_formula(str(reason))))
+            
+            # 価格列：数値としてソートするためにQt.UserRoleに数値を設定
+            price_item = NumericTableWidgetItem(price)
+            price_item.setText(self.clean_excel_formula(str(price)))
+            self.result_table.setItem(i, 6, price_item)
+            
+            new_price_item = NumericTableWidgetItem(new_price)
+            new_price_item.setText(self.clean_excel_formula(str(new_price)))
+            self.result_table.setItem(i, 7, new_price_item)
+            
+            self.result_table.setItem(i, 8, QTableWidgetItem(trace_change_text))
+            
+            # 価格変更に応じて色分け（型変換を追加）
+            try:
+                price_float = float(price) if price else 0
+                new_price_float = float(new_price) if new_price else 0
+                
+                if new_price_float > price_float:
+                    # 価格上昇：緑色
+                    for j in range(9):
+                        self.result_table.item(i, j).setBackground(QColor(200, 255, 200))
+                elif new_price_float < price_float:
+                    # 価格下降：赤色
+                    for j in range(9):
+                        self.result_table.item(i, j).setBackground(QColor(255, 200, 200))
+            except (ValueError, TypeError):
+                # 型変換に失敗した場合は色分けをスキップ
+                pass
+        
+        # データ投入完了後、ソート機能を再有効化
+        self.result_table.setSortingEnabled(True)
         
         # 列幅の自動調整
         self.result_table.resizeColumnsToContents()
+    
+    def _get_unique_file_path(self, directory: str, filename: str) -> str:
+        """重複しないファイルパスを生成"""
+        import os
         
+        # ディレクトリとファイル名を分離
+        name, ext = os.path.splitext(filename)
+        
+        # 最初のファイルパス
+        file_path = os.path.join(directory, filename)
+        
+        # ファイルが存在しない場合はそのまま返す
+        if not os.path.exists(file_path):
+            return file_path
+        
+        # 重複する場合は番号を付ける
+        counter = 1
+        while True:
+            new_filename = f"{name}({counter}){ext}"
+            new_file_path = os.path.join(directory, new_filename)
+            
+            if not os.path.exists(new_file_path):
+                return new_file_path
+            
+            counter += 1
+            
+            # 無限ループ防止（最大999まで）
+            if counter > 999:
+                return file_path
+    
     def save_results(self):
         """結果のCSV保存"""
         if not self.repricing_result:
             QMessageBox.warning(self, "エラー", "保存する結果がありません")
             return
             
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "結果をCSV保存",
-            "repricing_result.csv",
-            "CSVファイル (*.csv)"
-        )
+        # 設定からデフォルトディレクトリを取得（結果保存用）
+        default_dir = self.settings.value("directories/result", "")
+        default_filename = "repricing_result.csv"
+        
+        # 自動リネーム機能付きでファイルパスを生成
+        file_path = self._get_unique_file_path(default_dir, default_filename)
+        
+        # ユーザーに確認（手動選択のオプション付き）
+        if file_path:
+            reply = QMessageBox.question(
+                self,
+                "ファイル保存確認",
+                f"以下のファイル名で保存しますか？\n{file_path}\n\n「いいえ」を選択すると手動でファイル名を指定できます。",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.No:
+                # 手動でファイル名を選択
+                manual_path, _ = QFileDialog.getSaveFileName(
+                    self,
+                    "結果をCSV保存（手動選択）",
+                    file_path,
+                    "CSVファイル (*.csv)"
+                )
+                if manual_path:
+                    file_path = manual_path
+                else:
+                    return
         
         if file_path:
             try:
                 # 結果をCSVファイルに保存
                 items = self.repricing_result['items']
+                print(f"[DEBUG CSV保存] 保存開始: {len(items)}件のアイテム")
                 
-                # 既存APIレスポンス形式に合わせたデータフレーム作成
-                data = []
+                # 元ファイルのデータを読み込んで、priceとpriceTraceのみを変更
+                from utils.csv_io import csv_io
+                original_df = csv_io.read_csv(self.csv_path)
+                
+                if original_df is None:
+                    QMessageBox.warning(self, "エラー", "元のCSVファイルを読み込めませんでした")
+                    return
+                
+                # 価格改定結果を辞書に変換（SKUをキーとして）
+                repricing_dict = {}
                 for item in items:
-                    data.append({
-                        'SKU': item.get('sku', ''),
-                        '日数': item.get('days', 0),
-                        'アクション': item.get('action', ''),
-                        '理由': item.get('reason', ''),
-                        '現在価格': item.get('price', 0),
-                        '改定後価格': item.get('new_price', 0),
-                        'Trace変更': item.get('priceTraceChange', item.get('price_trace_change', 0))
-                    })
+                    sku = self.clean_excel_formula(str(item.get('sku', '')))
+                    
+                    # 安全な型変換
+                    try:
+                        new_price = float(item.get('new_price', 0)) if item.get('new_price') is not None else 0
+                        new_price = int(new_price) if new_price > 0 else 0
+                    except (ValueError, TypeError):
+                        new_price = 0
+                    
+                    try:
+                        trace_value = item.get('priceTraceChange', item.get('price_trace_change', 0))
+                        if trace_value is not None and str(trace_value).strip():
+                            # 数値文字列の場合のみint変換
+                            if str(trace_value).replace('.', '').replace('-', '').isdigit():
+                                price_trace = int(float(trace_value))
+                            else:
+                                # 文字列の場合は0として扱う
+                                price_trace = 0
+                        else:
+                            price_trace = 0
+                    except (ValueError, TypeError):
+                        price_trace = 0
+                    
+                    repricing_dict[sku] = {
+                        'new_price': new_price,
+                        'price_trace': price_trace
+                    }
+                
+                # 元ファイルのデータをコピーして、該当する行のみpriceとpriceTraceを更新
+                # 価格やpriceTraceに変更がない場合は除外する
+                data = []
+                for _, row in original_df.iterrows():
+                    sku = self.clean_excel_formula(str(row.get('SKU', '')))
+                    
+                    # 元の価格とpriceTraceを取得
+                    original_price = float(row.get('price', 0)) if pd.notna(row.get('price')) else 0
+                    original_price_trace = float(row.get('priceTrace', 0)) if pd.notna(row.get('priceTrace')) else 0
+                    
+                    # 価格改定対象の場合はpriceとpriceTraceを更新
+                    if sku in repricing_dict:
+                        new_price = repricing_dict[sku]['new_price']
+                        new_price_trace = repricing_dict[sku]['price_trace']
+                        
+                        # 価格とpriceTraceの両方が変更されていない場合はスキップ（CSVに保存しない）
+                        if new_price == original_price and new_price_trace == original_price_trace:
+                            print(f"[DEBUG CSV保存] スキップ: {sku} (変更なし)")
+                            continue
+                        
+                        row_data = row.to_dict()
+                        row_data['price'] = new_price
+                        row_data['priceTrace'] = new_price_trace
+                        # conditionNoteは空にする
+                        row_data['conditionNote'] = ""
+                        data.append(row_data)
+                    else:
+                        # 対象外の場合は元のデータをそのまま使用
+                        row_data = row.to_dict()
+                        data.append(row_data)
                 
                 df = pd.DataFrame(data)
-                df.to_csv(file_path, index=False, encoding='utf-8')
                 
+                # 元ファイルの書式に完全に合わせるための処理
+                # 0. 空の値を保持（nanを空文字に変換）
+                df = df.fillna('')  # 全てのnan値を空文字に変換
+                # 1. 数値列を文字列として出力（クォート付き）
+                numeric_columns = ['number', 'price', 'cost', 'akaji', 'takane', 'condition', 'priceTrace', 'amazon-fee', 'shipping-price', 'profit']
+                for col in numeric_columns:
+                    if col in df.columns:
+                        df[col] = df[col].astype(str)
+                        # 文字列変換後もnan値を空文字に変換
+                        df[col] = df[col].replace('nan', '')
+                
+                # 2. Excel数式記法の修正（プライスター対応）
+                text_columns = ['SKU', 'ASIN', 'title', 'conditionNote', 'leadtime', 'add-delete']
+                for col in text_columns:
+                    if col in df.columns:
+                        try:
+                            # 文字列型に変換
+                            df[col] = df[col].astype(str)
+                            # nan値を空文字に変換
+                            df[col] = df[col].replace('nan', '')
+                            # Excel数式記法をプライスター形式に変換
+                            df[col] = df[col].str.replace(r'^"(.+)"$', r'=\1', regex=True)  # "値" → =値
+                        except Exception as e:
+                            print(f"[WARNING CSV保存] 列 {col} の処理でエラー: {e}")
+                            # エラーが発生した場合は文字列型に変換するだけ
+                            df[col] = df[col].astype(str)
+                            df[col] = df[col].replace('nan', '')
+                
+                # 3. Shift-JISでエンコードできない文字の置換処理
+                def clean_for_shift_jis(text):
+                    """Shift-JISでエンコードできない文字を置換"""
+                    if pd.isna(text) or text == '':
+                        return text
+                    
+                    # 文字列に変換
+                    text = str(text)
+                    
+                    # Shift-JISでエンコードできない文字の置換
+                    replacements = {
+                        '\uff5e': '~',  # 全角チルダ → 半角チルダ
+                        '\uff0d': '-',  # 全角ハイフン → 半角ハイフン
+                        '\uff0c': ',',  # 全角カンマ → 半角カンマ
+                        '\uff1a': ':',  # 全角コロン → 半角コロン
+                        '\uff1b': ';',  # 全角セミコロン → 半角セミコロン
+                        '\uff01': '!',  # 全角エクスクラメーション → 半角
+                        '\uff1f': '?',  # 全角クエスチョン → 半角
+                        '\uff08': '(',  # 全角括弧 → 半角括弧
+                        '\uff09': ')',  # 全角括弧 → 半角括弧
+                        '\uff3b': '[',  # 全角角括弧 → 半角角括弧
+                        '\uff3d': ']',  # 全角角括弧 → 半角角括弧
+                        '\uff5b': '{',  # 全角波括弧 → 半角波括弧
+                        '\uff5d': '}',  # 全角波括弧 → 半角波括弧
+                        '\uff0a': '\n',  # 全角改行 → 半角改行
+                        '\uff20': '@',  # 全角アットマーク → 半角アットマーク
+                        '\uff23': '#',  # 全角シャープ → 半角シャープ
+                        '\uff24': '$',  # 全角ドル → 半角ドル
+                        '\uff25': '%',  # 全角パーセント → 半角パーセント
+                        '\uff26': '&',  # 全角アンパサンド → 半角アンパサンド
+                        '\uff2a': '*',  # 全角アスタリスク → 半角アスタリスク
+                        '\uff2b': '+',  # 全角プラス → 半角プラス
+                        '\uff2e': '.',  # 全角ピリオド → 半角ピリオド
+                        '\uff2f': '/',  # 全角スラッシュ → 半角スラッシュ
+                        '\uff3c': '<',  # 全角小なり → 半角小なり
+                        '\uff3e': '>',  # 全角大なり → 半角大なり
+                        '\uff3f': '_',  # 全角アンダースコア → 半角アンダースコア
+                        '\uff40': '`',  # 全角バッククォート → 半角バッククォート
+                        '\uff5c': '|',  # 全角パイプ → 半角パイプ
+                    }
+                    
+                    for full_width, half_width in replacements.items():
+                        text = text.replace(full_width, half_width)
+                    
+                    return text
+                
+                # テキスト列の文字置換処理
+                text_columns = ['SKU', 'ASIN', 'title', 'conditionNote', 'leadtime', 'add-delete']
+                for col in text_columns:
+                    if col in df.columns:
+                        df[col] = df[col].apply(clean_for_shift_jis)
+                
+                # 4. 元ファイルと同じ形式でCSV保存（プライスター対応）
+                try:
+                    df.to_csv(file_path, index=False, encoding='shift_jis', quoting=0)  # Shift-JIS、クォートなし
+                except UnicodeEncodeError as e:
+                    # Shift-JISでエンコードできない文字が残っている場合の追加処理
+                    print(f"[WARNING CSV保存] Shift-JISエンコードエラー: {e}")
+                    print(f"[WARNING CSV保存] エラー文字を除去して再試行...")
+                    
+                    # エラーが発生した列を特定して処理
+                    for col in df.columns:
+                        try:
+                            # 各列をShift-JISでエンコードテスト
+                            df[col].astype(str).str.encode('shift_jis')
+                        except UnicodeEncodeError:
+                            # エラーが発生した列の文字を安全な文字に置換
+                            df[col] = df[col].astype(str).str.encode('shift_jis', errors='replace').str.decode('shift_jis')
+                    
+                    # 再試行
+                    df.to_csv(file_path, index=False, encoding='shift_jis', quoting=0)
+                
+                print(f"[DEBUG CSV保存] 保存完了: {file_path}")
                 QMessageBox.information(self, "保存完了", f"結果を保存しました:\n{file_path}")
                 
             except Exception as e:
+                print(f"[ERROR CSV保存] 保存エラー: {str(e)}")
+                print(f"[ERROR CSV保存] エラータイプ: {type(e).__name__}")
+                import traceback
+                print(f"[ERROR CSV保存] トレースバック: {traceback.format_exc()}")
                 QMessageBox.critical(self, "エラー", f"保存に失敗しました:\n{str(e)}")

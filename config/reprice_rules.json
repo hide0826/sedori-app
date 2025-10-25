@@ -2,55 +2,72 @@
   "profit_guard_percentage": 1.1,
   "excluded_skus": [],
   "q4_rule_enabled": false,
-  "reprice_rules": {
-    "30": {
+  "reprice_rules": [
+    {
+      "days_from": 30,
       "action": "maintain",
-      "priceTrace": 0
+      "value": 1.0
     },
-    "60": {
+    {
+      "days_from": 60,
       "action": "priceTrace",
-      "priceTrace": 1.0
+      "value": 1.0
     },
-    "90": {
+    {
+      "days_from": 90,
       "action": "priceTrace",
-      "priceTrace": 1.0
+      "value": 1.0
     },
-    "120": {
+    {
+      "days_from": 120,
       "action": "price_down_1",
-      "priceTrace": 7.0
+      "value": 4.0
     },
-    "150": {
+    {
+      "days_from": 150,
       "action": "price_down_1",
-      "priceTrace": 7.0
+      "value": 3.0
     },
-    "180": {
+    {
+      "days_from": 180,
       "action": "price_down_1",
-      "priceTrace": 7.0
+      "value": 4.0
     },
-    "210": {
-      "action": "price_down_1",
-      "priceTrace": 7.0
+    {
+      "days_from": 210,
+      "action": "price_down_2",
+      "value": 5.0
     },
-    "240": {
-      "action": "price_down_1",
-      "priceTrace": 7.0
+    {
+      "days_from": 240,
+      "action": "price_down_2",
+      "value": 3.0
     },
-    "270": {
-      "action": "price_down_1",
-      "priceTrace": 7.0
+    {
+      "days_from": 270,
+      "action": "price_down_2",
+      "value": 0.0
     },
-    "300": {
-      "action": "profit_ignore_down",
-      "priceTrace": 7.0
+    {
+      "days_from": 300,
+      "action": "price_down_ignore",
+      "value": 1.0
     },
-    "330": {
-      "action": "profit_ignore_down",
-      "priceTrace": 7.0
+    {
+      "days_from": 330,
+      "action": "price_down_ignore",
+      "value": 3.0
     },
-    "360": {
-      "action": "profit_ignore_down",
-      "priceTrace": 7.0
+    {
+      "days_from": 360,
+      "action": "price_down_ignore",
+      "value": 4.0
+    },
+    {
+      "days_from": 999,
+      "action": "price_down_2",
+      "value": 4.0
     }
-  },
-  "updated_at": "2025-10-11 23:04:36.276032"
+  ],
+  "updated_at": "2025-10-25 14:58:35.593489"
 }

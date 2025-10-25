@@ -141,7 +141,7 @@ class RepricerSettingsWidget(QWidget):
         day_ranges = [
             (1, 30), (31, 60), (61, 90), (91, 120), (121, 150),
             (151, 180), (181, 210), (211, 240), (241, 270),
-            (271, 300), (301, 330), (331, 360)
+            (271, 300), (301, 330), (331, 360), (361, 999)
         ]
         
         self.rules_table.setRowCount(len(day_ranges))
@@ -173,7 +173,11 @@ class RepricerSettingsWidget(QWidget):
         
         for i, (start_day, end_day) in enumerate(day_ranges):
             # 出品日数
-            days_item = QTableWidgetItem(f"{start_day}-{end_day}日")
+            if end_day == 999:
+                days_text = f"{start_day}日～"
+            else:
+                days_text = f"{start_day}-{end_day}日"
+            days_item = QTableWidgetItem(days_text)
             days_item.setFlags(days_item.flags() & ~Qt.ItemIsEditable)
             self.rules_table.setItem(i, 0, days_item)
             
@@ -275,7 +279,7 @@ class RepricerSettingsWidget(QWidget):
             "profit_guard_percentage": self.profit_guard_spin.value(),
             "q4_rule_enabled": self.q4_rule_check.isChecked(),
             "excluded_skus": [sku.strip() for sku in self.excluded_skus_edit.text().split(",") if sku.strip()],
-            "reprice_rules": {}
+            "reprice_rules": []  # リスト形式に変更
         }
         
         # テーブルからルールを収集
@@ -283,8 +287,11 @@ class RepricerSettingsWidget(QWidget):
             days_item = self.rules_table.item(i, 0)
             if days_item:
                 days_text = days_item.text()
-                # "1-30日" から "30" を抽出
-                end_day = days_text.split("-")[1].replace("日", "")
+                # "1-30日" から "30" を抽出、"361日～" の場合は 999 を使用
+                if "～" in days_text:
+                    end_day = 999
+                else:
+                    end_day = int(days_text.split("-")[1].replace("日", ""))
                 
                 action_combo = self.rules_table.cellWidget(i, 1)
                 price_trace_combo = self.rules_table.cellWidget(i, 2)
@@ -297,10 +304,12 @@ class RepricerSettingsWidget(QWidget):
                     if action.startswith("price_down_ignore_"):
                         action = "price_down_ignore"
                     
-                    config["reprice_rules"][end_day] = {
+                    # リスト形式で追加
+                    config["reprice_rules"].append({
+                        "days_from": end_day,
                         "action": action,
-                        "priceTrace": price_trace
-                    }
+                        "value": price_trace
+                    })
         
         return config
     
@@ -315,8 +324,17 @@ class RepricerSettingsWidget(QWidget):
         excluded_skus = config.get("excluded_skus", [])
         self.excluded_skus_edit.setText(", ".join(excluded_skus))
         
-        # ルール設定の更新
-        self.update_rules_table(config.get("reprice_rules", {}))
+        # ルール設定の更新（リスト形式から辞書形式に変換）
+        rules_list = config.get("reprice_rules", [])
+        rules_dict = {}
+        for rule in rules_list:
+            days_from = rule.get("days_from")
+            if days_from:
+                rules_dict[str(days_from)] = {
+                    "action": rule.get("action", "maintain"),
+                    "priceTrace": rule.get("value", 0)
+                }
+        self.update_rules_table(rules_dict)
         
         # priceTrace設定の表示制御を更新
         self.update_price_trace_visibility()
@@ -340,7 +358,11 @@ class RepricerSettingsWidget(QWidget):
             days_item = self.rules_table.item(i, 0)
             if days_item:
                 days_text = days_item.text()
-                end_day = days_text.split("-")[1].replace("日", "")
+                # "361日～" の場合は 999 を使用
+                if "～" in days_text:
+                    end_day = "999"
+                else:
+                    end_day = days_text.split("-")[1].replace("日", "")
                 
                 if end_day in rules_dict:
                     rule = rules_dict[end_day]
