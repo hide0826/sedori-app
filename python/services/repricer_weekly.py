@@ -58,7 +58,21 @@ class RepriceOutputs(NamedTuple):
 
 def load_config():
     with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-        return json.load(f)
+        config = json.load(f)
+    
+    # リスト形式のreprice_rulesを辞書形式に変換
+    if 'reprice_rules' in config and isinstance(config['reprice_rules'], list):
+        rules_dict = {}
+        for rule in config['reprice_rules']:
+            days_from = rule.get('days_from')
+            if days_from:
+                rules_dict[str(days_from)] = {
+                    'action': rule.get('action', 'maintain'),
+                    'priceTrace': rule.get('value', 0)  # valueフィールドをpriceTraceにマッピング
+                }
+        config['reprice_rules'] = rules_dict
+    
+    return config
 
 def get_days_since_listed(sku: str, today: datetime) -> int:
     """
@@ -142,7 +156,8 @@ def calculate_new_price_and_trace(price: float, akaji: float, rule: Dict[str, An
 
     elif action == "priceTrace":
         # priceTraceのみ変更、価格は変更なし
-        new_price_trace = rule.get("priceTrace", 0)
+        new_price_trace = rule.get("priceTrace", rule.get("value", 0))
+        print(f"[DEBUG priceTrace] ルール: {rule}, 新しいpriceTrace: {new_price_trace}")
 
     elif action == "price_down_1":
         # 価格のみ1%値下げ、priceTraceは変更なし
@@ -196,10 +211,13 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
 
         # 除外SKU処理
         if sku in excluded_skus:
+            asin = row.get("ASIN", "")
+            title = row.get("title", "")
             log_data.append({
-                "sku": sku, "days": -1, "action": "exclude",
+                "sku": sku, "asin": asin, "title": title, "days": -1, "action": "exclude",
                 "reason": "Excluded SKU", "price": price,
-                "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace
+                "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace,
+                "priceTraceChange": 0
             })
             excluded_inventory_data.append(row.to_dict())
             continue
@@ -208,10 +226,13 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
 
         # 日付不明の場合は維持
         if days_since_listed == -1:
+            asin = row.get("ASIN", "")
+            title = row.get("title", "")
             log_data.append({
-                "sku": sku, "days": days_since_listed, "action": "maintain",
+                "sku": sku, "asin": asin, "title": title, "days": days_since_listed, "action": "maintain",
                 "reason": "Date unknown (maintained)", "price": price,
-                "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace
+                "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace,
+                "priceTraceChange": 0
             })
             row_dict = row.to_dict()
             updated_inventory_data.append(row_dict)
@@ -219,10 +240,13 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
 
         # 365日超過の場合は対象外
         if days_since_listed > 365:
+            asin = row.get("ASIN", "")
+            title = row.get("title", "")
             log_data.append({
-                "sku": sku, "days": days_since_listed, "action": "exclude",
+                "sku": sku, "asin": asin, "title": title, "days": days_since_listed, "action": "exclude",
                 "reason": "Over 365 days (manual handling required)", "price": price,
-                "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace
+                "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace,
+                "priceTraceChange": 0
             })
             excluded_inventory_data.append(row.to_dict())
             continue
@@ -233,10 +257,23 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
             price, akaji, rule, days_since_listed, config, price_trace
         )
 
+        # ASINとTitleを取得
+        asin = row.get("ASIN", "")
+        title = row.get("title", "")
+        
+        # priceTraceChangeの計算（変更があった場合のみ）
+        # priceTraceアクションの場合、new_price_traceがprice_traceと異なる場合は変更あり
+        price_trace_change = new_price_trace if action == "priceTrace" and new_price_trace != price_trace else 0
+        
+        # デバッグ出力
+        if action == "priceTrace":
+            print(f"[DEBUG priceTrace] SKU: {sku}, action: {action}, price_trace: {price_trace}, new_price_trace: {new_price_trace}, price_trace_change: {price_trace_change}")
+        
         log_data.append({
-            "sku": sku, "days": days_since_listed, "action": action,
-            "reason": reason, "price": price, "new_price": new_price,
-            "priceTrace": price_trace, "new_priceTrace": new_price_trace
+            "sku": sku, "asin": asin, "title": title, "days": days_since_listed, 
+            "action": action, "reason": reason, "price": price, "new_price": new_price,
+            "priceTrace": price_trace, "new_priceTrace": new_price_trace,
+            "priceTraceChange": price_trace_change  # フロント表示用のフィールドを追加
         })
 
         # Prister形式の全列を保持したまま価格とpriceTraceのみ更新

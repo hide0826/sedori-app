@@ -12,13 +12,20 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QComboBox,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QGroupBox, QSplitter, QMessageBox, QFrame,
-    QCheckBox, QSpinBox, QDateEdit
+    QCheckBox, QSpinBox, QDateEdit, QFileDialog
 )
 from PySide6.QtCore import Qt, QDate, Signal
 from PySide6.QtGui import QFont, QColor, QPalette
 import pandas as pd
 from pathlib import Path
 import re
+import sys
+import os
+
+# プロジェクトルートをパスに追加（相対インポート用）
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from database.store_db import StoreDatabase
 
 
 class InventoryWidget(QWidget):
@@ -33,6 +40,9 @@ class InventoryWidget(QWidget):
         self.api_client = api_client
         self.inventory_data = None
         self.filtered_data = None
+        
+        # 店舗マスタDBの初期化
+        self.store_db = StoreDatabase()
         
         # UIの初期化
         self.setup_ui()
@@ -52,16 +62,18 @@ class InventoryWidget(QWidget):
         # 下部：データテーブルエリア
         self.setup_data_table()
         
-        # 最下部：アクションボタンエリア
-        self.setup_action_buttons()
+        # アクションボタンはファイル操作エリアに統合済み
         
         # ワークフローパネルの追加
         self.setup_workflow_panel()
         
     def setup_file_operations(self):
-        """ファイル操作エリアの設定"""
-        file_group = QGroupBox("ファイル操作")
+        """ファイル操作エリアの設定（改良版）"""
+        file_group = QGroupBox("ファイル操作・アクション")
         file_layout = QHBoxLayout(file_group)
+        
+        # ファイル操作セクション
+        file_ops_layout = QHBoxLayout()
         
         # CSV取込ボタン
         self.import_btn = QPushButton("CSV取込")
@@ -79,19 +91,57 @@ class InventoryWidget(QWidget):
                 background-color: #218838;
             }
         """)
-        file_layout.addWidget(self.import_btn)
+        file_ops_layout.addWidget(self.import_btn)
         
         # エクスポートボタン
         self.export_btn = QPushButton("CSV出力")
         self.export_btn.clicked.connect(self.export_csv)
         self.export_btn.setEnabled(False)
-        file_layout.addWidget(self.export_btn)
+        file_ops_layout.addWidget(self.export_btn)
         
         # データクリアボタン
         self.clear_btn = QPushButton("データクリア")
         self.clear_btn.clicked.connect(self.clear_data)
         self.clear_btn.setEnabled(False)
-        file_layout.addWidget(self.clear_btn)
+        file_ops_layout.addWidget(self.clear_btn)
+        
+        file_layout.addLayout(file_ops_layout)
+        
+        # アクションボタンセクション
+        action_ops_layout = QHBoxLayout()
+        
+        # SKU生成ボタン
+        self.generate_sku_btn = QPushButton("SKU生成")
+        self.generate_sku_btn.clicked.connect(self.generate_sku)
+        self.generate_sku_btn.setEnabled(False)
+        self.generate_sku_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #007bff;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #0056b3;
+            }
+        """)
+        action_ops_layout.addWidget(self.generate_sku_btn)
+        
+        # 出品CSV生成ボタン
+        self.export_listing_btn = QPushButton("出品CSV生成")
+        self.export_listing_btn.clicked.connect(self.export_listing_csv)
+        self.export_listing_btn.setEnabled(False)
+        action_ops_layout.addWidget(self.export_listing_btn)
+        
+        # 古物台帳生成ボタン
+        self.antique_register_btn = QPushButton("古物台帳生成")
+        self.antique_register_btn.clicked.connect(self.generate_antique_register)
+        self.antique_register_btn.setEnabled(False)
+        action_ops_layout.addWidget(self.antique_register_btn)
+        
+        file_layout.addLayout(action_ops_layout)
         
         file_layout.addStretch()
         
@@ -128,17 +178,19 @@ class InventoryWidget(QWidget):
         # フィルタ行
         filter_row_layout = QHBoxLayout()
         
-        # Q列フィルタ
-        q_filter_label = QLabel("Q列:")
-        filter_row_layout.addWidget(q_filter_label)
+        # Q列フィルタ（現在の列構成に含まれていないため非表示）
+        # q_filter_label = QLabel("Q列:")
+        # filter_row_layout.addWidget(q_filter_label)
+        # 
+        # self.q_filter_combo = QComboBox()
+        # self.q_filter_combo.addItems(["すべて", "Q1", "Q2", "Q3", "Q4", "Qなし"])
+        # self.q_filter_combo.currentTextChanged.connect(self.apply_filters)
+        # filter_row_layout.addWidget(self.q_filter_combo)
+        # 
+        # 後でコンディションフィルタを追加予定
         
-        self.q_filter_combo = QComboBox()
-        self.q_filter_combo.addItems(["すべて", "Q1", "Q2", "Q3", "Q4", "Qなし"])
-        self.q_filter_combo.currentTextChanged.connect(self.apply_filters)
-        filter_row_layout.addWidget(self.q_filter_combo)
-        
-        # 価格範囲フィルタ
-        price_label = QLabel("価格範囲:")
+        # 価格範囲フィルタ（販売予定価格でフィルタ）
+        price_label = QLabel("販売予定価格範囲:")
         filter_row_layout.addWidget(price_label)
         
         self.min_price_spin = QSpinBox()
@@ -168,7 +220,11 @@ class InventoryWidget(QWidget):
         self.layout().addWidget(filter_group)
         
     def setup_data_table(self):
-        """データテーブルエリアの設定"""
+        """データテーブルエリアの設定（改良版）"""
+        # データ表示グループ
+        data_group = QGroupBox("取り込んだデータ一覧")
+        data_layout = QVBoxLayout(data_group)
+        
         # テーブルウィジェットの作成
         self.data_table = QTableWidget()
         self.data_table.setAlternatingRowColors(True)
@@ -180,75 +236,53 @@ class InventoryWidget(QWidget):
         header.setStretchLastSection(True)
         header.setSectionResizeMode(QHeaderView.Interactive)
         
-        # 列の定義（17列対応）
+        # 列の定義（15列対応・指定順序）
         self.column_headers = [
-            "SKU", "ASIN", "JAN", "商品名", "状態", "Q列", "仕入日",
-            "店舗", "価格", "原価", "利益", "出品日", "売上日",
-            "備考", "写真", "URL", "メモ"
+            "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
+            "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "コメント",
+            "発送方法", "仕入先", "コンディション説明"
         ]
         
         self.data_table.setColumnCount(len(self.column_headers))
         self.data_table.setHorizontalHeaderLabels(self.column_headers)
         
-        # テーブルをレイアウトに追加
-        self.layout().addWidget(self.data_table)
+        # 選択変更時の自動スクロール・ハイライト機能
+        self.data_table.itemSelectionChanged.connect(self.on_data_selection_changed)
         
-    def setup_action_buttons(self):
-        """アクションボタンエリアの設定"""
-        action_layout = QHBoxLayout()
+        # テーブルをグループに追加
+        data_layout.addWidget(self.data_table)
         
-        # SKU生成ボタン
-        self.generate_sku_btn = QPushButton("SKU生成")
-        self.generate_sku_btn.clicked.connect(self.generate_sku)
-        self.generate_sku_btn.setEnabled(False)
-        self.generate_sku_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #007bff;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #0056b3;
-            }
-        """)
-        action_layout.addWidget(self.generate_sku_btn)
-        
-        # 出品CSV生成ボタン
-        self.export_listing_btn = QPushButton("出品CSV生成")
-        self.export_listing_btn.clicked.connect(self.export_listing_csv)
-        self.export_listing_btn.setEnabled(False)
-        action_layout.addWidget(self.export_listing_btn)
-        
-        # 古物台帳生成ボタン
-        self.antique_register_btn = QPushButton("古物台帳生成")
-        self.antique_register_btn.clicked.connect(self.generate_antique_register)
-        self.antique_register_btn.setEnabled(False)
-        action_layout.addWidget(self.antique_register_btn)
-        
-        action_layout.addStretch()
-        
-        # 統計情報表示
+        # 統計情報をグループ内に配置
+        stats_layout = QHBoxLayout()
         self.stats_label = QLabel("統計: なし")
-        action_layout.addWidget(self.stats_label)
+        stats_layout.addWidget(self.stats_label)
+        stats_layout.addStretch()
+        data_layout.addLayout(stats_layout)
         
-        self.layout().addLayout(action_layout)
+        # グループをレイアウトに追加
+        self.layout().addWidget(data_group)
+        
+    # アクションボタンはファイル操作エリアに統合済み
         
     def import_csv(self):
         """CSVファイルの取込"""
+        # デフォルトディレクトリを設定
+        default_dir = r"D:\HIRIO\docs\参考データ"
+        
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "CSVファイルを選択",
-            "",
+            default_dir,
             "CSVファイル (*.csv);;すべてのファイル (*)"
         )
         
         if file_path:
             try:
-                # CSVファイルの読み込み
-                self.inventory_data = pd.read_csv(file_path, encoding='utf-8')
+                # CSVファイルの読み込み（複数エンコーディング対応）
+                df = self._read_csv_with_encoding_fallback(file_path)
+                
+                # 列マッピングと並び替え
+                self.inventory_data = self._map_and_reorder_columns(df)
                 self.filtered_data = self.inventory_data.copy()
                 
                 # テーブルの更新
@@ -275,6 +309,140 @@ class InventoryWidget(QWidget):
                 
             except Exception as e:
                 QMessageBox.warning(self, "エラー", f"CSVファイルの読み込みに失敗しました:\n{str(e)}")
+    
+    def _read_csv_with_encoding_fallback(self, file_path):
+        """複数エンコーディングでCSVファイルを読み込む"""
+        encodings = ['utf-8', 'shift_jis', 'cp932', 'utf-8-sig', 'iso-2022-jp']
+        
+        for encoding in encodings:
+            try:
+                df = pd.read_csv(file_path, encoding=encoding)
+                print(f"CSV読み込み成功: エンコーディング={encoding}, 行数={len(df)}")
+                return df
+            except UnicodeDecodeError:
+                print(f"エンコーディング {encoding} で読み込み失敗、次のエンコーディングを試行")
+                continue
+            except Exception as e:
+                print(f"エンコーディング {encoding} で予期しないエラー: {e}")
+                continue
+        
+        # すべてのエンコーディングで失敗した場合
+        raise Exception("すべてのエンコーディングでCSVファイルの読み込みに失敗しました")
+    
+    def _map_and_reorder_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """CSV列を指定順序にマッピング・並び替え"""
+        # CSVファイルの列名と新しい列名のマッピング
+        # 参考データ: StockList_20250927_2108_standard.csv
+        column_mapping = {
+            # 仕入れ日
+            "仕入日": "仕入れ日",
+            "仕入れ日": "仕入れ日",
+            "日付": "仕入れ日",
+            # コンディション
+            "状態": "コンディション",
+            "コンディション": "コンディション",
+            "condition": "コンディション",
+            # ASIN
+            "ASIN": "ASIN",
+            "asin": "ASIN",
+            # JAN
+            "JAN": "JAN",
+            "jan": "JAN",
+            "JANコード": "JAN",
+            # 商品名
+            "商品名": "商品名",
+            "商品名": "商品名",
+            "title": "商品名",
+            "name": "商品名",
+            # 仕入れ個数
+            "仕入個数": "仕入れ個数",
+            "仕入れ個数": "仕入れ個数",
+            "数量": "仕入れ個数",
+            "quantity": "仕入れ個数",
+            # 仕入れ価格
+            "仕入価格": "仕入れ価格",
+            "仕入れ価格": "仕入れ価格",
+            "原価": "仕入れ価格",
+            "cost": "仕入れ価格",
+            "purchasePrice": "仕入れ価格",
+            # 販売予定価格
+            "販売予定価格": "販売予定価格",
+            "価格": "販売予定価格",
+            "price": "販売予定価格",
+            "plannedPrice": "販売予定価格",
+            # 見込み利益
+            "見込み利益": "見込み利益",
+            "利益": "見込み利益",
+            "profit": "見込み利益",
+            "expectedProfit": "見込み利益",
+            # 損益分岐点
+            "損益分岐点": "損益分岐点",
+            "akaji": "損益分岐点",
+            "breakEven": "損益分岐点",
+            # コメント
+            "コメント": "コメント",
+            "備考": "コメント",
+            "comment": "コメント",
+            "notes": "コメント",
+            # 発送方法
+            "発送方法": "発送方法",
+            "配送方法": "発送方法",
+            "shippingMethod": "発送方法",
+            "shipping_method": "発送方法",
+            "発送": "発送方法",
+            # 仕入先
+            "仕入先": "仕入先",
+            "仕入元": "仕入先",
+            "店舗": "仕入先",
+            "supplier": "仕入先",
+            # コンディション説明（後で処理予定、一旦空）
+            "コンディション説明": "コンディション説明",
+            "conditionNote": "コンディション説明",
+            # SKU（取込時は空でもOK）
+            "SKU": "SKU",
+            "sku": "SKU",
+        }
+        
+        # 新しいDataFrameを作成
+        new_df = pd.DataFrame()
+        
+        # 指定順序で列を作成
+        for new_column in self.column_headers:
+            # 元のDataFrameから該当する列を探す
+            found = False
+            for old_column in df.columns:
+                # 列名の正規化（空白除去、大文字小文字統一）
+                old_col_normalized = str(old_column).strip()
+                
+                # マッピングから探す
+                if old_col_normalized in column_mapping:
+                    if column_mapping[old_col_normalized] == new_column:
+                        new_df[new_column] = df[old_column]
+                        found = True
+                        break
+                
+                # 直接一致する場合
+                if old_col_normalized == new_column:
+                    new_df[new_column] = df[old_column]
+                    found = True
+                    break
+            
+            # 列が見つからない場合は空の列を作成
+            if not found:
+                new_df[new_column] = ""
+        
+        # コンディション説明欄を空にする
+        if "コンディション説明" in new_df.columns:
+            new_df["コンディション説明"] = ""
+        
+        # SKUが空の場合は「未実装」にする
+        if "SKU" in new_df.columns:
+            new_df["SKU"] = new_df["SKU"].fillna("").astype(str)
+            new_df["SKU"] = new_df["SKU"].replace("nan", "")
+            # 空の場合は「未実装」に設定
+            new_df["SKU"] = new_df["SKU"].apply(lambda x: "未実装" if x == "" or pd.isna(x) else x)
+        
+        return new_df
                 
     def update_table(self):
         """テーブルの更新"""
@@ -288,19 +456,35 @@ class InventoryWidget(QWidget):
         for i, row in self.filtered_data.iterrows():
             for j, column in enumerate(self.column_headers):
                 value = str(row.get(column, ""))
-                item = QTableWidgetItem(value)
                 
-                # Q列のハイライト
-                if column == "Q列" and value in ["Q1", "Q2", "Q3", "Q4"]:
-                    item.setBackground(QColor(255, 255, 200))  # 薄い黄色
+                # SKU列の特別処理（空の場合は「未実装」と表示）
+                if column == "SKU":
+                    if not value or value == "" or value == "nan" or pd.isna(value):
+                        item = QTableWidgetItem("未実装")
+                    else:
+                        item = QTableWidgetItem(str(value))
+                # 商品名列の特別処理（50文字制限+ツールチップ）
+                elif column == "商品名":
+                    original_value = value
+                    display_value = original_value[:50] + '...' if len(original_value) > 50 else original_value
+                    item = QTableWidgetItem(display_value)
+                    # 50文字を超える場合はツールチップで全文を表示
+                    if len(original_value) > 50:
+                        item.setToolTip(original_value)
+                else:
+                    item = QTableWidgetItem(value)
                 
                 # 価格列の数値フォーマット
-                if column in ["価格", "原価", "利益"] and value.replace(".", "").isdigit():
+                if column in ["仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点"]:
                     try:
-                        num_value = float(value)
-                        item.setText(f"{num_value:,.0f}")
+                        # 数値に変換できるかチェック
+                        if value and str(value).replace(".", "").replace("-", "").replace(",", "").isdigit():
+                            num_value = float(str(value).replace(",", ""))
+                            item.setText(f"{num_value:,.0f}")
+                        else:
+                            item.setText(str(value))
                     except:
-                        pass
+                        item.setText(str(value))
                 
                 self.data_table.setItem(i, j, item)
         
@@ -334,18 +518,18 @@ class InventoryWidget(QWidget):
             )
             mask &= search_mask
         
-        # Q列フィルタ
-        if q_filter != "すべて":
-            if q_filter == "Qなし":
-                q_mask = self.inventory_data.get("Q列", "").isna() | (self.inventory_data.get("Q列", "") == "")
-            else:
-                q_mask = self.inventory_data.get("Q列", "") == q_filter
-            mask &= q_mask
+        # Q列フィルタ（Q列は現在の列構成に含まれていないため、一旦コメントアウト）
+        # if q_filter != "すべて":
+        #     if q_filter == "Qなし":
+        #         q_mask = self.inventory_data.get("Q列", "").isna() | (self.inventory_data.get("Q列", "") == "")
+        #     else:
+        #         q_mask = self.inventory_data.get("Q列", "") == q_filter
+        #     mask &= q_mask
         
-        # 価格範囲フィルタ
-        if "価格" in self.inventory_data.columns:
+        # 価格範囲フィルタ（販売予定価格でフィルタ）
+        if "販売予定価格" in self.inventory_data.columns:
             try:
-                price_series = pd.to_numeric(self.inventory_data["価格"], errors='coerce')
+                price_series = pd.to_numeric(self.inventory_data["販売予定価格"], errors='coerce')
                 price_mask = (price_series >= min_price) & (price_series <= max_price)
                 mask &= price_mask
             except:
@@ -365,9 +549,55 @@ class InventoryWidget(QWidget):
     def reset_filters(self):
         """フィルタのリセット"""
         self.search_edit.clear()
-        self.q_filter_combo.setCurrentText("すべて")
+        # self.q_filter_combo.setCurrentText("すべて")  # Q列フィルタは非表示
         self.min_price_spin.setValue(0)
         self.max_price_spin.setValue(999999)
+    
+    def on_data_selection_changed(self):
+        """データテーブルの選択変更時の処理（商品名列のハイライト）"""
+        try:
+            # 選択された行を取得
+            selected_items = self.data_table.selectedItems()
+            if not selected_items:
+                return
+            
+            # 最初の選択されたアイテムの行番号を取得
+            current_row = selected_items[0].row()
+            
+            # 商品名列を探す
+            product_name_column = -1
+            for j in range(self.data_table.columnCount()):
+                header_item = self.data_table.horizontalHeaderItem(j)
+                if header_item and header_item.text() == '商品名':
+                    product_name_column = j
+                    break
+            
+            # 商品名列が見つかった場合、その列にスクロール・ハイライト
+            if product_name_column >= 0:
+                # 水平スクロールで商品名列を表示
+                item = self.data_table.item(current_row, product_name_column)
+                if item:
+                    self.data_table.scrollToItem(
+                        item,
+                        QTableWidget.PositionAtCenter
+                    )
+                    
+                    # 商品名列のセルをハイライト
+                    for j in range(self.data_table.columnCount()):
+                        row_item = self.data_table.item(current_row, j)
+                        if row_item:
+                            if j == product_name_column:
+                                # 商品名列は黄色でハイライト
+                                row_item.setBackground(QColor(255, 255, 200))
+                            else:
+                                # 他の列は通常の背景色（交互行色を維持）
+                                if current_row % 2 == 0:
+                                    row_item.setBackground(QColor(255, 255, 255))
+                                else:
+                                    row_item.setBackground(QColor(240, 240, 240))
+                                    
+        except Exception as e:
+            print(f"選択変更処理エラー: {e}")
         
     def update_data_count(self):
         """データ件数の更新"""
@@ -390,23 +620,31 @@ class InventoryWidget(QWidget):
         # 基本統計
         total_items = len(self.filtered_data)
         
-        # Q列の統計
-        q_counts = self.filtered_data.get("Q列", "").value_counts()
-        q_stats = ", ".join([f"{q}: {count}" for q, count in q_counts.items() if q])
+        # コンディション統計
+        try:
+            if "コンディション" in self.filtered_data.columns:
+                condition_counts = self.filtered_data["コンディション"].value_counts()
+                condition_stats = ", ".join([f"{cond}: {count}" for cond, count in condition_counts.items() if cond])
+            else:
+                condition_stats = "コンディション: なし"
+        except Exception as e:
+            print(f"コンディション統計エラー: {e}")
+            condition_stats = "コンディション: エラー"
         
-        # 価格統計
-        if "価格" in self.filtered_data.columns:
-            try:
-                prices = pd.to_numeric(self.filtered_data["価格"], errors='coerce')
+        # 価格統計（販売予定価格で統計）
+        try:
+            if "販売予定価格" in self.filtered_data.columns:
+                prices = pd.to_numeric(self.filtered_data["販売予定価格"], errors='coerce')
                 avg_price = prices.mean()
                 total_value = prices.sum()
                 price_stats = f"平均価格: {avg_price:,.0f}円, 合計: {total_value:,.0f}円"
-            except:
-                price_stats = "価格統計: エラー"
-        else:
-            price_stats = "価格統計: なし"
+            else:
+                price_stats = "価格統計: なし"
+        except Exception as e:
+            print(f"価格統計エラー: {e}")
+            price_stats = "価格統計: エラー"
         
-        stats_text = f"統計: {total_items}件, {q_stats}, {price_stats}"
+        stats_text = f"統計: {total_items}件, {condition_stats}, {price_stats}"
         self.stats_label.setText(stats_text)
         
     def clear_data(self):
@@ -427,7 +665,7 @@ class InventoryWidget(QWidget):
         self.stats_label.setText("統計: なし")
         
     def generate_sku(self):
-        """SKU生成"""
+        """SKU生成（店舗マスタ連携対応）"""
         if self.filtered_data is None:
             QMessageBox.warning(self, "エラー", "データがありません")
             return
@@ -436,8 +674,50 @@ class InventoryWidget(QWidget):
             # データを辞書形式に変換
             data_list = self.filtered_data.to_dict('records')
             
+            # 各商品データに店舗情報を追加
+            enriched_data = []
+            store_not_found_warnings = []
+            
+            for item in data_list:
+                enriched_item = item.copy()
+                
+                # 「仕入先」列から仕入れ先コードを取得
+                supplier_code = item.get('仕入先', '').strip()
+                
+                if supplier_code:
+                    # 店舗マスタから店舗情報を取得
+                    store_info = self.store_db.get_store_by_supplier_code(supplier_code)
+                    
+                    if store_info:
+                        # 店舗情報を追加
+                        enriched_item['supplier_code'] = supplier_code
+                        enriched_item['store_name'] = store_info.get('store_name', '')
+                        enriched_item['store_id'] = store_info.get('id')
+                    else:
+                        # 店舗が見つからない場合の警告を記録
+                        store_not_found_warnings.append(supplier_code)
+                        enriched_item['supplier_code'] = supplier_code
+                        enriched_item['store_name'] = ''
+                        enriched_item['store_id'] = None
+                else:
+                    # 仕入先コードが空の場合は警告を記録
+                    enriched_item['supplier_code'] = ''
+                    enriched_item['store_name'] = ''
+                    enriched_item['store_id'] = None
+                
+                enriched_data.append(enriched_item)
+            
+            # 警告メッセージの表示（店舗が見つからない場合）
+            unique_warnings = []
+            if store_not_found_warnings:
+                unique_warnings = list(set(store_not_found_warnings))
+                warning_msg = f"以下の仕入れ先コードに対応する店舗が見つかりませんでした:\n{', '.join(unique_warnings[:5])}"
+                if len(unique_warnings) > 5:
+                    warning_msg += f"\n他 {len(unique_warnings) - 5}件..."
+                QMessageBox.warning(self, "店舗情報警告", warning_msg)
+            
             # APIクライアントでSKU生成
-            result = self.api_client.inventory_generate_sku(data_list)
+            result = self.api_client.inventory_generate_sku(enriched_data)
             
             if result['status'] == 'success':
                 # 生成されたSKUをテーブルに反映
@@ -446,10 +726,15 @@ class InventoryWidget(QWidget):
                 # 統計情報の更新
                 self.update_stats()
                 
+                generated_count = result['generated_count']
+                success_msg = f"SKU生成が完了しました\n生成数: {generated_count}件"
+                if unique_warnings:
+                    success_msg += f"\n（店舗未登録: {len(unique_warnings)}件）"
+                
                 QMessageBox.information(
                     self, 
                     "SKU生成完了", 
-                    f"SKU生成が完了しました\n生成数: {result['generated_count']}件"
+                    success_msg
                 )
                 
                 # シグナル発火
@@ -475,10 +760,10 @@ class InventoryWidget(QWidget):
                     for i, row in self.inventory_data.iterrows():
                         if (str(row.get('ASIN', '')) == str(original_data.get('ASIN', '')) and
                             str(row.get('商品名', '')) == str(original_data.get('商品名', ''))):
-                            # SKU列とQ列を更新
+                            # SKU列を更新（Q列は現在の列構成に含まれていないためコメントアウト）
                             self.inventory_data.at[i, 'SKU'] = generated_sku
-                            if q_tag:
-                                self.inventory_data.at[i, 'Q列'] = q_tag
+                            # if q_tag:
+                            #     self.inventory_data.at[i, 'Q列'] = q_tag
                             break
             
             # フィルタデータも更新
@@ -608,10 +893,90 @@ class InventoryWidget(QWidget):
             QMessageBox.critical(self, "エラー", f"古物台帳生成中にエラーが発生しました:\n{str(e)}")
     
     def setup_workflow_panel(self):
-        """ワークフローパネルの設定"""
-        try:
-            from ui.workflow_panel import WorkflowPanel
-            self.workflow_panel = WorkflowPanel(self.api_client)
-            self.layout().addWidget(self.workflow_panel)
-        except Exception as e:
-            print(f"ワークフローパネル作成エラー: {e}")
+        """ワークフローパネルの設定（改良版）"""
+        # 作業フローグループ
+        workflow_group = QGroupBox("作業フロー")
+        workflow_layout = QVBoxLayout(workflow_group)
+        
+        # 作業フローを横展開で表示
+        workflow_steps_layout = QHBoxLayout()
+        
+        # 各ステップのボタンを作成
+        steps = [
+            ("1. 仕入データ取込", "CSVファイルから仕入データを読み込み", "待機中"),
+            ("2. SKU生成", "商品にSKUを自動生成・重複チェック", "待機中"),
+            ("3. 出品CSV生成", "プライスター形式の出品CSVを生成", "待機中"),
+            ("4. ドッキングリスト生成", "倉庫作業用ピッキングリストを生成", "待機中"),
+            ("5. 古物台帳生成", "法定要件に準拠した古物台帳を生成", "待機中")
+        ]
+        
+        self.workflow_buttons = []
+        for i, (title, description, status) in enumerate(steps):
+            step_widget = QWidget()
+            step_layout = QVBoxLayout(step_widget)
+            step_layout.setContentsMargins(5, 5, 5, 5)
+            
+            # ステップボタン
+            step_btn = QPushButton(title)
+            step_btn.setEnabled(False)
+            step_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #6c757d;
+                    color: white;
+                    border: none;
+                    padding: 8px 12px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:enabled {
+                    background-color: #28a745;
+                }
+            """)
+            step_layout.addWidget(step_btn)
+            
+            # 説明ラベル
+            desc_label = QLabel(description)
+            desc_label.setWordWrap(True)
+            desc_label.setStyleSheet("font-size: 10px; color: #666;")
+            step_layout.addWidget(desc_label)
+            
+            # ステータスラベル
+            status_label = QLabel(status)
+            status_label.setStyleSheet("font-size: 10px; color: #666;")
+            step_layout.addWidget(status_label)
+            
+            self.workflow_buttons.append((step_btn, status_label))
+            workflow_steps_layout.addWidget(step_widget)
+        
+        workflow_layout.addLayout(workflow_steps_layout)
+        
+        # 進捗状況
+        progress_layout = QHBoxLayout()
+        progress_layout.addWidget(QLabel("進捗状況:"))
+        progress_layout.addWidget(QLabel("0%"))
+        progress_layout.addWidget(QLabel("0%"))
+        progress_layout.addWidget(QLabel("準備完了"))
+        progress_layout.addStretch()
+        workflow_layout.addLayout(progress_layout)
+        
+        # 一括実行コントロール
+        control_layout = QHBoxLayout()
+        control_layout.addWidget(QLabel("一括実行コントロール:"))
+        
+        auto_exec_btn = QPushButton("全自動実行")
+        auto_exec_btn.setStyleSheet("background-color: #28a745; color: white;")
+        control_layout.addWidget(auto_exec_btn)
+        
+        pause_btn = QPushButton("一時停止")
+        pause_btn.setStyleSheet("background-color: #6c757d; color: white;")
+        control_layout.addWidget(pause_btn)
+        
+        reset_btn = QPushButton("リセット")
+        reset_btn.setStyleSheet("background-color: #dc3545; color: white;")
+        control_layout.addWidget(reset_btn)
+        
+        control_layout.addStretch()
+        workflow_layout.addLayout(control_layout)
+        
+        # ワークフローグループをレイアウトに追加
+        self.layout().addWidget(workflow_group)

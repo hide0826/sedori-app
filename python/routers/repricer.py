@@ -130,20 +130,36 @@ class RepriceConfig(BaseModel):
 @router.get("/config")
 def get_config():
     """Get repricer config and convert rules to a list."""
-    if not CONFIG_PATH.exists():
-        raise HTTPException(status_code=404, detail="Config file not found")
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        config_data = json.load(f)
-    
-    # Convert reprice_rules from dict to list
-    rules_dict = config_data.get("reprice_rules", {})
-    rules_list = [
-        {"days_from": int(k), "action": _read_field(v, "action"), "value": _read_field(v, "priceTrace")}
-        for k, v in rules_dict.items()
-    ]
-    config_data["reprice_rules"] = rules_list
-    
-    return config_data
+    try:
+        if not CONFIG_PATH.exists():
+            raise HTTPException(status_code=404, detail="Config file not found")
+        
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            config_data = json.load(f)
+        
+        # Convert reprice_rules from dict to list (if needed)
+        rules_data = config_data.get("reprice_rules", [])
+        
+        # 既にリスト形式の場合はそのまま返す
+        if isinstance(rules_data, list):
+            return config_data
+        
+        # 辞書形式の場合はリスト形式に変換
+        if isinstance(rules_data, dict):
+            rules_list = [
+                {"days_from": int(k), "action": _read_field(v, "action"), "value": _read_field(v, "priceTrace")}
+                for k, v in rules_data.items()
+            ]
+            config_data["reprice_rules"] = rules_list
+        
+        return config_data
+        
+    except Exception as e:
+        print(f"[ERROR] Config取得エラー: {str(e)}")
+        print(f"[ERROR] エラータイプ: {type(e).__name__}")
+        import traceback
+        print(f"[ERROR] トレースバック: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Config取得エラー: {str(e)}")
 
 @router.put("/config", response_model=RepriceConfig)
 def update_config(config: RepriceConfig = Body(...)):

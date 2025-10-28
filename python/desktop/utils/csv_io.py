@@ -68,7 +68,7 @@ class CSVIO:
             self.logger.error(f"CSV読み込み失敗: {e}")
             return None
     
-    def save_csv(self, df: pd.DataFrame, file_path: str, encoding: str = 'utf-8') -> bool:
+    def save_csv(self, df: pd.DataFrame, file_path: str, encoding: str = 'utf-8-sig') -> bool:
         """CSVファイルの保存"""
         try:
             # ディレクトリの作成

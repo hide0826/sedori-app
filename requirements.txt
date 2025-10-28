@@ -3,3 +3,5 @@ uvicorn[standard]
 pandas
 python-multipart
 chardet
+openpyxl
+matplotlib

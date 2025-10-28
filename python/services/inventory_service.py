@@ -47,7 +47,14 @@ class InventoryService:
 
     @staticmethod
     def generate_sku_bulk(products: List[dict]) -> dict:
-        """SKUを一括生成"""
+        """
+        SKUを一括生成（店舗マスタ連携対応）
+        
+        productsには以下の情報が含まれる可能性がある:
+        - supplier_code: 仕入れ先コード（店舗マスタから取得）
+        - store_name: 店舗名
+        - store_id: 店舗ID
+        """
         
         # コンディションコード変換マップ
         CONDITION_MAP = {
@@ -72,24 +79,34 @@ class InventoryService:
             seq_number = str(start_number + idx).zfill(3)
             
             # コンディションコード取得
-            condition = product.get("condition", "新品")
+            # 列名が日本語の場合も対応（「コンディション」）
+            condition = product.get("condition") or product.get("コンディション", "新品")
             condition_code = CONDITION_MAP.get(condition, "N")
             
             # Qタグ（デフォルトで付与、将来的にユーザー選択可能に）
             q_tag = "Q"
             
-            # SKU生成
+            # SKU生成（現行フォーマット: {q_tag}{today}-{seq_number}-{condition_code}）
             sku = f"{q_tag}{today}-{seq_number}-{condition_code}"
             
-            # 結果に追加
+            # 店舗情報を取得（店舗マスタ連携で追加された情報）
+            supplier_code = product.get("supplier_code", "")
+            store_name = product.get("store_name", "")
+            store_id = product.get("store_id")
+            
+            # 結果に追加（店舗情報も含める）
             results.append({
-                "jan": product.get("jan"),
-                "product_name": product.get("product_name"),
-                "purchase_price": product.get("purchase_price"),
+                "jan": product.get("jan") or product.get("JAN", ""),
+                "product_name": product.get("product_name") or product.get("商品名", ""),
+                "purchase_price": product.get("purchase_price") or product.get("仕入れ価格", 0),
                 "condition": condition,
                 "sku": sku,
                 "condition_code": condition_code,
-                "q_tag": q_tag
+                "q_tag": q_tag,
+                # 店舗情報（店舗マスタ連携）
+                "supplier_code": supplier_code,
+                "store_name": store_name,
+                "store_id": store_id
             })
         
         return {

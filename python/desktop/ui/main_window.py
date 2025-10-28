@@ -25,7 +25,12 @@ import time
 from ui.repricer_widget import RepricerWidget
 from ui.repricer_settings_widget import RepricerSettingsWidget
 from ui.inventory_widget import InventoryWidget
+from ui.antique_widget import AntiqueWidget
+from ui.settings_widget import SettingsWidget
 from ui.workflow_panel import WorkflowPanel
+from ui.store_master_widget import StoreMasterWidget
+from ui.route_summary_widget import RouteSummaryWidget
+from ui.analysis_widget import AnalysisWidget
 
 
 class APIServerThread(QThread):
@@ -120,16 +125,25 @@ class MainWindow(QMainWindow):
         self.inventory_widget = InventoryWidget(self.api_client)
         self.tab_widget.addTab(self.inventory_widget, "仕入管理")
         
-        # 古物台帳タブ（プレースホルダー）
-        self.antique_widget = QWidget()
-        antique_layout = QVBoxLayout(self.antique_widget)
-        antique_layout.addWidget(QLabel("古物台帳機能（開発予定）"))
+        # 古物台帳タブ
+        self.antique_widget = AntiqueWidget(self.api_client)
         self.tab_widget.addTab(self.antique_widget, "古物台帳")
         
-        # 設定タブ（プレースホルダー）
-        self.settings_widget = QWidget()
-        settings_layout = QVBoxLayout(self.settings_widget)
-        settings_layout.addWidget(QLabel("設定画面（開発予定）"))
+        # 店舗マスタタブ
+        self.store_master_widget = StoreMasterWidget()
+        self.tab_widget.addTab(self.store_master_widget, "店舗マスタ")
+        
+        # ルートサマリータブ
+        self.route_summary_widget = RouteSummaryWidget()
+        self.tab_widget.addTab(self.route_summary_widget, "ルートサマリー")
+        
+        # 分析タブ
+        self.analysis_widget = AnalysisWidget()
+        self.tab_widget.addTab(self.analysis_widget, "分析")
+        
+        # 設定タブ
+        self.settings_widget = SettingsWidget(self.api_client)
+        self.settings_widget.settings_changed.connect(self.on_settings_changed)
         self.tab_widget.addTab(self.settings_widget, "設定")
         
     def setup_menu(self):
@@ -340,6 +354,24 @@ class MainWindow(QMainWindow):
         self.status_label.setText("API接続テスト完了")
         self.check_api_connection()
         
+    def on_settings_changed(self, settings_dict):
+        """設定変更時の処理"""
+        try:
+            # API設定の更新
+            if 'api' in settings_dict:
+                api_settings = settings_dict['api']
+                if 'url' in api_settings:
+                    self.api_client.base_url = api_settings['url']
+                if 'timeout' in api_settings:
+                    # タイムアウト設定の適用（必要に応じて実装）
+                    pass
+            
+            # その他の設定変更処理
+            self.status_label.setText("設定が更新されました")
+            
+        except Exception as e:
+            QMessageBox.warning(self, "設定更新エラー", f"設定の適用中にエラーが発生しました:\n{str(e)}")
+    
     def show_about(self):
         """バージョン情報を表示"""
         QMessageBox.about(
