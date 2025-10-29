@@ -56,10 +56,18 @@ class StoreDatabase:
                 supplier_code TEXT UNIQUE,
                 store_name TEXT NOT NULL,
                 custom_fields TEXT,  -- JSON形式
+                display_order INTEGER DEFAULT 0,  -- 訪問順序（追加）
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # display_orderカラムが存在しない場合は追加（マイグレーション）
+        try:
+            cursor.execute("ALTER TABLE stores ADD COLUMN display_order INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            # カラムが既に存在する場合はスキップ
+            pass
         
         # store_custom_fields テーブル作成（カスタムフィールド定義）
         cursor.execute("""
@@ -438,4 +446,37 @@ class StoreDatabase:
         except (ValueError, AttributeError):
             # パースできない場合は'-001'を追加
             return f"{max_code}-001"
+    
+    def update_store_display_order(self, route_name: str, store_orders: Dict[str, int]) -> bool:
+        """ルート内の店舗の表示順序を更新"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            for supplier_code, order in store_orders.items():
+                cursor.execute("""
+                    UPDATE stores 
+                    SET display_order = ? 
+                    WHERE affiliated_route_name = ? AND supplier_code = ?
+                """, (order, route_name, supplier_code))
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"訪問順序更新エラー: {e}")
+            conn.rollback()
+            return False
+    
+    def get_stores_for_route_ordered(self, route_name: str) -> List[Dict[str, Any]]:
+        """指定されたルートの店舗一覧を表示順序で取得"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT * FROM stores 
+            WHERE affiliated_route_name = ? 
+            ORDER BY display_order ASC, store_name ASC
+        """, (route_name,))
+        
+        rows = cursor.fetchall()
+        return [self._row_to_dict(row) for row in rows]
 
