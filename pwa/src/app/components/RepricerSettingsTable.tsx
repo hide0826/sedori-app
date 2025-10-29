@@ -185,10 +185,28 @@ export default function RepricerSettingsTable() {
       console.log(`[${mode.toUpperCase()}] Received response:`, apiResponse);
       console.log("Full API response object:", apiResponse); // Log the entire result object
       
-      // バックエンドAPIレスポンスをProcessingResult型に変換
+      // バックエンドAPIレスポンスをProcessingResult型に変換（型の正規化を実施）
+      const normalizeNumber = (v: any, fallback = 0): number => {
+        if (v === null || v === undefined || v === '') return fallback;
+        const n = typeof v === 'number' ? v : Number(String(v).replace(/[,\s]/g, ''));
+        return Number.isFinite(n) ? n : fallback;
+      };
+
+      const normalizedItems = Array.isArray(apiResponse.items) ? apiResponse.items.map((it: any) => ({
+        sku: String(it.sku ?? ''),
+        productName: it.productName ?? it.title ?? undefined,
+        days: normalizeNumber(it.days, 0),
+        price: normalizeNumber(it.price, 0),
+        new_price: normalizeNumber(it.new_price, 0),
+        action: String(it.action ?? ''),
+        priceTrace: it.priceTrace !== undefined ? normalizeNumber(it.priceTrace, undefined as unknown as number) : undefined,
+        new_priceTrace: it.new_priceTrace !== undefined ? normalizeNumber(it.new_priceTrace, undefined as unknown as number) : undefined,
+        reason: it.reason ?? undefined,
+      })) : [];
+
       const result: ProcessingResult = {
         summary: apiResponse.summary,
-        items: apiResponse.items,
+        items: normalizedItems,
         updatedCsvContent: apiResponse.updatedCsvContent,
         updatedCsvEncoding: apiResponse.updatedCsvEncoding,
         reportCsvContent: apiResponse.reportCsvContent

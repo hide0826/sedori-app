@@ -8,7 +8,7 @@
 
 import pandas as pd
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -153,7 +153,7 @@ class TemplateGenerator:
             return False
     
     @staticmethod
-    def generate_excel_template(output_path: str, route_code: Optional[str] = None, store_codes: Optional[List[str]] = None) -> bool:
+    def generate_excel_template(output_path: str, route_code: Optional[str] = None, store_codes: Optional[List[str]] = None, stores_data: Optional[List[Dict[str, Any]]] = None) -> bool:
         """
         Excel形式のルートサマリーテンプレートを生成
         
@@ -161,20 +161,21 @@ class TemplateGenerator:
             output_path: 出力ファイルパス
             route_code: ルートコード（任意）
             store_codes: 店舗コードリスト（任意）
+            stores_data: 店舗データリスト（店舗名等を含む）
         
         Returns:
             生成成功時True
         """
         try:
+            print(f"テンプレート生成開始: {output_path}")
+            print(f"ルートコード: {route_code}, 店舗数: {len(stores_data) if stores_data else len(store_codes) if store_codes else 0}")
+            
             # ワークブック作成
             wb = openpyxl.Workbook()
             
             # デフォルトシートを削除
             if 'Sheet' in wb.sheetnames:
                 wb.remove(wb['Sheet'])
-            
-            # === ルート情報シート ===
-            route_sheet = wb.create_sheet('ルート情報', 0)
             
             # スタイル定義
             header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
@@ -186,137 +187,138 @@ class TemplateGenerator:
                 bottom=Side(style='thin')
             )
             
-            # ルート情報ヘッダー
-            route_sheet['A1'] = '項目'
-            route_sheet['B1'] = '値'
-            route_sheet['A1'].fill = header_fill
-            route_sheet['A1'].font = header_font
-            route_sheet['B1'].fill = header_fill
-            route_sheet['B1'].font = header_font
-            route_sheet['A1'].border = border
-            route_sheet['B1'].border = border
+            # === 店舗訪問詳細（単一シート） ===
+            visit_sheet = wb.create_sheet('店舗訪問詳細', 0)
             
-            # ルート情報データ
-            route_items = [
-                ('ルート日付', datetime.now().strftime('%Y-%m-%d')),
-                ('ルートコード', route_code or ''),
-                ('出発時間', ''),
-                ('帰宅時間', ''),
-                ('往路高速代', ''),
-                ('復路高速代', ''),
-                ('駐車場代', ''),
-                ('食費', ''),
-                ('その他経費', ''),
-                ('備考（天候等）', '')
-            ]
+            # 上部情報（日付・ルート名）
+            route_date_cell = visit_sheet.cell(row=1, column=1)
+            route_date_cell.value = '日付'
+            route_date_cell.fill = header_fill
+            route_date_cell.font = header_font
+            route_date_cell.border = border
+            route_date_cell.alignment = Alignment(horizontal='left', vertical='center')
             
-            for row_idx, (item, value) in enumerate(route_items, start=2):
-                route_sheet[f'A{row_idx}'] = item
-                route_sheet[f'B{row_idx}'] = value
-                route_sheet[f'A{row_idx}'].border = border
-                route_sheet[f'B{row_idx}'].border = border
-                route_sheet[f'A{row_idx}'].alignment = Alignment(vertical='center')
+            date_value_cell = visit_sheet.cell(row=1, column=2)
+            date_value_cell.value = datetime.now().date()
+            date_value_cell.border = border
+            date_value_cell.number_format = 'yyyy/mm/dd'  # 日付形式
             
-            # 列幅調整
-            route_sheet.column_dimensions['A'].width = 20
-            route_sheet.column_dimensions['B'].width = 25
+            route_name_cell = visit_sheet.cell(row=2, column=1)
+            route_name_cell.value = 'ルート'
+            route_name_cell.fill = header_fill
+            route_name_cell.font = header_font
+            route_name_cell.border = border
+            route_name_cell.alignment = Alignment(horizontal='left', vertical='center')
             
-            # === 店舗訪問詳細シート ===
-            visit_sheet = wb.create_sheet('店舗訪問詳細', 1)
+            route_value_cell = visit_sheet.cell(row=2, column=2)
+            route_value_cell.value = route_code or ''
+            route_value_cell.border = border
             
-            # ヘッダー
+            # ヘッダー（3行目） - 日付列を削除
             visit_headers = [
-                '訪問順序',
                 '店舗コード',
-                '店舗IN時間',
-                '店舗OUT時間',
-                '前店舗からの移動時間（分）',
-                '前店舗からの距離（km）',
-                '店舗毎想定粗利',
-                '店舗毎仕入れ点数',
-                '仕入れ成功',
-                '空振り理由',
-                '店舗評価（1-5）',
-                '店舗メモ',
-                '次回訪問推奨度',
-                '在庫状況',
-                '競合いたか',
-                'トラブルあったか',
-                'トラブル詳細'
+                '店舗名',
+                '到着時刻',
+                '出発時刻',
+                '滞在時間',
+                '備考'
             ]
             
             for col_idx, header in enumerate(visit_headers, start=1):
-                cell = visit_sheet.cell(row=1, column=col_idx)
+                cell = visit_sheet.cell(row=3, column=col_idx)
                 cell.value = header
                 cell.fill = header_fill
                 cell.font = header_font
                 cell.border = border
                 cell.alignment = Alignment(horizontal='center', vertical='center')
             
-            # データ行
+            # データ行（4行目以降）
             visit_data_rows = []
-            if store_codes:
+            if stores_data:
+                # 店舗データを使用してテンプレートを生成
+                for i, store in enumerate(stores_data, 1):
+                    visit_data_rows.append([
+                        store.get('supplier_code', ''),  # 店舗コード
+                        store.get('store_name', ''),  # 店舗名
+                        '',  # 到着時刻
+                        '',  # 出発時刻
+                        '0',  # 滞在時間（数式で自動計算される）
+                        ''   # 備考
+                    ])
+            elif store_codes:
+                # 店舗コードのみの場合
                 for i, store_code in enumerate(store_codes, 1):
                     visit_data_rows.append([
-                        i,  # 訪問順序
                         store_code,
-                        '',  # 店舗IN時間
-                        '',  # 店舗OUT時間
-                        '',  # 移動時間
-                        '',  # 距離
-                        '',  # 想定粗利
-                        '',  # 仕入れ点数
-                        'YES',  # 仕入れ成功
-                        '',  # 空振り理由
-                        '',  # 店舗評価
-                        '',  # 店舗メモ
-                        '',  # 次回訪問推奨度
-                        '',  # 在庫状況
-                        'NO',  # 競合
-                        'NO',  # トラブル
-                        ''  # トラブル詳細
+                        '',  # 店舗名
+                        '',  # 到着時刻
+                        '',  # 出発時刻
+                        '0',  # 滞在時間
+                        ''   # 備考
                     ])
             else:
-                # 空の行を5行追加
+                # 空の行を追加
                 for i in range(1, 6):
                     visit_data_rows.append([
-                        i,
                         '',
                         '',
                         '',
                         '',
-                        '',
-                        '',
-                        '',
-                        'YES',
-                        '',
-                        '',
-                        '',
-                        '',
-                        '',
-                        'NO',
-                        'NO',
+                        '0',
                         ''
                     ])
             
-            for row_idx, row_data in enumerate(visit_data_rows, start=2):
+            for row_idx, row_data in enumerate(visit_data_rows, start=4):
                 for col_idx, value in enumerate(row_data, start=1):
                     cell = visit_sheet.cell(row=row_idx, column=col_idx)
-                    cell.value = value
+                    if col_idx == 5:  # 滞在時間列（E列）
+                        # 到着時刻（C列）と出発時刻（D列）から分数を計算する数式
+                        # 時刻が入力されている場合のみ計算
+                        arrival_col = get_column_letter(3)  # C列
+                        departure_col = get_column_letter(4)  # D列
+                        formula = f'=IF(AND({arrival_col}{row_idx}<>"",{departure_col}{row_idx}<>""),ROUND(({departure_col}{row_idx}-{arrival_col}{row_idx})*24*60,0),0)'
+                        cell.value = formula
+                        cell.number_format = '0'  # 整数表示
+                    elif col_idx == 3 or col_idx == 4:  # 到着時刻・出発時刻列
+                        cell.value = value
+                        cell.number_format = 'hh:mm'  # 時刻形式
+                    else:
+                        cell.value = value
                     cell.border = border
-                    if col_idx == 1:  # 訪問順序は中央揃え
-                        cell.alignment = Alignment(horizontal='center', vertical='center')
             
-            # 列幅調整
-            column_widths = [10, 15, 18, 18, 20, 20, 18, 18, 12, 15, 12, 25, 18, 15, 12, 15, 25]
+            # 下部追加情報（17行目以降）
+            info_row = 17
+            info_labels = ['出発時刻', '帰宅時刻', '往路高速代', '復路高速代']
+            for i, label in enumerate(info_labels, start=info_row):
+                label_cell = visit_sheet.cell(row=i, column=1)
+                label_cell.value = label
+                label_cell.fill = header_fill
+                label_cell.font = header_font
+                label_cell.border = border
+                label_cell.alignment = Alignment(horizontal='left', vertical='center')
+                
+                # 値セル（B列に配置）
+                value_cell = visit_sheet.cell(row=i, column=2)
+                value_cell.value = ''
+                value_cell.border = border
+                
+                # 時刻関連のラベルは時刻形式を設定
+                if label in ['出発時刻', '帰宅時刻']:
+                    value_cell.number_format = 'hh:mm'
+            
+            # 列幅調整（6列構成）
+            column_widths = [15, 40, 18, 18, 12, 30]
             for col_idx, width in enumerate(column_widths, start=1):
                 visit_sheet.column_dimensions[get_column_letter(col_idx)].width = width
             
-            # 1行目を固定
-            visit_sheet.freeze_panes = 'A2'
+            # 3行目を固定
+            visit_sheet.freeze_panes = 'A4'
             
             # 保存
             wb.save(output_path)
+            print(f"テンプレート生成完了: {output_path}")
+            print(f"  シート数: {len(wb.sheetnames)}")
+            print(f"  シート名: {wb.sheetnames}")
             return True
             
         except Exception as e:
