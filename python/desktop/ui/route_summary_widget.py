@@ -15,10 +15,10 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox,
     QMessageBox, QFileDialog, QDateTimeEdit, QLineEdit,
     QTextEdit, QDoubleSpinBox, QSpinBox, QCheckBox, QComboBox,
-    QDialog, QFormLayout, QDialogButtonBox, QTabWidget
+    QDialog, QFormLayout, QDialogButtonBox, QTabWidget, QStyledItemDelegate, QStyle
 )
 from ui.star_rating_widget import StarRatingWidget
-from PySide6.QtCore import Qt, QDateTime, Signal
+from PySide6.QtCore import Qt, QDateTime, QTime, Signal
 from PySide6.QtGui import QColor, QShortcut, QKeySequence
 import pandas as pd
 from pathlib import Path
@@ -26,6 +26,8 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 import sys
 import os
+from datetime import time as dt_time
+import openpyxl
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -122,13 +124,13 @@ class RouteSummaryWidget(QWidget):
         
         # 保存ボタン
         save_btn = QPushButton("保存")
-        save_btn.clicked.connect(self.save_data)
+        save_btn.clicked.connect(lambda: getattr(self, 'save_data', lambda: None)())
         save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
         button_layout.addWidget(save_btn)
         
         # 新規作成ボタン
         new_btn = QPushButton("新規作成")
-        new_btn.clicked.connect(self.new_route)
+        new_btn.clicked.connect(lambda: getattr(self, 'new_route', lambda: None)())
         button_layout.addWidget(new_btn)
         
         button_layout.addStretch()
@@ -167,18 +169,16 @@ class RouteSummaryWidget(QWidget):
         route_layout.addRow("ルートコード:", self.route_code_combo)
         self.update_route_codes()
         
-        # 出発時間
-        self.departure_time_edit = QDateTimeEdit()
-        self.departure_time_edit.setCalendarPopup(True)
-        self.departure_time_edit.setDateTime(QDateTime.currentDateTime())
-        self.departure_time_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
+        # 出発時間（自由入力のテキスト: HH:MM）
+        self.departure_time_edit = QLineEdit()
+        self.departure_time_edit.setPlaceholderText("HH:MM")
+        self.departure_time_edit.setText(QTime.currentTime().toString('HH:mm'))
         route_layout.addRow("出発時間:", self.departure_time_edit)
         
-        # 帰宅時間
-        self.return_time_edit = QDateTimeEdit()
-        self.return_time_edit.setCalendarPopup(True)
-        self.return_time_edit.setDateTime(QDateTime.currentDateTime())
-        self.return_time_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
+        # 帰宅時間（自由入力のテキスト: HH:MM）
+        self.return_time_edit = QLineEdit()
+        self.return_time_edit.setPlaceholderText("HH:MM")
+        self.return_time_edit.setText(QTime.currentTime().toString('HH:mm'))
         route_layout.addRow("帰宅時間:", self.return_time_edit)
         
         # 経費（駐車場代・食費・その他を削除）
@@ -186,12 +186,14 @@ class RouteSummaryWidget(QWidget):
         self.toll_fee_outbound_spin = QDoubleSpinBox()
         self.toll_fee_outbound_spin.setMaximum(999999)
         self.toll_fee_outbound_spin.setSuffix(" 円")
+        self.toll_fee_outbound_spin.setDecimals(0)  # 小数不要
         cost_layout.addWidget(QLabel("往路高速代:"))
         cost_layout.addWidget(self.toll_fee_outbound_spin)
         
         self.toll_fee_return_spin = QDoubleSpinBox()
         self.toll_fee_return_spin.setMaximum(999999)
         self.toll_fee_return_spin.setSuffix(" 円")
+        self.toll_fee_return_spin.setDecimals(0)  # 小数不要
         cost_layout.addWidget(QLabel("復路高速代:"))
         cost_layout.addWidget(self.toll_fee_return_spin)
         route_layout.addRow("経費:", cost_layout)
@@ -210,7 +212,9 @@ class RouteSummaryWidget(QWidget):
         # テーブル
         self.store_visits_table = QTableWidget()
         self.store_visits_table.setAlternatingRowColors(True)
+        # 行ドラッグ＆ドロップに必要な行単位選択＋単一選択
         self.store_visits_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.store_visits_table.setSelectionMode(QTableWidget.SingleSelection)
         self.store_visits_table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
         
         # ドラッグ＆ドロップを有効化（行間に挿入する設定）
@@ -248,20 +252,70 @@ class RouteSummaryWidget(QWidget):
         # ショートカットキーの設定
         self.setup_shortcuts()
         
+        # メモ列のフォーカス・選択の強調を最小化（実質非表示）
+        class MinimalFocusDelegate(QStyledItemDelegate):
+            def paint(self, painter, option, index):
+                if option.state & QStyle.State_HasFocus:
+                    option.state &= ~QStyle.State_HasFocus
+                if option.state & QStyle.State_Selected:
+                    option.state &= ~QStyle.State_Selected
+                super().paint(painter, option, index)
+            
+            def createEditor(self, parent, option, index):
+                # メモ入力用のエディタ（枠線なし・背景そのまま）
+                from PySide6.QtWidgets import QLineEdit
+                editor = QLineEdit(parent)
+                editor.setFrame(False)
+                # 入力中の視認性を上げるため、セル内に小さな編集ボックス風の装飾を適用
+                # 背景は不透明にして下地テキストが透けないようにする（ゴースト文字対策）
+                editor.setStyleSheet(
+                    "QLineEdit{"
+                    "background-color: #2b2b2b;"
+                    "color: #ffffff;"
+                    "border: 1px solid #5aa2ff;"
+                    "border-radius: 3px;"
+                    "padding: 2px 6px;"
+                    "}"
+                )
+                try:
+                    editor.setAutoFillBackground(True)
+                except Exception:
+                    pass
+                try:
+                    editor.setTextMargins(4, 0, 4, 0)
+                except Exception:
+                    pass
+                return editor
+
+        self.store_visits_table.setItemDelegateForColumn(10, MinimalFocusDelegate(self.store_visits_table))
+
+        # 選択時の可視性を上げつつ、強すぎないハイライトに調整
+        self.store_visits_table.setStyleSheet(
+            "QTableView::item:focus{outline: none;}"
+            "QTableView::item:selected{background-color: rgba(90,162,255,0.18); color: #ffffff; border: none;}"
+            "QTableView::item{border: none;}"
+        )
+
+        # ドラッグ＆ドロップのため選択は有効（単一行）
+
         visits_layout.addWidget(self.store_visits_table)
         
         # 行追加・削除・全クリア・Undo/Redoボタン
         button_layout = QHBoxLayout()
+        # 店舗マスタから追加ボタン
+        add_from_master_btn = QPushButton("店舗追加（店舗マスタから）")
+        add_from_master_btn.clicked.connect(self.add_store_from_master)
+        button_layout.addWidget(add_from_master_btn)
         add_row_btn = QPushButton("行追加")
-        add_row_btn.clicked.connect(self.add_store_visit_row)
+        add_row_btn.clicked.connect(lambda: getattr(self, 'add_store_visit_row', lambda: None)())
         button_layout.addWidget(add_row_btn)
         
         delete_row_btn = QPushButton("行削除")
-        delete_row_btn.clicked.connect(self.delete_store_visit_row)
+        delete_row_btn.clicked.connect(lambda: getattr(self, 'delete_store_visit_row', lambda: None)())
         button_layout.addWidget(delete_row_btn)
         
         clear_all_btn = QPushButton("全行クリア")
-        clear_all_btn.clicked.connect(self.clear_all_rows)
+        clear_all_btn.clicked.connect(lambda: getattr(self, 'clear_all_rows', lambda: None)())
         clear_all_btn.setStyleSheet("background-color: #dc3545; color: white;")
         button_layout.addWidget(clear_all_btn)
         
@@ -282,6 +336,38 @@ class RouteSummaryWidget(QWidget):
         layout.addWidget(visits_group, 1)  # stretch=1で残りのスペースを全て使用
         
         return widget
+
+    def add_store_from_master(self):
+        """店舗マスタ一覧から選択して店舗を追加"""
+        try:
+            dialog = StoreSelectDialog(self.store_db, self)
+            if dialog.exec() == QDialog.Accepted:
+                selected = dialog.get_selected_stores()
+                if not selected:
+                    return
+                # 変更前の状態保存
+                self.save_table_state()
+                base_rows = self.store_visits_table.rowCount()
+                for i, store in enumerate(selected):
+                    row = base_rows + i
+                    self.store_visits_table.insertRow(row)
+                    order_item = QTableWidgetItem(str(row + 1))
+                    order_item.setFlags(order_item.flags() & ~Qt.ItemIsEditable)
+                    self.store_visits_table.setItem(row, 0, order_item)
+                    self.store_visits_table.setItem(row, 1, QTableWidgetItem(store.get('supplier_code', '')))
+                    self.store_visits_table.setItem(row, 2, QTableWidgetItem(store.get('store_name', '')))
+                    # 星評価初期化
+                    star_widget = StarRatingWidget(self.store_visits_table, rating=0, star_size=14)
+                    star_widget.rating_changed.connect(lambda rating, r=row: self.on_star_rating_changed(r, rating))
+                    self.store_visits_table.setCellWidget(row, 9, star_widget)
+                self.update_visit_order()
+                self.save_store_order()
+                self.recalc_travel_times()
+                self.save_table_state()
+                # 計算結果更新（存在しない環境でも落ちないように）
+                getattr(self, 'update_calculation_results', lambda: None)()
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"店舗追加中にエラーが発生しました:\n{str(e)}")
     
     def create_route_info_widget(self) -> QWidget:
         """ルート情報入力ウィジェットの作成"""
@@ -305,18 +391,16 @@ class RouteSummaryWidget(QWidget):
         # ルートコード一覧を更新
         self.update_route_codes()
         
-        # 出発時間
-        self.departure_time_edit = QDateTimeEdit()
-        self.departure_time_edit.setCalendarPopup(True)
-        self.departure_time_edit.setDateTime(QDateTime.currentDateTime())
-        self.departure_time_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
+        # 出発時間（自由入力のテキスト: HH:MM）
+        self.departure_time_edit = QLineEdit()
+        self.departure_time_edit.setPlaceholderText("HH:MM")
+        self.departure_time_edit.setText(QTime.currentTime().toString('HH:mm'))
         layout.addRow("出発時間:", self.departure_time_edit)
         
-        # 帰宅時間
-        self.return_time_edit = QDateTimeEdit()
-        self.return_time_edit.setCalendarPopup(True)
-        self.return_time_edit.setDateTime(QDateTime.currentDateTime())
-        self.return_time_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
+        # 帰宅時間（自由入力のテキスト: HH:MM）
+        self.return_time_edit = QLineEdit()
+        self.return_time_edit.setPlaceholderText("HH:MM")
+        self.return_time_edit.setText(QTime.currentTime().toString('HH:mm'))
         layout.addRow("帰宅時間:", self.return_time_edit)
         
         # 経費
@@ -412,15 +496,15 @@ class RouteSummaryWidget(QWidget):
         # 行追加・削除・全クリア・Undo/Redoボタン
         button_layout = QHBoxLayout()
         add_row_btn = QPushButton("行追加")
-        add_row_btn.clicked.connect(self.add_store_visit_row)
+        add_row_btn.clicked.connect(lambda: getattr(self, 'add_store_visit_row', lambda: None)())
         button_layout.addWidget(add_row_btn)
         
         delete_row_btn = QPushButton("行削除")
-        delete_row_btn.clicked.connect(self.delete_store_visit_row)
+        delete_row_btn.clicked.connect(lambda: getattr(self, 'delete_store_visit_row', lambda: None)())
         button_layout.addWidget(delete_row_btn)
         
         clear_all_btn = QPushButton("全行クリア")
-        clear_all_btn.clicked.connect(self.clear_all_rows)
+        clear_all_btn.clicked.connect(lambda: getattr(self, 'clear_all_rows', lambda: None)())
         clear_all_btn.setStyleSheet("background-color: #dc3545; color: white;")
         button_layout.addWidget(clear_all_btn)
         
@@ -567,7 +651,7 @@ class RouteSummaryWidget(QWidget):
             
             # 訪問順序を再設定
             self.update_visit_order()
-            self.update_calculation_results()
+            getattr(self, 'update_calculation_results', lambda: None)()
         finally:
             # 変更イベントを再有効化
             self.store_visits_table.blockSignals(False)
@@ -629,7 +713,10 @@ class RouteSummaryWidget(QWidget):
             from PySide6.QtCore import QTimer
             self._change_timer = QTimer()
             self._change_timer.setSingleShot(True)
-            self._change_timer.timeout.connect(self.save_table_state)
+            def _batched_update():
+                self.save_table_state()
+                self.recalc_travel_times()
+            self._change_timer.timeout.connect(_batched_update)
         
         # タイマーをリセット（500ms後に保存）
         self._change_timer.stop()
@@ -652,7 +739,7 @@ class RouteSummaryWidget(QWidget):
             
             # 訪問順序を保存
             self.save_store_order()
-            self.update_calculation_results()
+            getattr(self, 'update_calculation_results', lambda: None)()
         finally:
             # 変更イベントを再有効化
             self.store_visits_table.blockSignals(False)
@@ -781,14 +868,14 @@ class RouteSummaryWidget(QWidget):
                     elif item == '出発時間':
                         try:
                             dt = pd.to_datetime(value)
-                            self.departure_time_edit.setDateTime(QDateTime.fromString(dt.strftime('%Y-%m-%d %H:%M'), 'yyyy-MM-dd HH:mm'))
-                        except:
+                            self.departure_time_edit.setText(dt.strftime('%H:%M'))
+                        except Exception:
                             pass
                     elif item == '帰宅時間':
                         try:
                             dt = pd.to_datetime(value)
-                            self.return_time_edit.setDateTime(QDateTime.fromString(dt.strftime('%Y-%m-%d %H:%M'), 'yyyy-MM-dd HH:mm'))
-                        except:
+                            self.return_time_edit.setText(dt.strftime('%H:%M'))
+                        except Exception:
                             pass
                     elif item == '往路高速代':
                         self.toll_fee_outbound_spin.setValue(float(value) if value else 0)
@@ -806,55 +893,133 @@ class RouteSummaryWidget(QWidget):
                     elif item == '備考（天候等）' or item == '備考':
                         self.remarks_edit.setPlainText(str(value) if value else '')
 
-            # 単一シート構成（店舗訪問詳細シートに日付・備考が含まれる）に対応
-            if '日付' in df_visits.columns:
-                first_date = df_visits['日付'].dropna().astype(str).head(1)
-                if not first_date.empty:
+            # 単一シート構成（1枚目の生成テンプレ形式）に対応：openpyxlでセル値も取得
+            try:
+                wb = openpyxl.load_workbook(file_path, data_only=True)
+                ws = wb['店舗訪問詳細'] if '店舗訪問詳細' in wb.sheetnames else wb.active
+
+                def _to_time_str(v: Any) -> str:
+                    if v is None or v == '':
+                        return ''
+                    if isinstance(v, dt_time):
+                        return QTime(v.hour, v.minute).toString('HH:mm')
+                    if isinstance(v, datetime):
+                        return QTime(v.hour, v.minute).toString('HH:mm')
+                    # Excel数値(1日=1) の場合
                     try:
-                        dt = pd.to_datetime(first_date.iloc[0])
-                        self.route_date_edit.setDateTime(QDateTime.fromString(dt.strftime('%Y-%m-%d'), 'yyyy-MM-dd'))
+                        num = float(v)
+                        total_minutes = int(round(num * 24 * 60))
+                        hh = total_minutes // 60
+                        mm = total_minutes % 60
+                        return f"{hh:02d}:{mm:02d}"
+                    except Exception:
+                        s = str(v).strip()
+                        # 既にHH:MMの文字列
+                        return s
+
+                # 上部情報の読み込み
+                top_date = ws['B1'].value
+                if top_date:
+                    try:
+                        if isinstance(top_date, datetime):
+                            d_str = top_date.strftime('%Y-%m-%d')
+                        else:
+                            d_str = pd.to_datetime(str(top_date)).strftime('%Y-%m-%d')
+                        self.route_date_edit.setDateTime(QDateTime.fromString(d_str, 'yyyy-MM-dd'))
                     except Exception:
                         pass
-            if '備考' in df_visits.columns:
-                first_note = df_visits['備考'].dropna().astype(str).head(1)
-                if not first_note.empty:
-                    self.remarks_edit.setPlainText(first_note.iloc[0])
-            
-            # 店舗訪問詳細を読み込み
-            self.store_visits_table.setRowCount(len(df_visits))
-            for i, row in df_visits.iterrows():
-                # 列のマッピング（新テンプレ列名に対応）
-                alt_map = {
-                    '店舗IN時間': '到着時刻',
-                    '店舗OUT時間': '出発時刻'
-                }
-                # 新しい列構成に対応
-                headers = [
-                    "訪問順序", "店舗コード", "店舗名", "店舗IN時間", "店舗OUT時間",
-                    "店舗滞在時間", "移動時間（分）", "想定粗利", "仕入れ点数",
-                    "店舗評価", "店舗メモ"
-                ]
-                for j, header in enumerate(headers):
-                    if header == "訪問順序":
-                        value = i + 1
-                        item = QTableWidgetItem(str(value))
-                        self.store_visits_table.setItem(i, j, item)
-                    elif header == "店舗評価":
-                        # 星評価ウィジェットを設定
-                        rating_value = row.get(header, 0) or row.get("店舗評価（1-5）", 0)
-                        rating = self._safe_int(str(rating_value)) or 0
-                        star_widget = StarRatingWidget(self.store_visits_table, rating=rating, star_size=14)
-                        star_widget.rating_changed.connect(lambda rating, r=i: self.on_star_rating_changed(r, rating))
-                        self.store_visits_table.setCellWidget(i, j, star_widget)
+
+                route_name = (ws['B2'].value or '').strip()
+                if route_name:
+                    idx = self.route_code_combo.findText(route_name)
+                    if idx >= 0:
+                        self.route_code_combo.setCurrentIndex(idx)
                     else:
-                        value = row.get(header, None)
-                        if (value is None or (isinstance(value, float) and pd.isna(value))) and header in alt_map:
-                            value = row.get(alt_map[header], '')
-                        item = QTableWidgetItem(str(value) if pd.notna(value) else '')
-                        self.store_visits_table.setItem(i, j, item)
+                        self.route_code_combo.setCurrentText(route_name)
+
+                # データ行（4行目以降、A列が空で終了）
+                rows_data: List[Dict[str, Any]] = []
+                r = 4
+                while True:
+                    code = ws[f'A{r}'].value
+                    name = ws[f'B{r}'].value
+                    if (code is None or str(code).strip() == '') and (name is None or str(name).strip() == ''):
+                        break
+                    arrival = _to_time_str(ws[f'C{r}'].value)
+                    depart = _to_time_str(ws[f'D{r}'].value)
+                    stay_val = ws[f'E{r}'].value
+                    try:
+                        stay_minutes = int(round(float(stay_val))) if stay_val not in (None, '') else 0
+                    except Exception:
+                        stay_minutes = 0
+                    memo = ws[f'F{r}'].value or ''
+                    rows_data.append({
+                        'code': str(code or ''),
+                        'name': str(name or ''),
+                        'in': arrival,
+                        'out': depart,
+                        'stay': stay_minutes,
+                        'memo': str(memo)
+                    })
+                    r += 1
+
+                # テーブルへ反映
+                self.store_visits_table.setRowCount(len(rows_data))
+                for i, rd in enumerate(rows_data):
+                    # 訪問順序
+                    order_item = QTableWidgetItem(str(i + 1))
+                    order_item.setFlags(order_item.flags() & ~Qt.ItemIsEditable)
+                    self.store_visits_table.setItem(i, 0, order_item)
+
+                    self.store_visits_table.setItem(i, 1, QTableWidgetItem(rd['code']))
+                    self.store_visits_table.setItem(i, 2, QTableWidgetItem(rd['name']))
+                    self.store_visits_table.setItem(i, 3, QTableWidgetItem(rd['in']))
+                    self.store_visits_table.setItem(i, 4, QTableWidgetItem(rd['out']))
+                    self.store_visits_table.setItem(i, 5, QTableWidgetItem(str(rd['stay'])))
+                    # 店舗メモ（備考）
+                    self.store_visits_table.setItem(i, 10, QTableWidgetItem(rd['memo']))
+
+                    # 店舗評価は0で初期化
+                    star_widget = StarRatingWidget(self.store_visits_table, rating=0, star_size=14)
+                    star_widget.rating_changed.connect(lambda rating, r=i: self.on_star_rating_changed(r, rating))
+                    self.store_visits_table.setCellWidget(i, 9, star_widget)
+
+                # 下部情報（17行目以降）
+                try:
+                    bottom_map = {}
+                    for rr in range(17, 17 + 10):
+                        key = ws[f'A{rr}'].value
+                        val = ws[f'B{rr}'].value
+                        if key:
+                            bottom_map[str(key).strip()] = val
+
+                    # 出発時刻・帰宅時刻
+                    dep_str = _to_time_str(bottom_map.get('出発時刻'))
+                    ret_str = _to_time_str(bottom_map.get('帰宅時刻'))
+                    if dep_str:
+                        self.departure_time_edit.setText(dep_str)
+                    if ret_str:
+                        self.return_time_edit.setText(ret_str)
+
+                    # 高速代
+                    try:
+                        self.toll_fee_outbound_spin.setValue(float(bottom_map.get('往路高速代') or 0))
+                    except Exception:
+                        pass
+                    try:
+                        self.toll_fee_return_spin.setValue(float(bottom_map.get('復路高速代') or 0))
+                    except Exception:
+                        pass
+                except Exception as _:
+                    pass
+            except Exception:
+                # 旧ロジック（pandas）にフォールバック
+                pass
             
             QMessageBox.information(self, "完了", "テンプレートを読み込みました")
-            self.update_calculation_results()
+            # 移動時間（分）を自動計算
+            self.recalc_travel_times()
+            getattr(self, 'update_calculation_results', lambda: None)()
             
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"テンプレート読み込み中にエラーが発生しました:\n{str(e)}")
@@ -935,7 +1100,7 @@ class RouteSummaryWidget(QWidget):
             self.save_table_state()
             
             QMessageBox.information(self, "完了", f"{len(stores_to_add)}件の店舗を追加しました")
-            self.update_calculation_results()
+            getattr(self, 'update_calculation_results', lambda: None)()
             
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"店舗自動追加中にエラーが発生しました:\n{str(e)}")
@@ -946,7 +1111,61 @@ class RouteSummaryWidget(QWidget):
             order_item = self.store_visits_table.item(i, 0)
             if order_item:
                 order_item.setText(str(i + 1))
-    
+        # 順序が変わったら移動時間も更新
+        self.recalc_travel_times()
+
+    def recalc_travel_times(self):
+        """移動時間（分）を自動計算して6列目に反映"""
+        try:
+            row_count = self.store_visits_table.rowCount()
+            if row_count == 0:
+                return
+
+            def parse_hhmm(text: str) -> Optional[QTime]:
+                text = (text or '').strip()
+                if not text:
+                    return None
+                # HH:mm または H:mm を許容
+                parts = text.split(':')
+                if len(parts) != 2:
+                    return None
+                try:
+                    h = int(parts[0])
+                    m = int(parts[1])
+                    if 0 <= h < 24 and 0 <= m < 60:
+                        return QTime(h, m)
+                except ValueError:
+                    return None
+                return None
+
+            def get_text(row: int, col: int) -> str:
+                item = self.store_visits_table.item(row, col)
+                return item.text() if item else ''
+
+            # 1店舗目: 出発時間 から IN時間
+            first_in = parse_hhmm(get_text(0, 3))
+            dep_time = parse_hhmm(self.departure_time_edit.text())
+            if first_in and dep_time:
+                mins = dep_time.secsTo(first_in) // 60
+                mins = max(0, int(mins))
+                self.store_visits_table.setItem(0, 6, QTableWidgetItem(str(mins)))
+            else:
+                self.store_visits_table.setItem(0, 6, QTableWidgetItem(''))
+
+            # 2店舗目以降: 前店舗OUT → 現在IN
+            for r in range(1, row_count):
+                prev_out = parse_hhmm(get_text(r - 1, 4))
+                cur_in = parse_hhmm(get_text(r, 3))
+                if prev_out and cur_in:
+                    mins = prev_out.secsTo(cur_in) // 60
+                    mins = max(0, int(mins))
+                    self.store_visits_table.setItem(r, 6, QTableWidgetItem(str(mins)))
+                else:
+                    self.store_visits_table.setItem(r, 6, QTableWidgetItem(''))
+        except Exception as e:
+            print(f"移動時間計算エラー: {e}")
+
+
     def add_store_visit_row(self):
         """店舗訪問行を追加"""
         # 変更前の状態を保存
@@ -967,12 +1186,12 @@ class RouteSummaryWidget(QWidget):
         
         # 変更後の状態を保存
         self.save_table_state()
-    
+
     def on_star_rating_changed(self, row: int, rating: int):
         """星評価が変更されたときの処理"""
         # データ変更をUndoスタックに保存
         self.on_table_item_changed(None)
-    
+
     def clear_all_rows(self):
         """すべての行をクリア"""
         reply = QMessageBox.question(
@@ -990,28 +1209,28 @@ class RouteSummaryWidget(QWidget):
             self.store_visits_table.setRowCount(0)
             # 訪問順序を保存（クリア状態）
             self.save_store_order()
-            self.update_calculation_results()
+            getattr(self, 'update_calculation_results', lambda: None)()
             
             # 変更後の状態を保存
             self.save_table_state()
             
             QMessageBox.information(self, "完了", "すべての行を削除しました")
-    
+
     def delete_store_visit_row(self):
         """選択された店舗訪問行を削除"""
-        # PySide6ではselectedItems()を使用して選択された行を取得
-        selected_items = self.store_visits_table.selectedItems()
-        if not selected_items:
+        # 選択行の取得（行選択/セル選択の両対応）
+        selected_indexes = self.store_visits_table.selectionModel().selectedRows()
+        selected_rows = {idx.row() for idx in selected_indexes}
+        if not selected_rows:
+            current = self.store_visits_table.currentRow()
+            if current >= 0:
+                selected_rows = {current}
+        if not selected_rows:
             QMessageBox.warning(self, "警告", "削除する行を選択してください")
             return
         
         # 変更前の状態を保存
         self.save_table_state()
-        
-        # 選択された行番号を取得（重複を除去）
-        selected_rows = set()
-        for item in selected_items:
-            selected_rows.add(item.row())
         
         # 行番号を降順でソート（後ろから削除することでインデックスがずれない）
         for row in sorted(selected_rows, reverse=True):
@@ -1026,13 +1245,97 @@ class RouteSummaryWidget(QWidget):
         # 変更後の状態を保存
         self.save_table_state()
         
-        self.update_calculation_results()
+        getattr(self, 'update_calculation_results', lambda: None)()
+
+class StoreSelectDialog(QDialog):
+    """店舗マスタ一覧を表示して選択させるダイアログ"""
+    def __init__(self, store_db: StoreDatabase, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("店舗マスタから追加")
+        self.resize(700, 480)
+        self.store_db = store_db
+        self.selected_rows: List[Dict[str, Any]] = []
+
+        layout = QVBoxLayout(self)
+        search_layout = QHBoxLayout()
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("コード/店舗名で検索")
+        search_btn = QPushButton("検索")
+        search_btn.clicked.connect(self.filter_rows)
+        search_layout.addWidget(self.search_edit)
+        search_layout.addWidget(search_btn)
+        layout.addLayout(search_layout)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["ルート名", "店舗コード", "店舗名"])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.MultiSelection)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        layout.addWidget(self.table)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+        self.load_rows()
+
+    def load_rows(self):
+        try:
+            stores = self.store_db.list_stores()
+        except Exception:
+            stores = []
+        self.all_rows = stores
+        self.populate(stores)
+
+    def populate(self, stores: List[Dict[str, Any]]):
+        self.table.setRowCount(len(stores))
+        for i, s in enumerate(stores):
+            self.table.setItem(i, 0, QTableWidgetItem(str(s.get('affiliated_route_name', ''))))
+            self.table.setItem(i, 1, QTableWidgetItem(str(s.get('supplier_code', ''))))
+            self.table.setItem(i, 2, QTableWidgetItem(str(s.get('store_name', ''))))
+
+    def filter_rows(self):
+        q = self.search_edit.text().strip().lower()
+        if not q:
+            self.populate(self.all_rows)
+            return
+        filtered = [s for s in self.all_rows if q in str(s.get('supplier_code','')).lower() or q in str(s.get('store_name','')).lower()]
+        self.populate(filtered)
+
+    def get_selected_stores(self) -> List[Dict[str, Any]]:
+        rows = []
+        for idx in self.table.selectionModel().selectedRows():
+            r = idx.row()
+            code = self.table.item(r, 1).text() if self.table.item(r, 1) else ''
+            name = self.table.item(r, 2).text() if self.table.item(r, 2) else ''
+            route = self.table.item(r, 0).text() if self.table.item(r, 0) else ''
+            rows.append({'supplier_code': code, 'store_name': name, 'affiliated_route_name': route})
+        return rows
     
     def get_route_data(self) -> Dict[str, Any]:
         """入力データを取得"""
         route_date = self.route_date_edit.dateTime().toString('yyyy-MM-dd')
-        departure_time = self.departure_time_edit.dateTime().toString('yyyy-MM-dd HH:mm:ss')
-        return_time = self.return_time_edit.dateTime().toString('yyyy-MM-dd HH:mm:ss')
+        # 時刻は編集欄から取得し、ルート日付と結合
+        dep_text = (self.departure_time_edit.text() or '').strip()
+        ret_text = (self.return_time_edit.text() or '').strip()
+        # 簡易バリデーション（不正時は空として扱う）
+        def to_sec(text: str) -> str:
+            try:
+                parts = text.split(':')
+                if len(parts) != 2:
+                    return ''
+                h = int(parts[0]); m = int(parts[1])
+                if 0 <= h <= 23 and 0 <= m <= 59:
+                    return f"{h:02d}:{m:02d}:00"
+            except Exception:
+                return ''
+            return ''
+        dep_time = to_sec(dep_text) or '00:00:00'
+        ret_time = to_sec(ret_text) or '00:00:00'
+        departure_time = f"{route_date} {dep_time}"
+        return_time = f"{route_date} {ret_time}"
         
         return {
             'route_date': route_date,
@@ -1169,8 +1472,8 @@ class RouteSummaryWidget(QWidget):
         self.current_route_id = None
         self.route_code_combo.setCurrentText("")
         self.route_date_edit.setDateTime(QDateTime.currentDateTime())
-        self.departure_time_edit.setDateTime(QDateTime.currentDateTime())
-        self.return_time_edit.setDateTime(QDateTime.currentDateTime())
+        self.departure_time_edit.setText(QTime.currentTime().toString('HH:mm'))
+        self.return_time_edit.setText(QTime.currentTime().toString('HH:mm'))
         self.toll_fee_outbound_spin.setValue(0)
         self.toll_fee_return_spin.setValue(0)
         self.remarks_edit.clear()

@@ -25,6 +25,38 @@ from PySide6.QtGui import QIcon, QFont
 from ui.main_window import MainWindow
 from api.client import APIClient
 
+# 例外ロギング
+import traceback
+from datetime import datetime
+LOG_PATH = Path(__file__).parent / "desktop_error.log"
+
+def _log_error(message: str):
+    try:
+        LOG_PATH.write_text("", encoding="utf-8") if not LOG_PATH.exists() else None
+    except Exception:
+        pass
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]\n")
+            f.write(message)
+            f.write("\n\n")
+    except Exception:
+        pass
+
+def _global_excepthook(exc_type, exc_value, exc_tb):
+    tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    _log_error(tb_text)
+    try:
+        # 既にQApplicationがあればそのままダイアログ表示、無ければ一時作成
+        app = QApplication.instance() or QApplication([])
+        QMessageBox.critical(None, "エラー", f"未処理の例外が発生しました。\n\nログ: {LOG_PATH}\n\n詳細:\n{tb_text}")
+    except Exception:
+        # それでも無理なら標準出力
+        print(tb_text)
+    finally:
+        # 終了コードを返す
+        os._exit(1)
+
 
 class HIRIOApplication:
     """HIRIOアプリケーションのメインクラス"""
@@ -83,11 +115,14 @@ class HIRIOApplication:
             return self.app.exec()
             
         except Exception as e:
+            import traceback
+            tb_text = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+            _log_error(tb_text)
             print(f"アプリケーション実行エラー: {e}")
             QMessageBox.critical(
                 None, 
                 "エラー", 
-                f"アプリケーションの起動に失敗しました:\n{str(e)}"
+                f"アプリケーションの起動に失敗しました:\n{str(e)}\n\nログ: {LOG_PATH}"
             )
             return 1
 
@@ -95,6 +130,8 @@ class HIRIOApplication:
 def main():
     """メイン関数"""
     print("HIRIO デスクトップアプリを起動中...")
+    # グローバル例外ハンドラ（コンソールが一瞬で閉じる環境でもログに残す）
+    sys.excepthook = _global_excepthook
     
     # アプリケーションの作成と実行
     hirio_app = HIRIOApplication()
