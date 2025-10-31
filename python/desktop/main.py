@@ -16,16 +16,7 @@ import sys
 import os
 from pathlib import Path
 
-# PySide6のインポート
-from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QIcon, QFont
-
-# プロジェクト内のモジュール
-from ui.main_window import MainWindow
-from api.client import APIClient
-
-# 例外ロギング
+# 例外ロギング（できるだけ早くセット）
 import traceback
 from datetime import datetime
 LOG_PATH = Path(__file__).parent / "desktop_error.log"
@@ -57,6 +48,14 @@ def _global_excepthook(exc_type, exc_value, exc_tb):
         # 終了コードを返す
         os._exit(1)
 
+# PySide6のインポート（excepthook設定後）
+from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QIcon, QFont
+
+# グローバル例外ハンドラを登録
+sys.excepthook = _global_excepthook
+
 
 class HIRIOApplication:
     """HIRIOアプリケーションのメインクラス"""
@@ -82,10 +81,19 @@ class HIRIOApplication:
         font = QFont("Segoe UI", 9)
         self.app.setFont(font)
         
-        # APIクライアントの初期化
-        self.api_client = APIClient()
+        # APIクライアントとメインウィンドウの作成（インポート含めて保護）
+        try:
+            from api.client import APIClient
+        except Exception as e:
+            _log_error("APIClient import error:\n" + "".join(traceback.format_exception(type(e), e, e.__traceback__)))
+            raise
+        try:
+            from ui.main_window import MainWindow
+        except Exception as e:
+            _log_error("MainWindow import error:\n" + "".join(traceback.format_exception(type(e), e, e.__traceback__)))
+            raise
         
-        # メインウィンドウの作成
+        self.api_client = APIClient()
         self.main_window = MainWindow(self.api_client)
         self.main_window.show()
         

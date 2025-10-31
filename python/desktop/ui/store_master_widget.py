@@ -37,6 +37,8 @@ class StoreEditDialog(QDialog):
         self.store_data = store_data
         self.custom_fields_def = custom_fields_def or []
         self.db = StoreDatabase()
+        # カスタムフィールド編集ウィジェットのマップは必ず初期化しておく
+        self.custom_field_edits = {}
         
         self.setWindowTitle("店舗編集" if store_data else "店舗追加")
         self.setModal(True)
@@ -82,8 +84,6 @@ class StoreEditDialog(QDialog):
         if self.custom_fields_def:
             custom_group = QGroupBox("カスタムフィールド")
             custom_layout = QFormLayout(custom_group)
-            
-            self.custom_field_edits = {}
             for field_def in self.custom_fields_def:
                 if field_def.get('is_active', 1):
                     field_name = field_def['field_name']
@@ -176,9 +176,11 @@ class StoreEditDialog(QDialog):
         
         # カスタムフィールドの読み込み
         custom_fields = self.store_data.get('custom_fields', {})
-        for field_name, edit in self.custom_field_edits.items():
-            value = custom_fields.get(field_name, '')
-            edit.setText(str(value))
+        # self.custom_field_edits は空の可能性があるため安全に処理
+        if hasattr(self, 'custom_field_edits') and isinstance(self.custom_field_edits, dict):
+            for field_name, edit in self.custom_field_edits.items():
+                value = custom_fields.get(field_name, '')
+                edit.setText(str(value))
     
     def get_data(self) -> dict:
         """入力データを取得"""
@@ -612,13 +614,21 @@ class StoreMasterWidget(QWidget):
     
     def edit_store(self):
         """店舗編集"""
-        selected_rows = self.store_table.selectedRows()
-        if not selected_rows:
+        selected = self.store_table.selectionModel().selectedRows() if self.store_table.selectionModel() else []
+        if not selected:
             QMessageBox.warning(self, "警告", "編集する店舗を選択してください")
             return
         
-        row = selected_rows[0].row()
-        store_id = int(self.store_table.item(row, 0).text())
+        row = selected[0].row()
+        id_item = self.store_table.item(row, 0)
+        if not id_item or not id_item.text().strip():
+            QMessageBox.warning(self, "エラー", "選択行のIDが取得できません")
+            return
+        try:
+            store_id = int(id_item.text())
+        except ValueError:
+            QMessageBox.warning(self, "エラー", "不正なID形式です")
+            return
         store_data = self.db.get_store(store_id)
         
         if not store_data:
@@ -642,13 +652,21 @@ class StoreMasterWidget(QWidget):
     
     def delete_store(self):
         """店舗削除"""
-        selected_rows = self.store_table.selectedRows()
-        if not selected_rows:
+        selected = self.store_table.selectionModel().selectedRows() if self.store_table.selectionModel() else []
+        if not selected:
             QMessageBox.warning(self, "警告", "削除する店舗を選択してください")
             return
         
-        row = selected_rows[0].row()
-        store_id = int(self.store_table.item(row, 0).text())
+        row = selected[0].row()
+        id_item = self.store_table.item(row, 0)
+        if not id_item or not id_item.text().strip():
+            QMessageBox.warning(self, "エラー", "選択行のIDが取得できません")
+            return
+        try:
+            store_id = int(id_item.text())
+        except ValueError:
+            QMessageBox.warning(self, "エラー", "不正なID形式です")
+            return
         store_name = self.store_table.item(row, 4).text()
         
         reply = QMessageBox.question(

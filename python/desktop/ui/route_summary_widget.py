@@ -124,9 +124,14 @@ class RouteSummaryWidget(QWidget):
         
         # 保存ボタン
         save_btn = QPushButton("保存")
-        save_btn.clicked.connect(lambda: getattr(self, 'save_data', lambda: None)())
+        save_btn.clicked.connect(self.save_data)
         save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
         button_layout.addWidget(save_btn)
+        
+        # 保存履歴（読み込み/削除）
+        history_btn = QPushButton("保存履歴")
+        history_btn.clicked.connect(self.open_saved_history)
+        button_layout.addWidget(history_btn)
         
         # 新規作成ボタン
         new_btn = QPushButton("新規作成")
@@ -223,6 +228,13 @@ class RouteSummaryWidget(QWidget):
         self.store_visits_table.setDropIndicatorShown(True)
         self.store_visits_table.setDragDropMode(QTableWidget.InternalMove)
         self.store_visits_table.setDragDropOverwriteMode(False)
+        # ドラッグ中の自動スクロールが列ズレの原因になるため無効化
+        try:
+            from PySide6.QtWidgets import QAbstractItemView
+            self.store_visits_table.setAutoScroll(False)
+            self.store_visits_table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        except Exception:
+            pass
         self.store_visits_table.setDefaultDropAction(Qt.MoveAction)
         
         headers = [
@@ -236,6 +248,15 @@ class RouteSummaryWidget(QWidget):
         header = self.store_visits_table.horizontalHeader()
         header.setStretchLastSection(True)
         header.setSectionResizeMode(QHeaderView.Interactive)
+        # 列のドラッグ移動は不可（行ドラッグ時の横スライドで列が入れ替わらないよう固定）
+        try:
+            header.setSectionsMovable(False)
+        except Exception:
+            pass
+        try:
+            self.store_visits_table.verticalHeader().setSectionsMovable(False)
+        except Exception:
+            pass
         
         # 店舗名列をコンテンツに合わせて自動調整
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # 店舗名列（インデックス2）
@@ -307,15 +328,15 @@ class RouteSummaryWidget(QWidget):
         add_from_master_btn.clicked.connect(self.add_store_from_master)
         button_layout.addWidget(add_from_master_btn)
         add_row_btn = QPushButton("行追加")
-        add_row_btn.clicked.connect(lambda: getattr(self, 'add_store_visit_row', lambda: None)())
+        add_row_btn.clicked.connect(self.add_store_visit_row)
         button_layout.addWidget(add_row_btn)
         
         delete_row_btn = QPushButton("行削除")
-        delete_row_btn.clicked.connect(lambda: getattr(self, 'delete_store_visit_row', lambda: None)())
+        delete_row_btn.clicked.connect(self.delete_store_visit_row)
         button_layout.addWidget(delete_row_btn)
         
         clear_all_btn = QPushButton("全行クリア")
-        clear_all_btn.clicked.connect(lambda: getattr(self, 'clear_all_rows', lambda: None)())
+        clear_all_btn.clicked.connect(self.clear_all_rows)
         clear_all_btn.setStyleSheet("background-color: #dc3545; color: white;")
         button_layout.addWidget(clear_all_btn)
         
@@ -335,6 +356,11 @@ class RouteSummaryWidget(QWidget):
         visits_layout.addLayout(button_layout)
         layout.addWidget(visits_group, 1)  # stretch=1で残りのスペースを全て使用
         
+        # 初期スナップショットを保存（Undoの基点）
+        try:
+            self.save_table_state()
+        except Exception:
+            pass
         return widget
 
     def add_store_from_master(self):
@@ -606,27 +632,30 @@ class RouteSummaryWidget(QWidget):
         redo_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self)
         redo_shortcut.activated.connect(self.redo_action)
     
-    def save_table_state(self):
-        """テーブルの現在の状態を保存（Undo用）"""
+    def _snapshot_table_state(self):
+        """現在のテーブル状態をスナップショットとして返す（星評価含む）"""
         state = []
         for row in range(self.store_visits_table.rowCount()):
             row_data = {}
             for col in range(self.store_visits_table.columnCount()):
-                # 星評価列の場合はウィジェットから取得
                 if col == 9:
                     star_widget = self.store_visits_table.cellWidget(row, col)
-                    row_data[col] = star_widget.rating() if star_widget else 0
+                    row_data[col] = int(star_widget.rating()) if star_widget else 0
                 else:
                     item = self.store_visits_table.item(row, col)
                     row_data[col] = item.text() if item else ''
             state.append(row_data)
-        
-        # Undoスタックに追加
+        return state
+
+    def save_table_state(self):
+        """テーブルの現在の状態を保存（Undo用）"""
+        state = self._snapshot_table_state()
+        # 直前と同じ状態は保存しない（無駄な履歴を防止）
+        if self.undo_stack and self.undo_stack[-1] == state:
+            return
         self.undo_stack.append(state)
         if len(self.undo_stack) > self.max_undo_history:
             self.undo_stack.pop(0)
-        
-        # Redoスタックをクリア（新しい操作が行われたため）
         self.redo_stack.clear()
     
     def restore_table_state(self, state):
@@ -641,7 +670,11 @@ class RouteSummaryWidget(QWidget):
                     col_idx_int = int(col_idx)
                     # 星評価列の場合はウィジェットを設定
                     if col_idx_int == 9:
-                        rating = self._safe_int(str(value)) or 0
+                        # self._safe_int が未定義な環境でも安全にパース
+                        try:
+                            rating = int(float(str(value))) if str(value) not in (None, '', 'None') else 0
+                        except Exception:
+                            rating = 0
                         star_widget = StarRatingWidget(self.store_visits_table, rating=rating)
                         star_widget.rating_changed.connect(lambda rating, r=row_idx: self.on_star_rating_changed(r, rating))
                         self.store_visits_table.setCellWidget(row_idx, col_idx_int, star_widget)
@@ -663,23 +696,21 @@ class RouteSummaryWidget(QWidget):
             return
         
         # 現在の状態をRedoスタックに保存
-        current_state = []
-        for row in range(self.store_visits_table.rowCount()):
-            row_data = {}
-            for col in range(self.store_visits_table.columnCount()):
-                item = self.store_visits_table.item(row, col)
-                row_data[col] = item.text() if item else ''
-            current_state.append(row_data)
+        current_state = self._snapshot_table_state()
         self.redo_stack.append(current_state)
         
-        # Undoスタックから前の状態を復元
+        # Undoスタックから前の状態を取得
         previous_state = self.undo_stack.pop()
-        self.restore_table_state(previous_state)
-        
+        # 直前に保存された状態が現状態と同一の場合、さらに一つ前を使う
+        if previous_state == current_state and self.undo_stack:
+            previous_state = self.undo_stack.pop()
+        if previous_state != current_state:
+            self.restore_table_state(previous_state)
+            QMessageBox.information(self, "完了", "操作を元に戻しました")
+        else:
+            QMessageBox.information(self, "情報", "元に戻す操作がありません")
         # 訪問順序を保存
         self.save_store_order()
-        
-        QMessageBox.information(self, "完了", "操作を元に戻しました")
     
     def redo_action(self):
         """Redo操作"""
@@ -1028,6 +1059,124 @@ class RouteSummaryWidget(QWidget):
         """照合処理実行"""
         QMessageBox.information(self, "照合処理", "照合処理機能は仕入リストと連携する必要があります")
     
+    def load_saved_data(self, route_id: int):
+        """指定IDの保存データを読み込む"""
+        try:
+            row = self.route_db.get_route_summary(route_id)
+            if not row:
+                QMessageBox.information(self, "情報", "保存済みデータが見つかりませんでした")
+                return
+            self.current_route_id = route_id
+            # 上部フィールド
+            self.route_date_edit.setDateTime(QDateTime.fromString(row.get('route_date',''), 'yyyy-MM-dd'))
+            # ルート名はコンボの現在値を維持（コード=表示名として扱う）
+            dep = row.get('departure_time') or ''
+            ret = row.get('return_time') or ''
+            try:
+                self.departure_time_edit.setText(dep.split(' ')[1][:5] if ' ' in dep else dep[:5])
+            except Exception:
+                self.departure_time_edit.setText('')
+            try:
+                self.return_time_edit.setText(ret.split(' ')[1][:5] if ' ' in ret else ret[:5])
+            except Exception:
+                self.return_time_edit.setText('')
+            try:
+                self.toll_fee_outbound_spin.setValue(float(row.get('toll_fee_outbound') or 0))
+                self.toll_fee_return_spin.setValue(float(row.get('toll_fee_return') or 0))
+            except Exception:
+                pass
+            self.remarks_edit.setPlainText(row.get('remarks') or '')
+            
+            # 店舗訪問詳細
+            visits = self.route_db.get_store_visits_by_route(route_id)
+            # ルート名からコード→店名の簡易マップを作成（補完用）
+            code_to_name = {}
+            try:
+                route_name = self.route_code_combo.currentText().strip()
+                if route_name:
+                    for s in self.get_stores_for_route(route_name):
+                        c = s.get('supplier_code')
+                        n = s.get('store_name')
+                        if c and n:
+                            code_to_name[c] = n
+            except Exception:
+                pass
+            self.store_visits_table.blockSignals(True)
+            try:
+                self.store_visits_table.setRowCount(len(visits))
+                for i, v in enumerate(visits):
+                    order_item = QTableWidgetItem(str(i + 1))
+                    order_item.setFlags(order_item.flags() & ~Qt.ItemIsEditable)
+                    self.store_visits_table.setItem(i, 0, order_item)
+                    self.store_visits_table.setItem(i, 1, QTableWidgetItem(v.get('store_code','')))
+                    # store_name はDBのstore_visit_detailsに無いのでマスタから補完
+                    code = v.get('store_code','')
+                    store_name = code_to_name.get(code, '')
+                    if not store_name and code:
+                        try:
+                            s = self.store_db.get_store_by_supplier_code(code)
+                            store_name = (s or {}).get('store_name','')
+                        except Exception:
+                            store_name = ''
+                    self.store_visits_table.setItem(i, 2, QTableWidgetItem(store_name))
+                    self.store_visits_table.setItem(i, 3, QTableWidgetItem((v.get('store_in_time') or '')[:5]))
+                    self.store_visits_table.setItem(i, 4, QTableWidgetItem((v.get('store_out_time') or '')[:5]))
+                    self.store_visits_table.setItem(i, 5, QTableWidgetItem(str(v.get('stay_duration') or '')))
+                    self.store_visits_table.setItem(i, 6, QTableWidgetItem(str(v.get('travel_time_from_prev') or '')))
+                    self.store_visits_table.setItem(i, 7, QTableWidgetItem(str(v.get('store_gross_profit') or '')))
+                    self.store_visits_table.setItem(i, 8, QTableWidgetItem(str(v.get('store_item_count') or '')))
+                    star_widget = StarRatingWidget(self.store_visits_table, rating=int(v.get('store_rating') or 0), star_size=14)
+                    star_widget.rating_changed.connect(lambda rating, r=i: self.on_star_rating_changed(r, rating))
+                    self.store_visits_table.setCellWidget(i, 9, star_widget)
+                    self.store_visits_table.setItem(i, 10, QTableWidgetItem(v.get('store_notes','') or ''))
+            finally:
+                self.store_visits_table.blockSignals(False)
+            
+            self.update_visit_order()
+            getattr(self, 'update_calculation_results', lambda: None)()
+            # Undo基点
+            self.undo_stack.clear(); self.redo_stack.clear(); self.save_table_state()
+            QMessageBox.information(self, "完了", "保存済みデータを読み込みました")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"保存済みデータの読み込みに失敗しました:\n{str(e)}")
+
+    def delete_saved_data(self, route_id: int):
+        """指定IDの保存済みデータを削除"""
+        try:
+            target_id = route_id
+            reply = QMessageBox.question(
+                self,
+                "削除確認",
+                "この保存データを削除しますか？（店舗訪問詳細も削除されます）",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+            ok = self.route_db.delete_route_summary(int(target_id))
+            if ok:
+                # 画面側はクリア
+                if self.current_route_id == target_id:
+                    self.current_route_id = None
+                self.store_visits_table.setRowCount(0)
+                self.undo_stack.clear(); self.redo_stack.clear(); self.save_table_state()
+                QMessageBox.information(self, "完了", "保存データを削除しました")
+            else:
+                QMessageBox.warning(self, "警告", "削除できませんでした")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"保存データの削除に失敗しました:\n{str(e)}")
+
+    def open_saved_history(self):
+        """保存履歴ダイアログを開き、読み込み/削除を実行"""
+        dlg = SavedRoutesDialog(self.route_db, self.store_db, self)
+        res = dlg.exec()
+        if res == QDialog.Accepted:
+            action, route_id = dlg.get_result()
+            if action == 'load' and route_id:
+                self.load_saved_data(route_id)
+            elif action == 'delete' and route_id:
+                self.delete_saved_data(route_id)
     def auto_add_stores(self):
         """選択されたルートの店舗を自動追加（重複チェック付き）"""
         # 変更前の状態を保存
@@ -1115,7 +1264,7 @@ class RouteSummaryWidget(QWidget):
         self.recalc_travel_times()
 
     def recalc_travel_times(self):
-        """移動時間（分）を自動計算して6列目に反映"""
+        """滞在時間と移動時間（分）を自動計算して5/6列目に反映"""
         try:
             row_count = self.store_visits_table.rowCount()
             if row_count == 0:
@@ -1141,6 +1290,17 @@ class RouteSummaryWidget(QWidget):
             def get_text(row: int, col: int) -> str:
                 item = self.store_visits_table.item(row, col)
                 return item.text() if item else ''
+
+            # 各行の滞在時間（店舗OUT - 店舗IN）を算出
+            for r in range(row_count):
+                in_t = parse_hhmm(get_text(r, 3))
+                out_t = parse_hhmm(get_text(r, 4))
+                if in_t and out_t:
+                    mins = in_t.secsTo(out_t) // 60
+                    mins = max(0, int(mins))
+                    self.store_visits_table.setItem(r, 5, QTableWidgetItem(str(mins)))
+                else:
+                    self.store_visits_table.setItem(r, 5, QTableWidgetItem(''))
 
             # 1店舗目: 出発時間 から IN時間
             first_in = parse_hhmm(get_text(0, 3))
@@ -1247,6 +1407,121 @@ class RouteSummaryWidget(QWidget):
         
         getattr(self, 'update_calculation_results', lambda: None)()
 
+    def save_data(self):
+        """データを保存"""
+        try:
+            route_data = self.get_route_data()
+            store_visits = self.get_store_visits_data()
+            
+            if not route_data.get('route_code'):
+                QMessageBox.warning(self, "警告", "ルートコードを入力してください")
+                return
+            
+            self.save_store_order()
+            
+            stats = {}
+            try:
+                if self.calc_service:
+                    stats = self.calc_service.calculate_route_statistics(route_data, store_visits) or {}
+            except Exception:
+                stats = {}
+            stats_defaults = {
+                'total_working_hours': 0,
+                'estimated_hourly_rate': 0,
+                'total_gross_profit': 0,
+                'purchase_success_rate': 0,
+                'avg_purchase_price': 0,
+            }
+            stats = {**stats_defaults, **stats}
+            route_data.update(stats)
+            
+            if self.current_route_id:
+                self.route_db.update_route_summary(self.current_route_id, route_data)
+                existing_visits = self.route_db.get_store_visits_by_route(self.current_route_id)
+                for visit in existing_visits:
+                    self.route_db.delete_store_visit(visit['id'])
+            else:
+                self.current_route_id = self.route_db.add_route_summary(route_data)
+            
+            for visit in store_visits:
+                visit['route_summary_id'] = self.current_route_id
+                self.route_db.add_store_visit(visit)
+            
+            QMessageBox.information(self, "完了", "データを保存しました")
+            self.data_saved.emit(self.current_route_id)
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"データ保存中にエラーが発生しました:\n{str(e)}")
+
+    def get_route_data(self) -> Dict[str, Any]:
+        """入力データを取得"""
+        route_date = self.route_date_edit.dateTime().toString('yyyy-MM-dd')
+        dep_text = (self.departure_time_edit.text() or '').strip()
+        ret_text = (self.return_time_edit.text() or '').strip()
+        def to_sec(text: str) -> str:
+            try:
+                parts = text.split(':')
+                if len(parts) != 2:
+                    return ''
+                h = int(parts[0]); m = int(parts[1])
+                if 0 <= h <= 23 and 0 <= m <= 59:
+                    return f"{h:02d}:{m:02d}:00"
+            except Exception:
+                return ''
+            return ''
+        dep_time = to_sec(dep_text) or '00:00:00'
+        ret_time = to_sec(ret_text) or '00:00:00'
+        departure_time = f"{route_date} {dep_time}"
+        return_time = f"{route_date} {ret_time}"
+        return {
+            'route_date': route_date,
+            'route_code': self.get_selected_route_code(),
+            'departure_time': departure_time,
+            'return_time': return_time,
+            'toll_fee_outbound': self.toll_fee_outbound_spin.value(),
+            'toll_fee_return': self.toll_fee_return_spin.value(),
+            'parking_fee': 0,
+            'meal_cost': 0,
+            'other_expenses': 0,
+            'remarks': self.remarks_edit.toPlainText()
+        }
+
+    def get_store_visits_data(self) -> List[Dict[str, Any]]:
+        visits = []
+        for i in range(self.store_visits_table.rowCount()):
+            star_widget = self.store_visits_table.cellWidget(i, 9)
+            rating = star_widget.rating() if star_widget else 0
+            visit = {
+                'visit_order': i + 1,
+                'store_code': self._get_table_item(i, 1),
+                'store_name': self._get_table_item(i, 2),
+                'store_in_time': self._get_table_item(i, 3),
+                'store_out_time': self._get_table_item(i, 4),
+                'stay_duration': self._safe_float(self._get_table_item(i, 5)),
+                'travel_time_from_prev': self._safe_float(self._get_table_item(i, 6)),
+                'store_gross_profit': self._safe_float(self._get_table_item(i, 7)),
+                'store_item_count': self._safe_int(self._get_table_item(i, 8)),
+                'store_rating': rating,
+                'store_notes': self._get_table_item(i, 10)
+            }
+            visits.append(visit)
+        return visits
+
+    def _get_table_item(self, row: int, col: int) -> str:
+        item = self.store_visits_table.item(row, col)
+        return item.text() if item else ''
+
+    def _safe_float(self, value: str) -> Optional[float]:
+        try:
+            return float(value) if value else None
+        except (ValueError, TypeError):
+            return None
+
+    def _safe_int(self, value: str) -> Optional[int]:
+        try:
+            return int(float(value)) if value else None
+        except (ValueError, TypeError):
+            return None
+
 class StoreSelectDialog(QDialog):
     """店舗マスタ一覧を表示して選択させるダイアログ"""
     def __init__(self, store_db: StoreDatabase, parent=None):
@@ -1313,170 +1588,120 @@ class StoreSelectDialog(QDialog):
             route = self.table.item(r, 0).text() if self.table.item(r, 0) else ''
             rows.append({'supplier_code': code, 'store_name': name, 'affiliated_route_name': route})
         return rows
-    
-    def get_route_data(self) -> Dict[str, Any]:
-        """入力データを取得"""
-        route_date = self.route_date_edit.dateTime().toString('yyyy-MM-dd')
-        # 時刻は編集欄から取得し、ルート日付と結合
-        dep_text = (self.departure_time_edit.text() or '').strip()
-        ret_text = (self.return_time_edit.text() or '').strip()
-        # 簡易バリデーション（不正時は空として扱う）
-        def to_sec(text: str) -> str:
-            try:
-                parts = text.split(':')
-                if len(parts) != 2:
-                    return ''
-                h = int(parts[0]); m = int(parts[1])
-                if 0 <= h <= 23 and 0 <= m <= 59:
-                    return f"{h:02d}:{m:02d}:00"
-            except Exception:
-                return ''
-            return ''
-        dep_time = to_sec(dep_text) or '00:00:00'
-        ret_time = to_sec(ret_text) or '00:00:00'
-        departure_time = f"{route_date} {dep_time}"
-        return_time = f"{route_date} {ret_time}"
-        
-        return {
-            'route_date': route_date,
-            'route_code': self.get_selected_route_code(),
-            'departure_time': departure_time,
-            'return_time': return_time,
-            'toll_fee_outbound': self.toll_fee_outbound_spin.value(),
-            'toll_fee_return': self.toll_fee_return_spin.value(),
-            'parking_fee': 0,  # 削除済み
-            'meal_cost': 0,  # 削除済み
-            'other_expenses': 0,  # 削除済み
-            'remarks': self.remarks_edit.toPlainText()
-        }
-    
-    def get_store_visits_data(self) -> List[Dict[str, Any]]:
-        """店舗訪問詳細データを取得"""
-        visits = []
-        
-        for i in range(self.store_visits_table.rowCount()):
-            # 星評価を取得
-            star_widget = self.store_visits_table.cellWidget(i, 9)
-            rating = star_widget.rating() if star_widget else 0
-            
-            visit = {
-                'visit_order': i + 1,
-                'store_code': self._get_table_item(i, 1),
-                'store_name': self._get_table_item(i, 2),
-                'store_in_time': self._get_table_item(i, 3),
-                'store_out_time': self._get_table_item(i, 4),
-                'stay_duration': self._safe_float(self._get_table_item(i, 5)),  # 店舗滞在時間
-                'travel_time_from_prev': self._safe_float(self._get_table_item(i, 6)),
-                'store_gross_profit': self._safe_float(self._get_table_item(i, 7)),
-                'store_item_count': self._safe_int(self._get_table_item(i, 8)),
-                'store_rating': rating,  # 星評価
-                'store_notes': self._get_table_item(i, 10)  # 店舗メモ
-            }
-            visits.append(visit)
-        
-        return visits
-    
-    def _get_table_item(self, row: int, col: int) -> str:
-        """テーブルのアイテムを取得"""
-        item = self.store_visits_table.item(row, col)
-        return item.text() if item else ''
-    
-    def _safe_float(self, value: str) -> Optional[float]:
-        """安全にfloatに変換"""
+
+
+class SavedRoutesDialog(QDialog):
+    """保存済みルートの一覧から選択して読込/削除するダイアログ"""
+    def __init__(self, route_db: RouteDatabase, store_db: StoreDatabase, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("保存履歴")
+        self.resize(720, 420)
+        self.route_db = route_db
+        self.store_db = store_db
+        self._result_action = None  # 'load' or 'delete'
+        self._result_id = None
+
+        layout = QVBoxLayout(self)
+
+        # フィルタ行（デフォルトは全件表示。必要時のみチェックして絞り込む）
+        filt = QHBoxLayout()
+        from PySide6.QtWidgets import QDateEdit
+        self.chk_date = QCheckBox("日付")
+        self.date_edit = QDateEdit()
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDateTime(QDateTime.currentDateTime())
+        self.chk_route = QCheckBox("ルート名")
+        self.route_combo = QComboBox()
+        self.route_combo.setEditable(True)
         try:
-            return float(value) if value else None
-        except (ValueError, TypeError):
+            names = self.store_db.get_route_names()
+            for n in names:
+                self.route_combo.addItem(n)
+        except Exception:
+            pass
+        search_btn = QPushButton("検索")
+        search_btn.clicked.connect(self._reload)
+        filt.addWidget(self.chk_date)
+        filt.addWidget(self.date_edit)
+        filt.addWidget(self.chk_route)
+        filt.addWidget(self.route_combo)
+        filt.addWidget(search_btn)
+        layout.addLayout(filt)
+
+        # 一覧テーブル
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["ID", "日付", "ルートコード"]) 
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        layout.addWidget(self.table)
+
+        # ボタン
+        btns = QDialogButtonBox()
+        self.load_btn = QPushButton("読み込み")
+        self.del_btn = QPushButton("削除")
+        self.cancel_btn = QPushButton("閉じる")
+        btns.addButton(self.load_btn, QDialogButtonBox.AcceptRole)
+        btns.addButton(self.del_btn, QDialogButtonBox.ActionRole)
+        btns.addButton(self.cancel_btn, QDialogButtonBox.RejectRole)
+        layout.addWidget(btns)
+
+        self.load_btn.clicked.connect(self._on_load)
+        self.del_btn.clicked.connect(self._on_delete)
+        self.cancel_btn.clicked.connect(self.reject)
+
+        self._reload()
+
+    def _reload(self):
+        try:
+            route_name = self.route_combo.currentText().strip()
+            route_code = None
+            if self.chk_route.isChecked() and route_name:
+                route_code = self.store_db.get_route_code_by_name(route_name)
+        except Exception:
+            route_code = None
+        if self.chk_date.isChecked():
+            day = self.date_edit.date().toString('yyyy-MM-dd')
+            start = day; end = day
+        else:
+            start = None; end = None
+        rows = self.route_db.list_route_summaries(start_date=start, end_date=end, route_code=route_code)
+        self.table.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            self.table.setItem(i, 0, QTableWidgetItem(str(r.get('id',''))))
+            self.table.setItem(i, 1, QTableWidgetItem(str(r.get('route_date',''))))
+            self.table.setItem(i, 2, QTableWidgetItem(str(r.get('route_code',''))))
+
+    def _selected_id(self) -> Optional[int]:
+        sel = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        if not sel:
             return None
-    
-    def _safe_int(self, value: str) -> Optional[int]:
-        """安全にintに変換"""
+        r = sel[0].row()
+        item = self.table.item(r, 0)
         try:
-            return int(float(value)) if value else None
-        except (ValueError, TypeError):
+            return int(item.text()) if item else None
+        except Exception:
             return None
-    
-    def update_calculation_results(self):
-        """計算結果を更新"""
-        try:
-            route_data = self.get_route_data()
-            store_visits = self.get_store_visits_data()
-            
-            # 計算実行
-            stats = self.calc_service.calculate_route_statistics(route_data, store_visits)
-            
-            # 結果表示
-            result_text = f"""
-計算結果:
-- 実働時間: {stats.get('total_working_hours', 0):.2f} 時間
-- 総粗利: {stats.get('total_gross_profit', 0):,.0f} 円
-- 総仕入れ点数: {stats.get('total_item_count', 0)} 点
-- 想定時給: {stats.get('estimated_hourly_rate', 0):,.0f} 円/時間
-- 仕入れ成功率: {stats.get('purchase_success_rate', 0) * 100:.1f}%
-- 平均仕入れ単価: {stats.get('avg_purchase_price', 0):,.0f} 円/点
-            """.strip()
-            
-            self.calculation_label.setText(result_text)
-            
-        except Exception as e:
-            self.calculation_label.setText(f"計算エラー: {str(e)}")
-    
-    def save_data(self):
-        """データを保存"""
-        try:
-            route_data = self.get_route_data()
-            store_visits = self.get_store_visits_data()
-            
-            # バリデーション
-            if not route_data.get('route_code'):
-                QMessageBox.warning(self, "警告", "ルートコードを入力してください")
-                return
-            
-            # 訪問順序を保存
-            self.save_store_order()
-            
-            # 計算実行
-            if not self.calc_service:
-                QMessageBox.warning(self, "エラー", "計算サービスが利用できません")
-                return
-            
-            stats = self.calc_service.calculate_route_statistics(route_data, store_visits)
-            
-            # 計算結果をroute_dataに追加
-            route_data.update(stats)
-            
-            # データベースに保存
-            if self.current_route_id:
-                # 更新
-                self.route_db.update_route_summary(self.current_route_id, route_data)
-                # 既存の店舗訪問詳細を削除
-                existing_visits = self.route_db.get_store_visits_by_route(self.current_route_id)
-                for visit in existing_visits:
-                    self.route_db.delete_store_visit(visit['id'])
-            else:
-                # 新規作成
-                self.current_route_id = self.route_db.add_route_summary(route_data)
-            
-            # 店舗訪問詳細を保存
-            for visit in store_visits:
-                visit['route_summary_id'] = self.current_route_id
-                self.route_db.add_store_visit(visit)
-            
-            QMessageBox.information(self, "完了", "データを保存しました")
-            self.data_saved.emit(self.current_route_id)
-            
-        except Exception as e:
-            QMessageBox.critical(self, "エラー", f"データ保存中にエラーが発生しました:\n{str(e)}")
-    
-    def new_route(self):
-        """新規ルート作成"""
-        self.current_route_id = None
-        self.route_code_combo.setCurrentText("")
-        self.route_date_edit.setDateTime(QDateTime.currentDateTime())
-        self.departure_time_edit.setText(QTime.currentTime().toString('HH:mm'))
-        self.return_time_edit.setText(QTime.currentTime().toString('HH:mm'))
-        self.toll_fee_outbound_spin.setValue(0)
-        self.toll_fee_return_spin.setValue(0)
-        self.remarks_edit.clear()
-        self.store_visits_table.setRowCount(0)
-        self.calculation_label.setText("計算結果: データ未入力")
+
+    def _on_load(self):
+        rid = self._selected_id()
+        if rid is None:
+            QMessageBox.information(self, "情報", "読み込む行を選択してください")
+            return
+        self._result_action = 'load'
+        self._result_id = rid
+        self.accept()
+
+    def _on_delete(self):
+        rid = self._selected_id()
+        if rid is None:
+            QMessageBox.information(self, "情報", "削除する行を選択してください")
+            return
+        self._result_action = 'delete'
+        self._result_id = rid
+        self.accept()
+
+    def get_result(self):
+        return self._result_action, self._result_id
 
