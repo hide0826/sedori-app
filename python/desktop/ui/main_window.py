@@ -133,9 +133,9 @@ class MainWindow(QMainWindow):
         self.store_master_widget = StoreMasterWidget()
         self.tab_widget.addTab(self.store_master_widget, "店舗マスタ")
         
-        # ルートサマリータブ
-        self.route_summary_widget = RouteSummaryWidget()
-        self.tab_widget.addTab(self.route_summary_widget, "ルートサマリー")
+        # ルートサマリータブ（仕入管理ウィジェットへの参照を渡す）
+        self.route_summary_widget = RouteSummaryWidget(self.api_client, inventory_widget=self.inventory_widget)
+        self.tab_widget.addTab(self.route_summary_widget, "ルート登録")
         
         # 分析タブ
         self.analysis_widget = AnalysisWidget()

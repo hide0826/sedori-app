@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox,
     QMessageBox, QFileDialog, QDateTimeEdit, QLineEdit,
     QTextEdit, QDoubleSpinBox, QSpinBox, QCheckBox, QComboBox,
-    QDialog, QFormLayout, QDialogButtonBox, QTabWidget, QStyledItemDelegate, QStyle
+    QDialog, QFormLayout, QDialogButtonBox, QTabWidget, QStyledItemDelegate, QStyle, QInputDialog
 )
 from ui.star_rating_widget import StarRatingWidget
 from PySide6.QtCore import Qt, QDateTime, QTime, Signal
@@ -28,6 +28,7 @@ import sys
 import os
 from datetime import time as dt_time
 import openpyxl
+import logging
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -61,12 +62,14 @@ class RouteSummaryWidget(QWidget):
     
     data_saved = Signal(int)  # データ保存完了
     
-    def __init__(self):
+    def __init__(self, api_client=None, inventory_widget=None):
         super().__init__()
         self.route_db = RouteDatabase()
         self.store_db = StoreDatabase()
         self.matching_service = RouteMatchingService() if RouteMatchingService else None
         self.calc_service = CalculationService() if CalculationService else None
+        self.api_client = api_client
+        self.inventory_widget = inventory_widget
         
         self.current_route_id = None
         self.route_data = {}
@@ -339,6 +342,12 @@ class RouteSummaryWidget(QWidget):
         clear_all_btn.clicked.connect(self.clear_all_rows)
         clear_all_btn.setStyleSheet("background-color: #dc3545; color: white;")
         button_layout.addWidget(clear_all_btn)
+        
+        # 照合再計算ボタン
+        recalc_btn = QPushButton("照合再計算")
+        recalc_btn.clicked.connect(self.recalculate_matching)
+        recalc_btn.setStyleSheet("background-color: #ff9800; color: white;")
+        button_layout.addWidget(recalc_btn)
         
         button_layout.addStretch()
         
@@ -1056,8 +1065,140 @@ class RouteSummaryWidget(QWidget):
             QMessageBox.critical(self, "エラー", f"テンプレート読み込み中にエラーが発生しました:\n{str(e)}")
     
     def run_matching(self):
-        """照合処理実行"""
-        QMessageBox.information(self, "照合処理", "照合処理機能は仕入リストと連携する必要があります")
+        """照合処理実行（改良版：仕入管理データを参照）"""
+        try:
+            # 現在のルートIDが必要
+            if not self.current_route_id:
+                QMessageBox.warning(self, "警告", "先にルートを保存してください")
+                return
+            
+            # 仕入管理データの確認
+            if not self.inventory_widget:
+                QMessageBox.warning(self, "警告", "仕入管理ウィジェットへの参照がありません")
+                return
+            
+            inventory_data = self.inventory_widget.inventory_data
+            if inventory_data is None or len(inventory_data) == 0:
+                # データがない場合、CSVファイル選択にフォールバック
+                reply = QMessageBox.question(
+                    self,
+                    "データなし",
+                    "仕入管理にデータがありません。\nCSVファイルを選択して処理しますか？",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply == QMessageBox.Yes:
+                    # 既存のCSVファイル選択処理を呼び出し
+                    self.execute_matching_from_csv()
+                return
+            
+            # 時間許容誤差の設定
+            tolerance, ok = QInputDialog.getInt(
+                self,
+                "時間許容誤差",
+                "時間許容誤差（分）:",
+                30, 0, 120, 1
+            )
+            if not ok:
+                return
+            
+            # データをJSON形式に変換（NaN値を事前に処理）
+            # NaN値を空文字列に置換してからJSON化
+            clean_data = inventory_data.fillna('')
+            purchase_data = clean_data.to_dict(orient="records")
+            
+            # API呼び出し
+            QMessageBox.information(self, "処理中", "照合処理を実行しています...")
+            result = self.api_client.inventory_match_stores_from_data(
+                purchase_data=purchase_data,
+                route_summary_id=self.current_route_id,
+                time_tolerance_minutes=tolerance
+            )
+            
+            # 結果を仕入管理ウィジェットに反映
+            if result.get('status') == 'success':
+                # 照合後のデータで仕入管理データを更新
+                result_data = result.get('data', [])
+                if result_data:
+                    import pandas as pd
+                    updated_df = pd.DataFrame(result_data)
+                    
+                    # 仕入管理ウィジェットのデータを更新
+                    self.inventory_widget.inventory_data = updated_df
+                    self.inventory_widget.filtered_data = updated_df.copy()
+                    self.inventory_widget.update_table()
+                    self.inventory_widget.update_data_count()
+                
+                # 店舗コード別の粗利を集計してルートサマリーを更新
+                self._update_route_gross_profit_from_inventory(result_data)
+                
+                # 結果表示
+                stats = result.get('stats', {})
+                matched_rows = stats.get('matched_rows', 0)
+                total_rows = stats.get('total_rows', 0)
+                
+                msg = f"照合処理完了\n\n総行数: {total_rows}\nマッチした行数: {matched_rows}"
+                msg += "\n\n仕入管理タブのデータが更新され、\nルートサマリーの想定粗利も自動計算されました。"
+                QMessageBox.information(self, "照合処理完了", msg)
+            else:
+                QMessageBox.warning(self, "エラー", "照合処理に失敗しました")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"照合処理中にエラーが発生しました:\n{str(e)}")
+    
+    def execute_matching_from_csv(self):
+        """照合処理実行（CSVファイル版）"""
+        try:
+            # 現在のルートIDが必要
+            if not self.current_route_id:
+                QMessageBox.warning(self, "警告", "先にルートを保存してください")
+                return
+            
+            # APIクライアント確認
+            if not self.api_client:
+                from api.client import APIClient
+                self.api_client = APIClient()
+            
+            # CSVファイル選択
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "仕入CSVファイルを選択",
+                "",
+                "CSVファイル (*.csv);;すべてのファイル (*)"
+            )
+            if not file_path:
+                return
+            
+            # 時間許容誤差の設定（デフォルト30分）
+            tolerance, ok = QInputDialog.getInt(
+                self,
+                "時間許容誤差",
+                "時間許容誤差（分）:",
+                30, 0, 120, 1
+            )
+            if not ok:
+                return
+            
+            # API呼び出し
+            QMessageBox.information(self, "処理中", "照合処理を実行しています...")
+            result = self.api_client.inventory_match_stores(
+                file_path=file_path,
+                route_summary_id=self.current_route_id,
+                time_tolerance_minutes=tolerance
+            )
+            
+            # 結果表示
+            stats = result.get('stats', {})
+            matched_rows = stats.get('matched_rows', 0)
+            total_rows = stats.get('total_rows', 0)
+            
+            msg = f"照合処理完了\n\n総行数: {total_rows}\nマッチした行数: {matched_rows}"
+            if matched_rows > 0:
+                msg += f"\n\nプレビュー（先頭10件）には店舗コードが自動付与されています。"
+            
+            QMessageBox.information(self, "照合処理完了", msg)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"照合処理中にエラーが発生しました:\n{str(e)}")
     
     def load_saved_data(self, route_id: int):
         """指定IDの保存データを読み込む"""
@@ -1069,7 +1210,38 @@ class RouteSummaryWidget(QWidget):
             self.current_route_id = route_id
             # 上部フィールド
             self.route_date_edit.setDateTime(QDateTime.fromString(row.get('route_date',''), 'yyyy-MM-dd'))
-            # ルート名はコンボの現在値を維持（コード=表示名として扱う）
+            
+            # ルートコードを読み込んだルートに更新（日本語名で表示）
+            route_code = row.get('route_code', '')
+            if route_code:
+                # ルートコードから日本語名を取得
+                route_name = self.store_db.get_route_name_by_code(route_code)
+                display_value = route_name if route_name else route_code
+                
+                # コンボボックスのアイテムを更新（最新のルート一覧を反映）
+                self.update_route_codes()
+                
+                # コンボボックスに該当するアイテムがあるかチェック
+                idx = self.route_code_combo.findText(display_value)
+                if idx >= 0:
+                    # アイテムが見つかった場合は選択
+                    self.route_code_combo.setCurrentIndex(idx)
+                else:
+                    # アイテムが見つからない場合は、まず追加してから選択
+                    # または、直接テキストを設定（編集可能なので）
+                    if display_value and display_value not in [self.route_code_combo.itemText(i) for i in range(self.route_code_combo.count())]:
+                        self.route_code_combo.addItem(display_value)
+                        idx = self.route_code_combo.findText(display_value)
+                        if idx >= 0:
+                            self.route_code_combo.setCurrentIndex(idx)
+                    else:
+                        self.route_code_combo.setCurrentText(display_value)
+                
+                print(f"保存データ読み込み: route_code={route_code}, route_name={route_name}, display_value={display_value}")
+            else:
+                # ルートコードが空の場合は、コンボボックスを更新してクリア
+                self.update_route_codes()
+                self.route_code_combo.setCurrentText('')
             dep = row.get('departure_time') or ''
             ret = row.get('return_time') or ''
             try:
@@ -1119,12 +1291,33 @@ class RouteSummaryWidget(QWidget):
                         except Exception:
                             store_name = ''
                     self.store_visits_table.setItem(i, 2, QTableWidgetItem(store_name))
-                    self.store_visits_table.setItem(i, 3, QTableWidgetItem((v.get('store_in_time') or '')[:5]))
-                    self.store_visits_table.setItem(i, 4, QTableWidgetItem((v.get('store_out_time') or '')[:5]))
+                    # 店舗IN/OUT時間は "2025-10-26 17:22:00" 形式から HH:MM を抽出
+                    store_in_time = v.get('store_in_time') or ''
+                    store_out_time = v.get('store_out_time') or ''
+                    try:
+                        store_in_display = store_in_time.split(' ')[1][:5] if ' ' in store_in_time else store_in_time[:5]
+                    except Exception:
+                        store_in_display = ''
+                    try:
+                        store_out_display = store_out_time.split(' ')[1][:5] if ' ' in store_out_time else store_out_time[:5]
+                    except Exception:
+                        store_out_display = ''
+                    self.store_visits_table.setItem(i, 3, QTableWidgetItem(store_in_display))
+                    self.store_visits_table.setItem(i, 4, QTableWidgetItem(store_out_display))
                     self.store_visits_table.setItem(i, 5, QTableWidgetItem(str(v.get('stay_duration') or '')))
                     self.store_visits_table.setItem(i, 6, QTableWidgetItem(str(v.get('travel_time_from_prev') or '')))
-                    self.store_visits_table.setItem(i, 7, QTableWidgetItem(str(v.get('store_gross_profit') or '')))
-                    self.store_visits_table.setItem(i, 8, QTableWidgetItem(str(v.get('store_item_count') or '')))
+                    # 想定粗利は整数で表示（None/空の場合は0）
+                    gross_profit = v.get('store_gross_profit')
+                    if gross_profit is None or gross_profit == '':
+                        self.store_visits_table.setItem(i, 7, QTableWidgetItem('0'))
+                    else:
+                        self.store_visits_table.setItem(i, 7, QTableWidgetItem(str(int(float(gross_profit)))))
+                    # 仕入れ点数は整数で表示（None/空の場合は0）
+                    item_count = v.get('store_item_count')
+                    if item_count is None or item_count == '':
+                        self.store_visits_table.setItem(i, 8, QTableWidgetItem('0'))
+                    else:
+                        self.store_visits_table.setItem(i, 8, QTableWidgetItem(str(int(item_count))))
                     star_widget = StarRatingWidget(self.store_visits_table, rating=int(v.get('store_rating') or 0), star_size=14)
                     star_widget.rating_changed.connect(lambda rating, r=i: self.on_star_rating_changed(r, rating))
                     self.store_visits_table.setCellWidget(i, 9, star_widget)
@@ -1487,15 +1680,26 @@ class RouteSummaryWidget(QWidget):
 
     def get_store_visits_data(self) -> List[Dict[str, Any]]:
         visits = []
+        route_date = self.route_date_edit.dateTime().toString('yyyy-MM-dd')
+        
         for i in range(self.store_visits_table.rowCount()):
             star_widget = self.store_visits_table.cellWidget(i, 9)
             rating = star_widget.rating() if star_widget else 0
+            
+            # HH:MM形式の時間を取得してルート日付と結合
+            in_time_str = self._get_table_item(i, 3)
+            out_time_str = self._get_table_item(i, 4)
+            
+            # HH:MMを yyyy-MM-dd HH:MM:SS に変換
+            store_in_time = self._combine_datetime(route_date, in_time_str)
+            store_out_time = self._combine_datetime(route_date, out_time_str)
+            
             visit = {
                 'visit_order': i + 1,
                 'store_code': self._get_table_item(i, 1),
                 'store_name': self._get_table_item(i, 2),
-                'store_in_time': self._get_table_item(i, 3),
-                'store_out_time': self._get_table_item(i, 4),
+                'store_in_time': store_in_time,
+                'store_out_time': store_out_time,
                 'stay_duration': self._safe_float(self._get_table_item(i, 5)),
                 'travel_time_from_prev': self._safe_float(self._get_table_item(i, 6)),
                 'store_gross_profit': self._safe_float(self._get_table_item(i, 7)),
@@ -1505,6 +1709,28 @@ class RouteSummaryWidget(QWidget):
             }
             visits.append(visit)
         return visits
+    
+    def _combine_datetime(self, date_str: str, time_str: str) -> str:
+        """ルート日付と時間（HH:MM）を結合してDATETIME形式にする"""
+        if not time_str or not time_str.strip():
+            return ''
+        
+        try:
+            # HH:MM形式をチェック
+            parts = time_str.strip().split(':')
+            if len(parts) != 2:
+                return ''
+            
+            h = int(parts[0])
+            m = int(parts[1])
+            
+            if not (0 <= h <= 23 and 0 <= m <= 59):
+                return ''
+            
+            # yyyy-MM-dd HH:MM:SS形式で返す
+            return f"{date_str} {h:02d}:{m:02d}:00"
+        except (ValueError, TypeError):
+            return ''
 
     def _get_table_item(self, row: int, col: int) -> str:
         item = self.store_visits_table.item(row, col)
@@ -1521,6 +1747,193 @@ class RouteSummaryWidget(QWidget):
             return int(float(value)) if value else None
         except (ValueError, TypeError):
             return None
+    
+    def recalculate_matching(self):
+        """照合再計算処理: 仕入管理タブのデータから想定粗利・仕入れ点数を再計算"""
+        try:
+            if not self.current_route_id:
+                QMessageBox.warning(self, "警告", "先にルートを保存してください")
+                return
+            
+            # 仕入管理データの確認
+            if not self.inventory_widget:
+                QMessageBox.warning(self, "警告", "仕入管理ウィジェットへの参照がありません")
+                return
+            
+            # 🔥 重要: テーブルから最新のデータを再取得（手入力データを含む）
+            # テーブルの内容をinventory_dataに同期
+            if hasattr(self.inventory_widget, 'sync_inventory_data_from_table'):
+                sync_success = self.inventory_widget.sync_inventory_data_from_table()
+                if not sync_success:
+                    QMessageBox.warning(self, "警告", "テーブルデータの取得に失敗しました")
+                    return
+            
+            # テーブルから直接データを取得（より確実な方法）
+            if hasattr(self.inventory_widget, 'get_table_data'):
+                table_data = self.inventory_widget.get_table_data()
+                if table_data is not None and len(table_data) > 0:
+                    inventory_data = table_data
+                    print(f"\n=== 照合再計算: テーブルからデータ取得 ===")
+                    print(f"取得件数: {len(inventory_data)}")
+                    # デバッグ: K1-010の件数を確認
+                    k1_010_count = 0
+                    if '仕入先' in inventory_data.columns:
+                        k1_010_count = len(inventory_data[inventory_data['仕入先'].astype(str).str.strip().str.replace('(', '').str.replace(')', '') == 'K1-010'])
+                    print(f"K1-010の件数（テーブルから取得）: {k1_010_count}")
+                    # inventory_dataも更新しておく（今後の処理で使用される可能性があるため）
+                    self.inventory_widget.inventory_data = table_data.copy()
+                    self.inventory_widget.filtered_data = table_data.copy()
+                else:
+                    inventory_data = self.inventory_widget.inventory_data
+                    print(f"\n=== 照合再計算: テーブルデータが空のため、既存のinventory_dataを使用 ===")
+            else:
+                inventory_data = self.inventory_widget.inventory_data
+                print(f"\n=== 照合再計算: get_table_dataメソッドがないため、既存のinventory_dataを使用 ===")
+            
+            if inventory_data is None or len(inventory_data) == 0:
+                QMessageBox.warning(self, "警告", "仕入管理にデータがありません")
+                return
+            
+            # 確認ダイアログ
+            reply = QMessageBox.question(
+                self,
+                "照合再計算",
+                "想定粗利・仕入れ点数を再計算しますか？\n\n他の項目は変更されません。",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+            
+            # データをJSON形式に変換（NaN値を事前に処理）
+            clean_data = inventory_data.fillna('')
+            purchase_data = clean_data.to_dict(orient="records")
+            
+            # 粗利再計算
+            self._update_route_gross_profit_from_inventory(purchase_data)
+            
+            QMessageBox.information(self, "完了", "照合再計算が完了しました")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"照合再計算中にエラーが発生しました:\n{str(e)}")
+    
+    def _update_route_gross_profit_from_inventory(self, inventory_data: List[Dict[str, Any]]):
+        """
+        仕入管理データから店舗コード別の粗利を集計してルートサマリーを更新
+        
+        計算方法:
+        - 想定粗利: 各商品の「仕入れ個数 × 見込み利益」を店舗別に合計
+        - 仕入れ点数: 店舗毎の「仕入れ個数」の総数（SUM）
+        """
+        try:
+            if not self.current_route_id:
+                return
+            
+            # 店舗コード別の粗利と仕入れ個数を集計
+            store_profits = {}  # 想定粗利の合計（仕入れ個数 × 見込み利益）
+            store_item_counts = {}  # 仕入れ個数の総数
+            print(f"\n照合再計算開始: inventory_data件数={len(inventory_data)}")
+            # デバッグ: K1-010のデータを全て確認
+            k1_010_items = []
+            for idx, item in enumerate(inventory_data):
+                store_code_raw = item.get('仕入先') or item.get('supplier')
+                if store_code_raw:
+                    store_code_cleaned = store_code_raw.strip().strip('()') if isinstance(store_code_raw, str) else str(store_code_raw).strip().strip('()')
+                    if store_code_cleaned == 'K1-010':
+                        k1_010_items.append((
+                            idx, 
+                            item.get('商品名', 'N/A')[:30], 
+                            item.get('仕入れ個数'), 
+                            item.get('見込み利益')
+                        ))
+            
+            if k1_010_items:
+                print(f"  K1-010のデータ一覧 ({len(k1_010_items)}件):")
+                for idx, name, count, profit in k1_010_items:
+                    print(f"    行{idx}: {name}, 仕入れ個数={count}, 見込み利益={profit}")
+            
+            for idx, item in enumerate(inventory_data):
+                store_code = item.get('仕入先') or item.get('supplier')
+                if not store_code:
+                    continue
+                
+                # 括弧を取り除いて正規化（例: "(K1-010)" → "K1-010"）
+                if isinstance(store_code, str):
+                    store_code = store_code.strip().strip('()')
+                
+                # 仕入れ個数と見込み利益を取得
+                item_count = self._safe_float(item.get('仕入れ個数') or item.get('purchase_count') or item.get('quantity'))
+                expected_profit = self._safe_float(item.get('見込み利益') or item.get('expected_profit') or item.get('profit'))
+                
+                # デバッグ: 値がNoneのデータを確認
+                if store_code == 'K1-010':
+                    if item_count is None or expected_profit is None:
+                        print(f"  K1-010で値None検出: 仕入れ個数={item.get('仕入れ個数')}, 見込み利益={item.get('見込み利益')}")
+                
+                # 初期化
+                if store_code not in store_profits:
+                    store_profits[store_code] = 0
+                if store_code not in store_item_counts:
+                    store_item_counts[store_code] = 0
+                
+                # 仕入れ個数の総数を計算（店舗毎の合計）
+                if item_count is not None and item_count >= 0:
+                    store_item_counts[store_code] += int(item_count)
+                
+                # 想定粗利の計算（仕入れ個数 × 見込み利益）
+                if item_count is not None and expected_profit is not None:
+                    # 仕入れ個数が0以上の場合は計算に含める
+                    if item_count >= 0:
+                        profit_per_store = item_count * expected_profit
+                        store_profits[store_code] += profit_per_store
+                        # デバッグ: K1-010を含むデータを出力
+                        if store_code == 'K1-010':
+                            print(f"  K1-010処理: 仕入れ個数={item_count}, 見込み利益={expected_profit}, 粗利={profit_per_store}")
+            
+            # デバッグ: 集計結果を出力
+            print(f"\n=== 照合再計算: 店舗別粗利集計結果 ===")
+            for code in store_profits.keys():
+                profit = store_profits.get(code, 0)
+                item_count = store_item_counts.get(code, 0)
+                print(f"  {code}: 粗利={profit}円, 仕入れ個数={item_count}")
+            
+            # ルートサマリーの店舗訪問詳細を取得
+            visits = self.route_db.get_store_visits_by_route(self.current_route_id)
+            
+            # 各店舗訪問に粗利を設定
+            for visit in visits:
+                store_code = visit.get('store_code')
+                if store_code in store_profits:
+                    # 整数に変換（小数点なし）
+                    visit['store_gross_profit'] = int(store_profits[store_code])
+                    # 仕入れ点数は店舗毎の仕入れ個数の総数
+                    visit['store_item_count'] = store_item_counts.get(store_code, 0)
+                    # 粗利が0より大きい場合は仕入れ成功とみなす
+                    visit['purchase_success'] = (store_profits[store_code] > 0)
+                    print(f"  → {store_code} を更新: 粗利={visit['store_gross_profit']}, 仕入れ個数={visit['store_item_count']}")
+                    logging.info(f"照合再計算: {store_code} を更新 - 粗利: {visit['store_gross_profit']}, 仕入れ個数: {visit['store_item_count']}")
+                else:
+                    # マッチしない店舗は0に設定
+                    visit['store_gross_profit'] = 0
+                    visit['store_item_count'] = 0
+                    visit['purchase_success'] = False
+                    print(f"  → {store_code} はマッチなし")
+                    logging.info(f"照合再計算: {store_code} はマッチなし")
+                
+                # 店舗訪問詳細を更新
+                result = self.route_db.update_store_visit(visit['id'], visit)
+                if not result:
+                    print(f"  ⚠️ {store_code} のDB更新に失敗")
+                    logging.warning(f"照合再計算: {store_code} のDB更新に失敗")
+            
+            # テーブルを更新
+            if self.current_route_id:
+                # デバッグ: 更新前のDB状態を確認
+                print(f"\n照合再計算完了: 更新した店舗数={len([v for v in visits if v.get('store_code') in store_profits])}")
+                self.load_saved_data(self.current_route_id)
+            
+        except Exception as e:
+            # エラーはログに記録するが、ユーザーには通知しない（主要処理は成功しているため）
+            logging.error(f"ルート粗利更新エラー: {str(e)}")
 
 class StoreSelectDialog(QDialog):
     """店舗マスタ一覧を表示して選択させるダイアログ"""

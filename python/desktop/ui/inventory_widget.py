@@ -266,8 +266,8 @@ class InventoryWidget(QWidget):
         
     def import_csv(self):
         """CSVファイルの取込"""
-        # デフォルトディレクトリを設定
-        default_dir = r"D:\HIRIO\docs\参考データ"
+        # デフォルトディレクトリを設定（デバッグ用：暫定的に変更）
+        default_dir = r"D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳\20251026鎌倉ルート"
         
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -795,6 +795,86 @@ class InventoryWidget(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "エラー", f"保存に失敗しました:\n{str(e)}")
                 
+    def get_table_data(self) -> pd.DataFrame:
+        """テーブルから現在のデータを取得してDataFrameに変換"""
+        try:
+            row_count = self.data_table.rowCount()
+            if row_count == 0:
+                return pd.DataFrame()
+            
+            # テーブルのデータをリストに収集
+            data_rows = []
+            for i in range(row_count):
+                row_data = {}
+                for j, column in enumerate(self.column_headers):
+                    item = self.data_table.item(i, j)
+                    value = item.text() if item else ""
+                    
+                    # 数値列の特別処理（カンマ区切りを除去）
+                    if column in ["仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "仕入れ個数"]:
+                        try:
+                            # カンマを除去して数値に変換
+                            value_str = str(value).replace(",", "").strip()
+                            if value_str == "" or value_str == "未実装" or value_str == "nan" or pd.isna(value):
+                                row_data[column] = None
+                            else:
+                                # 数値に変換を試みる
+                                if "." in value_str:
+                                    row_data[column] = float(value_str)
+                                else:
+                                    row_data[column] = int(value_str)
+                        except (ValueError, TypeError) as e:
+                            # 変換に失敗した場合は元の値をそのまま使用
+                            row_data[column] = value
+                    # SKU列の特別処理（「未実装」は空文字に変換）
+                    elif column == "SKU":
+                        if value == "未実装":
+                            row_data[column] = ""
+                        else:
+                            row_data[column] = value
+                    else:
+                        row_data[column] = value
+                
+                data_rows.append(row_data)
+            
+            # DataFrameに変換
+            df = pd.DataFrame(data_rows)
+            
+            # 列の順序を維持
+            if len(df) > 0:
+                df = df[self.column_headers]
+            
+            return df
+            
+        except Exception as e:
+            print(f"テーブルデータ取得エラー: {e}")
+            import traceback
+            traceback.print_exc()
+            return pd.DataFrame()
+    
+    def sync_inventory_data_from_table(self):
+        """テーブルの内容をinventory_dataに同期"""
+        try:
+            # テーブルからデータを取得
+            table_df = self.get_table_data()
+            
+            if len(table_df) == 0:
+                return False
+            
+            # フィルタが適用されていない場合は、テーブルのデータをそのまま使用
+            # フィルタが適用されている場合も、テーブルに表示されているデータを
+            # inventory_dataとして使用する（照合再計算では表示されているデータのみを対象とする）
+            self.inventory_data = table_df.copy()
+            self.filtered_data = table_df.copy()
+            
+            return True
+            
+        except Exception as e:
+            print(f"inventory_data同期エラー: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
     def export_listing_csv(self):
         """出品CSV生成"""
         if self.filtered_data is None:
