@@ -21,6 +21,7 @@ from PySide6.QtGui import QColor
 from typing import Tuple
 import sys
 import os
+import webbrowser
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -309,8 +310,12 @@ class StoreMasterWidget(QWidget):
         super().__init__()
         self.db = StoreDatabase()
         self.excel_importer = ExcelImporter()
+        self.current_filtered_route = None  # 現在フィルタリング中のルート名
+        self.current_selected_route = None  # 現在選択中のルート名
+        self.route_data = {}  # ルート名とデータのマッピング
         
         self.setup_ui()
+        self.load_routes()
         self.load_stores()
         self.load_custom_fields()
     
@@ -325,6 +330,9 @@ class StoreMasterWidget(QWidget):
         
         # 中部：検索・フィルタ
         self.setup_search_filter(layout)
+        
+        # ルート一覧テーブル
+        self.setup_route_table(layout)
         
         # 下部：店舗一覧テーブル
         self.setup_store_table(layout)
@@ -401,6 +409,192 @@ class StoreMasterWidget(QWidget):
         
         parent_layout.addWidget(search_group)
     
+    def setup_route_table(self, parent_layout):
+        """ルート選択の設定（一行形式）"""
+        route_group = QGroupBox("ルート選択")
+        route_layout = QHBoxLayout(route_group)
+        
+        # ルート呼び出しボタン
+        self.call_route_btn = QPushButton("ルート呼び出し")
+        self.call_route_btn.clicked.connect(self.on_call_route_clicked)
+        self.call_route_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #007bff;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+                min-width: 120px;
+            }
+            QPushButton:hover {
+                background-color: #0056b3;
+            }
+        """)
+        route_layout.addWidget(self.call_route_btn)
+        
+        # ルート解除ボタン
+        self.clear_filter_btn_route = QPushButton("ルート解除")
+        self.clear_filter_btn_route.clicked.connect(self.clear_route_filter)
+        self.clear_filter_btn_route.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+                min-width: 120px;
+            }
+            QPushButton:hover {
+                background-color: #545b62;
+            }
+        """)
+        self.clear_filter_btn_route.setEnabled(False)  # 初期状態は無効
+        route_layout.addWidget(self.clear_filter_btn_route)
+        
+        # ルート選択プルダウン
+        route_label = QLabel("ルート選択:")
+        route_layout.addWidget(route_label)
+        
+        self.route_combo = QComboBox()
+        self.route_combo.setMinimumWidth(200)
+        route_layout.addWidget(self.route_combo)
+        
+        # ルート選択変更時のシグナル接続
+        self.route_combo.currentTextChanged.connect(self.on_route_selection_changed)
+        
+        # Google Map URL ラベルと入力欄
+        url_label = QLabel("Google Map URL:")
+        route_layout.addWidget(url_label)
+        
+        self.google_map_url_edit = QLineEdit()
+        self.google_map_url_edit.setPlaceholderText("https://...")
+        self.google_map_url_edit.setMinimumWidth(300)
+        route_layout.addWidget(self.google_map_url_edit)
+        
+        # Google Map URL保存ボタン
+        save_url_btn = QPushButton("URL保存")
+        save_url_btn.clicked.connect(self.save_google_map_url)
+        save_url_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                padding: 8px 12px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+        """)
+        route_layout.addWidget(save_url_btn)
+        
+        # ブラウザで開くボタン
+        open_browser_btn = QPushButton("ブラウザで開く")
+        open_browser_btn.clicked.connect(self.open_url_in_browser)
+        open_browser_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                padding: 8px 12px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #138496;
+            }
+        """)
+        route_layout.addWidget(open_browser_btn)
+        
+        route_layout.addStretch()
+        
+        parent_layout.addWidget(route_group)
+    
+    def load_routes(self):
+        """ルート一覧を読み込む"""
+        routes = self.db.list_routes_with_store_count()
+        self.update_route_combo(routes)
+    
+    def update_route_combo(self, routes: list):
+        """ルート選択プルダウンを更新"""
+        self.route_combo.clear()
+        self.route_data = {}  # ルート名とデータのマッピング
+        
+        for route in routes:
+            route_name = route.get('route_name', '')
+            route_code = route.get('route_code', '')
+            store_count = route.get('store_count', 0)
+            display_text = f"{route_name} ({route_code}) - {store_count}店舗"
+            
+            self.route_combo.addItem(display_text)
+            self.route_data[route_name] = route
+        
+        # 現在選択中のルートのGoogle Map URLを表示
+        if self.current_selected_route and self.current_selected_route in self.route_data:
+            url = self.route_data[self.current_selected_route].get('google_map_url', '')
+            self.google_map_url_edit.setText(url)
+    
+    def on_route_selection_changed(self, text: str):
+        """ルート選択変更時の処理"""
+        if self.route_combo.currentIndex() >= 0 and self.route_combo.currentIndex() < len(self.route_data):
+            selected_route = list(self.route_data.keys())[self.route_combo.currentIndex()]
+            route_info = self.route_data.get(selected_route, {})
+            url = route_info.get('google_map_url', '')
+            self.google_map_url_edit.setText(url)
+    
+    def save_google_map_url(self):
+        """Google Map URLを保存"""
+        if self.route_combo.currentIndex() < 0:
+            QMessageBox.warning(self, "警告", "ルートを選択してください")
+            return
+        
+        selected_route = list(self.route_data.keys())[self.route_combo.currentIndex()]
+        google_map_url = self.google_map_url_edit.text().strip()
+        
+        try:
+            self.db.update_route_google_map_url(selected_route, google_map_url)
+            # データも更新
+            if selected_route in self.route_data:
+                self.route_data[selected_route]['google_map_url'] = google_map_url
+            QMessageBox.information(self, "完了", f"ルート '{selected_route}' のGoogle Map URLを保存しました")
+        except Exception as e:
+            QMessageBox.warning(self, "エラー", f"Google Map URLの保存に失敗しました:\n{str(e)}")
+    
+    def open_url_in_browser(self):
+        """ブラウザでURLを開く"""
+        url = self.google_map_url_edit.text().strip()
+        
+        if not url:
+            QMessageBox.warning(self, "警告", "Google Map URLが入力されていません")
+            return
+        
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            QMessageBox.warning(self, "エラー", f"ブラウザで開くのに失敗しました:\n{str(e)}")
+    
+    def on_call_route_clicked(self):
+        """ルート呼び出しボタンクリック時の処理"""
+        if self.route_combo.currentIndex() < 0:
+            QMessageBox.warning(self, "警告", "ルートを選択してください")
+            return
+        
+        # 現在選択されているルート名を取得
+        selected_route = list(self.route_data.keys())[self.route_combo.currentIndex()]
+        self.current_selected_route = selected_route
+        
+        self.call_route(selected_route)
+        
+        # 解除ボタンを有効化
+        self.clear_filter_btn_route.setEnabled(True)
+    
+    def call_route(self, route_name: str):
+        """ルート呼び出し処理"""
+        self.current_filtered_route = route_name
+        self.load_stores()  # フィルタリングされた店舗一覧を表示
+    
+    def clear_route_filter(self):
+        """ルート呼び出し解除処理"""
+        self.current_filtered_route = None
+        self.current_selected_route = None
+        self.load_stores()  # 全店舗一覧を表示
+        self.clear_filter_btn_route.setEnabled(False)  # ルート解除ボタンの無効化
+    
     def setup_store_table(self, parent_layout):
         """店舗一覧テーブルの設定"""
         table_group = QGroupBox("店舗一覧")
@@ -431,6 +625,11 @@ class StoreMasterWidget(QWidget):
     def load_stores(self, search_term: str = ""):
         """店舗一覧を読み込む"""
         stores = self.db.list_stores(search_term)
+        
+        # ルートフィルタが設定されている場合は店舗一覧をフィルタリング
+        if self.current_filtered_route:
+            stores = [store for store in stores if store.get('affiliated_route_name') == self.current_filtered_route]
+        
         self.update_table(stores)
         self.update_statistics()
     

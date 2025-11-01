@@ -69,6 +69,35 @@ class StoreDatabase:
             # カラムが既に存在する場合はスキップ
             pass
         
+        # google_map_urlカラムが存在しない場合は追加（マイグレーション）
+        try:
+            cursor.execute("ALTER TABLE stores ADD COLUMN google_map_url TEXT")
+        except sqlite3.OperationalError:
+            # カラムが既に存在する場合はスキップ
+            pass
+        
+        # routes テーブル作成（ルート情報管理）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS routes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                route_name TEXT UNIQUE NOT NULL,
+                route_code TEXT UNIQUE NOT NULL,
+                google_map_url TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # updated_atを自動更新するトリガー（routes）
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS update_routes_timestamp 
+            AFTER UPDATE ON routes
+            FOR EACH ROW
+            BEGIN
+                UPDATE routes SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            END
+        """)
+        
         # store_custom_fields テーブル作成（カスタムフィールド定義）
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS store_custom_fields (
@@ -359,6 +388,18 @@ class StoreDatabase:
         row = cursor.fetchone()
         return row[0] if row else None
     
+    def get_route_name_by_code(self, route_code: str) -> Optional[str]:
+        """ルートコードからルート名を取得（最初に見つかったものを返す）"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "SELECT affiliated_route_name FROM stores WHERE route_code = ? AND affiliated_route_name IS NOT NULL AND affiliated_route_name != '' LIMIT 1",
+            (route_code,)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+    
     def get_max_supplier_code_for_route(self, route_name: str) -> Optional[str]:
         """指定ルートの最大仕入れ先コードを取得"""
         conn = self._get_connection()
@@ -479,4 +520,93 @@ class StoreDatabase:
         
         rows = cursor.fetchall()
         return [self._row_to_dict(row) for row in rows]
+    
+    # ==================== routes テーブル操作 ====================
+    
+    def list_routes_with_store_count(self) -> List[Dict[str, Any]]:
+        """ルート一覧を店舗数付きで取得"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # ルート名でグループ化して店舗数を集計
+        cursor.execute("""
+            SELECT 
+                s.affiliated_route_name AS route_name,
+                s.route_code AS route_code,
+                COUNT(*) AS store_count
+            FROM stores s
+            WHERE s.affiliated_route_name IS NOT NULL 
+                AND s.affiliated_route_name != ''
+            GROUP BY s.affiliated_route_name, s.route_code
+            ORDER BY s.route_code, s.affiliated_route_name
+        """)
+        
+        rows = cursor.fetchall()
+        routes = []
+        
+        for row in rows:
+            route_name = row[0]
+            route_code = row[1]
+            store_count = row[2]
+            
+            # routes テーブルから Google Map URL を取得
+            cursor.execute("""
+                SELECT google_map_url FROM routes 
+                WHERE route_name = ? OR route_code = ?
+            """, (route_name, route_code))
+            
+            url_row = cursor.fetchone()
+            google_map_url = url_row[0] if url_row else ''
+            
+            routes.append({
+                'route_name': route_name,
+                'route_code': route_code,
+                'store_count': store_count,
+                'google_map_url': google_map_url
+            })
+        
+        return routes
+    
+    def update_route_google_map_url(self, route_name: str, google_map_url: str) -> bool:
+        """ルートの Google Map URL を更新"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # まず routes テーブルに該当ルートが存在するか確認
+            cursor.execute("SELECT id FROM routes WHERE route_name = ?", (route_name,))
+            existing_route = cursor.fetchone()
+            
+            if existing_route:
+                # 既存ルートのURLを更新
+                cursor.execute("""
+                    UPDATE routes 
+                    SET google_map_url = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE route_name = ?
+                """, (google_map_url, route_name))
+            else:
+                # 新規ルートとして追加
+                # route_code を取得
+                cursor.execute("""
+                    SELECT DISTINCT route_code 
+                    FROM stores 
+                    WHERE affiliated_route_name = ? 
+                    LIMIT 1
+                """, (route_name,))
+                
+                route_code_row = cursor.fetchone()
+                if route_code_row:
+                    route_code = route_code_row[0]
+                    cursor.execute("""
+                        INSERT INTO routes (route_name, route_code, google_map_url)
+                        VALUES (?, ?, ?)
+                    """, (route_name, route_code, google_map_url))
+            
+            conn.commit()
+            return True
+            
+        except Exception as e:
+            print(f"Google Map URL更新エラー: {e}")
+            conn.rollback()
+            return False
 
