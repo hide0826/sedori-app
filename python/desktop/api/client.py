@@ -349,6 +349,65 @@ class APIClient:
         q_tags = ['Q1', 'Q2', 'Q3', 'Q4', '']
         return random.choice(q_tags)
     
+    def inventory_match_stores(self, file_path: str, route_summary_id: int, time_tolerance_minutes: int = 30) -> Dict[str, Any]:
+        """仕入CSVとルートサマリーを照合して店舗コードを自動付与（CSVファイル版）"""
+        try:
+            import os
+            filename = os.path.basename(file_path)
+            with open(file_path, 'rb') as f:
+                files = {'file': (filename, f, 'text/csv')}
+                data = {
+                    'route_summary_id': route_summary_id,
+                    'time_tolerance_minutes': time_tolerance_minutes
+                }
+                response = self.session.post(
+                    f"{self.base_url}/api/inventory/match-stores",
+                    files=files,
+                    data=data,
+                    timeout=60
+                )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                error_detail = response.text
+                self.logger.error(f"照合処理APIエラー: {response.status_code} - {error_detail}")
+                raise Exception(f"照合処理APIエラー: {response.status_code} - {error_detail}")
+                
+        except Exception as e:
+            self.logger.error(f"照合処理失敗: {e}")
+            raise Exception(f"照合処理に失敗しました: {str(e)}")
+    
+    def inventory_match_stores_from_data(
+        self, 
+        purchase_data: List[Dict[str, Any]], 
+        route_summary_id: int, 
+        time_tolerance_minutes: int = 30
+    ) -> Dict[str, Any]:
+        """仕入データ（JSON）とルートサマリーを照合して店舗コードを自動付与"""
+        try:
+            response = self.session.post(
+                f"{self.base_url}/api/inventory/match-stores-from-data",
+                json={
+                    "purchase_data": purchase_data,
+                    "route_summary_id": route_summary_id,
+                    "time_tolerance_minutes": time_tolerance_minutes
+                },
+                headers={"Content-Type": "application/json"},
+                timeout=60
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                error_detail = response.text
+                self.logger.error(f"照合処理APIエラー: {response.status_code} - {error_detail}")
+                raise Exception(f"照合処理APIエラー: {response.status_code} - {error_detail}")
+                
+        except Exception as e:
+            self.logger.error(f"照合処理失敗: {e}")
+            raise Exception(f"照合処理に失敗しました: {str(e)}")
+    
     def inventory_export_listing(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """出品CSV生成"""
         try:

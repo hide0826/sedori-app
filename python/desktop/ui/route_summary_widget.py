@@ -1213,31 +1213,59 @@ class RouteSummaryWidget(QWidget):
             
             # ルートコードを読み込んだルートに更新（日本語名で表示）
             route_code = row.get('route_code', '')
+            
             if route_code:
-                # ルートコードから日本語名を取得
-                route_name = self.store_db.get_route_name_by_code(route_code)
-                display_value = route_name if route_name else route_code
-                
-                # コンボボックスのアイテムを更新（最新のルート一覧を反映）
-                self.update_route_codes()
-                
-                # コンボボックスに該当するアイテムがあるかチェック
-                idx = self.route_code_combo.findText(display_value)
-                if idx >= 0:
-                    # アイテムが見つかった場合は選択
-                    self.route_code_combo.setCurrentIndex(idx)
-                else:
-                    # アイテムが見つからない場合は、まず追加してから選択
-                    # または、直接テキストを設定（編集可能なので）
-                    if display_value and display_value not in [self.route_code_combo.itemText(i) for i in range(self.route_code_combo.count())]:
+                # シグナルを一時的にブロック（currentTextChangedが発火しないように）
+                self.route_code_combo.blockSignals(True)
+                try:
+                    # コンボボックスのアイテムを先に更新（最新のルート一覧を反映）
+                    self.update_route_codes()
+                    
+                    # ルートコードから日本語名を取得
+                    route_name = self.store_db.get_route_name_by_code(route_code)
+                    print(f"\n=== 保存データ読み込みデバッグ ===")
+                    print(f"DBから取得したroute_code: '{route_code}'")
+                    print(f"get_route_name_by_code('{route_code}') の結果: '{route_name}'")
+                    
+                    # もし取得できなかった場合、ルートコードが既に日本語名の可能性がある
+                    if not route_name:
+                        # ルートコードがそのまま日本語名の場合（後方互換性のため）
+                        # コンボボックスにその値があるかチェック
+                        if self.route_code_combo.findText(route_code) >= 0:
+                            route_name = route_code
+                            print(f"route_codeが直接日本語名として存在: '{route_code}'")
+                    
+                    display_value = route_name if route_name else route_code
+                    print(f"表示値（display_value）: '{display_value}'")
+                    
+                    # コンボボックスに該当するアイテムがあるかチェック
+                    idx = self.route_code_combo.findText(display_value)
+                    print(f"findText('{display_value}') の結果: idx={idx}")
+                    
+                    if idx >= 0:
+                        # アイテムが見つかった場合は選択
+                        self.route_code_combo.setCurrentIndex(idx)
+                        print(f"setCurrentIndex({idx}) を実行")
+                    else:
+                        # アイテムが見つからない場合は追加してから選択
+                        print(f"アイテムが見つからないため追加します")
                         self.route_code_combo.addItem(display_value)
                         idx = self.route_code_combo.findText(display_value)
                         if idx >= 0:
                             self.route_code_combo.setCurrentIndex(idx)
-                    else:
-                        self.route_code_combo.setCurrentText(display_value)
-                
-                print(f"保存データ読み込み: route_code={route_code}, route_name={route_name}, display_value={display_value}")
+                            print(f"追加後に setCurrentIndex({idx}) を実行")
+                        else:
+                            # 最後の手段：直接テキストを設定（編集可能なので）
+                            self.route_code_combo.setCurrentText(display_value)
+                            print(f"直接 setCurrentText('{display_value}') を実行")
+                    
+                    # 最終的な表示値を確認
+                    final_display = self.route_code_combo.currentText()
+                    print(f"最終的な表示値: '{final_display}'")
+                    print(f"==============================\n")
+                finally:
+                    # シグナルのブロックを解除
+                    self.route_code_combo.blockSignals(False)
             else:
                 # ルートコードが空の場合は、コンボボックスを更新してクリア
                 self.update_route_codes()

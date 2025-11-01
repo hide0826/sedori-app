@@ -143,16 +143,15 @@ class RouteMatchingService:
         
         # 1. 時間照合（重要度: 0.5）
         if purchase_date and store_in_time and store_out_time:
-            # 仕入日時が店舗IN/OUT時間の範囲内かチェック
-            tolerance = timedelta(minutes=time_tolerance_minutes)
+            # 滞在時間内かチェック
+            is_in_store_duration = store_in_time <= purchase_date <= store_out_time
             
-            if store_in_time - tolerance <= purchase_date <= store_out_time + tolerance:
+            if is_in_store_duration:
+                # 滞在時間内なら高スコア
                 time_score = 0.5
-                reasons.append(f"時間範囲内（{time_tolerance_minutes}分許容）")
-            elif store_in_time - tolerance * 2 <= purchase_date <= store_out_time + tolerance * 2:
-                time_score = 0.3
-                reasons.append(f"時間範囲近辺（{time_tolerance_minutes * 2}分許容）")
+                reasons.append(f"滞在時間内")
             else:
+                # 滞在時間外の場合、マッチしない
                 time_score = 0.0
         else:
             time_score = 0.0

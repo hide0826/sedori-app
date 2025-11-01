@@ -32,12 +32,12 @@ def create_app() -> FastAPI:
     from routers.csv import router as csv_router
     from routers.ssot_rules import router as ssot_router
     from routers.repricer import router as repricer_router
-    # from routers.inventory import router as inventory_router # 仕入管理機能を一時的に無効化
+    from routers.inventory import router as inventory_router
 
     app.include_router(csv_router)
     app.include_router(ssot_router)
     app.include_router(repricer_router)
-    # app.include_router(inventory_router) # 仕入管理機能を一時的に無効化
+    app.include_router(inventory_router)
 
     # キャッシュ問題対策
     app.openapi_schema = None

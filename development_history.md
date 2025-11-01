@@ -1,5 +1,123 @@
 ---
 
+## 2025-01-21 (朝): ルートサマリー照合処理の仕入管理データ参照版実装
+
+- **タスク:** 仕入管理タブのデータを直接参照する照合処理の実装
+- **状況:** 完了
+- **作業時間:** 約30分 + NaN値問題修正 約10分
+- **詳細:**
+    - **実装機能:**
+        - ✅ 仕入管理タブの既存データを直接参照して照合処理
+        - ✅ CSVファイル再選択不要
+        - ✅ 照合後、仕入管理タブのデータを自動更新
+        - ✅ データがない場合はCSVファイル選択にフォールバック
+    - **実装内容:**
+        - `python/routers/inventory.py` に `/api/inventory/match-stores-from-data` エンドポイント追加
+        - JSONデータを受け取ってDataFrameに変換して照合
+        - `python/desktop/api/client.py` に `inventory_match_stores_from_data` メソッド追加
+        - `python/desktop/ui/main_window.py` でウィジェット間連携設定
+        - `python/desktop/ui/route_summary_widget.py` に新しい `run_matching` 実装
+        - `execute_matching_from_csv` にリネーム（既存CSV版）
+    - **ワークフロー改善:**
+        - 従来: CSV再選択 → 照合 → プレビュー確認 → 手動反映
+        - 改良後: 照合実行 → 自動反映
+    - **照合処理の流れ:**
+        1. 仕入管理タブにデータがあるかチェック
+        2. データがない場合はCSVファイル選択ダイアログ表示
+        3. データがある場合は直接照合処理実行
+        4. 照合結果を仕入管理タブに自動反映
+        5. 統計情報をダイアログ表示
+    - **レスポンス形式:**
+        ```json
+        {
+          "status": "success",
+          "stats": {
+            "total_rows": 100,
+            "matched_rows": 85
+          },
+          "data": [...]  // 全データ（プレビューではない）
+        }
+        ```
+- **技術詳細:**
+    - FastAPIの `Body` でJSONデータを受け取る（`multipart/form-data` ではない）
+    - 仕入管理ウィジェットの `inventory_data` をDataFrame → JSON → 照合 → DataFrame
+    - 照合後のDataFrameを仕入管理ウィジェットに直接代入
+- **メリット:**
+    - CSV再選択が不要
+    - 仕入管理で編集済みのデータがそのまま反映
+    - データ整合性の維持
+    - ワークフローがシンプルに
+- **修正内容:**
+    - ✅ NaN値問題修正: 送信側（`route_summary_widget.py`）と受信側（`inventory.py`）の両方でNaN値処理
+    - 送信側: `inventory_data.fillna('')` で空文字列に置換
+    - 受信側: `df.fillna('')` + `math.isnan()` チェックでNoneに置換
+    - JSONシリアライズ時のNaN値エラーを完全に解決
+    - ✅ 照合処理0件問題修正: DBにHH:MM形式で保存されている店舗IN/OUT時間を、照合時にルート日付と結合
+    - `inventory.py` の2つの照合エンドポイントでルートサマリーから日付を取得し、HH:MM形式の時間に結合
+    - 形式: `9:59` → `2025-10-26 9:59:00`（仕入れ日の `2025/10/26 10:13` と照合可能に）
+    - ✅ 照合処理後に自動粗利計算機能追加
+    - 店舗コード別に粗利を集計してルートサマリーの「想定粗利」に自動挿入
+    - 仕入れ点数も自動集計
+    - 粗利>0の店舗は自動的に「仕入れ成功」に設定
+- **次のステップ:**
+    - 照合結果の詳細表示UI
+    - 照合精度向上（粗利照合の活用）
+
+---
+
+## 2025-10-31 (夜): 仕入CSVとルートサマリーの照合API実装
+
+- **タスク:** `/api/inventory/match-stores` エンドポイント実装
+- **状況:** 完了
+- **作業時間:** 約30分
+- **詳細:**
+    - **実装機能:**
+        - ✅ 仕入CSVの仕入れ日時とルートサマリーの店舗IN/OUT時間を照合
+        - ✅ 時間帯内の仕入に店舗コードを自動付与
+        - ✅ プレビュー表示（先頭10件）
+        - ✅ 時間許容誤差の調整可能（デフォルト30分）
+    - **実装内容:**
+        - `python/routers/inventory.py` に `/match-stores` エンドポイント追加
+        - CSV読み込み・正規化（既存 `InventoryService.process_inventory_csv` 使用）
+        - 仕入日時カラムの自動推定（仕入れ日, purchaseDate, purchase_date）
+        - 仕入先カラムの自動作成（存在しない場合）
+        - ルート訪問詳細取得（`RouteDatabase.get_store_visits_by_route`）
+        - 時間照合処理（`RouteMatchingService.match_store_code_by_time_and_profit`）
+        - 照合結果をDataFrameへ反映
+    - **エラーハンドリング:**
+        - 仕入日時カラムがない場合: 400エラー
+        - ルート訪問詳細がない場合: 400エラー
+        - その他の例外: 500エラー
+    - **レスポンス形式:**
+        ```json
+        {
+          "status": "success",
+          "stats": {
+            "total_rows": 100,
+            "matched_rows": 85,
+            ...
+          },
+          "preview": [...]
+        }
+        ```
+- **技術詳細:**
+    - FastAPIの `multipart/form-data` でCSVファイルとパラメータを受け取る
+    - `route_summary_id` と `time_tolerance_minutes` をFormパラメータで受け取り
+    - 既存の `RouteMatchingService` を活用して時間・粗利照合を実行
+- **動作確認用curlコマンド:**
+    ```bash
+    curl -X POST http://localhost:8000/api/inventory/match-stores ^
+      -F "file=@D:\path\to\purchase.csv" ^
+      -F "route_summary_id=1" ^
+      -F "time_tolerance_minutes=30"
+    ```
+- **次のステップ:**
+    - フロントエンドからAPI呼び出し実装
+    - 照合結果の確認・修正UI
+    - CSVダウンロード機能統合
+
+---
+
 ## 2025-01-20 (朝): フロント表示修正完了 - APIレスポンスマッピング修正
 
 - **タスク:** RepricerSettingsTable.tsx のフロント表示修正

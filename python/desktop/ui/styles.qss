@@ -189,8 +189,22 @@ QLineEdit {
 }
 
 QLineEdit:focus {
-    border-color: #0078d4;
-    border-width: 2px;
+    border: 1px solid #5aa2ff;
+    background-color: rgba(255,255,255,0.08);
+}
+
+/* 複数行テキスト入力の視認性を統一 */
+QTextEdit, QPlainTextEdit {
+    background-color: #3c3c3c;
+    color: #ffffff;
+    border: 1px solid #555555;
+    border-radius: 3px;
+    padding: 4px 8px;
+}
+
+QTextEdit:focus, QPlainTextEdit:focus {
+    border: 1px solid #5aa2ff;
+    background-color: rgba(255,255,255,0.08);
 }
 
 QLineEdit:disabled {
@@ -214,8 +228,8 @@ QComboBox:hover {
 }
 
 QComboBox:focus {
-    border-color: #0078d4;
-    border-width: 2px;
+    border: 1px solid #5aa2ff;
+    background-color: rgba(255,255,255,0.08);
 }
 
 QComboBox::drop-down {
@@ -308,9 +322,9 @@ QSpinBox {
     padding: 4px 8px;
 }
 
-QSpinBox:focus {
-    border-color: #0078d4;
-    border-width: 2px;
+QSpinBox:focus, QDoubleSpinBox:focus, QDateTimeEdit:focus {
+    border: 1px solid #5aa2ff;
+    background-color: rgba(255,255,255,0.08);
 }
 
 QSpinBox::up-button {
