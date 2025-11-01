@@ -1656,6 +1656,10 @@ class RouteSummaryWidget(QWidget):
             stats = {**stats_defaults, **stats}
             route_data.update(stats)
             
+            # 総仕入点数と総想定粗利を計算（計算サービスの結果を上書き）
+            route_data['total_item_count'] = sum(int(v.get('store_item_count', 0)) for v in store_visits)
+            route_data['total_gross_profit'] = sum(float(v.get('store_gross_profit', 0)) for v in store_visits)
+            
             if self.current_route_id:
                 self.route_db.update_route_summary(self.current_route_id, route_data)
                 existing_visits = self.route_db.get_store_visits_by_route(self.current_route_id)

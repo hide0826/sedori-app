@@ -30,6 +30,7 @@ from ui.settings_widget import SettingsWidget
 from ui.workflow_panel import WorkflowPanel
 from ui.store_master_widget import StoreMasterWidget
 from ui.route_summary_widget import RouteSummaryWidget
+from ui.route_list_widget import RouteListWidget
 from ui.analysis_widget import AnalysisWidget
 
 
@@ -136,6 +137,13 @@ class MainWindow(QMainWindow):
         # ルートサマリータブ（仕入管理ウィジェットへの参照を渡す）
         self.route_summary_widget = RouteSummaryWidget(self.api_client, inventory_widget=self.inventory_widget)
         self.tab_widget.addTab(self.route_summary_widget, "ルート登録")
+        
+        # ルートサマリー一覧タブ
+        self.route_list_widget = RouteListWidget()
+        self.tab_widget.addTab(self.route_list_widget, "ルートサマリー")
+        
+        # ルート登録保存時にサマリー一覧を更新
+        self.route_summary_widget.data_saved.connect(self.route_list_widget.load_routes)
         
         # 分析タブ
         self.analysis_widget = AnalysisWidget()

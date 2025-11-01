@@ -64,12 +64,20 @@ class RouteDatabase:
                 total_working_hours REAL,
                 estimated_hourly_rate REAL,
                 total_gross_profit REAL,
+                total_item_count INTEGER,
                 purchase_success_rate REAL,
                 avg_purchase_price REAL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # total_item_countカラムが存在しない場合は追加（マイグレーション）
+        try:
+            cursor.execute("ALTER TABLE route_summaries ADD COLUMN total_item_count INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            # カラムが既に存在する場合はスキップ
+            pass
         
         # store_visit_details テーブル作成
         cursor.execute("""
@@ -142,8 +150,8 @@ class RouteDatabase:
                 toll_fee_outbound, toll_fee_return, parking_fee,
                 meal_cost, other_expenses, remarks,
                 total_working_hours, estimated_hourly_rate,
-                total_gross_profit, purchase_success_rate, avg_purchase_price
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                total_gross_profit, total_item_count, purchase_success_rate, avg_purchase_price
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             route_data.get('route_date'),
             route_data.get('route_code'),
@@ -158,6 +166,7 @@ class RouteDatabase:
             route_data.get('total_working_hours'),
             route_data.get('estimated_hourly_rate'),
             route_data.get('total_gross_profit'),
+            route_data.get('total_item_count'),
             route_data.get('purchase_success_rate'),
             route_data.get('avg_purchase_price')
         ))
@@ -185,6 +194,7 @@ class RouteDatabase:
                 total_working_hours = ?,
                 estimated_hourly_rate = ?,
                 total_gross_profit = ?,
+                total_item_count = ?,
                 purchase_success_rate = ?,
                 avg_purchase_price = ?
             WHERE id = ?
@@ -202,6 +212,7 @@ class RouteDatabase:
             route_data.get('total_working_hours'),
             route_data.get('estimated_hourly_rate'),
             route_data.get('total_gross_profit'),
+            route_data.get('total_item_count'),
             route_data.get('purchase_success_rate'),
             route_data.get('avg_purchase_price'),
             route_id
@@ -450,4 +461,46 @@ class RouteDatabase:
             'avg_hourly_rate': avg_hourly_rate,
             'total_gross_profit': total_gross_profit
         }
+    
+    def sync_total_item_count_from_visits(self):
+        """既存データの総仕入点数と総想定粗利を店舗訪問詳細から集計して更新"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # すべてのルートサマリーを取得
+            cursor.execute("SELECT id FROM route_summaries")
+            route_ids = [row[0] for row in cursor.fetchall()]
+            
+            updated_count = 0
+            for route_id in route_ids:
+                # 店舗訪問詳細から総仕入点数を集計
+                cursor.execute("""
+                    SELECT SUM(store_item_count) AS total_items,
+                           SUM(store_gross_profit) AS total_profit
+                    FROM store_visit_details
+                    WHERE route_summary_id = ?
+                """, (route_id,))
+                
+                result = cursor.fetchone()
+                total_items = int(result[0]) if result and result[0] else 0
+                total_profit = float(result[1]) if result and result[1] else 0
+                
+                # 総仕入点数と総想定粗利を更新
+                cursor.execute("""
+                    UPDATE route_summaries
+                    SET total_item_count = ?, total_gross_profit = ?
+                    WHERE id = ?
+                """, (total_items, total_profit, route_id))
+                
+                if total_items > 0 or total_profit > 0:
+                    updated_count += 1
+            
+            conn.commit()
+            return updated_count
+            
+        except Exception as e:
+            print(f"総仕入点数・総想定粗利同期エラー: {e}")
+            conn.rollback()
+            return 0
 
