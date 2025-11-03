@@ -12,7 +12,8 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QComboBox,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QGroupBox, QSplitter, QMessageBox, QFrame,
-    QCheckBox, QSpinBox, QDateEdit, QFileDialog
+    QCheckBox, QSpinBox, QDateEdit, QFileDialog,
+    QDialog, QDialogButtonBox
 )
 from PySide6.QtCore import Qt, QDate, Signal
 from PySide6.QtGui import QFont, QColor, QPalette
@@ -26,6 +27,7 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from database.store_db import StoreDatabase
+from database.inventory_db import InventoryDatabase
 
 
 class InventoryWidget(QWidget):
@@ -41,8 +43,9 @@ class InventoryWidget(QWidget):
         self.inventory_data = None
         self.filtered_data = None
         
-        # 店舗マスタDBの初期化
+        # データベースの初期化
         self.store_db = StoreDatabase()
+        self.inventory_db = InventoryDatabase()
         
         # UIの初期化
         self.setup_ui()
@@ -104,6 +107,43 @@ class InventoryWidget(QWidget):
         self.clear_btn.clicked.connect(self.clear_data)
         self.clear_btn.setEnabled(False)
         file_ops_layout.addWidget(self.clear_btn)
+        
+        # 保存ボタン
+        self.save_btn = QPushButton("保存")
+        self.save_btn.clicked.connect(self.save_inventory_data)
+        self.save_btn.setEnabled(False)
+        self.save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ffc107;
+                color: #000;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #e0a800;
+            }
+        """)
+        file_ops_layout.addWidget(self.save_btn)
+        
+        # 保存履歴ボタン
+        self.load_history_btn = QPushButton("保存履歴")
+        self.load_history_btn.clicked.connect(self.open_saved_history)
+        self.load_history_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #138496;
+            }
+        """)
+        file_ops_layout.addWidget(self.load_history_btn)
         
         file_layout.addLayout(file_ops_layout)
         
@@ -299,6 +339,7 @@ class InventoryWidget(QWidget):
                 # ボタンの有効化
                 self.export_btn.setEnabled(True)
                 self.clear_btn.setEnabled(True)
+                self.save_btn.setEnabled(True)
                 self.generate_sku_btn.setEnabled(True)
                 self.export_listing_btn.setEnabled(True)
                 self.antique_register_btn.setEnabled(True)
@@ -975,6 +1016,127 @@ class InventoryWidget(QWidget):
                 
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"出品CSV生成中にエラーが発生しました:\n{str(e)}")
+    
+    def save_inventory_data(self):
+        """仕入データを保存"""
+        if self.filtered_data is None or len(self.filtered_data) == 0:
+            QMessageBox.warning(self, "エラー", "データがありません")
+            return
+        
+        try:
+            from PySide6.QtWidgets import QInputDialog
+            
+            # スナップショット名の入力
+            snapshot_name, ok = QInputDialog.getText(
+                self,
+                "データ保存",
+                "保存名を入力してください:",
+                text=f"仕入リスト {len(self.filtered_data)}件"
+            )
+            
+            if not ok or not snapshot_name.strip():
+                return
+            
+            # データを辞書形式に変換
+            data_list = self.filtered_data.to_dict('records')
+            
+            # データベースに保存
+            snapshot_id = self.inventory_db.save_inventory_data(
+                snapshot_name.strip(),
+                data_list
+            )
+            
+            QMessageBox.information(
+                self,
+                "保存完了",
+                f"データを保存しました\nID: {snapshot_id}\n件数: {len(data_list)}件"
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"データ保存中にエラーが発生しました:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+    
+    def load_saved_data(self, snapshot_id: int):
+        """指定IDの保存データを読み込む"""
+        try:
+            snapshot = self.inventory_db.get_snapshot_by_id(snapshot_id)
+            if not snapshot:
+                QMessageBox.information(self, "情報", "保存済みデータが見つかりませんでした")
+                return
+            
+            # データをDataFrameに変換
+            data_list = snapshot.get('data', [])
+            if not data_list:
+                QMessageBox.warning(self, "警告", "データが空です")
+                return
+            
+            # DataFrameとして読み込み
+            self.inventory_data = pd.DataFrame(data_list)
+            self.filtered_data = self.inventory_data.copy()
+            
+            # テーブル更新
+            self.update_table()
+            
+            # ボタンの有効化
+            self.export_btn.setEnabled(True)
+            self.clear_btn.setEnabled(True)
+            self.save_btn.setEnabled(True)
+            self.generate_sku_btn.setEnabled(True)
+            self.export_listing_btn.setEnabled(True)
+            self.antique_register_btn.setEnabled(True)
+            
+            # データ件数更新
+            self.update_data_count()
+            
+            QMessageBox.information(
+                self,
+                "読み込み完了",
+                f"データを読み込みました\n件数: {len(self.filtered_data)}件"
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"データ読み込み中にエラーが発生しました:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+    
+    def delete_saved_data(self, snapshot_id: int):
+        """指定IDの保存済みデータを削除"""
+        try:
+            reply = QMessageBox.question(
+                self,
+                "削除確認",
+                "この保存データを削除しますか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply != QMessageBox.Yes:
+                return
+            
+            ok = self.inventory_db.delete_snapshot(snapshot_id)
+            if ok:
+                QMessageBox.information(self, "完了", "保存データを削除しました")
+            else:
+                QMessageBox.warning(self, "警告", "削除できませんでした")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"保存データの削除に失敗しました:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+    
+    def open_saved_history(self):
+        """保存履歴ダイアログを開き、読み込み/削除を実行"""
+        from typing import Optional
+        
+        dlg = SavedInventoryDialog(self.inventory_db, self)
+        res = dlg.exec()
+        if res == QDialog.Accepted:
+            action, snapshot_id = dlg.get_result()
+            if action == 'load' and snapshot_id:
+                self.load_saved_data(snapshot_id)
+            elif action == 'delete' and snapshot_id:
+                self.delete_saved_data(snapshot_id)
         
     def generate_antique_register(self):
         """古物台帳生成"""
@@ -1268,3 +1430,120 @@ class InventoryWidget(QWidget):
                     parts.append(f"{{custom:{text}}}")
         tpl = "-".join(parts) if parts else self.tpl_edit.text().strip()
         self.tpl_edit.setText(tpl)
+
+
+class SavedInventoryDialog(QDialog):
+    """保存済み仕入データの一覧から選択して読込/削除するダイアログ"""
+    
+    def __init__(self, inventory_db: 'InventoryDatabase', parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("保存履歴")
+        self.resize(720, 420)
+        self.inventory_db = inventory_db
+        self._result_action = None  # 'load' or 'delete'
+        self._result_id = None
+        
+        layout = QVBoxLayout(self)
+        
+        # 検索行
+        filt = QHBoxLayout()
+        from PySide6.QtWidgets import QDateEdit
+        self.chk_name = QCheckBox("名前")
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("保存名で検索")
+        search_btn = QPushButton("検索")
+        search_btn.clicked.connect(self._reload)
+        filt.addWidget(self.chk_name)
+        filt.addWidget(self.name_edit)
+        filt.addWidget(search_btn)
+        filt.addStretch()
+        layout.addLayout(filt)
+        
+        # 一覧テーブル
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["ID", "保存名", "件数", "作成日時"])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setStretchLastSection(True)
+        layout.addWidget(self.table)
+        
+        # ボタン
+        btns = QDialogButtonBox()
+        self.load_btn = QPushButton("読み込み")
+        self.del_btn = QPushButton("削除")
+        self.cancel_btn = QPushButton("閉じる")
+        btns.addButton(self.load_btn, QDialogButtonBox.AcceptRole)
+        btns.addButton(self.del_btn, QDialogButtonBox.ActionRole)
+        btns.addButton(self.cancel_btn, QDialogButtonBox.RejectRole)
+        layout.addWidget(btns)
+        
+        self.load_btn.clicked.connect(self._on_load)
+        self.del_btn.clicked.connect(self._on_delete)
+        self.cancel_btn.clicked.connect(self.reject)
+        
+        self._reload()
+    
+    def _reload(self):
+        """一覧を再読み込み"""
+        try:
+            if self.chk_name.isChecked():
+                name_keyword = self.name_edit.text().strip()
+                rows = self.inventory_db.search_snapshots(name_keyword)
+            else:
+                rows = self.inventory_db.get_all_snapshots()
+            
+            self.table.setRowCount(len(rows))
+            for i, r in enumerate(rows):
+                rid = str(r.get('id', ''))
+                name = str(r.get('snapshot_name', ''))
+                count = str(r.get('item_count', ''))
+                created_at = str(r.get('created_at', ''))
+                
+                self.table.setItem(i, 0, QTableWidgetItem(rid))
+                self.table.setItem(i, 1, QTableWidgetItem(name))
+                self.table.setItem(i, 2, QTableWidgetItem(count))
+                self.table.setItem(i, 3, QTableWidgetItem(created_at))
+            
+            self.table.resizeColumnsToContents()
+        except Exception as e:
+            QMessageBox.warning(self, "エラー", f"一覧の読み込みに失敗しました:\n{str(e)}")
+    
+    def _selected_id(self):
+        """選択されている行のIDを取得"""
+        sel = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        if not sel:
+            return None
+        r = sel[0].row()
+        item = self.table.item(r, 0)
+        try:
+            return int(item.text()) if item else None
+        except Exception:
+            return None
+    
+    def _on_load(self):
+        """読み込みボタンクリック"""
+        rid = self._selected_id()
+        if rid is None:
+            QMessageBox.information(self, "情報", "読み込む行を選択してください")
+            return
+        self._result_action = 'load'
+        self._result_id = rid
+        self.accept()
+    
+    def _on_delete(self):
+        """削除ボタンクリック"""
+        rid = self._selected_id()
+        if rid is None:
+            QMessageBox.information(self, "情報", "削除する行を選択してください")
+            return
+        self._result_action = 'delete'
+        self._result_id = rid
+        # 削除後もダイアログは開いたまま
+        self._reload()
+    
+    def get_result(self):
+        """結果を取得"""
+        return self._result_action, self._result_id
