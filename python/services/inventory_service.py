@@ -143,6 +143,7 @@ class InventoryService:
             'plannedPrice': 'price',
             'purchasePrice': 'cost',
             'breakEven': 'akaji',
+            'takane': 'takane',
             'condition': 'condition',
             'conditionNote': 'conditionNote',
             'condition_note': 'conditionNote',
@@ -184,9 +185,16 @@ class InventoryService:
         
         # Reorder columns
         df_final = df_output.reindex(columns=final_columns, fill_value='')
-        
+
         # Replace NaN with empty string for all columns
         df_final = df_final.fillna('')
+
+        # Shift-JIS 向けの正規化（文字化け対策）
+        try:
+            df_final = normalize_dataframe_for_cp932(df_final)
+        except Exception:
+            # 正規化で問題が出てもフォールバックして続行
+            pass
 
         # Generate CSV content using csv_io module for consistency
         from utils.csv_io import write_listing_csv

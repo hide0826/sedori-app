@@ -24,21 +24,27 @@
   - `python/desktop/ui/main_window.py`
   - `python/desktop/ui/route_summary_widget.py`（ルート登録画面）
   - `python/desktop/ui/route_list_widget.py`（ルートサマリー一覧画面）⭐ 新規
-  - `python/desktop/ui/inventory_widget.py`（仕入管理、テーブルデータ取得機能追加）
+  - `python/desktop/ui/inventory_widget.py`（仕入管理、保存機能追加）⭐ 拡張
   - `python/desktop/ui/store_master_widget.py`（店舗マスタ）
   - `python/desktop/ui/star_rating_widget.py`（星評価）
   - `python/desktop/ui/styles.qss`（全体スタイル）
 - DB アクセス:
   - `python/desktop/database/route_db.py`
   - `python/desktop/database/store_db.py`
+  - `python/desktop/database/inventory_db.py`（仕入データ保存）⭐ 新規
 - サービス:
   - `python/desktop/services/route_matching_service.py`（照合処理）
   - `python/desktop/services/calculation_service.py`（計算）
+  - `python/services/inventory_service.py`（仕入CSV処理、SKU生成、出品CSV生成）
+  - `python/services/sku_template.py`（SKUテンプレートレンダラ）⭐ 新規
 - API クライアント:
   - `python/desktop/api/client.py`
 - バックエンド API:
-  - `python/routers/inventory.py`（`/api/inventory/match-stores` 追加済み）
+  - `python/routers/inventory.py`（SKU生成、出品CSV生成、照合処理API）⭐ 拡張
+  - `python/utils/csv_io.py`（CSV I/Oエンジン）
   - `python/app.py`（inventory_router有効化済み）
+- 設定ファイル:
+  - `config/inventory_settings.json`（SKUテンプレート設定）⭐ 新規
 
 ## 現行仕様（ルート登録）
 
@@ -86,6 +92,36 @@
 ### 店舗マスタから追加
 - 「店舗追加（店舗マスタから）」ボタン
 - 検索＋複数選択 → 一括挿入
+
+## 現行仕様（仕入管理）⭐ 拡張
+
+### 仕入データ保存機能
+- **保存:** 現在の仕入データをスナップショットとして保存
+- **保存名自動生成:** `yyyy/mm/dd ○○ルート` 形式
+  - 仕入れ日（CSVデータから取得）
+  - ルート名（ルート登録タブから取得）
+  - ダイアログで「この名称で保存してよろしいですか？\n編集も可能です」と表示
+- **保存履歴:**
+  - 保存名・件数・作成日時を一覧表示
+  - 検索機能（保存名で絞り込み）
+  - 読み込み/削除を実行
+- **10件制限:**
+  - 10件を超える場合は古いデータを自動削除
+- **データベース:** `inventory_snapshots` テーブル
+
+### SKU生成機能
+- **SKUテンプレート:** 設定ファイルでカスタマイズ可能
+- **デスクトップ設定パネル:**
+  - 8スロット式ビルダー
+  - テンプレート保存/読み込み
+- **反映ロジック:** ASIN→JAN→商品名→未実装行の順
+
+### 出品CSV生成機能
+- **フォーマット:** 指定ファイルに完全準拠
+- **エンコーディング:** Shift-JIS (cp932)
+- **1行目:** 注意文
+- **コンディション:** Amazon形式にマッピング（中古(良い)→"3"など）
+- **ASIN/JAN:** 相互排他処理
 
 ## 現行仕様（ルートサマリー一覧）⭐ 新規
 
@@ -270,7 +306,7 @@ Content-Type: application/json
 
 ### データベース構造
 - **データベースファイル:** `python/desktop/data/hirio.db`（SQLite3）
-- **保存方式:** `RouteDatabase` / `StoreDatabase` クラス経由でSQLiteに保存
+- **保存方式:** `RouteDatabase` / `StoreDatabase` / `InventoryDatabase` クラス経由でSQLiteに保存
   - 保存ボタンクリック時に自動保存
   - アプリ再起動後もデータは保持される
 - **テーブル:**
@@ -281,6 +317,9 @@ Content-Type: application/json
   - `routes`: ルート情報管理（ルート名、ルートコード、Google Map URL）⭐ 新規
   - `stores`: 店舗情報（店舗マスタ）
     - `google_map_url` カラム追加 ⭐ 新規
+  - `inventory_snapshots`: 仕入データスナップショット ⭐ 新規
+    - 保存名、件数、データ（JSON形式）、作成/更新日時
+    - 10件制限あり（超過時は自動削除）
 
 ## 次にやるべきこと（推奨）
 1) 入力バリデーションの強化
@@ -299,24 +338,29 @@ Content-Type: application/json
 - 何か落ちる場合は「起動ログの最後の AttributeError 名」または `desktop_error.log` の内容を最優先で共有
 
 ## Git状態
-- **最新コミット（2025-11-02）:** `488acba` - ルート機能の拡張
-  - ルートサマリー一覧タブ追加
-  - 総仕入点数自動計算・同期機能
-  - 店舗マスタにルート選択機能追加
-  - Google Map URL管理機能追加
-- **主要変更コミット:**
-  - `d84fabf` - 店舗マスタ機能追加（ルート選択・Google Map URL管理）
-  - `488acba` - ルートサマリー機能更新・引き継ぎ資料追加
-- **変更ファイル:**
-  - `python/desktop/ui/route_list_widget.py`（新規・ルートサマリー一覧）
-  - `python/desktop/ui/store_master_widget.py`（ルート選択機能追加）
-  - `python/desktop/database/store_db.py`（routesテーブル追加、メソッド追加）
-  - `python/desktop/database/route_db.py`（total_item_count追加、同期機能）
-  - `python/desktop/ui/route_summary_widget.py`（総仕入点数・総想定粗利計算）
-  - `python/desktop/ui/main_window.py`（ルートサマリータブ追加）
+- **最新コミット（2025-02-01）:** `4df8ef8` - 仕入管理タブに保存機能追加
+  - InventoryDatabaseクラス作成（inventory_snapshotsテーブル）
+  - 10件制限＋古いデータ自動削除
+  - 保存/読み込み/削除機能実装
+  - 保存履歴ダイアログ追加
+  - 保存名自動生成（yyyy/mm/dd ○○ルート形式）
+- **最新の実装コミット:**
+  - `30dd1e0` - 出品CSV生成機能実装完了
+  - `af19794` - SKUテンプレート機能実装完了
+  - `4df8ef8` - 仕入管理タブに保存機能追加
+- **主要変更ファイル:**
+  - `python/services/sku_template.py`（新規・SKUテンプレートレンダラ）
+  - `python/services/inventory_service.py`（出品CSV生成、SKU生成改良）
+  - `python/routers/inventory.py`（出品CSV生成API、SKUテンプレートAPI）
+  - `python/utils/csv_io.py`（出品CSV形式修正）
+  - `python/desktop/database/inventory_db.py`（新規・仕入データ保存）
+  - `python/desktop/ui/inventory_widget.py`（保存機能・保存名自動生成）
+  - `python/desktop/ui/main_window.py`（ルートサマリー参照追加）
+  - `config/inventory_settings.json`（新規・SKU設定）
 - **リモート:** `origin/main` にプッシュ済み
 
-## 最新実装まとめ（2025-11-02 更新）
+## 最新実装まとめ（2025-02-01 更新）
+### ルート管理機能
 1. ✅ 照合処理改良版（仕入管理データ参照、自動粗利計算）
 2. ✅ 照合再計算機能改良（テーブルからデータ再取得、手入力商品対応）
 3. ✅ 想定粗利計算方法変更（仕入れ個数 × 見込み利益）
@@ -331,30 +375,61 @@ Content-Type: application/json
 12. ✅ Google Map URL管理機能追加
 13. ✅ 総仕入点数自動計算・同期機能
 
+### 仕入管理機能（2025-02-01 追加）
+14. ✅ SKUテンプレート機能実装完了
+15. ✅ 出品CSV生成機能実装完了
+16. ✅ 仕入データ保存機能追加
+    - InventoryDatabaseクラス作成
+    - 10件制限＋古いデータ自動削除
+    - 保存/読み込み/削除機能
+    - 保存履歴ダイアログ
+    - 保存名自動生成（yyyy/mm/dd ○○ルート形式）
+
 ## 直近の修正（2025-02-01）
-1. ✅ 店舗IN/OUT時間表示修正（2025-問題解決）
+
+### 仕入管理機能追加
+1. ✅ SKUテンプレート機能実装完了
+   - SKUテンプレートレンダラ作成
+   - 設定ファイル管理
+   - デスクトップ設定パネル追加
+   - 一括SKU生成をテンプレート式に置換
+
+2. ✅ 出品CSV生成機能実装完了
+   - 指定フォーマットに完全準拠
+   - Shift-JISエンコーディング対応
+   - コンディションマッピング対応
+   - ASIN/JAN相互排他処理
+
+3. ✅ 仕入データ保存機能追加
+   - InventoryDatabaseクラス作成
+   - 10件制限＋古いデータ自動削除
+   - 保存/読み込み/削除機能
+   - 保存名自動生成（yyyy/mm/dd ○○ルート形式）
+
+### ルート管理機能修正
+4. ✅ 店舗IN/OUT時間表示修正
    - 問題: 保存履歴読み込み時に「2025-」と表示
    - 原因: 文字列の先頭5文字を切り取っていた
    - 修正: `split(' ')` で時間部分（HH:MM）を正しく抽出
 
-2. ✅ 照合処理の修正（滞在時間内のみマッチ）
+5. ✅ 照合処理の修正（滞在時間内のみマッチ）
    - 問題: ±30分の許容範囲が広すぎて重複マッチ
    - 修正: 店舗IN/OUTの間のみマッチ（許容範囲なし）
 
-3. ✅ 照合再計算で括弧付き店舗コード対応
+6. ✅ 照合再計算で括弧付き店舗コード対応
    - 問題: 手入力の「(K1-010)」がマッチしない
    - 修正: 括弧を除去して正規化
 
-4. ✅ 仕入れ価格0円の商品も粗利計算に含める
+7. ✅ 仕入れ価格0円の商品も粗利計算に含める
    - 問題: `if purchase_price and planned_price` で0円商品が除外
    - 修正: `if purchase_price is not None and planned_price is not None` に変更
 
-5. ✅ 照合再計算にデバッグログ追加
+8. ✅ 照合再計算にデバッグログ追加
    - K1-010の全データ一覧出力
    - 店舗別粗利集計結果出力
    - 更新処理の詳細ログ
 
-## 最新の修正（2025-11-02）
+## 過去の修正（2025-11-02）
 1. ✅ ルートサマリー一覧タブの追加
    - 新しいタブ「ルートサマリー」を追加
    - 保存されたルート情報を一覧表示
@@ -431,14 +506,22 @@ Content-Type: application/json
 [現状サマリ]
 - 仕入管理/ルート登録/店舗マスタ/ルート一覧は稼働中。
 - 照合処理API（CSV版・JSON版）実装済み。NaN・時間結合の正規化あり。
-- SKUテンプレート機能を実装済み：
+- SKUテンプレート機能実装完了（2025-02-01）。
   - レンダラ: `python/services/sku_template.py`
   - 設定: `config/inventory_settings.json`
   - 既存一括SKU生成はテンプレ式に置換（`InventoryService.generate_sku_bulk`）。
-  - 設定API: GET/POST `/api/inventory/sku-template`（`python/routers/inventory.py`）。
+  - 設定API: GET/POST `/api/inventory/sku-template`。
   - デスクトップ側に設定パネル追加（仕入管理タブ内、トグル開閉・8スロット式ビルダー・保存/読込）。
-  - APIクライアントに取得/保存実装、SKU生成時のNaN→Noneクリーン実装済み。
-  - SKU反映ロジック強化（ASIN→JAN→商品名→未実装行→処理順の順に割当）。
+  - SKU反映ロジック強化（ASIN→JAN→商品名→未実装行の順）。
+- 出品CSV生成機能実装完了（2025-02-01）。
+  - 指定フォーマットに完全準拠（Shift-JIS）。
+  - コンディションマッピング対応。
+  - ASIN/JAN相互排他処理。
+- 仕入データ保存機能追加（2025-02-01）。
+  - InventoryDatabaseクラス作成。
+  - 10件制限＋古いデータ自動削除。
+  - 保存名自動生成（yyyy/mm/dd ○○ルート形式）。
+  - 保存履歴ダイアログ。
 
 [開始時の確認]
 1) API起動: `cd python && python app.py`（http://localhost:8000）。
@@ -447,12 +530,15 @@ Content-Type: application/json
 
 [主なファイル]
 - API: `python/routers/inventory.py`, `python/services/inventory_service.py`, `python/services/sku_template.py`
+- CSV: `python/utils/csv_io.py`（出品CSV生成）
+- DB: `python/desktop/database/inventory_db.py`（仕入データ保存）
 - デスクトップ: `python/desktop/ui/inventory_widget.py`, `python/desktop/api/client.py`
 
 [当面のタスク例]
 1) SKUテンプレの正規化強化（商品名の全角/半角・連続空白・="…" の除去など）。
 2) 未実装SKUが出ないか、サンプルCSVで再確認。問題あれば一致ロジック/ログ強化。
 3) 仕入管理のエクスポート/プレビュー改善（任意）。
+4) 古物台帳生成機能の実装。
 
 進め方: まず起動確認後、1) の正規化強化から着手してください。完了後に 2) の検証と修正を行い、差分をコミットしてください。
 ```

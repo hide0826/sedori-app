@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QSpinBox, QDateEdit, QFileDialog,
     QDialog, QDialogButtonBox
 )
-from PySide6.QtCore import Qt, QDate, Signal
+from PySide6.QtCore import Qt, QDate, Signal, QSettings
 from PySide6.QtGui import QFont, QColor, QPalette
 import pandas as pd
 from pathlib import Path
@@ -42,6 +42,10 @@ class InventoryWidget(QWidget):
         self.api_client = api_client
         self.inventory_data = None
         self.filtered_data = None
+        self.excluded_highlight_on = False
+        
+        # ルートサマリーウィジェットへの参照（後で設定される）
+        self.route_summary_widget = None
         
         # データベースの初期化
         self.store_db = StoreDatabase()
@@ -197,9 +201,19 @@ class InventoryWidget(QWidget):
         self.layout().addWidget(file_group)
         
     def setup_search_filters(self):
-        """検索・フィルタエリアの設定"""
-        filter_group = QGroupBox("検索・フィルタ")
-        filter_layout = QVBoxLayout(filter_group)
+        """検索・フィルタエリアの設定（折りたたみ対応）"""
+        self.filter_group = QGroupBox("検索・フィルタ")
+        self.filter_group.setCheckable(True)
+        self.filter_group.setChecked(True)
+        outer_layout = QVBoxLayout(self.filter_group)
+        outer_layout.setContentsMargins(8, 8, 8, 8)  # 小さくする
+        outer_layout.setSpacing(6)
+
+        # 折りたたみ対象のコンテンツ
+        self.filter_content = QWidget()
+        filter_layout = QVBoxLayout(self.filter_content)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(6)
         
         # 検索行
         search_layout = QHBoxLayout()
@@ -222,6 +236,7 @@ class InventoryWidget(QWidget):
         
         # フィルタ行
         filter_row_layout = QHBoxLayout()
+        filter_row_layout.setSpacing(8)
         
         # Q列フィルタ（現在の列構成に含まれていないため非表示）
         # q_filter_label = QLabel("Q列:")
@@ -261,11 +276,100 @@ class InventoryWidget(QWidget):
         filter_row_layout.addWidget(self.reset_filters_btn)
         
         filter_layout.addLayout(filter_row_layout)
-        
-        self.layout().addWidget(filter_group)
+
+        # グループ本体に追加
+        outer_layout.addWidget(self.filter_content)
+        # チェック切替で折りたたみ（表示/非表示）
+        def _on_filter_toggled(checked: bool):
+            self.filter_content.setVisible(checked)
+        self.filter_group.toggled.connect(_on_filter_toggled)
+
+        self.layout().addWidget(self.filter_group)
 
         # SKUテンプレ設定パネル（折りたたみ）
         self.setup_settings_panel()
+
+        # 出品リスト生成設定パネル（折りたたみ）
+        self.setup_listing_settings_panel()
+
+    def setup_listing_settings_panel(self):
+        settings_group = QGroupBox("出品リスト生成設定")
+        settings_group.setCheckable(True)
+        settings_group.setChecked(True)
+        outer = QVBoxLayout(settings_group)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(6)
+
+        self.listing_settings_content = QWidget()
+        lay = QHBoxLayout(self.listing_settings_content)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+
+        # タイトル出力の有無
+        self.chk_include_title = QCheckBox("タイトルを出力する")
+        self.chk_include_title.setChecked(True)
+        self.chk_include_title.setToolTip("無効にすると、出品CSVのtitle列を空欄で出力します")
+        lay.addWidget(self.chk_include_title)
+
+        # 高値設定（takane）
+        self.chk_enable_takane = QCheckBox("高値を設定する")
+        self.chk_enable_takane.setToolTip("有効にすると、takane欄にpriceの〇%上を自動設定")
+        lay.addWidget(self.chk_enable_takane)
+
+        self.lbl_takane_pct = QLabel("+%:")
+        lay.addWidget(self.lbl_takane_pct)
+
+        self.spin_takane_pct = QSpinBox()
+        self.spin_takane_pct.setRange(0, 200)
+        self.spin_takane_pct.setValue(5)
+        self.spin_takane_pct.setFixedWidth(60)
+        lay.addWidget(self.spin_takane_pct)
+
+        lay.addStretch()
+
+        outer.addWidget(self.listing_settings_content)
+
+        def _on_settings_toggled(checked: bool):
+            self.listing_settings_content.setVisible(checked)
+        settings_group.toggled.connect(_on_settings_toggled)
+
+        self.layout().addWidget(settings_group)
+
+        # 永続化: 値変更時に保存
+        self.chk_include_title.toggled.connect(self.save_listing_settings)
+        self.chk_enable_takane.toggled.connect(self.save_listing_settings)
+        self.spin_takane_pct.valueChanged.connect(self.save_listing_settings)
+
+        # 初期値の読み込み
+        self.load_listing_settings()
+
+    def _get_qsettings(self) -> QSettings:
+        # 会社名/アプリ名は任意の固定値で統一
+        return QSettings("HIRIO", "SedoriDesktopApp")
+
+    def load_listing_settings(self):
+        try:
+            s = self._get_qsettings()
+            include_title = s.value("listing/include_title", True, type=bool)
+            enable_takane = s.value("listing/enable_takane", False, type=bool)
+            takane_pct = s.value("listing/takane_pct", 5, type=int)
+            self.chk_include_title.setChecked(bool(include_title))
+            self.chk_enable_takane.setChecked(bool(enable_takane))
+            try:
+                self.spin_takane_pct.setValue(int(takane_pct))
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"出品設定ロード失敗: {e}")
+
+    def save_listing_settings(self):
+        try:
+            s = self._get_qsettings()
+            s.setValue("listing/include_title", self.chk_include_title.isChecked())
+            s.setValue("listing/enable_takane", self.chk_enable_takane.isChecked())
+            s.setValue("listing/takane_pct", int(self.spin_takane_pct.value()))
+        except Exception as e:
+            print(f"出品設定セーブ失敗: {e}")
         
     def setup_data_table(self):
         """データテーブルエリアの設定（改良版）"""
@@ -304,6 +408,11 @@ class InventoryWidget(QWidget):
         stats_layout = QHBoxLayout()
         self.stats_label = QLabel("統計: なし")
         stats_layout.addWidget(self.stats_label)
+        # 除外商品確認トグルボタン
+        self.toggle_excluded_btn = QPushButton("除外商品確認")
+        self.toggle_excluded_btn.setToolTip("コメントに『除外』、または発送方法がFBA以外の商品をハイライト表示します。もう一度押すと解除。")
+        self.toggle_excluded_btn.clicked.connect(self.toggle_excluded_highlight)
+        stats_layout.addWidget(self.toggle_excluded_btn)
         stats_layout.addStretch()
         data_layout.addLayout(stats_layout)
         
@@ -539,6 +648,84 @@ class InventoryWidget(QWidget):
         
         # 列幅の自動調整
         self.data_table.resizeColumnsToContents()
+
+        # 除外ハイライトがONなら適用
+        if self.excluded_highlight_on:
+            self.update_excluded_highlight()
+
+    def _is_excluded_row(self, row: dict) -> bool:
+        """除外条件の判定: コメントに『除外』または 発送方法がFBA以外"""
+        try:
+            comment = str(row.get('コメント', '') or '')
+            if '除外' in comment:
+                return True
+            ship = str(row.get('発送方法', '') or '').strip().upper()
+            if ship == '':
+                return True
+            return ship != 'FBA'
+        except Exception:
+            return True
+
+    def toggle_excluded_highlight(self):
+        self.excluded_highlight_on = not self.excluded_highlight_on
+        if self.excluded_highlight_on:
+            self.update_excluded_highlight()
+            self.toggle_excluded_btn.setText("除外ハイライト解除")
+        else:
+            self.clear_excluded_highlight()
+            self.toggle_excluded_btn.setText("除外商品確認")
+
+    def update_excluded_highlight(self):
+        """除外ではない商品を明確にハイライト（背景＋太字）"""
+        try:
+            if self.filtered_data is None:
+                return
+            rows = self.data_table.rowCount()
+            for i in range(rows):
+                # 現在行の辞書を作成
+                row_dict = {}
+                for j, column in enumerate(self.column_headers):
+                    item = self.data_table.item(i, j)
+                    row_dict[column] = item.text() if item else ''
+                is_ex = self._is_excluded_row(row_dict)
+                for j in range(self.data_table.columnCount()):
+                    cell = self.data_table.item(i, j)
+                    if not cell:
+                        continue
+                    if not is_ex:
+                        # 除外ではない行を強調（淡い青系）
+                        cell.setData(Qt.BackgroundRole, QColor(200, 225, 255))
+                        cell.setData(Qt.ForegroundRole, QColor(0, 0, 0))
+                        f = cell.font(); f.setBold(True); cell.setFont(f)
+                    else:
+                        # 除外行は通常表示（交互行色）
+                        cell.setData(Qt.BackgroundRole, None)
+                        cell.setData(Qt.ForegroundRole, None)
+                        f = cell.font(); f.setBold(False); cell.setFont(f)
+                        if i % 2 == 0:
+                            cell.setBackground(QColor(255, 255, 255))
+                        else:
+                            cell.setBackground(QColor(240, 240, 240))
+        except Exception as e:
+            print(f"除外ハイライト更新エラー: {e}")
+
+    def clear_excluded_highlight(self):
+        try:
+            rows = self.data_table.rowCount()
+            for i in range(rows):
+                for j in range(self.data_table.columnCount()):
+                    cell = self.data_table.item(i, j)
+                    if not cell:
+                        continue
+                    cell.setData(Qt.BackgroundRole, None)
+                    cell.setData(Qt.ForegroundRole, None)
+                    f = cell.font(); f.setBold(False); cell.setFont(f)
+                    if i % 2 == 0:
+                        cell.setBackground(QColor(255, 255, 255))
+                    else:
+                        cell.setBackground(QColor(240, 240, 240))
+        except Exception as e:
+            print(f"除外ハイライト解除エラー: {e}")
         
     def apply_filters(self):
         """フィルタの適用"""
@@ -720,8 +907,10 @@ class InventoryWidget(QWidget):
             return
             
         try:
-            # データを辞書形式に変換
-            data_list = self.filtered_data.to_dict('records')
+            # データを辞書形式に変換（除外商品を除く）
+            all_list = self.filtered_data.to_dict('records')
+            data_list = [r for r in all_list if not self._is_excluded_row(r)]
+            excluded_count = len(all_list) - len(data_list)
             
             # 各商品データに店舗情報を追加
             enriched_data = []
@@ -869,14 +1058,17 @@ class InventoryWidget(QWidget):
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "CSVファイルを保存",
-            "inventory_export.csv",
+            "inventory_preview.csv",
             "CSVファイル (*.csv)"
         )
         
         if file_path:
             try:
-                self.filtered_data.to_csv(file_path, index=False, encoding='utf-8')
-                QMessageBox.information(self, "出力完了", f"CSVファイルを保存しました:\n{file_path}")
+                from pathlib import Path
+                from desktop.utils.file_naming import resolve_unique_path
+                target = resolve_unique_path(Path(file_path))
+                self.filtered_data.to_csv(str(target), index=False, encoding='utf-8')
+                QMessageBox.information(self, "出力完了", f"プレビュー用CSVを保存しました（UTF-8）。出品用は『出品CSV生成』をご利用ください。\n{str(target)}")
             except Exception as e:
                 QMessageBox.critical(self, "エラー", f"保存に失敗しました:\n{str(e)}")
                 
@@ -969,19 +1161,44 @@ class InventoryWidget(QWidget):
         try:
             # データを辞書形式に変換
             data_list = self.filtered_data.to_dict('records')
+            # 除外商品を除く
+            included_list = [r for r in data_list if not self._is_excluded_row(r)]
+            excluded_count = len(data_list) - len(included_list)
             
             # 列名をマッピング（日本語→英語）
             mapped_data = []
-            for row in data_list:
+            for row in included_list:
+                # takane 設定が有効なら価格の〇%上で算出
+                takane_val = ''
+                try:
+                    if self.chk_enable_takane.isChecked():
+                        pct = int(self.spin_takane_pct.value())
+                        base_price = row.get('販売予定価格', 0) or 0
+                        # 数値化
+                        if isinstance(base_price, str):
+                            base_price = float(base_price.replace(',', '')) if base_price else 0
+                        takane_val = int(round(float(base_price) * (1.0 + float(pct) / 100.0)))
+                except Exception:
+                    takane_val = ''
+
+                # タイトル出力の有無
+                product_name_val = row.get('商品名', '')
+                try:
+                    if hasattr(self, 'chk_include_title') and not self.chk_include_title.isChecked():
+                        product_name_val = ''
+                except Exception:
+                    pass
+
                 mapped_row = {
                     'sku': row.get('SKU', ''),
                     'asin': row.get('ASIN', ''),
                     'jan': row.get('JAN', ''),
-                    'product_name': row.get('商品名', ''),
+                    'product_name': product_name_val,
                     'quantity': row.get('仕入れ個数', 1),
                     'plannedPrice': row.get('販売予定価格', 0),
                     'purchasePrice': row.get('仕入れ価格', 0),
                     'breakEven': row.get('損益分岐点', 0),
+                    'takane': takane_val,
                     'condition': row.get('コンディション', ''),
                     'conditionNote': row.get('コンディション説明', ''),
                     'priceTrace': row.get('priceTrace', 0)
@@ -992,25 +1209,57 @@ class InventoryWidget(QWidget):
             result = self.api_client.inventory_export_listing(mapped_data)
             
             if result['status'] == 'success':
-                # ファイル保存ダイアログ
-                file_path, _ = QFileDialog.getSaveFileName(
-                    self,
-                    "出品CSVファイルを保存",
-                    "listing_export.csv",
-                    "CSVファイル (*.csv)"
-                )
-                
-                if file_path:
-                    # CSVバイナリデータをファイルに保存
+                # 既定の保存ファイル名（仕入れ日から YYYYMMDD_出品用CSV.csv を生成）
+                default_name = "listing_export.csv"
+                try:
+                    if len(self.filtered_data) > 0:
+                        first_date = str(self.filtered_data.iloc[0].get('仕入れ日', '')).strip()
+                        from datetime import datetime
+                        for fmt in ['%Y/%m/%d', '%Y-%m-%d', '%Y.%m.%d', '%Y%m%d']:
+                            try:
+                                dt = datetime.strptime(first_date, fmt)
+                                default_name = f"{dt.strftime('%Y%m%d')}_出品用CSV.csv"
+                                break
+                            except ValueError:
+                                continue
+                except Exception:
+                    pass
+
+                # 確認・デバッグ用: 保存先を一時的に固定
+                try:
+                    from pathlib import Path
+                    from desktop.utils.file_naming import resolve_unique_path
+                    fixed_dir = Path(r"D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳\20251102つくばルート")
+                    fixed_dir.mkdir(parents=True, exist_ok=True)
+                    target = resolve_unique_path(fixed_dir / default_name)
                     csv_content = result['csv_content']
-                    with open(file_path, 'wb') as f:
+                    with open(str(target), 'wb') as f:
                         f.write(csv_content)
-                    
                     QMessageBox.information(
-                        self, 
-                        "出品CSV生成完了", 
-                        f"出品CSV生成が完了しました\n出力数: {result['exported_count']}件\n保存先: {file_path}"
+                        self,
+                        "出品CSV生成完了",
+                        f"出品CSV生成が完了しました\n出力数: {result['exported_count']}件 (除外 {excluded_count}件)\n保存先: {str(target)}\n(一時的に固定保存フォルダを使用)"
                     )
+                except Exception:
+                    # フォールバック: 通常の保存ダイアログ
+                    file_path, _ = QFileDialog.getSaveFileName(
+                        self,
+                        "出品CSVファイルを保存",
+                        default_name,
+                        "CSVファイル (*.csv)"
+                    )
+                    if file_path:
+                        from pathlib import Path
+                        from desktop.utils.file_naming import resolve_unique_path
+                        target = resolve_unique_path(Path(file_path))
+                        csv_content = result['csv_content']
+                        with open(str(target), 'wb') as f:
+                            f.write(csv_content)
+                        QMessageBox.information(
+                            self,
+                            "出品CSV生成完了",
+                            f"出品CSV生成が完了しました\n出力数: {result['exported_count']}件\n保存先: {str(target)}"
+                        )
             else:
                 QMessageBox.warning(self, "出品CSV生成失敗", "出品CSV生成に失敗しました")
                 
@@ -1025,19 +1274,64 @@ class InventoryWidget(QWidget):
         
         try:
             from PySide6.QtWidgets import QInputDialog
+            from datetime import datetime
             
-            # スナップショット名の入力
+            # まずテーブルの編集内容を DataFrame に同期（手入力の変更を反映）
+            self.sync_inventory_data_from_table()
+            
+            # 仕入れ日の取得（最初の行から）
+            first_row = self.filtered_data.iloc[0]
+            purchase_date = first_row.get('仕入れ日', '')
+            
+            # 日付のフォーマット変換
+            date_str = ""
+            if purchase_date:
+                try:
+                    # 日付文字列をパース（複数のフォーマットに対応）
+                    if isinstance(purchase_date, str):
+                        # "2025/11/02" や "2025-11-02" など
+                        for fmt in ['%Y/%m/%d', '%Y-%m-%d', '%Y.%m.%d']:
+                            try:
+                                dt = datetime.strptime(purchase_date, fmt)
+                                date_str = dt.strftime('%Y/%m/%d')
+                                break
+                            except ValueError:
+                                continue
+                    
+                    # パースできなかった場合はそのまま使用
+                    if not date_str:
+                        date_str = str(purchase_date)
+                except Exception:
+                    date_str = str(purchase_date)
+            
+            # ルート名の取得
+            route_name = ""
+            if self.route_summary_widget:
+                try:
+                    route_name = self.route_summary_widget.route_code_combo.currentText()
+                except Exception:
+                    pass
+            
+            # 保存名の生成
+            if date_str and route_name:
+                default_name = f"{date_str} {route_name}"
+            elif date_str:
+                default_name = f"{date_str} 仕入リスト"
+            else:
+                default_name = f"仕入リスト {len(self.filtered_data)}件"
+            
+            # スナップショット名の入力ダイアログ
             snapshot_name, ok = QInputDialog.getText(
                 self,
                 "データ保存",
-                "保存名を入力してください:",
-                text=f"仕入リスト {len(self.filtered_data)}件"
+                f"この名称で保存してよろしいですか？\n編集も可能です:",
+                text=default_name
             )
             
             if not ok or not snapshot_name.strip():
                 return
             
-            # データを辞書形式に変換
+            # データを辞書形式に変換（同期後の最新データ）
             data_list = self.filtered_data.to_dict('records')
             
             # データベースに保存

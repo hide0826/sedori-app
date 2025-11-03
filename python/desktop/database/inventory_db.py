@@ -114,7 +114,14 @@ class InventoryDatabase:
         cursor = conn.cursor()
         
         cursor.execute("""
-            SELECT id, snapshot_name, item_count, created_at, updated_at
+            SELECT 
+                id, 
+                snapshot_name, 
+                item_count, 
+                created_at, 
+                updated_at,
+                datetime(created_at, 'localtime') AS created_at_local,
+                datetime(updated_at, 'localtime') AS updated_at_local
             FROM inventory_snapshots
             ORDER BY created_at DESC
         """)
@@ -125,8 +132,8 @@ class InventoryDatabase:
             'id': row['id'],
             'snapshot_name': row['snapshot_name'],
             'item_count': row['item_count'],
-            'created_at': row['created_at'],
-            'updated_at': row['updated_at']
+            'created_at': row['created_at_local'] or row['created_at'],
+            'updated_at': row['updated_at_local'] or row['updated_at']
         } for row in rows]
     
     def get_snapshot_by_id(self, snapshot_id: int) -> Optional[Dict[str, Any]]:
@@ -143,7 +150,11 @@ class InventoryDatabase:
         cursor = conn.cursor()
         
         cursor.execute("""
-            SELECT id, snapshot_name, item_count, data, created_at, updated_at
+            SELECT 
+                id, snapshot_name, item_count, data, 
+                created_at, updated_at,
+                datetime(created_at, 'localtime') AS created_at_local,
+                datetime(updated_at, 'localtime') AS updated_at_local
             FROM inventory_snapshots
             WHERE id = ?
         """, (snapshot_id,))
@@ -161,8 +172,8 @@ class InventoryDatabase:
             'snapshot_name': row['snapshot_name'],
             'item_count': row['item_count'],
             'data': data,
-            'created_at': row['created_at'],
-            'updated_at': row['updated_at']
+            'created_at': row['created_at_local'] or row['created_at'],
+            'updated_at': row['updated_at_local'] or row['updated_at']
         }
     
     def delete_snapshot(self, snapshot_id: int) -> bool:
@@ -202,14 +213,22 @@ class InventoryDatabase:
         
         if name_keyword:
             cursor.execute("""
-                SELECT id, snapshot_name, item_count, created_at, updated_at
+                SELECT 
+                    id, snapshot_name, item_count, 
+                    created_at, updated_at,
+                    datetime(created_at, 'localtime') AS created_at_local,
+                    datetime(updated_at, 'localtime') AS updated_at_local
                 FROM inventory_snapshots
                 WHERE snapshot_name LIKE ?
                 ORDER BY created_at DESC
             """, (f'%{name_keyword}%',))
         else:
             cursor.execute("""
-                SELECT id, snapshot_name, item_count, created_at, updated_at
+                SELECT 
+                    id, snapshot_name, item_count, 
+                    created_at, updated_at,
+                    datetime(created_at, 'localtime') AS created_at_local,
+                    datetime(updated_at, 'localtime') AS updated_at_local
                 FROM inventory_snapshots
                 ORDER BY created_at DESC
             """)
@@ -220,8 +239,8 @@ class InventoryDatabase:
             'id': row['id'],
             'snapshot_name': row['snapshot_name'],
             'item_count': row['item_count'],
-            'created_at': row['created_at'],
-            'updated_at': row['updated_at']
+            'created_at': row['created_at_local'] or row['created_at'],
+            'updated_at': row['updated_at_local'] or row['updated_at']
         } for row in rows]
     
     def close(self):

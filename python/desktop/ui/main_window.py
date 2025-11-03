@@ -122,7 +122,7 @@ class MainWindow(QMainWindow):
         self.repricer_settings_widget = RepricerSettingsWidget(self.api_client)
         self.tab_widget.addTab(self.repricer_settings_widget, "価格改定ルール")
         
-        # 仕入管理タブ
+        # 仕入管理タブ（仮に作成）
         self.inventory_widget = InventoryWidget(self.api_client)
         self.tab_widget.addTab(self.inventory_widget, "仕入管理")
         
@@ -137,6 +137,9 @@ class MainWindow(QMainWindow):
         # ルートサマリータブ（仕入管理ウィジェットへの参照を渡す）
         self.route_summary_widget = RouteSummaryWidget(self.api_client, inventory_widget=self.inventory_widget)
         self.tab_widget.addTab(self.route_summary_widget, "ルート登録")
+        
+        # ルートサマリーウィジェットへの参照を仕入管理ウィジェットに追加
+        self.inventory_widget.route_summary_widget = self.route_summary_widget
         
         # ルートサマリー一覧タブ
         self.route_list_widget = RouteListWidget()

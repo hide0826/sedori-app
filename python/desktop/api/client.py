@@ -632,8 +632,11 @@ class APIClient:
         """CSVファイル保存"""
         try:
             df = pd.DataFrame(data)
-            # 文字化け対策: BOM付きUTF-8で保存（Excel対応）
-            df.to_csv(file_path, index=False, encoding='utf-8-sig')
+            # 文字化け対策: BOM付きUTF-8で保存（Excel対応） + 重複名回避
+            from pathlib import Path
+            from desktop.utils.file_naming import resolve_unique_path
+            target = resolve_unique_path(Path(file_path))
+            df.to_csv(str(target), index=False, encoding='utf-8-sig')
             return True
         except Exception as e:
             self.logger.error(f"CSV保存失敗: {e}")

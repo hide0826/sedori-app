@@ -460,9 +460,12 @@ class AntiqueWidget(QWidget):
             try:
                 # データフレームの作成
                 df = pd.DataFrame(self.antique_data)
-                df.to_csv(file_path, index=False, encoding='utf-8')
+                from pathlib import Path
+                from desktop.utils.file_naming import resolve_unique_path
+                target = resolve_unique_path(Path(file_path))
+                df.to_csv(str(target), index=False, encoding='utf-8')
                 
-                QMessageBox.information(self, "出力完了", f"CSVファイルを保存しました:\n{file_path}")
+                QMessageBox.information(self, "出力完了", f"CSVファイルを保存しました:\n{str(target)}")
             except Exception as e:
                 QMessageBox.critical(self, "エラー", f"保存に失敗しました:\n{str(e)}")
                 
@@ -483,8 +486,11 @@ class AntiqueWidget(QWidget):
             try:
                 # データフレームの作成
                 df = pd.DataFrame(self.antique_data)
-                df.to_excel(file_path, index=False, engine='openpyxl')
+                from pathlib import Path
+                from desktop.utils.file_naming import resolve_unique_path
+                target = resolve_unique_path(Path(file_path))
+                df.to_excel(str(target), index=False, engine='openpyxl')
                 
-                QMessageBox.information(self, "出力完了", f"Excelファイルを保存しました:\n{file_path}")
+                QMessageBox.information(self, "出力完了", f"Excelファイルを保存しました:\n{str(target)}")
             except Exception as e:
                 QMessageBox.critical(self, "エラー", f"保存に失敗しました:\n{str(e)}")

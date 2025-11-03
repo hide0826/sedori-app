@@ -58,7 +58,10 @@ class DataExporter:
             if format.lower() == 'excel':
                 df.to_excel(output_path, index=False, engine='openpyxl')
             else:
-                df.to_csv(output_path, index=False, encoding='utf-8-sig')
+                from pathlib import Path
+                from desktop.utils.file_naming import resolve_unique_path
+                target = resolve_unique_path(Path(output_path))
+                df.to_csv(str(target), index=False, encoding='utf-8-sig')
             
             return True
             
@@ -115,7 +118,10 @@ class DataExporter:
             if format.lower() == 'excel':
                 df.to_excel(output_path, index=False, engine='openpyxl')
             else:
-                df.to_csv(output_path, index=False, encoding='utf-8-sig')
+                from pathlib import Path
+                from desktop.utils.file_naming import resolve_unique_path
+                target = resolve_unique_path(Path(output_path))
+                df.to_csv(str(target), index=False, encoding='utf-8-sig')
             
             return True
             
@@ -177,7 +183,10 @@ class DataExporter:
             df = pd.DataFrame(combined_data)
             
             # CSV形式で出力（UTF-8 BOM付き、Google Sheets対応）
-            df.to_csv(output_path, index=False, encoding='utf-8-sig')
+            from pathlib import Path
+            from desktop.utils.file_naming import resolve_unique_path
+            target = resolve_unique_path(Path(output_path))
+            df.to_csv(str(target), index=False, encoding='utf-8-sig')
             
             return True
             

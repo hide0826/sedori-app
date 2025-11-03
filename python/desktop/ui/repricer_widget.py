@@ -909,7 +909,10 @@ class RepricerWidget(QWidget):
                 
                 # 4. 元ファイルと同じ形式でCSV保存（プライスター対応）
                 try:
-                    df.to_csv(file_path, index=False, encoding='shift_jis', quoting=0)  # Shift-JIS、クォートなし
+                    from pathlib import Path
+                    from desktop.utils.file_naming import resolve_unique_path
+                    target = resolve_unique_path(Path(file_path))
+                    df.to_csv(str(target), index=False, encoding='shift_jis', quoting=0)  # Shift-JIS、クォートなし
                 except UnicodeEncodeError as e:
                     # Shift-JISでエンコードできない文字が残っている場合の追加処理
                     print(f"[WARNING CSV保存] Shift-JISエンコードエラー: {e}")
@@ -924,8 +927,11 @@ class RepricerWidget(QWidget):
                             # エラーが発生した列の文字を安全な文字に置換
                             df[col] = df[col].astype(str).str.encode('shift_jis', errors='replace').str.decode('shift_jis')
                     
-                    # 再試行
-                    df.to_csv(file_path, index=False, encoding='shift_jis', quoting=0)
+                    # 再試行（連番解決後のパスで）
+                    from pathlib import Path
+                    from desktop.utils.file_naming import resolve_unique_path
+                    target = resolve_unique_path(Path(file_path))
+                    df.to_csv(str(target), index=False, encoding='shift_jis', quoting=0)
                 
                 print(f"[DEBUG CSV保存] 保存完了: {file_path}")
                 QMessageBox.information(self, "保存完了", f"結果を保存しました:\n{file_path}")
