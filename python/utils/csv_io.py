@@ -6,7 +6,7 @@ import csv
 import io
 from typing import List, Dict
 
-EXCEL_HINT_ROW = ['ASIN、JANはどちらか一方のみ記載してください。']
+EXCEL_HINT_ROW = ['ASIN、JANはどちらか一方のみ記載してください。'] + [''] * 13  # 14列のCSVなので残り13列を空で埋める
 
 def write_listing_csv(data: List[Dict], 
                      columns: List[str],

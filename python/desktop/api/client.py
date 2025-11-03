@@ -456,28 +456,28 @@ class APIClient:
     def inventory_export_listing(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """出品CSV生成"""
         try:
-            # 既存のFastAPIエンドポイントを活用
+            # 出品CSV生成APIを呼び出す
             response = self.session.post(
-                f"{self.base_url}/api/inventory/process-listing",
+                f"{self.base_url}/api/inventory/export-listing-csv",
                 json={'products': data},
                 timeout=30
             )
             
             if response.status_code == 200:
-                result = response.json()
+                # CSVファイルとして返却
+                csv_content = response.content
                 return {
                     'status': 'success',
-                    'exported_count': result.get('listing_count', 0),
-                    'data': result.get('listing_products', [])
+                    'csv_content': csv_content,
+                    'exported_count': len(data)
                 }
             else:
-                # APIエラーの場合はダミー実装にフォールバック
-                self.logger.warning(f"出品CSV生成APIエラー: {response.status_code}、ダミー実装を使用")
-                return self._export_listing_dummy(data)
+                error_msg = response.text if hasattr(response, 'text') else str(response.status_code)
+                self.logger.warning(f"出品CSV生成APIエラー: {response.status_code} - {error_msg}")
+                raise Exception(f"出品CSV生成に失敗しました: {error_msg}")
         except Exception as e:
             self.logger.error(f"出品CSV生成失敗: {e}")
-            # エラー時もダミー実装で継続
-            return self._export_listing_dummy(data)
+            raise
     
     def _export_listing_dummy(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """出品CSV生成のダミー実装"""

@@ -101,9 +101,27 @@ async def export_listing_csv(request: ProcessListingRequest):
     """
     出品用CSV直接ダウンロード
     
-    コメント欄が空の商品のみをCSV出力（Shift-JIS）
+    商品データから出品用CSVを生成して返却（Shift-JIS）
     """
-    raise HTTPException(status_code=500, detail="Listing CSV generation not implemented yet or missing dependencies.")
+    try:
+        if not request.products:
+            raise HTTPException(status_code=400, detail="商品データがありません")
+        
+        # 出品用CSV生成
+        csv_bytes = InventoryService.generate_listing_csv_content(request.products)
+        
+        # HTTPレスポンスとして返却
+        return Response(
+            content=csv_bytes,
+            media_type="text/csv; charset=Shift_JIS",
+            headers={
+                "Content-Disposition": "attachment; filename=listing_export.csv"
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"出品CSV生成エラー: {str(e)}")
 
 @router.post("/match-stores")
 async def match_stores_with_route(

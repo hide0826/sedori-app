@@ -929,8 +929,26 @@ class InventoryWidget(QWidget):
             # データを辞書形式に変換
             data_list = self.filtered_data.to_dict('records')
             
+            # 列名をマッピング（日本語→英語）
+            mapped_data = []
+            for row in data_list:
+                mapped_row = {
+                    'sku': row.get('SKU', ''),
+                    'asin': row.get('ASIN', ''),
+                    'jan': row.get('JAN', ''),
+                    'product_name': row.get('商品名', ''),
+                    'quantity': row.get('仕入れ個数', 1),
+                    'plannedPrice': row.get('販売予定価格', 0),
+                    'purchasePrice': row.get('仕入れ価格', 0),
+                    'breakEven': row.get('損益分岐点', 0),
+                    'condition': row.get('コンディション', ''),
+                    'conditionNote': row.get('コンディション説明', ''),
+                    'priceTrace': row.get('priceTrace', 0)
+                }
+                mapped_data.append(mapped_row)
+            
             # APIクライアントで出品CSV生成
-            result = self.api_client.inventory_export_listing(data_list)
+            result = self.api_client.inventory_export_listing(mapped_data)
             
             if result['status'] == 'success':
                 # ファイル保存ダイアログ
@@ -942,10 +960,10 @@ class InventoryWidget(QWidget):
                 )
                 
                 if file_path:
-                    # 生成されたデータをCSVファイルに保存
-                    import pandas as pd
-                    df = pd.DataFrame(result['data'])
-                    df.to_csv(file_path, index=False, encoding='utf-8')
+                    # CSVバイナリデータをファイルに保存
+                    csv_content = result['csv_content']
+                    with open(file_path, 'wb') as f:
+                        f.write(csv_content)
                     
                     QMessageBox.information(
                         self, 

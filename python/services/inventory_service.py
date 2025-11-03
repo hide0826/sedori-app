@@ -120,7 +120,7 @@ class InventoryService:
     def generate_listing_csv_content(products: List[dict]) -> bytes:
         """
         商品リストから出品用CSVコンテンツを生成する（Shift-JISエンコーディング）。
-        参考フォーマット: D:\HIRIO\docs\参考データ\20250928_出品用CSV.csv
+        参考フォーマット: D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳\20251102つくばルート\20251102_出品用CSV.csv
         """
         if not products:
             return b""
@@ -138,12 +138,16 @@ class InventoryService:
             'asin': 'ASIN', 
             'jan': 'JAN',
             'productName': 'title',
+            'product_name': 'title',
             'quantity': 'add_number',
             'plannedPrice': 'price',
             'purchasePrice': 'cost',
             'breakEven': 'akaji',
+            'condition': 'condition',
             'conditionNote': 'conditionNote',
-            'priceTrace': 'priceTrace'
+            'condition_note': 'conditionNote',
+            'priceTrace': 'priceTrace',
+            'price_trace': 'priceTrace'
         }
 
         # Create output DataFrame with required columns
@@ -153,41 +157,44 @@ class InventoryService:
         for old_col, new_col in column_mapping.items():
             if old_col in df.columns:
                 output_data[new_col] = df[old_col]
-            else:
-                output_data[new_col] = ''
         
-        # Add condition (already mapped above)
-        if 'condition' in df.columns:
-            output_data['condition'] = df['condition']
-        else:
-            output_data['condition'] = ''
-            
-        # Add empty columns as per reference format
-        output_data['takane'] = ''
-        output_data['leadtime'] = ''
-        output_data['merchant_shipping_group_name'] = ''
-
-        # Create final DataFrame
-        df_output = pd.DataFrame(output_data)
-
-        # If ASIN exists, JAN should be empty
-        if 'ASIN' in df_output.columns and 'JAN' in df_output.columns:
-            df_output['JAN'] = df_output.apply(lambda row: '' if pd.notna(row['ASIN']) and row['ASIN'] != '' else row['JAN'], axis=1)
-
-        # Define final column order matching reference format
+        # Add required columns with default values if missing
         final_columns = [
             'SKU', 'ASIN', 'JAN', 'title', 'add_number', 'price', 'cost', 'akaji', 'takane',
             'condition', 'conditionNote', 'priceTrace', 'leadtime', 'merchant_shipping_group_name'
         ]
         
+        for col in final_columns:
+            if col not in output_data:
+                output_data[col] = ''
+        
+        # Create final DataFrame
+        df_output = pd.DataFrame(output_data)
+
+        # If ASIN exists, JAN should be empty (逆も同様)
+        if 'ASIN' in df_output.columns and 'JAN' in df_output.columns:
+            df_output['JAN'] = df_output.apply(
+                lambda row: '' if pd.notna(row['ASIN']) and str(row['ASIN']).strip() != '' else (row['JAN'] if pd.notna(row['JAN']) else ''), 
+                axis=1
+            )
+            df_output['ASIN'] = df_output.apply(
+                lambda row: '' if pd.notna(row['JAN']) and str(row['JAN']).strip() != '' else (row['ASIN'] if pd.notna(row['ASIN']) else ''), 
+                axis=1
+            )
+        
         # Reorder columns
         df_final = df_output.reindex(columns=final_columns, fill_value='')
+        
+        # Replace NaN with empty string for all columns
+        df_final = df_final.fillna('')
 
-        # Generate CSV content with header note
-        output = io.StringIO()
-        # Add header note as in reference file
-        output.write('ASIN、JANはどちらか一方のみ記載してください。,,,,,,,,,,,,,\n')
-        df_final.to_csv(output, index=False)
-        csv_content = output.getvalue()
-
-        return csv_content.encode('cp932', errors='replace')
+        # Generate CSV content using csv_io module for consistency
+        from utils.csv_io import write_listing_csv
+        
+        # Convert to list of dicts
+        records = df_final.to_dict(orient='records')
+        
+        # Generate CSV using write_listing_csv
+        csv_bytes = write_listing_csv(records, final_columns, excel_formula_cols=None)
+        
+        return csv_bytes
