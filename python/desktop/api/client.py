@@ -15,6 +15,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 import logging
+import math
 
 
 class APIClient:
@@ -287,10 +288,25 @@ class APIClient:
     def inventory_generate_sku(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """SKU生成"""
         try:
+            # NaN/inf を JSON に通る形にクリーン
+            def _clean(obj):
+                if isinstance(obj, dict):
+                    return {k: _clean(v) for k, v in obj.items()}
+                if isinstance(obj, list):
+                    return [_clean(x) for x in obj]
+                # numpy.nan などにも対応
+                try:
+                    if isinstance(obj, float) and math.isnan(obj):
+                        return None
+                except Exception:
+                    pass
+                return obj
+
+            payload = { 'products': _clean(data) }
             # 既存のFastAPIエンドポイントを活用
             response = self.session.post(
                 f"{self.base_url}/api/inventory/generate-sku-bulk",
-                json={'products': data},
+                json=payload,
                 timeout=30
             )
             
@@ -316,13 +332,12 @@ class APIClient:
                     'results': sku_results
                 }
             else:
-                # APIエラーの場合はダミー実装にフォールバック
-                self.logger.warning(f"SKU生成APIエラー: {response.status_code}、ダミー実装を使用")
-                return self._generate_sku_dummy(data)
+                # APIエラーはそのまま上位に知らせる
+                detail = response.text
+                raise Exception(f"SKU生成APIエラー: {response.status_code} - {detail}")
         except Exception as e:
             self.logger.error(f"SKU生成失敗: {e}")
-            # エラー時もダミー実装で継続
-            return self._generate_sku_dummy(data)
+            raise
     
     def _generate_sku_dummy(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """SKU生成のダミー実装"""
@@ -341,6 +356,36 @@ class APIClient:
             'generated_count': len(sku_results),
             'results': sku_results
         }
+
+    # ===== SKUテンプレート設定 =====
+    def inventory_get_sku_template(self) -> Dict[str, Any]:
+        """SKUテンプレート設定を取得"""
+        try:
+            resp = self.session.get(f"{self.base_url}/api/inventory/sku-template", timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+            raise Exception(f"GET sku-template failed: {resp.status_code} {resp.text}")
+        except Exception as e:
+            self.logger.error(f"inventory_get_sku_template error: {e}")
+            # フォールバック（初期値）
+            return {
+                "skuTemplate": "{date:YYYYMMDD}-{ASIN|JAN}-{supplier}-{seq:3}-{condNum}",
+                "seqScope": "day",
+                "seqStart": 1
+            }
+
+    def inventory_update_sku_template(self, settings: Dict[str, Any]) -> bool:
+        """SKUテンプレート設定を保存"""
+        try:
+            resp = self.session.post(
+                f"{self.base_url}/api/inventory/sku-template",
+                json=settings,
+                timeout=10
+            )
+            return resp.status_code == 200
+        except Exception as e:
+            self.logger.error(f"inventory_update_sku_template error: {e}")
+            return False
     
     def _determine_q_tag(self, item: Dict[str, Any]) -> str:
         """Qタグの判定（ダミー実装）"""

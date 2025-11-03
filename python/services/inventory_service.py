@@ -4,6 +4,15 @@ import json
 from pathlib import Path
 from typing import List, Tuple, Dict, Any
 from datetime import datetime
+import json
+from pathlib import Path
+
+# 新しいSKUテンプレートレンダラ
+try:
+    from services.sku_template import SKUTemplateRenderer
+except Exception:
+    # 相対パスでの実行環境向けフォールバック
+    from .sku_template import SKUTemplateRenderer
 
 from core.csv_utils import read_csv_with_fallback, normalize_dataframe_for_cp932
 from utils.csv_io import write_listing_csv
@@ -56,54 +65,46 @@ class InventoryService:
         - store_id: 店舗ID
         """
         
-        # コンディションコード変換マップ
-        CONDITION_MAP = {
-            "新品": "N",
-            "中古": "C",
-            "ほぼ新品": "V",
-            "非常に良い": "V",
-            "良い": "G",
-            "可": "A"
+        # 設定ファイル読み込み（無ければ初期値）
+        # 設定ファイルはリポジトリ直下の config/ に統一
+        # services/ からは parents[2] がリポジトリルート
+        config_path = Path(__file__).resolve().parents[2] / "config" / "inventory_settings.json"
+        default_settings = {
+            "skuTemplate": "{date:YYYYMMDD}-{ASIN|JAN}-{supplier}-{seq:3}-{condNum}",
+            "seqScope": "day",
+            "seqStart": 1
         }
-        
-        # 今日の日付を取得（YYYYMMDD形式）
-        today = datetime.now().strftime("%Y%m%d")
-        
-        # 既存SKUから最大連番を取得（実装済みの場合）
-        # 今回は簡易的に001から開始
-        start_number = 1
-        
+        try:
+            if config_path.exists():
+                settings = json.loads(config_path.read_text(encoding="utf-8"))
+            else:
+                settings = default_settings
+        except Exception:
+            settings = default_settings
+
+        renderer = SKUTemplateRenderer(settings)
+
         results = []
         for idx, product in enumerate(products):
-            # 連番生成（3桁ゼロパディング）
-            seq_number = str(start_number + idx).zfill(3)
-            
-            # コンディションコード取得
-            # 列名が日本語の場合も対応（「コンディション」）
-            condition = product.get("condition") or product.get("コンディション", "新品")
-            condition_code = CONDITION_MAP.get(condition, "N")
-            
-            # Qタグ（デフォルトで付与、将来的にユーザー選択可能に）
-            q_tag = "Q"
-            
-            # SKU生成（現行フォーマット: {q_tag}{today}-{seq_number}-{condition_code}）
-            sku = f"{q_tag}{today}-{seq_number}-{condition_code}"
-            
-            # 店舗情報を取得（店舗マスタ連携で追加された情報）
+            try:
+                sku = renderer.render_sku(product, seq_offset=idx)
+            except Exception:
+                sku = ""
+
+            # 補助値
+            condition = product.get("condition") or product.get("コンディション", "")
             supplier_code = product.get("supplier_code", "")
             store_name = product.get("store_name", "")
             store_id = product.get("store_id")
-            
-            # 結果に追加（店舗情報も含める）
+
             results.append({
+                "asin": product.get("asin") or product.get("ASIN", ""),
                 "jan": product.get("jan") or product.get("JAN", ""),
                 "product_name": product.get("product_name") or product.get("商品名", ""),
                 "purchase_price": product.get("purchase_price") or product.get("仕入れ価格", 0),
                 "condition": condition,
                 "sku": sku,
-                "condition_code": condition_code,
-                "q_tag": q_tag,
-                # 店舗情報（店舗マスタ連携）
+                # 店舗情報
                 "supplier_code": supplier_code,
                 "store_name": store_name,
                 "store_id": store_id

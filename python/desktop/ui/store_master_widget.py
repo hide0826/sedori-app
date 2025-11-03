@@ -33,11 +33,12 @@ from utils.excel_importer import ExcelImporter
 class StoreEditDialog(QDialog):
     """店舗編集ダイアログ"""
     
-    def __init__(self, parent=None, store_data=None, custom_fields_def=None):
+    def __init__(self, parent=None, store_data=None, custom_fields_def=None, initial_route_name: str = None):
         super().__init__(parent)
         self.store_data = store_data
         self.custom_fields_def = custom_fields_def or []
         self.db = StoreDatabase()
+        self.initial_route_name = initial_route_name
         # カスタムフィールド編集ウィジェットのマップは必ず初期化しておく
         self.custom_field_edits = {}
         
@@ -47,6 +48,16 @@ class StoreEditDialog(QDialog):
         
         if store_data:
             self.load_data()
+        else:
+            # 新規追加時に初期ルートが与えられていれば自動入力
+            if self.initial_route_name:
+                idx = self.affiliated_route_name_combo.findText(self.initial_route_name)
+                if idx >= 0:
+                    self.affiliated_route_name_combo.setCurrentIndex(idx)
+                else:
+                    self.affiliated_route_name_combo.setCurrentText(self.initial_route_name)
+                # ルートコードと次の仕入れ先コードを自動設定
+                self.on_route_name_changed(self.initial_route_name)
     
     def setup_ui(self):
         """UIの設定"""
@@ -796,7 +807,7 @@ class StoreMasterWidget(QWidget):
     
     def add_store(self):
         """店舗追加"""
-        dialog = StoreEditDialog(self, custom_fields_def=self.custom_fields_def)
+        dialog = StoreEditDialog(self, custom_fields_def=self.custom_fields_def, initial_route_name=self.current_selected_route)
         if dialog.exec() == QDialog.Accepted:
             is_valid, error_msg = dialog.validate()
             if not is_valid:

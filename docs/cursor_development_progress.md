@@ -1,3 +1,17 @@
+## 2025-11-03 SKUテンプレート機能追加
+
+- 追加: `python/services/sku_template.py` テンプレレンダラ
+- 追加: `config/inventory_settings.json` 初期設定
+- 変更: `python/services/inventory_service.py` → 一括SKU生成をテンプレ式へ
+- 追加: API `GET/POST /api/inventory/sku-template` 設定取得/保存
+- テンプレ仕様:
+  - `{date:YYYYMMDD}`, `{ASIN|JAN}`, `{asin}`, `{jan}`, `{condNum}`, `{condCode}`, `{ship}`, `{supplier}`, `{seq:桁数}`, `{custom:固定}`
+  - 許可文字: 英数・ハイフン・アンダースコア、連続ハイフン圧縮、最大60文字
+- テスト例:
+  - 設定: `{date:YYYYMMDD}-{ASIN|JAN}-{supplier}-{seq:3}-{condNum}`
+  - 入力1: asin=B0001234AB, supplier=HMK, condition=中古(非常に良い) → `20251103-B0001234AB-HMK-001-2`
+  - 入力2: jan=4901234567890, supplier=HR, condition=新品 → `20251103-4901234567890-HR-002-11`
+
 # Cursor開発進捗管理
 
 ## プロジェクト概要

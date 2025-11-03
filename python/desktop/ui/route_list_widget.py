@@ -88,7 +88,8 @@ class RouteListWidget(QWidget):
         # ヘッダー設定
         header = self.table.horizontalHeader()
         header.setStretchLastSection(False)
-        header.setSectionResizeMode(QHeaderView.Interactive)
+        # 文字数に応じて自動で幅をフィット
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setSectionsClickable(True)
         
         # ダブルクリックで詳細表示
@@ -104,10 +105,11 @@ class RouteListWidget(QWidget):
     
     def load_routes(self):
         """ルート一覧を読み込む"""
-        # 初回のみ既存データの同期
-        if not self._sync_done:
+        # 既存データの同期（毎回実行して最新化）
+        try:
             self.route_db.sync_total_item_count_from_visits()
-            self._sync_done = True
+        except Exception:
+            pass
         
         routes = self.route_db.list_route_summaries()
         self.update_table(routes)

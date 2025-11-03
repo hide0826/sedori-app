@@ -1067,10 +1067,20 @@ class RouteSummaryWidget(QWidget):
     def run_matching(self):
         """照合処理実行（改良版：仕入管理データを参照）"""
         try:
-            # 現在のルートIDが必要
+            # 現在のルートIDが必要。未保存なら保存を促し、自動保存を試みる
             if not self.current_route_id:
-                QMessageBox.warning(self, "警告", "先にルートを保存してください")
-                return
+                reply = QMessageBox.question(
+                    self,
+                    "未保存のルート",
+                    "照合処理を実行するにはルートの保存が必要です。今すぐ保存しますか？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                if reply == QMessageBox.Yes:
+                    self.save_data()
+                if not self.current_route_id:
+                    QMessageBox.warning(self, "警告", "ルートIDが未確定のため処理を中止しました")
+                    return
             
             # 仕入管理データの確認
             if not self.inventory_widget:
@@ -1148,10 +1158,20 @@ class RouteSummaryWidget(QWidget):
     def execute_matching_from_csv(self):
         """照合処理実行（CSVファイル版）"""
         try:
-            # 現在のルートIDが必要
+            # 現在のルートIDが必要。未保存なら保存を促し、自動保存を試みる
             if not self.current_route_id:
-                QMessageBox.warning(self, "警告", "先にルートを保存してください")
-                return
+                reply = QMessageBox.question(
+                    self,
+                    "未保存のルート",
+                    "照合処理を実行するにはルートの保存が必要です。今すぐ保存しますか？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                if reply == QMessageBox.Yes:
+                    self.save_data()
+                if not self.current_route_id:
+                    QMessageBox.warning(self, "警告", "ルートIDが未確定のため処理を中止しました")
+                    return
             
             # APIクライアント確認
             if not self.api_client:
@@ -1657,8 +1677,22 @@ class RouteSummaryWidget(QWidget):
             route_data.update(stats)
             
             # 総仕入点数と総想定粗利を計算（計算サービスの結果を上書き）
-            route_data['total_item_count'] = sum(int(v.get('store_item_count', 0)) for v in store_visits)
-            route_data['total_gross_profit'] = sum(float(v.get('store_gross_profit', 0)) for v in store_visits)
+            def _int_safe(x):
+                try:
+                    if x is None or x == '':
+                        return 0
+                    return int(float(x))
+                except Exception:
+                    return 0
+            def _float_safe(x):
+                try:
+                    if x is None or x == '':
+                        return 0.0
+                    return float(x)
+                except Exception:
+                    return 0.0
+            route_data['total_item_count'] = sum(_int_safe(v.get('store_item_count')) for v in store_visits)
+            route_data['total_gross_profit'] = sum(_float_safe(v.get('store_gross_profit')) for v in store_visits)
             
             if self.current_route_id:
                 self.route_db.update_route_summary(self.current_route_id, route_data)
@@ -1962,6 +1996,26 @@ class RouteSummaryWidget(QWidget):
                 # デバッグ: 更新前のDB状態を確認
                 print(f"\n照合再計算完了: 更新した店舗数={len([v for v in visits if v.get('store_code') in store_profits])}")
                 self.load_saved_data(self.current_route_id)
+
+                # 画面のテーブルにも即時反映（DB読込に失敗した場合のフォールバック）
+                try:
+                    code_col = 1  # 店舗コード列
+                    gross_col = 7  # 想定粗利列
+                    count_col = 8  # 仕入れ点数列
+                    for r in range(self.store_visits_table.rowCount()):
+                        code_item = self.store_visits_table.item(r, code_col)
+                        if not code_item:
+                            continue
+                        code = (code_item.text() or '').strip()
+                        if not code:
+                            continue
+                        if code in store_profits or code in store_item_counts:
+                            gp = int(store_profits.get(code, 0))
+                            cnt = int(store_item_counts.get(code, 0))
+                            self.store_visits_table.setItem(r, gross_col, QTableWidgetItem(str(gp)))
+                            self.store_visits_table.setItem(r, count_col, QTableWidgetItem(str(cnt)))
+                except Exception as _e:
+                    print(f"UI反映フォールバックでエラー: {_e}")
             
         except Exception as e:
             # エラーはログに記録するが、ユーザーには通知しない（主要処理は成功しているため）
@@ -2051,7 +2105,7 @@ class SavedRoutesDialog(QDialog):
         # フィルタ行（デフォルトは全件表示。必要時のみチェックして絞り込む）
         filt = QHBoxLayout()
         from PySide6.QtWidgets import QDateEdit
-        self.chk_date = QCheckBox("日付")
+        self.chk_date = QCheckBox("仕入れ日")
         self.date_edit = QDateEdit()
         self.date_edit.setCalendarPopup(True)
         self.date_edit.setDateTime(QDateTime.currentDateTime())
@@ -2075,11 +2129,14 @@ class SavedRoutesDialog(QDialog):
 
         # 一覧テーブル
         self.table = QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["ID", "日付", "ルートコード"]) 
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["ID", "仕入れ日", "ルートコード（ルート名）", "最終更新"])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        # 列幅を内容に合わせて自動調整（最終更新列が切れないように）
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setStretchLastSection(True)
         layout.addWidget(self.table)
 
         # ボタン
@@ -2114,9 +2171,28 @@ class SavedRoutesDialog(QDialog):
         rows = self.route_db.list_route_summaries(start_date=start, end_date=end, route_code=route_code)
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            self.table.setItem(i, 0, QTableWidgetItem(str(r.get('id',''))))
-            self.table.setItem(i, 1, QTableWidgetItem(str(r.get('route_date',''))))
-            self.table.setItem(i, 2, QTableWidgetItem(str(r.get('route_code',''))))
+            rid = str(r.get('id',''))
+            rdate = str(r.get('route_date',''))
+            rcode = str(r.get('route_code',''))
+            # ルート名に変換
+            try:
+                rname = self.store_db.get_route_name_by_code(rcode) or ''
+            except Exception:
+                rname = ''
+            code_display = f"{rcode}"
+            if rname:
+                code_display = f"{rcode}（{rname}）"
+            updated_at = str(r.get('updated_at',''))
+
+            self.table.setItem(i, 0, QTableWidgetItem(rid))
+            self.table.setItem(i, 1, QTableWidgetItem(rdate))
+            self.table.setItem(i, 2, QTableWidgetItem(code_display))
+            self.table.setItem(i, 3, QTableWidgetItem(updated_at))
+        # データ投入後に列幅を最適化
+        try:
+            self.table.resizeColumnsToContents()
+        except Exception:
+            pass
 
     def _selected_id(self) -> Optional[int]:
         sel = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []

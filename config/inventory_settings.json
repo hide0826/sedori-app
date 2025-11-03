@@ -1,0 +1,5 @@
+{
+  "skuTemplate": "{custom:hmk}-{date:YYYYMMDD}-{condCode}-{seq:3}",
+  "seqScope": "day",
+  "seqStart": 1
+}

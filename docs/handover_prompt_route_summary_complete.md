@@ -422,3 +422,38 @@ Content-Type: application/json
 
 以上。次チャットでは本プロンプトを貼り付けて「続きから」と伝えてください。
 
+
+## Agentモード用プロンプト（このまま貼り付けてください）
+
+```
+今から「HIRIO デスクトップアプリ（PySide6）＋ FastAPI」の継続開発を行います。直近までの状況は下記の通りです。
+
+[現状サマリ]
+- 仕入管理/ルート登録/店舗マスタ/ルート一覧は稼働中。
+- 照合処理API（CSV版・JSON版）実装済み。NaN・時間結合の正規化あり。
+- SKUテンプレート機能を実装済み：
+  - レンダラ: `python/services/sku_template.py`
+  - 設定: `config/inventory_settings.json`
+  - 既存一括SKU生成はテンプレ式に置換（`InventoryService.generate_sku_bulk`）。
+  - 設定API: GET/POST `/api/inventory/sku-template`（`python/routers/inventory.py`）。
+  - デスクトップ側に設定パネル追加（仕入管理タブ内、トグル開閉・8スロット式ビルダー・保存/読込）。
+  - APIクライアントに取得/保存実装、SKU生成時のNaN→Noneクリーン実装済み。
+  - SKU反映ロジック強化（ASIN→JAN→商品名→未実装行→処理順の順に割当）。
+
+[開始時の確認]
+1) API起動: `cd python && python app.py`（http://localhost:8000）。
+2) デスクトップ起動: `cd python/desktop && python main.py`。
+3) 設定画面で APIベースURL `http://localhost:8000` を確認し、接続テストOKであること。
+
+[主なファイル]
+- API: `python/routers/inventory.py`, `python/services/inventory_service.py`, `python/services/sku_template.py`
+- デスクトップ: `python/desktop/ui/inventory_widget.py`, `python/desktop/api/client.py`
+
+[当面のタスク例]
+1) SKUテンプレの正規化強化（商品名の全角/半角・連続空白・="…" の除去など）。
+2) 未実装SKUが出ないか、サンプルCSVで再確認。問題あれば一致ロジック/ログ強化。
+3) 仕入管理のエクスポート/プレビュー改善（任意）。
+
+進め方: まず起動確認後、1) の正規化強化から着手してください。完了後に 2) の検証と修正を行い、差分をコミットしてください。
+```
+

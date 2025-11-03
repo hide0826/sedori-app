@@ -10,6 +10,8 @@ from typing import Any, Dict, List
 import io
 import pandas as pd
 import math
+import json
+from pathlib import Path
 
 from services.inventory_service import InventoryService
 from desktop.database.route_db import RouteDatabase
@@ -183,6 +185,50 @@ async def match_stores_with_route(
             "stats": {**stats, "matched_rows": matched_rows},
             "preview": preview
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sku-template")
+async def get_sku_template_settings():
+    """SKUテンプレート設定の取得"""
+    try:
+        cfg_path = Path(__file__).resolve().parents[2] / "config" / "inventory_settings.json"
+        if cfg_path.exists():
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        else:
+            data = {
+                "skuTemplate": "{date:YYYYMMDD}-{ASIN|JAN}-{supplier}-{seq:3}-{condNum}",
+                "seqScope": "day",
+                "seqStart": 1
+            }
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sku-template")
+async def update_sku_template_settings(payload: Dict[str, Any]):
+    """SKUテンプレート設定の更新（簡易バリデーション付）"""
+    try:
+        tpl = str(payload.get("skuTemplate", ""))
+        if not tpl:
+            raise HTTPException(status_code=400, detail="skuTemplate is required")
+        if len(tpl) > 200:
+            raise HTTPException(status_code=400, detail="skuTemplate too long")
+        if any(ord(c) < 32 for c in tpl):
+            raise HTTPException(status_code=400, detail="invalid characters in template")
+
+        cfg_path = Path(__file__).resolve().parents[2] / "config" / "inventory_settings.json"
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(json.dumps({
+            "skuTemplate": tpl,
+            "seqScope": payload.get("seqScope", "day"),
+            "seqStart": int(payload.get("seqStart", 1))
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"status": "success"}
     except HTTPException:
         raise
     except Exception as e:

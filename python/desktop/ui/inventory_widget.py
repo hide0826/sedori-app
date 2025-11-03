@@ -142,6 +142,11 @@ class InventoryWidget(QWidget):
         action_ops_layout.addWidget(self.antique_register_btn)
         
         file_layout.addLayout(action_ops_layout)
+
+        # SKU設定トグルボタン
+        self.toggle_settings_btn = QPushButton("SKU設定")
+        self.toggle_settings_btn.clicked.connect(self.toggle_settings_panel)
+        file_layout.addWidget(self.toggle_settings_btn)
         
         file_layout.addStretch()
         
@@ -218,6 +223,9 @@ class InventoryWidget(QWidget):
         filter_layout.addLayout(filter_row_layout)
         
         self.layout().addWidget(filter_group)
+
+        # SKUテンプレ設定パネル（折りたたみ）
+        self.setup_settings_panel()
         
     def setup_data_table(self):
         """データテーブルエリアの設定（改良版）"""
@@ -749,7 +757,8 @@ class InventoryWidget(QWidget):
         """SKU生成結果をテーブルに反映"""
         try:
             # 元データにSKU情報を追加
-            for result in sku_results:
+            used_rows = set()
+            for idx_result, result in enumerate(sku_results):
                 if result['status'] == 'success':
                     # 元データの該当行を特定（ASINや商品名でマッチング）
                     original_data = result['original_data']
@@ -757,14 +766,49 @@ class InventoryWidget(QWidget):
                     q_tag = result['q_tag']
                     
                     # 元データの該当行を更新
-                    for i, row in self.inventory_data.iterrows():
-                        if (str(row.get('ASIN', '')) == str(original_data.get('ASIN', '')) and
-                            str(row.get('商品名', '')) == str(original_data.get('商品名', ''))):
-                            # SKU列を更新（Q列は現在の列構成に含まれていないためコメントアウト）
-                            self.inventory_data.at[i, 'SKU'] = generated_sku
-                            # if q_tag:
-                            #     self.inventory_data.at[i, 'Q列'] = q_tag
-                            break
+                    def _norm(s: str) -> str:
+                        return str(s or '').strip().replace('\u3000', ' ')
+
+                    asin = _norm(original_data.get('ASIN') or original_data.get('asin'))
+                    jan = _norm(original_data.get('JAN') or original_data.get('jan'))
+                    name = _norm(original_data.get('商品名') or original_data.get('product_name'))
+
+                    matched_index = None
+                    # 1) ASIN一致
+                    if asin:
+                        for i, row in self.inventory_data.iterrows():
+                            if i in used_rows:
+                                continue
+                            if _norm(row.get('ASIN')) == asin:
+                                matched_index = i; break
+                    # 2) JAN一致
+                    if matched_index is None and jan:
+                        for i, row in self.inventory_data.iterrows():
+                            if i in used_rows:
+                                continue
+                            if _norm(row.get('JAN')) == jan:
+                                matched_index = i; break
+                    # 3) 商品名（ゆるめ）
+                    if matched_index is None and name:
+                        for i, row in self.inventory_data.iterrows():
+                            if i in used_rows:
+                                continue
+                            if _norm(row.get('商品名')).lower() == name.lower():
+                                matched_index = i; break
+                    # 4) 表示順で最初の未実装
+                    if matched_index is None:
+                        for i, row in self.inventory_data.iterrows():
+                            if i in used_rows:
+                                continue
+                            if str(row.get('SKU', '')) in ('', '未実装'):
+                                matched_index = i; break
+                    # 5) 最後の保険: インデックス
+                    if matched_index is None and idx_result < len(self.inventory_data):
+                        matched_index = idx_result
+
+                    if matched_index is not None:
+                        self.inventory_data.at[matched_index, 'SKU'] = generated_sku
+                        used_rows.add(matched_index)
             
             # フィルタデータも更新
             self.filtered_data = self.inventory_data.copy()
@@ -1060,3 +1104,149 @@ class InventoryWidget(QWidget):
         
         # ワークフローグループをレイアウトに追加
         self.layout().addWidget(workflow_group)
+
+    # ===== SKUテンプレ設定パネル =====
+    def setup_settings_panel(self):
+        self.settings_group = QGroupBox("SKUテンプレート設定")
+        self.settings_group.setCheckable(False)
+        self.settings_group.setVisible(False)
+
+        lay = QGridLayout(self.settings_group)
+        lay.addWidget(QLabel("テンプレート:"), 0, 0)
+        self.tpl_edit = QLineEdit()
+        self.tpl_edit.setPlaceholderText("{date:YYYYMMDD}-{ASIN|JAN}-{supplier}-{seq:3}-{condNum}")
+        self.tpl_edit.setFixedHeight(30)
+        lay.addWidget(self.tpl_edit, 0, 1, 1, 3)
+
+        lay.addWidget(QLabel("連番開始:"), 1, 0)
+        self.seq_start_spin = QSpinBox()
+        self.seq_start_spin.setRange(1, 9999)
+        self.seq_start_spin.setValue(1)
+        self.seq_start_spin.setFixedHeight(30)
+        lay.addWidget(self.seq_start_spin, 1, 1)
+
+        lay.addWidget(QLabel("スコープ:"), 1, 2)
+        self.seq_scope_combo = QComboBox()
+        self.seq_scope_combo.addItems(["day"])  # まずはdayのみ
+        self.seq_scope_combo.setFixedHeight(30)
+        lay.addWidget(self.seq_scope_combo, 1, 3)
+
+        self.btn_load_settings = QPushButton("読込")
+        self.btn_load_settings.setFixedHeight(30)
+        self.btn_load_settings.clicked.connect(self.load_sku_settings)
+        lay.addWidget(self.btn_load_settings, 2, 2)
+
+        self.btn_save_settings = QPushButton("保存")
+        self.btn_save_settings.setFixedHeight(30)
+        self.btn_save_settings.clicked.connect(self.save_sku_settings)
+        lay.addWidget(self.btn_save_settings, 2, 3)
+
+        # 8スロットのプルダウン式ビルダー
+        token_choices = [
+            "(空)",
+            "日付",
+            "asin",
+            "商品コンディション番号",
+            "商品コンディション記号",
+            "発送方法",
+            "仕入先コード",
+            "連番",
+            "任意の文字列",
+        ]
+        self.slot_types = []
+        self.slot_values = []
+        self.slot_seq_widths = []
+        for i in range(8):
+            row = 3 + i
+            lay.addWidget(QLabel(f"{i+1}"), row, 0)
+            cb = QComboBox()
+            cb.addItems(token_choices)
+            cb.setFixedHeight(30)
+            self.slot_types.append(cb)
+            lay.addWidget(cb, row, 1)
+
+            val = QLineEdit()
+            val.setPlaceholderText("(任意文字列 / 連番桁数) ※選択により使用")
+            val.setFixedHeight(30)
+            self.slot_values.append(val)
+            lay.addWidget(val, row, 2)
+
+            seqw = QSpinBox()
+            seqw.setRange(1, 8)
+            seqw.setValue(3)
+            seqw.setFixedHeight(30)
+            self.slot_seq_widths.append(seqw)
+            lay.addWidget(seqw, row, 3)
+
+        self.btn_build_tpl = QPushButton("テンプレ生成")
+        self.btn_build_tpl.setFixedHeight(30)
+        self.btn_build_tpl.clicked.connect(self.build_template_from_slots)
+        lay.addWidget(self.btn_build_tpl, 11, 3)
+
+        # 画面に追加（検索フィルタの直下）
+        self.layout().addWidget(self.settings_group)
+
+    def toggle_settings_panel(self):
+        self.settings_group.setVisible(not self.settings_group.isVisible())
+        if self.settings_group.isVisible():
+            self.load_sku_settings()
+
+    def load_sku_settings(self):
+        try:
+            s = self.api_client.inventory_get_sku_template()
+            self.tpl_edit.setText(s.get("skuTemplate", ""))
+            self.seq_start_spin.setValue(int(s.get("seqStart", 1)))
+            scope = s.get("seqScope", "day")
+            idx = self.seq_scope_combo.findText(scope)
+            if idx >= 0:
+                self.seq_scope_combo.setCurrentIndex(idx)
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "エラー", f"設定の読込に失敗しました:\n{e}")
+
+    def save_sku_settings(self):
+        try:
+            # 現在のスロット構成からテンプレを再生成して反映
+            self.build_template_from_slots()
+            ok = self.api_client.inventory_update_sku_template({
+                "skuTemplate": self.tpl_edit.text().strip(),
+                "seqScope": self.seq_scope_combo.currentText(),
+                "seqStart": int(self.seq_start_spin.value())
+            })
+            from PySide6.QtWidgets import QMessageBox
+            if ok:
+                QMessageBox.information(self, "保存", "SKUテンプレート設定を保存しました")
+            else:
+                QMessageBox.warning(self, "保存", "SKUテンプレート設定の保存に失敗しました")
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "エラー", f"設定の保存に失敗しました:\n{e}")
+
+    def build_template_from_slots(self):
+        # スロットの選択からテンプレ文字列を生成
+        parts = []
+        for cb, val, seqw in zip(self.slot_types, self.slot_values, self.slot_seq_widths):
+            t = cb.currentText()
+            if t == "(空)":
+                continue
+            if t == "日付":
+                parts.append("{date:YYYYMMDD}")
+            elif t == "asin":
+                parts.append("{asin}")
+            elif t == "商品コンディション番号":
+                parts.append("{condNum}")
+            elif t == "商品コンディション記号":
+                parts.append("{condCode}")
+            elif t == "発送方法":
+                parts.append("{ship}")
+            elif t == "仕入先コード":
+                parts.append("{supplier}")
+            elif t == "連番":
+                width = int(seqw.value()) if seqw else 3
+                parts.append(f"{{seq:{width}}}")
+            elif t == "任意の文字列":
+                text = val.text().strip()
+                if text:
+                    parts.append(f"{{custom:{text}}}")
+        tpl = "-".join(parts) if parts else self.tpl_edit.text().strip()
+        self.tpl_edit.setText(tpl)

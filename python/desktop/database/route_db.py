@@ -248,7 +248,15 @@ class RouteDatabase:
         conn = self._get_connection()
         cursor = conn.cursor()
         
-        query = "SELECT * FROM route_summaries WHERE 1=1"
+        # updated_atはUTC保存のため、表示用にローカルタイムへ変換して返す
+        query = (
+            "SELECT id, route_date, route_code, departure_time, return_time, "
+            "toll_fee_outbound, toll_fee_return, parking_fee, meal_cost, other_expenses, remarks, "
+            "total_working_hours, estimated_hourly_rate, total_gross_profit, total_item_count, "
+            "purchase_success_rate, avg_purchase_price, created_at, updated_at, "
+            "datetime(updated_at, 'localtime') AS updated_at_local "
+            "FROM route_summaries WHERE 1=1"
+        )
         params = []
         
         if start_date:
@@ -267,7 +275,15 @@ class RouteDatabase:
         
         cursor.execute(query, params)
         rows = cursor.fetchall()
-        return [dict(row) for row in rows]
+        result = []
+        for row in rows:
+            d = dict(row)
+            # 置換: 表示用にローカルタイムを使う
+            if 'updated_at_local' in d and d['updated_at_local']:
+                d['updated_at'] = d['updated_at_local']
+                del d['updated_at_local']
+            result.append(d)
+        return result
     
     # ==================== store_visit_details テーブル操作 ====================
     
@@ -463,17 +479,28 @@ class RouteDatabase:
         }
     
     def sync_total_item_count_from_visits(self):
-        """既存データの総仕入点数と総想定粗利を店舗訪問詳細から集計して更新"""
+        """既存データの集計値を店舗訪問詳細から再計算して更新
+
+        対象:
+        - 総仕入点数 total_item_count
+        - 総想定粗利 total_gross_profit
+        - 平均仕入価格 avg_purchase_price (= total_gross_profit / total_item_count)
+        - 総稼働時間 total_working_hours (= return_time - departure_time)
+        - 想定時給 estimated_hourly_rate (= total_gross_profit / total_working_hours)
+
+        既存データで0またはNULLの項目は再計算結果で埋める。
+        """
         conn = self._get_connection()
         cursor = conn.cursor()
         
         try:
             # すべてのルートサマリーを取得
-            cursor.execute("SELECT id FROM route_summaries")
-            route_ids = [row[0] for row in cursor.fetchall()]
+            cursor.execute("SELECT id, route_date, departure_time, return_time FROM route_summaries")
+            route_rows = cursor.fetchall()
             
             updated_count = 0
-            for route_id in route_ids:
+            for row in route_rows:
+                route_id = row[0]
                 # 店舗訪問詳細から総仕入点数を集計
                 cursor.execute("""
                     SELECT SUM(store_item_count) AS total_items,
@@ -486,14 +513,76 @@ class RouteDatabase:
                 total_items = int(result[0]) if result and result[0] else 0
                 total_profit = float(result[1]) if result and result[1] else 0
                 
-                # 総仕入点数と総想定粗利を更新
-                cursor.execute("""
-                    UPDATE route_summaries
-                    SET total_item_count = ?, total_gross_profit = ?
-                    WHERE id = ?
-                """, (total_items, total_profit, route_id))
-                
-                if total_items > 0 or total_profit > 0:
+                # 既存値を取得（NULL/0 の場合のみ上書きしたい項目があるため）
+                cursor.execute("SELECT total_item_count, total_gross_profit, avg_purchase_price, total_working_hours, estimated_hourly_rate, departure_time, return_time FROM route_summaries WHERE id = ?", (route_id,))
+                cur = cursor.fetchone() or [None]*7
+                cur_total_items = cur[0]
+                cur_total_profit = cur[1]
+                cur_avg_price = cur[2]
+                cur_working_hours = cur[3]
+                cur_hourly_rate = cur[4]
+                dep_str = cur[5]
+                ret_str = cur[6]
+
+                # 平均仕入価格（分母があれば計算）
+                avg_price = None
+                if total_items > 0:
+                    avg_price = total_profit / total_items
+
+                # 総稼働時間（出発/帰宅から計算）
+                from datetime import datetime
+                def _parse(dt_str):
+                    if not dt_str:
+                        return None
+                    try:
+                        return datetime.fromisoformat(str(dt_str).replace('Z', '+00:00'))
+                    except Exception:
+                        try:
+                            return datetime.strptime(str(dt_str).strip(), '%Y-%m-%d %H:%M:%S')
+                        except Exception:
+                            return None
+                dep_dt = _parse(dep_str)
+                ret_dt = _parse(ret_str)
+                working_hours = None
+                if dep_dt and ret_dt and ret_dt >= dep_dt:
+                    working_hours = (ret_dt - dep_dt).total_seconds() / 3600.0
+
+                # 想定時給（分母があれば計算）
+                hourly_rate = None
+                if working_hours is not None and working_hours > 0:
+                    hourly_rate = total_profit / working_hours if total_profit is not None else None
+
+                # 更新値（既存がNULL/0のときのみ埋める）
+                new_total_items = total_items if (cur_total_items is None or cur_total_items == 0) else cur_total_items
+                new_total_profit = total_profit if (cur_total_profit is None or cur_total_profit == 0) else cur_total_profit
+                new_avg_price = avg_price if (cur_avg_price is None or cur_avg_price == 0) else cur_avg_price
+                new_working_hours = working_hours if (cur_working_hours is None or cur_working_hours == 0) else cur_working_hours
+                new_hourly_rate = hourly_rate if (cur_hourly_rate is None or cur_hourly_rate == 0) else cur_hourly_rate
+
+                # 変更がある場合のみUPDATE（不要なトリガー発火を防止）
+                if any([
+                    (cur_total_items or 0) != new_total_items,
+                    (cur_total_profit or 0) != new_total_profit,
+                    (cur_avg_price or 0) != (new_avg_price or 0),
+                    (cur_working_hours or 0) != (new_working_hours or 0),
+                    (cur_hourly_rate or 0) != (new_hourly_rate or 0)
+                ]):
+                    cursor.execute("""
+                        UPDATE route_summaries
+                        SET total_item_count = ?,
+                            total_gross_profit = ?,
+                            avg_purchase_price = ?,
+                            total_working_hours = ?,
+                            estimated_hourly_rate = ?
+                        WHERE id = ?
+                    """, (
+                        new_total_items,
+                        new_total_profit,
+                        new_avg_price,
+                        new_working_hours,
+                        new_hourly_rate,
+                        route_id,
+                    ))
                     updated_count += 1
             
             conn.commit()
