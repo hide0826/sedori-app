@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QDate, QThread, Signal, QSettings
 from PySide6.QtGui import QFont, QColor
+import re
 import pandas as pd
 from pathlib import Path
 import datetime
@@ -69,6 +70,12 @@ class AntiqueWidget(QWidget):
         # 仕入管理ウィジェット（取込元）への参照
         self.inventory_widget = inventory_widget
         self.antique_data = None
+        # 13品目（区分）リスト（UI/辞書/編集ですべて共通利用）
+        self.CATEGORY_CHOICES = [
+            "① 美術品類","② 衣類","③ 時計・宝飾品類","④ 自動車","⑤ 自動二輪車及び原動機付自転車",
+            "⑥ 自転車類","⑦ 写真機類","⑧ 事務機器類","⑨ 機械工具類","⑩ 道具類",
+            "⑪ 皮革・ゴム製品類","⑫ 書籍","⑬ 金券類"
+        ]
         # 統一スキーマ（列キー→日本語見出し）
         # 区分13と品目を統合: 表示上は「品目」に区分13を表示
         self.COMMON_COLUMNS = [
@@ -175,11 +182,7 @@ class AntiqueWidget(QWidget):
         self.ed_entry_date = QDateEdit(); self.ed_entry_date.setCalendarPopup(True); self.ed_entry_date.setDate(QDate.currentDate())
         g.addWidget(QLabel("取引日"), row, 0); g.addWidget(self.ed_entry_date, row, 1); row += 1
         # 区分13と品目を統合: 品目コンボ（区分13を選択）
-        self.cmb_kobutsu = QComboBox(); self.cmb_kobutsu.addItems([
-            "① 美術品類","② 衣類","③ 時計・宝飾品類","④ 自動車","⑤ 自動二輪車及び原動機付自転車",
-            "⑥ 自転車類","⑦ 写真機類","⑧ 事務機器類","⑨ 機械工具類","⑩ 道具類",
-            "⑪ 皮革・ゴム製品類","⑫ 書籍","⑬ 金券類"
-        ]) 
+        self.cmb_kobutsu = QComboBox(); self.cmb_kobutsu.addItems(self.CATEGORY_CHOICES) 
         g.addWidget(QLabel("品目(区分13)"), row, 0); g.addWidget(self.cmb_kobutsu, row, 1); row += 1
         self.ed_hinmei = QLineEdit(); g.addWidget(QLabel("品名"), row, 0); g.addWidget(self.ed_hinmei, row, 1); row += 1
         # 品名右に取引方法（買受固定）
@@ -411,11 +414,7 @@ class AntiqueWidget(QWidget):
         for i, (k, v) in enumerate(d.items()):
             self.dict_table.setItem(i, 0, QTableWidgetItem(str(k)))
             # 品目はプルダウン
-            cb = QComboBox(); cb.addItems([
-                "① 美術品類","② 衣類","③ 時計・宝飾品類","④ 自動車","⑤ 自動二輪車及び原動機付自転車",
-                "⑥ 自転車類","⑦ 写真機類","⑧ 事務機器類","⑨ 機械工具類","⑩ 道具類",
-                "⑪ 皮革・ゴム製品類","⑫ 書籍","⑬ 金券類"
-            ])
+            cb = QComboBox(); cb.addItems(self.CATEGORY_CHOICES)
             idx = cb.findText(v)
             if idx >= 0: cb.setCurrentIndex(idx)
             self.dict_table.setCellWidget(i, 1, cb)
@@ -423,11 +422,7 @@ class AntiqueWidget(QWidget):
     def _dict_add_row(self):
         r = self.dict_table.rowCount(); self.dict_table.insertRow(r)
         self.dict_table.setItem(r, 0, QTableWidgetItem(""))
-        cb = QComboBox(); cb.addItems([
-            "① 美術品類","② 衣類","③ 時計・宝飾品類","④ 自動車","⑤ 自動二輪車及び原動機付自転車",
-            "⑥ 自転車類","⑦ 写真機類","⑧ 事務機器類","⑨ 機械工具類","⑩ 道具類",
-            "⑪ 皮革・ゴム製品類","⑫ 書籍","⑬ 金券類"
-        ])
+        cb = QComboBox(); cb.addItems(self.CATEGORY_CHOICES)
         self.dict_table.setCellWidget(r, 1, cb)
 
     def _dict_del_row(self):
@@ -479,6 +474,14 @@ class AntiqueWidget(QWidget):
             name_s = pick_series("仕入先")
 
             user_dict = self._load_user_dictionary()
+            # 法人マスタを一括取得（チェーン名→法人名）
+            company_rows = []
+            try:
+                from desktop.database.store_db import StoreDatabase
+                _sdb_for_company = StoreDatabase()
+                company_rows = _sdb_for_company.list_companies()
+            except Exception:
+                company_rows = []
             rows = []
             for i in range(len(df)):
                 # 数値正規化
@@ -516,6 +519,31 @@ class AntiqueWidget(QWidget):
                             for k in ['chain_name','chain','corporation','corp_name','法人名','チェーン名']:
                                 if k in cf and cf.get(k):
                                     corp_name = cf.get(k); break
+                
+                    # 法人マスタでチェーン名キーワードマッチ（支店名→チェーン名→法人名）
+                    if not corp_name:
+                        branch_text = store_name or supplier_code
+                        bt_norm = str(branch_text or '').replace('　',' ').strip()
+                        def norm(s: str) -> str:
+                            return str(s or '').replace('　',' ').strip()
+                        best_match = None
+                        for comp in company_rows:
+                            chain = norm(comp.get('chain_name',''))
+                            if not chain:
+                                continue
+                            # 完全一致/部分一致の両方を許容
+                            if chain in bt_norm or bt_norm in chain:
+                                best_match = comp
+                                break
+                            # チェーン名を区切りで分解して部分一致ワードを探す
+                            for token in [t for t in re.split(r"[\s\-/・()（）]+", chain) if len(t) >= 2]:
+                                if token and token in bt_norm:
+                                    best_match = comp
+                                    break
+                            if best_match:
+                                break
+                        if best_match:
+                            corp_name = best_match.get('company_name','')
                 except Exception:
                     pass
 
@@ -553,7 +581,21 @@ class AntiqueWidget(QWidget):
             for i, r in enumerate(rows):
                 for j, key in enumerate(self.preview_keys):
                     val = "" if r.get(key) is None else str(r.get(key))
-                    self.table_store_list.setItem(i, j, QTableWidgetItem(val))
+                    # 未マッチの品目はプルダウンで選択可能にする
+                    if key == 'kobutsu_kind' and (not val):
+                        cb = QComboBox()
+                        cb.addItems(self.CATEGORY_CHOICES)
+                        # 変更時にデータへ反映
+                        def on_changed(idx, row_index=i, col_key=key, combo=cb):
+                            try:
+                                choice = combo.currentText()
+                                self._imported_store_rows[row_index][col_key] = choice
+                            except Exception:
+                                pass
+                        cb.currentIndexChanged.connect(on_changed)
+                        self.table_store_list.setCellWidget(i, j, cb)
+                    else:
+                        self.table_store_list.setItem(i, j, QTableWidgetItem(val))
             self.table_store_list.resizeColumnsToContents()
         except Exception:
             pass
