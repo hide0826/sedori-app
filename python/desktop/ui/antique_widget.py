@@ -459,7 +459,7 @@ class AntiqueWidget(QWidget):
             rows = getattr(self, "_imported_store_rows", [])
             self.table_store_list.setRowCount(len(rows))
             for i, r in enumerate(rows):
-            for j, key in enumerate(self.preview_keys):
+                for j, key in enumerate(self.preview_keys):
                     val = "" if r.get(key) is None else str(r.get(key))
                     self.table_store_list.setItem(i, j, QTableWidgetItem(val))
             self.table_store_list.resizeColumnsToContents()
