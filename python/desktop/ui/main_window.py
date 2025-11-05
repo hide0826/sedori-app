@@ -126,8 +126,8 @@ class MainWindow(QMainWindow):
         self.inventory_widget = InventoryWidget(self.api_client)
         self.tab_widget.addTab(self.inventory_widget, "仕入管理")
         
-        # 古物台帳タブ
-        self.antique_widget = AntiqueWidget(self.api_client)
+        # 古物台帳タブ（仕入管理ウィジェット参照を渡す）
+        self.antique_widget = AntiqueWidget(self.api_client, inventory_widget=self.inventory_widget)
         self.tab_widget.addTab(self.antique_widget, "古物台帳")
         
         # 店舗マスタタブ

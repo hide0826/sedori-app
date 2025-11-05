@@ -63,9 +63,11 @@ class AntiqueWorker(QThread):
 class AntiqueWidget(QWidget):
     """古物台帳ウィジェット（サブタブ: 入力・生成 / 閲覧・出力）"""
 
-    def __init__(self, api_client):
+    def __init__(self, api_client, inventory_widget=None):
         super().__init__()
         self.api_client = api_client
+        # 仕入管理ウィジェット（取込元）への参照
+        self.inventory_widget = inventory_widget
         self.antique_data = None
         # 統一スキーマ（列キー→日本語見出し）
         self.COMMON_COLUMNS = [
@@ -143,8 +145,9 @@ class AntiqueWidget(QWidget):
         h.addWidget(self.btn_import_store)
 
         # テンプレート表示の折りたたみトグル
-        self.btn_toggle_template = QPushButton("テンプレートを畳む")
+        self.btn_toggle_template = QPushButton("テンプレートを展開")
         self.btn_toggle_template.setCheckable(True)
+        self.btn_toggle_template.setChecked(True)  # デフォルトで畳む
         h.addWidget(self.btn_toggle_template)
 
         h.addStretch()
@@ -214,6 +217,8 @@ class AntiqueWidget(QWidget):
 
         lay.addWidget(form)
         self._template_form = form  # 折りたたみ対象
+        # 初期状態は非表示（畳み）
+        self._template_form.setVisible(False)
 
         # 店舗向け：下部リスト表示（店舗用項目）
         from PySide6.QtWidgets import QSizePolicy
@@ -332,63 +337,50 @@ class AntiqueWidget(QWidget):
             pass
 
     def _on_import_store_clicked(self) -> None:
-        """店舗用：CSVから仕入リストを取り込み、下部リストに表示"""
+        """店舗用：仕入管理の『取り込んだデータ一覧』から取得し、下部リストに表示"""
         try:
-            path, _ = QFileDialog.getOpenFileName(self, "仕入リストCSVを選択", "", "CSVファイル (*.csv)")
-            if not path:
-                return
             import pandas as pd
-            df = None
-            # エンコーディング候補
-            for enc in ("cp932", "utf-8-sig", "utf-8"):
-                try:
-                    df = pd.read_csv(path, encoding=enc)
-                    break
-                except Exception:
-                    df = None
-            if df is None:
-                QMessageBox.critical(self, "読込失敗", "CSVの読み込みに失敗しました。エンコーディングや形式をご確認ください。")
+            # 仕入管理ウィジェット参照確認
+            if not getattr(self, 'inventory_widget', None):
+                QMessageBox.information(self, "情報", "仕入管理でデータを展開してください（ウィジェット参照なし）")
+                return
+            # テーブルの現在データを取得
+            df = self.inventory_widget.get_table_data()
+            if df is None or len(df) == 0:
+                QMessageBox.information(self, "情報", "仕入管理の『取り込んだデータ一覧』にデータがありません。先に仕入管理でCSV取込または保存データを展開してください。")
                 return
 
-            # マッピング推定（列名のゆらぎに対応）
-            def pick(col_candidates):
-                for c in col_candidates:
-                    if c in df.columns:
-                        return df[c].astype(str).fillna("")
-                return pd.Series([""] * len(df))
+            # 列の取得（inventory_widgetの列名は日本語で統一済み）
+            def pick_series(name: str) -> pd.Series:
+                return df[name] if name in df.columns else pd.Series([""] * len(df))
 
-            date_s = pick(["仕入れ日", "purchaseDate", "purchase_date", "日時", "日付"]) 
-            title_s = pick(["商品名", "title", "商品タイトル"]) 
-            qty_s = pick(["仕入れ個数", "個数", "数量", "qty"]) 
-            unit_s = pick(["仕入れ価格", "価格", "purchase_price", "price"]) 
-            asin_s = pick(["ASIN", "asin"]) 
-            jan_s = pick(["JAN", "jan", "ISBN"]) 
-            notes_s = pick(["コメント", "備考", "notes"]) 
-            name_s = pick(["仕入先", "仕入先名", "店舗名", "store", "store_name"]) 
-            branch_s = pick(["支店", "branch", "店舗支店"]) 
-            addr_s = pick(["住所", "address"]) 
-            contact_s = pick(["連絡先", "phone", "tel"]) 
-            receipt_s = pick(["レシート番号", "receipt_no", "レシートNo", "receipt"]) 
+            date_s = pick_series("仕入れ日")
+            title_s = pick_series("商品名")
+            qty_s = pick_series("仕入れ個数")
+            unit_s = pick_series("仕入れ価格")
+            asin_s = pick_series("ASIN")
+            jan_s = pick_series("JAN")
+            notes_s = pick_series("コメント")
+            name_s = pick_series("仕入先")
 
             rows = []
             for i in range(len(df)):
-                qty_v = 0
-                try:
-                    qty_v = int(str(qty_s.iloc[i]).replace(",","")) if str(qty_s.iloc[i]).strip() else 0
-                except Exception:
-                    qty_v = 0
-                unit_v = 0
-                try:
-                    unit_v = int(float(str(unit_s.iloc[i]).replace(",",""))) if str(unit_s.iloc[i]).strip() else 0
-                except Exception:
-                    unit_v = 0
+                # 数値正規化
+                def to_int(v):
+                    try:
+                        s = str(v).replace(',', '').strip()
+                        return int(float(s)) if s not in ('', 'nan') else 0
+                    except Exception:
+                        return 0
+                qty_v = to_int(qty_s.iloc[i])
+                unit_v = to_int(unit_s.iloc[i])
                 amount_v = qty_v * unit_v
-                identifier_v = str(jan_s.iloc[i]) or str(asin_s.iloc[i])
+                identifier_v = str(jan_s.iloc[i] or '') or str(asin_s.iloc[i] or '')
                 rows.append({
                     # 共通列
                     "entry_date": str(date_s.iloc[i]),
-                    "kobutsu_kind": "",  # 不明の場合は空。必要ならテンプレから補完
-                    "hinmoku": "",       # 不明は空
+                    "kobutsu_kind": "",
+                    "hinmoku": "",
                     "hinmei": str(title_s.iloc[i]),
                     "qty": qty_v,
                     "unit_price": unit_v,
@@ -396,19 +388,18 @@ class AntiqueWidget(QWidget):
                     "identifier": identifier_v,
                     "counterparty_type": "店舗",
                     "notes": str(notes_s.iloc[i]),
-                    # 店舗列
+                    # 店舗列（支店/住所/連絡先/レシート番号は不明のため空）
                     "counterparty_name": str(name_s.iloc[i]),
-                    "counterparty_branch": str(branch_s.iloc[i]),
-                    "counterparty_address": str(addr_s.iloc[i]),
-                    "contact": str(contact_s.iloc[i]),
-                    "receipt_no": str(receipt_s.iloc[i]),
+                    "counterparty_branch": "",
+                    "counterparty_address": "",
+                    "contact": "",
+                    "receipt_no": "",
                 })
 
             self._imported_store_rows = rows
             self._refresh_store_list_table()
-            # 一括登録を有効化（店舗選択時のみ）
             self.btn_commit_bulk.setEnabled(self.cmb_counterparty.currentText() == '店舗' and len(rows) > 0)
-            QMessageBox.information(self, "取込完了", f"{len(rows)}件の店舗行を取り込みました。")
+            QMessageBox.information(self, "取込完了", f"仕入管理から {len(rows)} 件を取り込みました。")
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"取込でエラーが発生しました:\n{e}")
 
