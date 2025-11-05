@@ -89,6 +89,12 @@ class StoreEditDialog(QDialog):
         self.store_name_edit = QLineEdit()
         self.store_name_edit.setPlaceholderText("必須項目")
         form_layout.addRow("店舗名:", self.store_name_edit)
+
+        # 住所・電話番号の追加
+        self.address_edit = QLineEdit()
+        form_layout.addRow("住所:", self.address_edit)
+        self.phone_edit = QLineEdit()
+        form_layout.addRow("電話番号:", self.phone_edit)
         
         layout.addWidget(form_group)
         
@@ -185,6 +191,8 @@ class StoreEditDialog(QDialog):
         self.route_code_edit.setText(self.store_data.get('route_code', ''))
         self.supplier_code_edit.setText(self.store_data.get('supplier_code', ''))
         self.store_name_edit.setText(self.store_data.get('store_name', ''))
+        self.address_edit.setText(self.store_data.get('address', ''))
+        self.phone_edit.setText(self.store_data.get('phone', ''))
         
         # カスタムフィールドの読み込み
         custom_fields = self.store_data.get('custom_fields', {})
@@ -204,6 +212,8 @@ class StoreEditDialog(QDialog):
             'route_code': self.route_code_edit.text().strip(),
             'supplier_code': self.supplier_code_edit.text().strip(),
             'store_name': self.store_name_edit.text().strip(),
+            'address': self.address_edit.text().strip(),
+            'phone': self.phone_edit.text().strip(),
             'custom_fields': {}
         }
         
@@ -657,7 +667,7 @@ class StoreMasterWidget(QWidget):
         self.load_custom_fields()
         
         # 基本カラム + カスタムフィールドカラム
-        basic_columns = ["ID", "所属ルート名", "ルートコード", "仕入れ先コード", "店舗名"]
+        basic_columns = ["ID", "所属ルート名", "ルートコード", "仕入れ先コード", "店舗名", "住所", "電話番号"]
         custom_columns = [field['display_name'] for field in self.custom_fields_def]
         columns = basic_columns + custom_columns
         
@@ -678,6 +688,8 @@ class StoreMasterWidget(QWidget):
             self.store_table.setItem(i, 2, QTableWidgetItem(store.get('route_code', '')))
             self.store_table.setItem(i, 3, QTableWidgetItem(store.get('supplier_code', '')))
             self.store_table.setItem(i, 4, QTableWidgetItem(store.get('store_name', '')))
+            self.store_table.setItem(i, 5, QTableWidgetItem(store.get('address', '')))
+            self.store_table.setItem(i, 6, QTableWidgetItem(store.get('phone', '')))
             
             # カスタムフィールド
             custom_fields = store.get('custom_fields', {})

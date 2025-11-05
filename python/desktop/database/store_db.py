@@ -55,6 +55,8 @@ class StoreDatabase:
                 route_code TEXT,
                 supplier_code TEXT UNIQUE,
                 store_name TEXT NOT NULL,
+                address TEXT,
+                phone TEXT,
                 custom_fields TEXT,  -- JSON形式
                 display_order INTEGER DEFAULT 0,  -- 訪問順序（追加）
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -75,6 +77,15 @@ class StoreDatabase:
         except sqlite3.OperationalError:
             # カラムが既に存在する場合はスキップ
             pass
+        # address / phone カラムが存在しない場合は追加（マイグレーション）
+        for col, ddl in (
+            ("address", "ALTER TABLE stores ADD COLUMN address TEXT"),
+            ("phone", "ALTER TABLE stores ADD COLUMN phone TEXT"),
+        ):
+            try:
+                cursor.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
         
         # routes テーブル作成（ルート情報管理）
         cursor.execute("""
@@ -141,13 +152,15 @@ class StoreDatabase:
         cursor.execute("""
             INSERT INTO stores (
                 affiliated_route_name, route_code, supplier_code, 
-                store_name, custom_fields
-            ) VALUES (?, ?, ?, ?, ?)
+                store_name, address, phone, custom_fields
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             store_data.get('affiliated_route_name'),
             store_data.get('route_code'),
             store_data.get('supplier_code'),
             store_data.get('store_name'),
+            store_data.get('address'),
+            store_data.get('phone'),
             custom_fields_json
         ))
         
@@ -168,6 +181,8 @@ class StoreDatabase:
                 route_code = ?,
                 supplier_code = ?,
                 store_name = ?,
+                address = ?,
+                phone = ?,
                 custom_fields = ?
             WHERE id = ?
         """, (
@@ -175,6 +190,8 @@ class StoreDatabase:
             store_data.get('route_code'),
             store_data.get('supplier_code'),
             store_data.get('store_name'),
+            store_data.get('address'),
+            store_data.get('phone'),
             custom_fields_json,
             store_id
         ))
