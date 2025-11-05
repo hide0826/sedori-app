@@ -71,10 +71,11 @@ class AntiqueWidget(QWidget):
         self.inventory_widget = inventory_widget
         self.antique_data = None
         # 13品目（区分）リスト（UI/辞書/編集ですべて共通利用）
+        # 番号を削除した表示名を使用
         self.CATEGORY_CHOICES = [
-            "① 美術品類","② 衣類","③ 時計・宝飾品類","④ 自動車","⑤ 自動二輪車及び原動機付自転車",
-            "⑥ 自転車類","⑦ 写真機類","⑧ 事務機器類","⑨ 機械工具類","⑩ 道具類",
-            "⑪ 皮革・ゴム製品類","⑫ 書籍","⑬ 金券類"
+            "美術品類","衣類","時計・宝飾品類","自動車","自動二輪車及び原動機付自転車",
+            "自転車類","写真機類","事務機器類","機械工具類","道具類",
+            "皮革・ゴム製品類","書籍","金券類"
         ]
         # 統一スキーマ（列キー→日本語見出し）
         # 区分13と品目を統合: 表示上は「品目」に区分13を表示
@@ -182,7 +183,10 @@ class AntiqueWidget(QWidget):
         self.ed_entry_date = QDateEdit(); self.ed_entry_date.setCalendarPopup(True); self.ed_entry_date.setDate(QDate.currentDate())
         g.addWidget(QLabel("取引日"), row, 0); g.addWidget(self.ed_entry_date, row, 1); row += 1
         # 区分13と品目を統合: 品目コンボ（区分13を選択）
-        self.cmb_kobutsu = QComboBox(); self.cmb_kobutsu.addItems(self.CATEGORY_CHOICES) 
+        self.cmb_kobutsu = QComboBox(); self.cmb_kobutsu.addItems(self.CATEGORY_CHOICES)
+        # デフォルトで「道具類」を選択（インデックス9）
+        idx_tool = self.CATEGORY_CHOICES.index("道具類") if "道具類" in self.CATEGORY_CHOICES else 9
+        self.cmb_kobutsu.setCurrentIndex(idx_tool)
         g.addWidget(QLabel("品目(区分13)"), row, 0); g.addWidget(self.cmb_kobutsu, row, 1); row += 1
         self.ed_hinmei = QLineEdit(); g.addWidget(QLabel("品名"), row, 0); g.addWidget(self.ed_hinmei, row, 1); row += 1
         # 品名右に取引方法（買受固定）
@@ -354,6 +358,45 @@ class AntiqueWidget(QWidget):
             pass
 
     # ===== ユーザー辞書による品目（区分13）推定 =====
+    def _normalize_category_name(self, cat_name: str) -> str:
+        """品目名から番号を削除して正規化（既存データとの互換性のため）"""
+        if not cat_name:
+            return ""
+        # 番号（①②③...⑬）を削除
+        import re
+        normalized = re.sub(r'^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬]\s*', '', cat_name)
+        # 「電機機械類（道具類）」などは「道具類」にマッピング
+        if "道具類" in normalized:
+            return "道具類"
+        return normalized.strip()
+    
+    def _normalize_date(self, date_str: str) -> str:
+        """日付文字列から時刻部分を削除して yyyy-MM-dd 形式に正規化"""
+        if not date_str:
+            return ""
+        import re
+        from datetime import datetime
+        # 文字列に変換
+        date_str = str(date_str).strip()
+        # 時刻部分を削除（スペース以降や時刻パターンを削除）
+        # 例: "2025/11/2 10:42" -> "2025/11/2", "2025-11-02 10:42:00" -> "2025-11-02"
+        date_str = re.sub(r'\s+\d{1,2}:\d{2}(:\d{2})?.*$', '', date_str)
+        # 各種日付形式を yyyy-MM-dd に統一
+        try:
+            # yyyy/MM/dd 形式を試す
+            if '/' in date_str:
+                dt = datetime.strptime(date_str.split()[0], '%Y/%m/%d')
+            # yyyy-MM-dd 形式を試す
+            elif '-' in date_str:
+                dt = datetime.strptime(date_str.split()[0], '%Y-%m-%d')
+            else:
+                # その他の形式はそのまま返す（エラー回避）
+                return date_str.split()[0] if ' ' in date_str else date_str
+            return dt.strftime('%Y-%m-%d')
+        except (ValueError, AttributeError):
+            # パースできない場合は空白以降を削除して返す
+            return date_str.split()[0] if ' ' in date_str else date_str
+    
     def _load_user_dictionary(self) -> dict:
         try:
             s = QSettings("HIRIO", "SedoriDesktopApp")
@@ -363,14 +406,14 @@ class AntiqueWidget(QWidget):
             # 既定の簡易辞書
             return {
                 "本": "書籍",
-                "DVD": "CD・DVD・BD等",
-                "BD": "CD・DVD・BD等",
-                "ゲーム": "ゲーム・玩具",
+                "DVD": "写真機類",
+                "BD": "写真機類",
+                "ゲーム": "事務機器類",
                 "腕時計": "時計・宝飾品類",
-                "カメラ": "電機機械類（道具類）",
-                "掃除機": "電機機械類（道具類）",
-                "Wi-Fi": "電機機械類（道具類）",
-                "ルーター": "電機機械類（道具類）",
+                "カメラ": "道具類",
+                "掃除機": "道具類",
+                "Wi-Fi": "道具類",
+                "ルーター": "道具類",
                 "ジャケット": "衣類",
             }
         except Exception:
@@ -382,7 +425,9 @@ class AntiqueWidget(QWidget):
             user_dict = self._load_user_dictionary()
             for key, cat in user_dict.items():
                 if key and key.lower() in name.lower():
-                    idx = self.cmb_kobutsu.findText(cat)
+                    # 既存データとの互換性: 番号付き品目名を正規化
+                    normalized_cat = self._normalize_category_name(cat)
+                    idx = self.cmb_kobutsu.findText(normalized_cat)
                     if idx >= 0:
                         self.cmb_kobutsu.setCurrentIndex(idx)
                     break
@@ -415,8 +460,11 @@ class AntiqueWidget(QWidget):
             self.dict_table.setItem(i, 0, QTableWidgetItem(str(k)))
             # 品目はプルダウン
             cb = QComboBox(); cb.addItems(self.CATEGORY_CHOICES)
-            idx = cb.findText(v)
-            if idx >= 0: cb.setCurrentIndex(idx)
+            # 既存データとの互換性: 番号付き品目名を正規化
+            normalized_v = self._normalize_category_name(v)
+            idx = cb.findText(normalized_v)
+            if idx >= 0: 
+                cb.setCurrentIndex(idx)
             self.dict_table.setCellWidget(i, 1, cb)
 
     def _dict_add_row(self):
@@ -547,9 +595,13 @@ class AntiqueWidget(QWidget):
                 except Exception:
                     pass
 
+                # 取引日の時刻部分を削除
+                date_val = str(date_s.iloc[i]) if pd.notna(date_s.iloc[i]) else ""
+                normalized_date = self._normalize_date(date_val) if date_val else ""
+                
                 rows.append({
                     # 共通列
-                    "entry_date": str(date_s.iloc[i]),
+                    "entry_date": normalized_date,
                     "kobutsu_kind": cat,
                     "hinmei": str(title_s.iloc[i]),
                     "transaction_method": "買受",
@@ -581,10 +633,29 @@ class AntiqueWidget(QWidget):
             for i, r in enumerate(rows):
                 for j, key in enumerate(self.preview_keys):
                     val = "" if r.get(key) is None else str(r.get(key))
-                    # 未マッチの品目はプルダウンで選択可能にする
-                    if key == 'kobutsu_kind' and (not val):
+                    # 取引日の場合は時刻部分を削除
+                    if key == 'entry_date':
+                        val = self._normalize_date(val)
+                    # 品目は常にプルダウンで選択可能にする（マッチした品目も変更可能）
+                    if key == 'kobutsu_kind':
                         cb = QComboBox()
                         cb.addItems(self.CATEGORY_CHOICES)
+                        # 既存の値を設定（正規化してから）
+                        if val:
+                            normalized_val = self._normalize_category_name(val)
+                            idx = cb.findText(normalized_val)
+                            if idx >= 0:
+                                cb.setCurrentIndex(idx)
+                            else:
+                                # マッチしない場合はデフォルトで「道具類」
+                                idx_tool = cb.findText("道具類")
+                                if idx_tool >= 0:
+                                    cb.setCurrentIndex(idx_tool)
+                        else:
+                            # 値がない場合もデフォルトで「道具類」
+                            idx_tool = cb.findText("道具類")
+                            if idx_tool >= 0:
+                                cb.setCurrentIndex(idx_tool)
                         # 変更時にデータへ反映
                         def on_changed(idx, row_index=i, col_key=key, combo=cb):
                             try:
@@ -949,6 +1020,9 @@ class AntiqueWidget(QWidget):
         for i, item in enumerate(self.antique_data):
             for j, key in enumerate(self.column_keys):
                 value = str(item.get(key, ""))
+                # 取引日の場合は時刻部分を削除
+                if key == "entry_date":
+                    value = self._normalize_date(value)
                 item_widget = QTableWidgetItem(value)
                 
                 # 金額/数量などの簡易フォーマット
@@ -1018,6 +1092,9 @@ class AntiqueWidget(QWidget):
         for i, item in enumerate(filtered_data):
             for j, key in enumerate(self.column_keys):
                 value = str(item.get(key, ""))
+                # 取引日の場合は時刻部分を削除
+                if key == "entry_date":
+                    value = self._normalize_date(value)
                 item_widget = QTableWidgetItem(value)
                 
                 header_label = self.column_headers[j]
