@@ -114,8 +114,10 @@ class AntiqueWidget(QWidget):
         self.tabs = QTabWidget()
         self.tab_input = QWidget()
         self.tab_view = QWidget()
+        self.tab_dict = QWidget()
         self.tabs.addTab(self.tab_input, "入力・生成")
         self.tabs.addTab(self.tab_view, "閲覧・出力")
+        self.tabs.addTab(self.tab_dict, "ユーザー辞書")
 
         root = QVBoxLayout(self)
         root.addWidget(self.tabs)
@@ -123,6 +125,7 @@ class AntiqueWidget(QWidget):
         # それぞれのタブを構築（列スキーマ定義後に呼ぶ）
         self._setup_tab_input()
         self._setup_tab_view()
+        self._setup_tab_dict()
         
     # ===== 入力・生成タブ =====
     def _setup_tab_input(self):
@@ -172,7 +175,11 @@ class AntiqueWidget(QWidget):
         self.ed_entry_date = QDateEdit(); self.ed_entry_date.setCalendarPopup(True); self.ed_entry_date.setDate(QDate.currentDate())
         g.addWidget(QLabel("取引日"), row, 0); g.addWidget(self.ed_entry_date, row, 1); row += 1
         # 区分13と品目を統合: 品目コンボ（区分13を選択）
-        self.cmb_kobutsu = QComboBox(); self.cmb_kobutsu.addItems(["衣類","皮革・ゴム製品類","金属製品類","家具","什器類","電機機械類（道具類）","自動車","自動二輪車・原付","自転車類","書籍","CD・DVD・BD等","ゲーム・玩具","時計・宝飾品類"]) 
+        self.cmb_kobutsu = QComboBox(); self.cmb_kobutsu.addItems([
+            "① 美術品類","② 衣類","③ 時計・宝飾品類","④ 自動車","⑤ 自動二輪車及び原動機付自転車",
+            "⑥ 自転車類","⑦ 写真機類","⑧ 事務機器類","⑨ 機械工具類","⑩ 道具類",
+            "⑪ 皮革・ゴム製品類","⑫ 書籍","⑬ 金券類"
+        ]) 
         g.addWidget(QLabel("品目(区分13)"), row, 0); g.addWidget(self.cmb_kobutsu, row, 1); row += 1
         self.ed_hinmei = QLineEdit(); g.addWidget(QLabel("品名"), row, 0); g.addWidget(self.ed_hinmei, row, 1); row += 1
         # 品名右に取引方法（買受固定）
@@ -379,6 +386,71 @@ class AntiqueWidget(QWidget):
         except Exception:
             pass
 
+    # ===== ユーザー辞書タブ =====
+    def _setup_tab_dict(self):
+        from PySide6.QtWidgets import QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget, QTableWidgetItem
+        lay = QVBoxLayout(self.tab_dict)
+        self.dict_table = QTableWidget()
+        self.dict_table.setColumnCount(2)
+        self.dict_table.setHorizontalHeaderLabels(["キーワード", "品目"])
+        lay.addWidget(self.dict_table)
+        btns = QHBoxLayout()
+        self.btn_dict_add = QPushButton("行追加")
+        self.btn_dict_del = QPushButton("行削除")
+        self.btn_dict_save = QPushButton("保存")
+        btns.addWidget(self.btn_dict_add); btns.addWidget(self.btn_dict_del); btns.addStretch(); btns.addWidget(self.btn_dict_save)
+        lay.addLayout(btns)
+        self.btn_dict_add.clicked.connect(self._dict_add_row)
+        self.btn_dict_del.clicked.connect(self._dict_del_row)
+        self.btn_dict_save.clicked.connect(self._dict_save)
+        self._dict_load()
+
+    def _dict_load(self):
+        d = self._load_user_dictionary()
+        self.dict_table.setRowCount(len(d) if d else 0)
+        for i, (k, v) in enumerate(d.items()):
+            self.dict_table.setItem(i, 0, QTableWidgetItem(str(k)))
+            # 品目はプルダウン
+            cb = QComboBox(); cb.addItems([
+                "① 美術品類","② 衣類","③ 時計・宝飾品類","④ 自動車","⑤ 自動二輪車及び原動機付自転車",
+                "⑥ 自転車類","⑦ 写真機類","⑧ 事務機器類","⑨ 機械工具類","⑩ 道具類",
+                "⑪ 皮革・ゴム製品類","⑫ 書籍","⑬ 金券類"
+            ])
+            idx = cb.findText(v)
+            if idx >= 0: cb.setCurrentIndex(idx)
+            self.dict_table.setCellWidget(i, 1, cb)
+
+    def _dict_add_row(self):
+        r = self.dict_table.rowCount(); self.dict_table.insertRow(r)
+        self.dict_table.setItem(r, 0, QTableWidgetItem(""))
+        cb = QComboBox(); cb.addItems([
+            "① 美術品類","② 衣類","③ 時計・宝飾品類","④ 自動車","⑤ 自動二輪車及び原動機付自転車",
+            "⑥ 自転車類","⑦ 写真機類","⑧ 事務機器類","⑨ 機械工具類","⑩ 道具類",
+            "⑪ 皮革・ゴム製品類","⑫ 書籍","⑬ 金券類"
+        ])
+        self.dict_table.setCellWidget(r, 1, cb)
+
+    def _dict_del_row(self):
+        sel = self.dict_table.selectionModel().selectedRows() if self.dict_table.selectionModel() else []
+        if not sel: return
+        self.dict_table.removeRow(sel[0].row())
+
+    def _dict_save(self):
+        try:
+            d = {}
+            for r in range(self.dict_table.rowCount()):
+                key_item = self.dict_table.item(r, 0)
+                key = key_item.text().strip() if key_item else ""
+                cb = self.dict_table.cellWidget(r, 1)
+                val = cb.currentText().strip() if cb else ""
+                if key and val:
+                    d[key] = val
+            s = QSettings("HIRIO", "SedoriDesktopApp")
+            s.setValue("ledger/user_dictionary", d)
+            QMessageBox.information(self, "保存", "ユーザー辞書を保存しました")
+        except Exception as e:
+            QMessageBox.warning(self, "保存エラー", str(e))
+
     def _on_import_store_clicked(self) -> None:
         """店舗用：仕入管理の『取り込んだデータ一覧』から取得し、下部リストに表示"""
         try:
@@ -427,6 +499,26 @@ class AntiqueWidget(QWidget):
                     if key and key.lower() in (title_val or "").lower():
                         cat = cat_name; break
 
+                # 仕入先コード→店舗マスタ参照
+                supplier_code = str(name_s.iloc[i] or '').strip()
+                store_name = ""; address=""; phone=""; corp_name=""
+                try:
+                    if supplier_code:
+                        from desktop.database.store_db import StoreDatabase
+                        sdb = StoreDatabase()
+                        st = sdb.get_store_by_supplier_code(supplier_code)
+                        if st:
+                            store_name = st.get('store_name','')
+                            address = st.get('address','')
+                            phone = st.get('phone','')
+                            cf = st.get('custom_fields',{}) or {}
+                            # 候補キーから法人/チェーン名を推測
+                            for k in ['chain_name','chain','corporation','corp_name','法人名','チェーン名']:
+                                if k in cf and cf.get(k):
+                                    corp_name = cf.get(k); break
+                except Exception:
+                    pass
+
                 rows.append({
                     # 共通列
                     "entry_date": str(date_s.iloc[i]),
@@ -440,10 +532,10 @@ class AntiqueWidget(QWidget):
                     "counterparty_type": "店舗",
                     "notes": str(notes_s.iloc[i]),
                     # 店舗列（支店/住所/連絡先/レシート番号は不明のため空）
-                    "counterparty_name": str(name_s.iloc[i]),
-                    "counterparty_branch": "",
-                    "counterparty_address": "",
-                    "contact": "",
+                    "counterparty_name": corp_name,  # 仕入先名（法人）
+                    "counterparty_branch": store_name if store_name else supplier_code,  # 支店（店舗名）
+                    "counterparty_address": address,
+                    "contact": phone,
                     "receipt_no": "",
                 })
 
