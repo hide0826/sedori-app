@@ -70,11 +70,12 @@ class AntiqueWidget(QWidget):
         self.inventory_widget = inventory_widget
         self.antique_data = None
         # 統一スキーマ（列キー→日本語見出し）
+        # 区分13と品目を統合: 表示上は「品目」に区分13を表示
         self.COMMON_COLUMNS = [
             ("entry_date", "取引日"),
-            ("kobutsu_kind", "区分13"),
-            ("hinmoku", "品目"),
+            ("kobutsu_kind", "品目"),  # 区分13を「品目」として表示
             ("hinmei", "品名"),
+            ("transaction_method", "取引方法"),  # 表示専用（買受固定）
             ("qty", "数量"),
             ("unit_price", "単価"),
             ("amount", "金額"),
@@ -170,10 +171,13 @@ class AntiqueWidget(QWidget):
         row = 0
         self.ed_entry_date = QDateEdit(); self.ed_entry_date.setCalendarPopup(True); self.ed_entry_date.setDate(QDate.currentDate())
         g.addWidget(QLabel("取引日"), row, 0); g.addWidget(self.ed_entry_date, row, 1); row += 1
+        # 区分13と品目を統合: 品目コンボ（区分13を選択）
         self.cmb_kobutsu = QComboBox(); self.cmb_kobutsu.addItems(["衣類","皮革・ゴム製品類","金属製品類","家具","什器類","電機機械類（道具類）","自動車","自動二輪車・原付","自転車類","書籍","CD・DVD・BD等","ゲーム・玩具","時計・宝飾品類"]) 
-        g.addWidget(QLabel("13区分"), row, 0); g.addWidget(self.cmb_kobutsu, row, 1); row += 1
-        self.ed_hinmoku = QLineEdit(); g.addWidget(QLabel("品目"), row, 0); g.addWidget(self.ed_hinmoku, row, 1); row += 1
+        g.addWidget(QLabel("品目(区分13)"), row, 0); g.addWidget(self.cmb_kobutsu, row, 1); row += 1
         self.ed_hinmei = QLineEdit(); g.addWidget(QLabel("品名"), row, 0); g.addWidget(self.ed_hinmei, row, 1); row += 1
+        # 品名右に取引方法（買受固定）
+        self.transaction_method = QLineEdit(); self.transaction_method.setText("買受"); self.transaction_method.setReadOnly(True)
+        g.addWidget(QLabel("取引方法"), row-1, 2); g.addWidget(self.transaction_method, row-1, 3)
         self.sp_qty = QSpinBox(); self.sp_qty.setRange(1, 9999); self.sp_qty.setValue(1)
         g.addWidget(QLabel("数量"), row, 0); g.addWidget(self.sp_qty, row, 1); row += 1
         self.sp_unit = QSpinBox(); self.sp_unit.setRange(0, 10_000_000)
@@ -254,6 +258,8 @@ class AntiqueWidget(QWidget):
         self.cmb_counterparty.currentTextChanged.connect(self._on_counterparty_changed)
         self.btn_import_store.clicked.connect(self._on_import_store_clicked)
         self.btn_toggle_template.toggled.connect(self._on_toggle_template)
+        # 品名変更時に簡易推定（ユーザー辞書）
+        self.ed_hinmei.textChanged.connect(self._predict_category_from_name)
         self.btn_commit_bulk.clicked.connect(self._commit_imported_store_rows)
         self._on_counterparty_changed(self.cmb_counterparty.currentText())
 
@@ -298,8 +304,9 @@ class AntiqueWidget(QWidget):
             'id_checked_on': None,
             'id_checked_by': None,
             'id_proof_ref': None,
+            # 統合: 区分13=品目
             'kobutsu_kind': self.cmb_kobutsu.currentText(),
-            'hinmoku': self.ed_hinmoku.text().strip(),
+            'hinmoku': self.cmb_kobutsu.currentText(),
             'hinmei': self.ed_hinmei.text().strip(),
             'qty': qty,
             'unit_price': unit,
@@ -336,6 +343,42 @@ class AntiqueWidget(QWidget):
         except Exception:
             pass
 
+    # ===== ユーザー辞書による品目（区分13）推定 =====
+    def _load_user_dictionary(self) -> dict:
+        try:
+            s = QSettings("HIRIO", "SedoriDesktopApp")
+            data = s.value("ledger/user_dictionary", None)
+            if isinstance(data, dict):
+                return data
+            # 既定の簡易辞書
+            return {
+                "本": "書籍",
+                "DVD": "CD・DVD・BD等",
+                "BD": "CD・DVD・BD等",
+                "ゲーム": "ゲーム・玩具",
+                "腕時計": "時計・宝飾品類",
+                "カメラ": "電機機械類（道具類）",
+                "掃除機": "電機機械類（道具類）",
+                "Wi-Fi": "電機機械類（道具類）",
+                "ルーター": "電機機械類（道具類）",
+                "ジャケット": "衣類",
+            }
+        except Exception:
+            return {}
+
+    def _predict_category_from_name(self, name: str) -> None:
+        try:
+            name = name or ""
+            user_dict = self._load_user_dictionary()
+            for key, cat in user_dict.items():
+                if key and key.lower() in name.lower():
+                    idx = self.cmb_kobutsu.findText(cat)
+                    if idx >= 0:
+                        self.cmb_kobutsu.setCurrentIndex(idx)
+                    break
+        except Exception:
+            pass
+
     def _on_import_store_clicked(self) -> None:
         """店舗用：仕入管理の『取り込んだデータ一覧』から取得し、下部リストに表示"""
         try:
@@ -363,6 +406,7 @@ class AntiqueWidget(QWidget):
             notes_s = pick_series("コメント")
             name_s = pick_series("仕入先")
 
+            user_dict = self._load_user_dictionary()
             rows = []
             for i in range(len(df)):
                 # 数値正規化
@@ -376,12 +420,19 @@ class AntiqueWidget(QWidget):
                 unit_v = to_int(unit_s.iloc[i])
                 amount_v = qty_v * unit_v
                 identifier_v = str(jan_s.iloc[i] or '') or str(asin_s.iloc[i] or '')
+                # 品名から区分推定
+                cat = ""
+                title_val = str(title_s.iloc[i])
+                for key, cat_name in user_dict.items():
+                    if key and key.lower() in (title_val or "").lower():
+                        cat = cat_name; break
+
                 rows.append({
                     # 共通列
                     "entry_date": str(date_s.iloc[i]),
-                    "kobutsu_kind": "",
-                    "hinmoku": "",
+                    "kobutsu_kind": cat,
                     "hinmei": str(title_s.iloc[i]),
+                    "transaction_method": "買受",
                     "qty": qty_v,
                     "unit_price": unit_v,
                     "amount": amount_v,
@@ -408,7 +459,7 @@ class AntiqueWidget(QWidget):
             rows = getattr(self, "_imported_store_rows", [])
             self.table_store_list.setRowCount(len(rows))
             for i, r in enumerate(rows):
-                for j, key in enumerate(self.preview_keys):
+            for j, key in enumerate(self.preview_keys):
                     val = "" if r.get(key) is None else str(r.get(key))
                     self.table_store_list.setItem(i, j, QTableWidgetItem(val))
             self.table_store_list.resizeColumnsToContents()
@@ -458,8 +509,9 @@ class AntiqueWidget(QWidget):
                     'id_checked_on': None,
                     'id_checked_by': None,
                     'id_proof_ref': None,
+                    # 統合: 区分13=品目
                     'kobutsu_kind': r.get('kobutsu_kind') or self.cmb_kobutsu.currentText(),
-                    'hinmoku': r.get('hinmoku') or self.ed_hinmoku.text().strip(),
+                    'hinmoku': r.get('kobutsu_kind') or self.cmb_kobutsu.currentText(),
                     'hinmei': r.get('hinmei') or self.ed_hinmei.text().strip(),
                     'qty': int(qty_v),
                     'unit_price': int(unit_v),
