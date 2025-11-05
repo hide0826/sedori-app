@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView,
     QMessageBox, QDialog, QFormLayout, QLineEdit,
     QLabel, QGroupBox, QFileDialog, QTextEdit,
-    QComboBox, QCheckBox, QDialogButtonBox
+    QComboBox, QCheckBox, QDialogButtonBox, QTabWidget
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 
 from database.store_db import StoreDatabase
 from utils.excel_importer import ExcelImporter
+from ui.company_master_widget import CompanyMasterWidget
 
 
 class StoreEditDialog(QDialog):
@@ -324,8 +325,8 @@ class CustomFieldEditDialog(QDialog):
         return True, ""
 
 
-class StoreMasterWidget(QWidget):
-    """店舗マスタ管理ウィジェット"""
+class StoreListWidget(QWidget):
+    """店舗一覧管理ウィジェット（店舗マスタタブ用）"""
     
     def __init__(self):
         super().__init__()
@@ -914,4 +915,31 @@ class StoreMasterWidget(QWidget):
         dialog = CustomFieldsDialog(self, self.db)
         dialog.exec()
         self.load_stores(self.search_edit.text())  # カスタムフィールドが変わったので再読み込み
+
+
+class StoreMasterWidget(QWidget):
+    """店舗マスタ管理ウィジェット（タブコンテナ）"""
+    
+    def __init__(self):
+        super().__init__()
+        self.setup_ui()
+    
+    def setup_ui(self):
+        """UIの設定（タブウィジェット）"""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # タブウィジェットの作成
+        self.tab_widget = QTabWidget()
+        
+        # 店舗一覧タブ
+        self.store_list_widget = StoreListWidget()
+        self.tab_widget.addTab(self.store_list_widget, "店舗一覧")
+        
+        # 法人マスタタブ
+        self.company_master_widget = CompanyMasterWidget()
+        self.tab_widget.addTab(self.company_master_widget, "法人マスタ")
+        
+        layout.addWidget(self.tab_widget)
 

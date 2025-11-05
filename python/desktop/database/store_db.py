@@ -121,6 +121,20 @@ class StoreDatabase:
             )
         """)
         
+        # company_master テーブル作成（法人マスタ）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS company_master (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chain_name TEXT NOT NULL,
+                company_name TEXT NOT NULL,
+                license_number TEXT,
+                head_office_address TEXT,
+                representative_phone TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         # updated_atを自動更新するトリガー
         cursor.execute("""
             CREATE TRIGGER IF NOT EXISTS update_stores_timestamp 
@@ -128,6 +142,16 @@ class StoreDatabase:
             FOR EACH ROW
             BEGIN
                 UPDATE stores SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            END
+        """)
+        
+        # company_master の updated_at を自動更新するトリガー
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS update_company_master_timestamp 
+            AFTER UPDATE ON company_master
+            FOR EACH ROW
+            BEGIN
+                UPDATE company_master SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
             END
         """)
         
@@ -626,4 +650,102 @@ class StoreDatabase:
             print(f"Google Map URL更新エラー: {e}")
             conn.rollback()
             return False
+    
+    # ==================== company_master テーブル操作 ====================
+    
+    def add_company(self, company_data: Dict[str, Any]) -> int:
+        """法人を追加"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            INSERT INTO company_master (
+                chain_name, company_name, license_number, 
+                head_office_address, representative_phone
+            ) VALUES (?, ?, ?, ?, ?)
+        """, (
+            company_data.get('chain_name'),
+            company_data.get('company_name'),
+            company_data.get('license_number'),
+            company_data.get('head_office_address'),
+            company_data.get('representative_phone')
+        ))
+        
+        conn.commit()
+        return cursor.lastrowid
+    
+    def update_company(self, company_id: int, company_data: Dict[str, Any]) -> bool:
+        """法人を更新"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            UPDATE company_master SET
+                chain_name = ?,
+                company_name = ?,
+                license_number = ?,
+                head_office_address = ?,
+                representative_phone = ?
+            WHERE id = ?
+        """, (
+            company_data.get('chain_name'),
+            company_data.get('company_name'),
+            company_data.get('license_number'),
+            company_data.get('head_office_address'),
+            company_data.get('representative_phone'),
+            company_id
+        ))
+        
+        conn.commit()
+        return cursor.rowcount > 0
+    
+    def delete_company(self, company_id: int) -> bool:
+        """法人を削除"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("DELETE FROM company_master WHERE id = ?", (company_id,))
+        conn.commit()
+        
+        return cursor.rowcount > 0
+    
+    def get_company(self, company_id: int) -> Optional[Dict[str, Any]]:
+        """法人を取得"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM company_master WHERE id = ?", (company_id,))
+        row = cursor.fetchone()
+        
+        if row:
+            return dict(row)
+        return None
+    
+    def list_companies(self, search_term: Optional[str] = None) -> List[Dict[str, Any]]:
+        """法人一覧を取得（検索対応）"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        if search_term:
+            search_pattern = f"%{search_term}%"
+            cursor.execute("""
+                SELECT * FROM company_master 
+                WHERE chain_name LIKE ? 
+                   OR company_name LIKE ?
+                   OR license_number LIKE ?
+                ORDER BY chain_name, company_name
+            """, (search_pattern, search_pattern, search_pattern))
+        else:
+            cursor.execute("SELECT * FROM company_master ORDER BY chain_name, company_name")
+        
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    
+    def get_company_count(self) -> int:
+        """法人数を取得"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM company_master")
+        return cursor.fetchone()[0]
 
