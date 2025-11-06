@@ -652,6 +652,17 @@ Content-Type: application/json
   - `pwa/src/app/components/InventoryDataGrid.tsx` - 表示のみ省略対応
   - `docs/handover_prompt_route_summary_complete.md` - 引き継ぎドキュメント更新
 
+### OCR/保証書マッチング（2025-11-06 着手）
+- プロジェクト方針確定（レシート=日付/店舗/金額、保証書=商品名）
+- 新規DB実装: `products` テーブルを追加（SKU主キー）
+  - ファイル: `python/desktop/database/product_db.py`
+  - 項目: `sku/jan/asin/product_name/purchase_date/purchase_price/quantity/store_code/store_name/receipt_id/warranty_*`
+- 目的:
+  - 返品照合（SKUベース）
+  - 保証情報（期間・満了日・保証書画像パス等）の保存先整備
+  - レシート/保証書OCR後の自動紐付け先として利用
+
+
 ---
 次チャットでは、上記「引き継ぎポイント」を前提に動作確認の続き、または残タスクの実装（フィルタ拡張や印刷レイアウト調整など）から着手してください。
 ## 追加作業記録（2025-11-05）
