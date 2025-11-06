@@ -680,6 +680,10 @@ Content-Type: application/json
   - マッチングサービス実装: `python/desktop/services/receipt_matching_service.py`
     - 条件: 同日、店舗部分一致（店舗マスタ/学習）、金額一致（`(合計-値引)` とアイテム合計の差 ≤ ±10円）
     - 学習: 手動修正を `receipt_match_learnings` に蓄積、レシート`store_code`も更新
+  - 保証書サービス実装: `python/desktop/services/warranty_service.py`
+    - 画像保存→OCR→商品名抽出→`products`テーブルからSKU/JAN/ASIN/商品名でマッチング
+    - 保証情報を`products`に更新（保証期間・満了日・保証書画像パス・商品名）
+    - 手動修正を学習（将来的にledger_dbの学習機能と統合）
 
 
 ---
