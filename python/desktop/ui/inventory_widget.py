@@ -626,9 +626,9 @@ class InventoryWidget(QWidget):
                     original_value = value
                     display_value = original_value[:50] + '...' if len(original_value) > 50 else original_value
                     item = QTableWidgetItem(display_value)
-                    # 50文字を超える場合はツールチップで全文を表示
-                    if len(original_value) > 50:
-                        item.setToolTip(original_value)
+                    # 常にフルテキストをツールチップ/UserRoleに保持（保存時はこれを使う）
+                    item.setToolTip(original_value)
+                    item.setData(Qt.UserRole, original_value)
                 else:
                     item = QTableWidgetItem(value)
                 
@@ -1086,6 +1086,16 @@ class InventoryWidget(QWidget):
                 for j, column in enumerate(self.column_headers):
                     item = self.data_table.item(i, j)
                     value = item.text() if item else ""
+                    # 商品名はUserRoleに保持したフルテキストを優先
+                    if column == "商品名" and item is not None:
+                        full = item.data(Qt.UserRole)
+                        if full is not None and str(full).strip():
+                            value = str(full)
+                        # UserRoleが空の場合は、表示テキストから「...」を除去して使用（既存データ対応）
+                        elif value.endswith('...'):
+                            # 表示テキストが50文字+「...」の場合は、元のデータを探す
+                            # ただし、既に切られている場合は復元できない
+                            pass
                     
                     # 数値列の特別処理（カンマ区切りを除去）
                     if column in ["仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "仕入れ個数"]:
@@ -1332,6 +1342,15 @@ class InventoryWidget(QWidget):
                 return
             
             # データを辞書形式に変換（同期後の最新データ）
+            # 商品名が50文字で切られていないか確認（デバッグ用）
+            sample_product_name = None
+            for row in self.filtered_data.itertuples():
+                if hasattr(row, '商品名') and row.商品名:
+                    sample_product_name = str(row.商品名)
+                    if len(sample_product_name) > 50:
+                        print(f"保存前の商品名（全文）: {sample_product_name[:100]}...")
+                    break
+            
             data_list = self.filtered_data.to_dict('records')
             
             # データベースに保存

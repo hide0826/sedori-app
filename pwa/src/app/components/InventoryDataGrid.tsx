@@ -133,8 +133,20 @@ export default function InventoryDataGrid({ data, onDataChange }: InventoryDataG
                       )
                     ) : (
                       header.key === 'priceTrace'
-                        ? priceTraceOptions.find(opt => opt.value === item.priceTrace)?.label || item.priceTrace
-                        : item[header.key]
+                        ? (priceTraceOptions.find(opt => opt.value === item.priceTrace)?.label || item.priceTrace)
+                        : (
+                            header.key === 'productName'
+                              ? (
+                                  <span
+                                    className="block whitespace-nowrap overflow-hidden text-ellipsis"
+                                    style={{ maxWidth: '40ch' }}
+                                    title={(item[header.key] as string) || ''}
+                                  >
+                                    {item[header.key] as string}
+                                  </span>
+                                )
+                              : (item[header.key])
+                          )
                     )}
                   </td>
                 ))}

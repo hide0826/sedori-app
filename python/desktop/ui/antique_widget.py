@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QDate, QThread, Signal, QSettings
 from PySide6.QtGui import QFont, QColor
+from typing import Optional
 import re
 import pandas as pd
 from pathlib import Path
@@ -94,7 +95,7 @@ class AntiqueWidget(QWidget):
         self.STORE_COLUMNS = [
             ("counterparty_name", "仕入先名"),
             ("counterparty_branch", "支店"),
-            ("counterparty_address", "住所"),
+            ("counterparty_address", "店舗住所"),
             ("contact", "連絡先"),
             ("receipt_no", "レシート番号"),
         ]
@@ -108,7 +109,7 @@ class AntiqueWidget(QWidget):
         ]
         self.PERSON_COLUMNS = [
             ("person_name", "氏名"),
-            ("person_address", "住所"),
+            ("person_address", "個人住所"),
             ("person_dob", "生年月日"),
             ("id_type", "本人確認種別"),
             ("id_number", "番号"),
@@ -260,7 +261,8 @@ class AntiqueWidget(QWidget):
         self.btn_draft = QPushButton("ドラフト保存")
         self.btn_commit = QPushButton("確定（コミット）")
         self.btn_commit_bulk = QPushButton("取込プレビュー一括登録")
-        self.btn_commit_bulk.setEnabled(False)
+        # ボタンは常に有効（取込プレビューにデータがあるかは処理内でチェック）
+        self.btn_commit_bulk.setEnabled(True)
         actions.addWidget(self.btn_draft)
         actions.addWidget(self.btn_commit)
         actions.addWidget(self.btn_commit_bulk)
@@ -269,6 +271,8 @@ class AntiqueWidget(QWidget):
 
         # イベント
         self.btn_commit.clicked.connect(self._commit_single_row)
+        # ドラフト保存も同じ保存処理を暫定適用（将来分岐可能）
+        self.btn_draft.clicked.connect(self._commit_single_row)
         self.cmb_counterparty.currentTextChanged.connect(self._on_counterparty_changed)
         self.btn_import_store.clicked.connect(self._on_import_store_clicked)
         self.btn_toggle_template.toggled.connect(self._on_toggle_template)
@@ -285,19 +289,20 @@ class AntiqueWidget(QWidget):
         from desktop.database.ledger_db import LedgerDatabase
         # 必須チェック（最低限）
         missing = []
-        if not self.ed_hinmoku.text().strip(): missing.append("品目")
+        # 品目はコンボボックス選択
+        if not self.cmb_kobutsu.currentText().strip(): missing.append("品目")
         if not self.ed_hinmei.text().strip(): missing.append("品名")
         if not self.ed_identifier.text().strip(): missing.append("識別情報")
         cp = self.cmb_counterparty.currentText()
         if cp == '店舗':
-            if not self.ed_counterparty.text().strip(): missing.append("仕入先名")
-            if not self.ed_receipt.text().strip(): missing.append("レシート番号")
+            if not self.store_name.text().strip(): missing.append("仕入先名")
+            # レシート番号は任意（未実装のため空でも可）
         elif cp == 'フリマ':
-            if not self.ed_counterparty.text().strip(): missing.append("ユーザー名")
-            if not self.ed_receipt.text().strip(): missing.append("取引ID")
+            if not self.flea_user.text().strip(): missing.append("ユーザー名")
+            if not self.flea_order_id.text().strip(): missing.append("取引ID")
         elif cp == '個人':
-            if not self.ed_counterparty.text().strip(): missing.append("氏名")
-            if not self.ed_receipt.text().strip(): missing.append("本人確認番号")
+            if not self.person_name.text().strip(): missing.append("氏名")
+            if not self.id_number.text().strip(): missing.append("本人確認番号")
         if missing:
             QMessageBox.warning(self, "必須未入力", f"次を入力してください: {', '.join(missing)}")
             return
@@ -306,15 +311,18 @@ class AntiqueWidget(QWidget):
         row = {
             'entry_date': self.ed_entry_date.date().toString('yyyy-MM-dd'),
             'counterparty_type': cp,
-            'counterparty_name': self.ed_counterparty.text().strip() if cp in ('店舗','個人') else None,
-            'receipt_no': self.ed_receipt.text().strip() if cp == '店舗' else None,
+            'counterparty_name': (self.store_name.text().strip() if cp == '店舗' else (self.person_name.text().strip() if cp == '個人' else None)),
+            'counterparty_branch': self.store_name.text().strip() if cp == '店舗' else None,
+            'counterparty_address': self.store_address.text().strip() if cp == '店舗' else None,
+            'contact': self.store_contact.text().strip() if cp == '店舗' else None,
+            'receipt_no': self.store_receipt.text().strip() if cp == '店舗' else None,
             'platform': 'フリマ' if cp == 'フリマ' else None,
-            'platform_order_id': self.ed_receipt.text().strip() if cp == 'フリマ' else None,
-            'platform_user': self.ed_counterparty.text().strip() if cp == 'フリマ' else None,
-            'person_name': self.ed_counterparty.text().strip() if cp == '個人' else None,
+            'platform_order_id': self.flea_order_id.text().strip() if cp == 'フリマ' else None,
+            'platform_user': self.flea_user.text().strip() if cp == 'フリマ' else None,
+            'person_name': self.person_name.text().strip() if cp == '個人' else None,
             'person_address': None,
             'id_type': 'ID',
-            'id_number': self.ed_receipt.text().strip() if cp == '個人' else None,
+            'id_number': self.id_number.text().strip() if cp == '個人' else None,
             'id_checked_on': None,
             'id_checked_by': None,
             'id_proof_ref': None,
@@ -326,11 +334,16 @@ class AntiqueWidget(QWidget):
             'unit_price': unit,
             'amount': amount,
             'identifier': self.ed_identifier.text().strip(),
+            'transaction_method': '買受' if cp == '店舗' else (self.transaction_method.text().strip() if hasattr(self, 'transaction_method') else None),
             'notes': None,
             'correction_of': None
         }
         db = LedgerDatabase()
         db.insert_ledger_rows([row])
+        try:
+            self.reload_ledger_rows()
+        except Exception:
+            pass
         QMessageBox.information(self, "保存", "台帳に保存しました。『閲覧・出力』で確認できます。")
 
     def _on_counterparty_changed(self, text: str) -> None:
@@ -419,18 +432,52 @@ class AntiqueWidget(QWidget):
         except Exception:
             return {}
 
+    def _learn_category_edit(self, product_name: str, category: str, identifier: Optional[str] = None) -> None:
+        """
+        品目編集を学習する（非同期処理、エラーは無視）
+        """
+        try:
+            from desktop.database.ledger_db import LedgerDatabase
+            db = LedgerDatabase()
+            result = db.learn_category_from_edit(product_name, category, identifier)
+            # 学習結果はログに出力（デバッグ用）
+            if result.get('keywords_added', 0) > 0 or result.get('id_mapped', 0) > 0:
+                print(f"学習完了: キーワード{result.get('keywords_added', 0)}件, IDマッピング{result.get('id_mapped', 0)}件")
+        except Exception as e:
+            print(f"学習処理エラー: {e}")
+
     def _predict_category_from_name(self, name: str) -> None:
+        """
+        商品名から品目を推定してプルダウンに反映（学習データを優先）
+        """
         try:
             name = name or ""
-            user_dict = self._load_user_dictionary()
-            for key, cat in user_dict.items():
-                if key and key.lower() in name.lower():
-                    # 既存データとの互換性: 番号付き品目名を正規化
-                    normalized_cat = self._normalize_category_name(cat)
-                    idx = self.cmb_kobutsu.findText(normalized_cat)
-                    if idx >= 0:
-                        self.cmb_kobutsu.setCurrentIndex(idx)
-                    break
+            cat = None
+            
+            # 1. 学習済みキーワード辞書から推定
+            try:
+                from desktop.database.ledger_db import LedgerDatabase
+                db = LedgerDatabase()
+                result = db.match_category_by_keywords(name)
+                if result:
+                    cat = result[0]  # 品目名を取得
+            except Exception:
+                pass
+            
+            # 2. ユーザー辞書（既存の簡易辞書）から推定
+            if not cat:
+                user_dict = self._load_user_dictionary()
+                for key, cat_name in user_dict.items():
+                    if key and key.lower() in name.lower():
+                        cat = cat_name
+                        break
+            
+            # 3. プルダウンに反映
+            if cat:
+                normalized_cat = self._normalize_category_name(cat)
+                idx = self.cmb_kobutsu.findText(normalized_cat)
+                if idx >= 0:
+                    self.cmb_kobutsu.setCurrentIndex(idx)
         except Exception:
             pass
 
@@ -438,58 +485,106 @@ class AntiqueWidget(QWidget):
     def _setup_tab_dict(self):
         from PySide6.QtWidgets import QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget, QTableWidgetItem
         lay = QVBoxLayout(self.tab_dict)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(10)
+        
+        # 説明ラベル
+        info_label = QLabel("各品目に関連するキーワードをカンマ区切りで入力してください")
+        info_label.setStyleSheet("color: #888; font-size: 11px;")
+        lay.addWidget(info_label)
+        
+        # テーブル: 13品目を固定で縦に展開
         self.dict_table = QTableWidget()
         self.dict_table.setColumnCount(2)
-        self.dict_table.setHorizontalHeaderLabels(["キーワード", "品目"])
+        self.dict_table.setHorizontalHeaderLabels(["品目", "キーワード（カンマ区切り）"])
+        self.dict_table.setRowCount(len(self.CATEGORY_CHOICES))
+        self.dict_table.verticalHeader().setVisible(False)
+        
+        # 各品目を行に配置
+        for i, category in enumerate(self.CATEGORY_CHOICES):
+            # 左列: 品目名（読み取り専用ラベル）
+            item = QTableWidgetItem(category)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)  # 読み取り専用
+            item.setBackground(QColor(240, 240, 240))  # 背景色を薄いグレーに
+            self.dict_table.setItem(i, 0, item)
+            
+            # 右列: キーワード入力欄（QLineEdit）
+            keyword_input = QLineEdit()
+            keyword_input.setPlaceholderText("例: キーワード1,キーワード2,キーワード3")
+            self.dict_table.setCellWidget(i, 1, keyword_input)
+        
+        # 列幅調整
+        self.dict_table.setColumnWidth(0, 200)  # 品目列は固定幅
+        self.dict_table.setColumnWidth(1, 400)  # キーワード列は広めに
+        header = self.dict_table.horizontalHeader()
+        header.setStretchLastSection(True)  # 最後の列を伸縮可能に
+        
         lay.addWidget(self.dict_table)
+        
+        # ボタン（保存のみ）
         btns = QHBoxLayout()
-        self.btn_dict_add = QPushButton("行追加")
-        self.btn_dict_del = QPushButton("行削除")
+        btns.addStretch()
         self.btn_dict_save = QPushButton("保存")
-        btns.addWidget(self.btn_dict_add); btns.addWidget(self.btn_dict_del); btns.addStretch(); btns.addWidget(self.btn_dict_save)
-        lay.addLayout(btns)
-        self.btn_dict_add.clicked.connect(self._dict_add_row)
-        self.btn_dict_del.clicked.connect(self._dict_del_row)
         self.btn_dict_save.clicked.connect(self._dict_save)
+        btns.addWidget(self.btn_dict_save)
+        lay.addLayout(btns)
+        
+        # データ読み込み
         self._dict_load()
 
     def _dict_load(self):
-        d = self._load_user_dictionary()
-        self.dict_table.setRowCount(len(d) if d else 0)
-        for i, (k, v) in enumerate(d.items()):
-            self.dict_table.setItem(i, 0, QTableWidgetItem(str(k)))
-            # 品目はプルダウン
-            cb = QComboBox(); cb.addItems(self.CATEGORY_CHOICES)
-            # 既存データとの互換性: 番号付き品目名を正規化
-            normalized_v = self._normalize_category_name(v)
-            idx = cb.findText(normalized_v)
-            if idx >= 0: 
-                cb.setCurrentIndex(idx)
-            self.dict_table.setCellWidget(i, 1, cb)
-
-    def _dict_add_row(self):
-        r = self.dict_table.rowCount(); self.dict_table.insertRow(r)
-        self.dict_table.setItem(r, 0, QTableWidgetItem(""))
-        cb = QComboBox(); cb.addItems(self.CATEGORY_CHOICES)
-        self.dict_table.setCellWidget(r, 1, cb)
-
-    def _dict_del_row(self):
-        sel = self.dict_table.selectionModel().selectedRows() if self.dict_table.selectionModel() else []
-        if not sel: return
-        self.dict_table.removeRow(sel[0].row())
+        """既存のユーザー辞書を読み込んで新しい形式に変換して表示"""
+        try:
+            # 既存の {キーワード: 品目} 形式を読み込み
+            old_dict = self._load_user_dictionary()
+            
+            # 新しい形式 {品目: [キーワード1, キーワード2, ...]} に変換
+            category_keywords = {}
+            for keyword, category in old_dict.items():
+                normalized_cat = self._normalize_category_name(category)
+                if normalized_cat not in category_keywords:
+                    category_keywords[normalized_cat] = []
+                category_keywords[normalized_cat].append(keyword)
+            
+            # テーブルに反映
+            for i, category in enumerate(self.CATEGORY_CHOICES):
+                keywords = category_keywords.get(category, [])
+                keyword_text = ",".join(keywords) if keywords else ""
+                keyword_input = self.dict_table.cellWidget(i, 1)
+                if keyword_input:
+                    keyword_input.setText(keyword_text)
+        except Exception as e:
+            print(f"辞書読み込みエラー: {e}")
 
     def _dict_save(self):
+        """新しい形式で保存（{品目: "キーワード1,キーワード2,..."} 形式）"""
         try:
-            d = {}
-            for r in range(self.dict_table.rowCount()):
-                key_item = self.dict_table.item(r, 0)
-                key = key_item.text().strip() if key_item else ""
-                cb = self.dict_table.cellWidget(r, 1)
-                val = cb.currentText().strip() if cb else ""
-                if key and val:
-                    d[key] = val
+            # 新しい形式でデータを収集
+            category_keywords_dict = {}
+            for i, category in enumerate(self.CATEGORY_CHOICES):
+                keyword_input = self.dict_table.cellWidget(i, 1)
+                if keyword_input:
+                    keyword_text = keyword_input.text().strip()
+                    if keyword_text:
+                        # カンマ区切りのキーワードをリストに変換
+                        keywords = [k.strip() for k in keyword_text.split(",") if k.strip()]
+                        if keywords:
+                            category_keywords_dict[category] = ",".join(keywords)
+            
+            # 既存の {キーワード: 品目} 形式に変換して保存（互換性のため）
+            # ただし、学習機能が優先されるので、この辞書は補助的な役割
+            legacy_dict = {}
+            for category, keywords_str in category_keywords_dict.items():
+                keywords = [k.strip() for k in keywords_str.split(",") if k.strip()]
+                for keyword in keywords:
+                    legacy_dict[keyword] = category
+            
             s = QSettings("HIRIO", "SedoriDesktopApp")
-            s.setValue("ledger/user_dictionary", d)
+            # 新しい形式も保存（将来の拡張用）
+            s.setValue("ledger/user_dictionary_v2", category_keywords_dict)
+            # 既存形式も保存（互換性のため）
+            s.setValue("ledger/user_dictionary", legacy_dict)
+            
             QMessageBox.information(self, "保存", "ユーザー辞書を保存しました")
         except Exception as e:
             QMessageBox.warning(self, "保存エラー", str(e))
@@ -543,12 +638,40 @@ class AntiqueWidget(QWidget):
                 unit_v = to_int(unit_s.iloc[i])
                 amount_v = qty_v * unit_v
                 identifier_v = str(jan_s.iloc[i] or '') or str(asin_s.iloc[i] or '')
-                # 品名から区分推定
+                # 品名から区分推定（学習データを優先）
                 cat = ""
                 title_val = str(title_s.iloc[i])
-                for key, cat_name in user_dict.items():
-                    if key and key.lower() in (title_val or "").lower():
-                        cat = cat_name; break
+                
+                # 1. 識別情報（JAN/ASIN）から直接マッチング（最高優先度）
+                if identifier_v:
+                    try:
+                        from desktop.database.ledger_db import LedgerDatabase
+                        db = LedgerDatabase()
+                        matched = db.match_category_by_id(identifier_v)
+                        if matched:
+                            cat = matched
+                    except Exception:
+                        pass
+                
+                # 2. 学習済みキーワード辞書から推定
+                if not cat:
+                    try:
+                        from desktop.database.ledger_db import LedgerDatabase
+                        db = LedgerDatabase()
+                        result = db.match_category_by_keywords(title_val)
+                        if result:
+                            cat = result[0]  # 品目名を取得
+                    except Exception:
+                        pass
+                
+                # 3. ユーザー辞書（既存の簡易辞書）から推定
+                if not cat:
+                    for key, cat_name in user_dict.items():
+                        if key and key.lower() in (title_val or "").lower():
+                            cat = cat_name
+                            break
+                
+                # 4. デフォルト（マッチしない場合は空文字のまま、後で「道具類」が設定される）
 
                 # 仕入先コード→店舗マスタ参照
                 supplier_code = str(name_s.iloc[i] or '').strip()
@@ -621,7 +744,7 @@ class AntiqueWidget(QWidget):
 
             self._imported_store_rows = rows
             self._refresh_store_list_table()
-            self.btn_commit_bulk.setEnabled(self.cmb_counterparty.currentText() == '店舗' and len(rows) > 0)
+            # ボタンは常に有効（処理内でデータチェック）
             QMessageBox.information(self, "取込完了", f"仕入管理から {len(rows)} 件を取り込みました。")
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"取込でエラーが発生しました:\n{e}")
@@ -646,23 +769,42 @@ class AntiqueWidget(QWidget):
                             idx = cb.findText(normalized_val)
                             if idx >= 0:
                                 cb.setCurrentIndex(idx)
+                                # 初期表示時も内部データへ反映
+                                try:
+                                    self._imported_store_rows[i][key] = cb.currentText()
+                                except Exception:
+                                    pass
                             else:
                                 # マッチしない場合はデフォルトで「道具類」
                                 idx_tool = cb.findText("道具類")
                                 if idx_tool >= 0:
                                     cb.setCurrentIndex(idx_tool)
+                                    try:
+                                        self._imported_store_rows[i][key] = cb.currentText()
+                                    except Exception:
+                                        pass
                         else:
                             # 値がない場合もデフォルトで「道具類」
                             idx_tool = cb.findText("道具類")
                             if idx_tool >= 0:
                                 cb.setCurrentIndex(idx_tool)
-                        # 変更時にデータへ反映
+                                try:
+                                    self._imported_store_rows[i][key] = cb.currentText()
+                                except Exception:
+                                    pass
+                        # 変更時にデータへ反映＋学習処理
                         def on_changed(idx, row_index=i, col_key=key, combo=cb):
                             try:
                                 choice = combo.currentText()
                                 self._imported_store_rows[row_index][col_key] = choice
-                            except Exception:
-                                pass
+                                # 学習処理: 商品名と識別情報から学習
+                                row_data = self._imported_store_rows[row_index]
+                                product_name = str(row_data.get('hinmei', '') or '')
+                                identifier = str(row_data.get('identifier', '') or '')
+                                if product_name and choice:
+                                    self._learn_category_edit(product_name, choice, identifier)
+                            except Exception as e:
+                                print(f"学習処理エラー: {e}")
                         cb.currentIndexChanged.connect(on_changed)
                         self.table_store_list.setCellWidget(i, j, cb)
                     else:
@@ -682,50 +824,67 @@ class AntiqueWidget(QWidget):
                 QMessageBox.information(self, "データなし", "取込プレビューに行がありません。")
                 return
 
-            # 必須（共通）チェック
-            missing = []
-            if not self.ed_hinmoku.text().strip(): missing.append("品目")
-            if not self.ed_hinmei.text().strip(): missing.append("品名")
-            if not self.ed_identifier.text().strip(): missing.append("識別情報")
-            if missing:
-                QMessageBox.warning(self, "必須未入力", f"次を入力してください: {', '.join(missing)}")
-                return
-
+            # 取込プレビューの各行をチェック（テンプレートは不要）
             to_insert = []
-            for r in rows:
+            missing_rows = []
+            for idx, r in enumerate(rows, start=1):
+                # 各行の必須チェック
+                missing = []
+                if not str(r.get('hinmei', '')).strip():
+                    missing.append("品名")
+                if not str(r.get('identifier', '')).strip():
+                    missing.append("識別情報")
                 if not str(r.get('counterparty_name', '')).strip():
-                    continue
-                # 取込行の値を優先。空の場合はテンプレ（コンボボックス等）で補完
-                qty_v = r.get('qty') if r.get('qty') not in (None, "") else int(self.sp_qty.value())
-                unit_v = r.get('unit_price') if r.get('unit_price') not in (None, "") else int(self.sp_unit.value())
-                amount_v = r.get('amount') if r.get('amount') not in (None, "") else int(qty_v) * int(unit_v)
+                    missing.append("仕入先名")
+                if not str(r.get('kobutsu_kind', '')).strip():
+                    missing.append("品目")
+                
+                if missing:
+                    missing_rows.append(f"行{idx}: {', '.join(missing)}")
+                    continue  # 必須項目が不足している行はスキップ
+                # 取込行のデータを直接使用（テンプレートは補完のみ）
+                qty_v = r.get('qty', 0) or 0
+                unit_v = r.get('unit_price', 0) or 0
+                amount_v = r.get('amount') or (int(qty_v) * int(unit_v))
                 row = {
                     'entry_date': r.get('entry_date') or self.ed_entry_date.date().toString('yyyy-MM-dd'),
                     'counterparty_type': '店舗',
-                    'counterparty_name': r.get('counterparty_name'),
-                    'receipt_no': r.get('receipt_no'),
+                    'counterparty_name': str(r.get('counterparty_name', '')).strip(),
+                    'receipt_no': str(r.get('receipt_no', '')).strip() or None,
                     'platform': None,
                     'platform_order_id': None,
                     'platform_user': None,
                     'person_name': None,
-                    'person_address': None,
+                    'person_address': None,  # 店舗取引なので個人住所は常にNone
+                    # 店舗用フィールドを正しく反映
+                    'counterparty_branch': r.get('counterparty_branch') or None,
+                    'counterparty_address': r.get('counterparty_address') or None,
+                    'contact': r.get('contact') or None,
                     'id_type': None,
                     'id_number': None,
                     'id_checked_on': None,
                     'id_checked_by': None,
                     'id_proof_ref': None,
                     # 統合: 区分13=品目
-                    'kobutsu_kind': r.get('kobutsu_kind') or self.cmb_kobutsu.currentText(),
-                    'hinmoku': r.get('kobutsu_kind') or self.cmb_kobutsu.currentText(),
-                    'hinmei': r.get('hinmei') or self.ed_hinmei.text().strip(),
+                    'kobutsu_kind': str(r.get('kobutsu_kind', '')).strip(),
+                    'hinmoku': str(r.get('kobutsu_kind', '')).strip(),
+                    'hinmei': str(r.get('hinmei', '')).strip(),
                     'qty': int(qty_v),
                     'unit_price': int(unit_v),
                     'amount': int(amount_v),
-                    'identifier': r.get('identifier') or self.ed_identifier.text().strip(),
-                    'notes': r.get('notes') or None,
+                    'identifier': str(r.get('identifier', '')).strip(),
+                    'transaction_method': '買受',
+                    'notes': str(r.get('notes', '')).strip() or None,
                     'correction_of': None,
                 }
                 to_insert.append(row)
+            
+            # 必須項目が不足している行がある場合は警告
+            if missing_rows:
+                msg = f"以下の行は必須項目が不足しているためスキップされました:\n" + "\n".join(missing_rows[:10])
+                if len(missing_rows) > 10:
+                    msg += f"\n...他{len(missing_rows) - 10}行"
+                QMessageBox.warning(self, "一部スキップ", msg)
 
             if not to_insert:
                 QMessageBox.information(self, "登録対象なし", "登録可能な行がありません（仕入先名の空行は除外されます）。")
@@ -736,7 +895,11 @@ class AntiqueWidget(QWidget):
             n = db.insert_ledger_rows(to_insert)
             self._imported_store_rows = []
             self._refresh_store_list_table()
-            self.btn_commit_bulk.setEnabled(False)
+            # 閲覧・出力タブを即時更新
+            try:
+                self.reload_ledger_rows()
+            except Exception:
+                pass
             QMessageBox.information(self, "登録完了", f"{n}件を台帳に登録しました。『閲覧・出力』で確認できます。")
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"一括登録でエラーが発生しました:\n{e}")
@@ -900,6 +1063,11 @@ class AntiqueWidget(QWidget):
         
         # テーブルをレイアウトに追加
         (parent_layout or self.layout()).addWidget(self.data_table)
+        # 品名列は省略表示（50文字）＋選択時は全表示
+        try:
+            self.data_table.itemSelectionChanged.connect(self._on_table_selection_changed)
+        except Exception:
+            pass
         
     def setup_action_buttons(self, parent_layout=None):
         """アクションボタンエリアの設定"""
@@ -935,6 +1103,12 @@ class AntiqueWidget(QWidget):
         self.clear_btn.clicked.connect(self.clear_data)
         self.clear_btn.setEnabled(False)
         action_layout.addWidget(self.clear_btn)
+
+        # デバッグ: 全データ削除
+        self.debug_delete_btn = QPushButton("全データ削除(デバッグ)")
+        self.debug_delete_btn.clicked.connect(self._debug_delete_all_data)
+        self.debug_delete_btn.setStyleSheet("color: #b00;")
+        action_layout.addWidget(self.debug_delete_btn)
         
         action_layout.addStretch()
         
@@ -979,24 +1153,21 @@ class AntiqueWidget(QWidget):
         self.generate_btn.setEnabled(True)
         
         if result['status'] == 'success':
-            # データの保存
-            self.antique_data = result['items']
-            
-            # テーブルの更新
-            self.update_table()
-            
+            # 生成結果はDBに反映済み前提。画面はDBから再読み込みして維持する
+            try:
+                self.reload_ledger_rows()
+            except Exception:
+                pass
             # ボタンの有効化
             self.export_csv_btn.setEnabled(True)
             self.export_excel_btn.setEnabled(True)
             self.clear_btn.setEnabled(True)
-            
-            # 統計情報の更新
-            self.update_stats(result)
-            
+            # 統計情報更新
+            self.update_stats()
             QMessageBox.information(
-                self, 
-                "古物台帳生成完了", 
-                f"古物台帳生成が完了しました\n期間: {result['period']}\n件数: {result['total_items']}件\n合計金額: {result['total_value']:,}円"
+                self,
+                "古物台帳生成完了",
+                f"古物台帳生成が完了しました\n期間: {result.get('period','-')}\n件数: {result.get('total_items','-')}件"
             )
         else:
             QMessageBox.warning(self, "古物台帳生成失敗", "古物台帳生成に失敗しました")
@@ -1019,11 +1190,21 @@ class AntiqueWidget(QWidget):
         # データの設定
         for i, item in enumerate(self.antique_data):
             for j, key in enumerate(self.column_keys):
-                value = str(item.get(key, ""))
+                raw = item.get(key, "")
+                value = "" if raw is None else str(raw)
                 # 取引日の場合は時刻部分を削除
                 if key == "entry_date":
                     value = self._normalize_date(value)
-                item_widget = QTableWidgetItem(value)
+                display_value = value
+                if key == 'hinmei' and value:
+                    # 50文字にトリム
+                    display_value = (value[:50] + '…') if len(value) > 50 else value
+                item_widget = QTableWidgetItem(display_value)
+                if key == 'hinmei':
+                    # ツールチップは常にフルテキスト
+                    item_widget.setToolTip(value)
+                    # フルテキストをUserRoleに保持
+                    item_widget.setData(Qt.UserRole, value)
                 
                 # 金額/数量などの簡易フォーマット
                 header_label = self.column_headers[j]
@@ -1034,8 +1215,8 @@ class AntiqueWidget(QWidget):
                     except:
                         pass
 
-                # 長文はツールチップ
-                if len(value) > 28:
+                # ツールチップはフルテキスト（他列も同様）
+                if not item_widget.toolTip():
                     item_widget.setToolTip(value)
                 
                 self.data_table.setItem(i, j, item_widget)
@@ -1044,6 +1225,35 @@ class AntiqueWidget(QWidget):
         self.data_table.resizeColumnsToContents()
         # 列表示の適用
         self.apply_column_visibility()
+
+    def _on_table_selection_changed(self):
+        try:
+            # まずすべてをトリム表示に戻す
+            if not hasattr(self, 'column_keys'):
+                return
+            hinmei_col = None
+            for idx, key in enumerate(self.column_keys):
+                if key == 'hinmei':
+                    hinmei_col = idx
+                    break
+            if hinmei_col is None:
+                return
+            for r in range(self.data_table.rowCount()):
+                item = self.data_table.item(r, hinmei_col)
+                if not item:
+                    continue
+                full = item.data(Qt.UserRole) or item.text()
+                trimmed = (full[:50] + '…') if len(full) > 50 else full
+                item.setText(trimmed)
+            # 選択行はフル表示
+            if self.data_table.selectionModel():
+                for idx in self.data_table.selectionModel().selectedRows():
+                    item = self.data_table.item(idx.row(), hinmei_col)
+                    if item:
+                        full = item.data(Qt.UserRole) or item.text()
+                        item.setText(full)
+        except Exception:
+            pass
         
     def apply_filters(self):
         """フィルタの適用"""
@@ -1091,11 +1301,18 @@ class AntiqueWidget(QWidget):
         # データの設定
         for i, item in enumerate(filtered_data):
             for j, key in enumerate(self.column_keys):
-                value = str(item.get(key, ""))
+                raw = item.get(key, "")
+                value = "" if raw is None else str(raw)
                 # 取引日の場合は時刻部分を削除
                 if key == "entry_date":
                     value = self._normalize_date(value)
-                item_widget = QTableWidgetItem(value)
+                display_value = value
+                if key == 'hinmei' and value:
+                    display_value = (value[:50] + '…') if len(value) > 50 else value
+                item_widget = QTableWidgetItem(display_value)
+                if key == 'hinmei':
+                    item_widget.setToolTip(value)
+                    item_widget.setData(Qt.UserRole, value)
                 
                 header_label = self.column_headers[j]
                 if header_label in ["数量", "単価", "金額"] and value.replace(".", "").isdigit():
@@ -1104,7 +1321,7 @@ class AntiqueWidget(QWidget):
                         item_widget.setText(f"{num_value:,.0f}")
                     except:
                         pass
-                if len(value) > 28:
+                if not item_widget.toolTip():
                     item_widget.setToolTip(value)
                 
                 self.data_table.setItem(i, j, item_widget)
@@ -1212,6 +1429,20 @@ class AntiqueWidget(QWidget):
         
         # 表示のクリア
         self.stats_label.setText("統計: なし")
+
+    def _debug_delete_all_data(self):
+        """DB全削除（デバッグ）"""
+        ret = QMessageBox.question(self, "全データ削除", "ledger_entries等の全データを削除します。よろしいですか？", QMessageBox.Yes | QMessageBox.No)
+        if ret != QMessageBox.Yes:
+            return
+        try:
+            from desktop.database.ledger_db import LedgerDatabase
+            db = LedgerDatabase()
+            db.delete_all()
+            self.clear_data()
+            QMessageBox.information(self, "削除完了", "全データを削除しました。")
+        except Exception as e:
+            QMessageBox.critical(self, "削除失敗", f"削除に失敗しました:\n{e}")
         
     def export_csv(self):
         """CSV出力"""
@@ -1228,8 +1459,14 @@ class AntiqueWidget(QWidget):
         
         if file_path:
             try:
-                # フィルタ結果を出力
+                # フィルタ結果を出力（0件ならDBから再読込して再取得）
                 rows = self.get_filtered_rows()
+                if not rows:
+                    try:
+                        self.reload_ledger_rows()
+                        rows = self.get_filtered_rows()
+                    except Exception:
+                        pass
                 from pathlib import Path
                 from desktop.utils.file_naming import resolve_unique_path
                 target = resolve_unique_path(Path(file_path))
@@ -1326,11 +1563,31 @@ class AntiqueWidget(QWidget):
         
         if file_path:
             try:
-                # データフレームの作成
-                df = pd.DataFrame(self.antique_data)
+                # フィルタ結果を出力（0件ならDBから再読込して再取得）
+                rows = self.get_filtered_rows()
+                if not rows:
+                    try:
+                        self.reload_ledger_rows()
+                        rows = self.get_filtered_rows()
+                    except Exception:
+                        pass
                 from pathlib import Path
                 from desktop.utils.file_naming import resolve_unique_path
                 target = resolve_unique_path(Path(file_path))
+                
+                # 日本語ヘッダーと正しい順序でデータフレームを作成
+                data_for_df = []
+                for r in rows:
+                    row_dict = {}
+                    for key, header in zip(self.column_keys, self.column_headers):
+                        value = r.get(key)
+                        # Noneは空文字に変換
+                        row_dict[header] = "" if value is None else str(value)
+                    data_for_df.append(row_dict)
+                
+                df = pd.DataFrame(data_for_df)
+                # 列の順序を日本語ヘッダーの順序に合わせる
+                df = df[self.column_headers]
                 df.to_excel(str(target), index=False, engine='openpyxl')
                 
                 QMessageBox.information(self, "出力完了", f"Excelファイルを保存しました:\n{str(target)}")
