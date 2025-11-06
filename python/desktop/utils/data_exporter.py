@@ -237,3 +237,43 @@ class DataExporter:
             print(f"一括エクスポートエラー: {e}")
             return False
 
+    @staticmethod
+    def export_tax_purchase_ledger(
+        purchases: List[Dict[str, Any]],
+        output_path: str,
+        format: str = 'csv'
+    ) -> bool:
+        """
+        確定申告用 仕入台帳エクスポート
+
+        注意:
+        - 古物台帳とは別。レシートのクーポン/値引き(discount_amount)列を含める
+        - 文字コード: CSVはUTF-8 BOM、Excelはopenpyxl
+        - 入力データは呼び出し側で receipts 結合済みを想定
+        """
+        try:
+            df = pd.DataFrame(purchases)
+
+            # 列順（存在するもののみ採用）
+            columns = [
+                'purchase_date', 'store_code', 'store_name',
+                'sku', 'jan', 'asin', 'product_name',
+                'quantity', 'purchase_price',
+                'discount_amount',  # クーポン/値引き
+                'subtotal', 'tax', 'total_amount', 'paid_amount',
+            ]
+            available = [c for c in columns if c in df.columns]
+            if available:
+                df = df[available]
+
+            if format.lower() == 'excel':
+                df.to_excel(output_path, index=False, engine='openpyxl')
+            else:
+                from desktop.utils.file_naming import resolve_unique_path
+                target = resolve_unique_path(Path(output_path))
+                df.to_csv(str(target), index=False, encoding='utf-8-sig')
+            return True
+        except Exception as e:
+            print(f"確定申告用仕入台帳エクスポートエラー: {e}")
+            return False
+

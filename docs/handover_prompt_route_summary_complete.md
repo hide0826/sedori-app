@@ -695,6 +695,10 @@ Content-Type: application/json
     - 保証書一覧表示・ダブルクリックで再読み込み
     - `warranty_db.py`に`list_all`メソッド追加
     - `main_window.py`にタブ追加
+  - 確定申告用仕入台帳出力を追加: `python/desktop/utils/data_exporter.py`
+    - `export_tax_purchase_ledger(...)` を新設（UTF-8 BOM or Excel）
+    - 列: `purchase_date/store_code/store_name/sku/jan/asin/product_name/quantity/purchase_price/discount_amount/subtotal/tax/total_amount/paid_amount`
+    - 古物台帳は変更なし（クーポンは出力対象外）
 
 
 ---
