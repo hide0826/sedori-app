@@ -28,8 +28,14 @@ from PySide6.QtGui import QPixmap
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from services.receipt_service import ReceiptService
-from services.receipt_matching_service import ReceiptMatchingService
+# デスクトップ側servicesを優先して読み込む
+try:
+    from services.receipt_service import ReceiptService  # python/desktop/services
+    from services.receipt_matching_service import ReceiptMatchingService
+except Exception:
+    # 明示的パス指定のフォールバック
+    from desktop.services.receipt_service import ReceiptService
+    from desktop.services.receipt_matching_service import ReceiptMatchingService
 from database.receipt_db import ReceiptDatabase
 from database.inventory_db import InventoryDatabase
 

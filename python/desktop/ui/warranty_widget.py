@@ -28,7 +28,11 @@ from PySide6.QtCore import Qt, QDate, QThread, Signal
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from services.warranty_service import WarrantyService
+# デスクトップ側servicesを優先
+try:
+    from services.warranty_service import WarrantyService
+except Exception:
+    from desktop.services.warranty_service import WarrantyService
 from database.warranty_db import WarrantyDatabase
 from database.product_db import ProductDatabase
 
