@@ -669,6 +669,11 @@ Content-Type: application/json
   - 方針: 
     - レシートは同日・店舗部分一致・金額一致（誤差±10円）で候補提示
     - クーポン/値引きは確定申告用台帳にのみ出力（古物台帳は除外）
+- OCRサービス実装
+  - `python/desktop/services/ocr_service.py`: Tesseract優先、GCVフォールバック
+  - `python/desktop/utils/image_processor.py`: 画像前処理（グレースケール、コントラスト調整）
+  - 依存関係追加: `Pillow`, `pytesseract`（`requirements.txt`）
+  - 日本語対応: Tesseractに`jpn+eng`言語指定
 
 
 ---
