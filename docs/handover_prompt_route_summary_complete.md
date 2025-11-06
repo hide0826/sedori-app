@@ -677,6 +677,9 @@ Content-Type: application/json
   - レシートサービス実装: `python/desktop/services/receipt_service.py`
     - 画像保存→OCR→日付/店舗名（生）/小計・税・値引・合計・支払を抽出
     - `ReceiptDatabase` に保存（`receipts`）
+  - マッチングサービス実装: `python/desktop/services/receipt_matching_service.py`
+    - 条件: 同日、店舗部分一致（店舗マスタ/学習）、金額一致（`(合計-値引)` とアイテム合計の差 ≤ ±10円）
+    - 学習: 手動修正を `receipt_match_learnings` に蓄積、レシート`store_code`も更新
 
 
 ---
