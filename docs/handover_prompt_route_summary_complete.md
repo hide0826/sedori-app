@@ -684,6 +684,11 @@ Content-Type: application/json
     - 画像保存→OCR→商品名抽出→`products`テーブルからSKU/JAN/ASIN/商品名でマッチング
     - 保証情報を`products`に更新（保証期間・満了日・保証書画像パス・商品名）
     - 手動修正を学習（将来的にledger_dbの学習機能と統合）
+  - レシート管理UI実装: `python/desktop/ui/receipt_widget.py`
+    - 画像アップロード→OCR実行（バックグラウンドスレッド）→結果表示
+    - マッチング候補表示・店舗コード選択・確定→学習データ更新
+    - レシート一覧表示・ダブルクリックで再読み込み
+    - `main_window.py`にタブ追加
 
 
 ---
