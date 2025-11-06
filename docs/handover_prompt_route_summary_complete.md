@@ -674,6 +674,9 @@ Content-Type: application/json
   - `python/desktop/utils/image_processor.py`: 画像前処理（グレースケール、コントラスト調整）
   - 依存関係追加: `Pillow`, `pytesseract`（`requirements.txt`）
   - 日本語対応: Tesseractに`jpn+eng`言語指定
+  - レシートサービス実装: `python/desktop/services/receipt_service.py`
+    - 画像保存→OCR→日付/店舗名（生）/小計・税・値引・合計・支払を抽出
+    - `ReceiptDatabase` に保存（`receipts`）
 
 
 ---
