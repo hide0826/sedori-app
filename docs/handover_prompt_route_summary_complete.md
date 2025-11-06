@@ -629,6 +629,29 @@ Content-Type: application/json
 - 住所/支店/連絡先のマッピング漏れケースがあれば例を収集して調整。
 - 既存の保存データで50字切りされているものは元ファイルからの再登録で対応。
 
+### 追加実装（2025-11-06 完了）
+- **品目編集の自動学習機能**
+  - プルダウン変更時に商品名・識別情報から自動学習
+  - `ledger_category_dict`テーブル: キーワード→品目のマッピング（重み付き）
+  - `ledger_id_map`テーブル: JAN/ASIN→品目の直接マッピング（高信頼度）
+  - 次回取込時は学習データを優先して品目を自動推定
+- **ユーザー辞書UI変更**
+  - 13品目を縦に展開、各品目の右にカンマ区切りキーワード入力欄
+  - 既存の{キーワード: 品目}形式から自動変換
+- **PWA側の表示改善**
+  - `InventoryDataGrid.tsx`: 商品名は表示のみ50文字省略（CSS ellipsis）
+  - ツールチップ（title属性）で全文表示
+  - データは全文保持（保存・API送信は切らない）
+
+### Gitコミット（2025-11-06）
+- コミット: `53fb83b` - 古物台帳・仕入管理: 品目学習機能、表示改善、データ保存改善
+- 変更ファイル:
+  - `python/desktop/database/ledger_db.py` - 学習用テーブル追加、マイグレーション
+  - `python/desktop/ui/antique_widget.py` - 学習機能、UI改善、Excel出力修正
+  - `python/desktop/ui/inventory_widget.py` - 全文保存対応
+  - `pwa/src/app/components/InventoryDataGrid.tsx` - 表示のみ省略対応
+  - `docs/handover_prompt_route_summary_complete.md` - 引き継ぎドキュメント更新
+
 ---
 次チャットでは、上記「引き継ぎポイント」を前提に動作確認の続き、または残タスクの実装（フィルタ拡張や印刷レイアウト調整など）から着手してください。
 ## 追加作業記録（2025-11-05）
