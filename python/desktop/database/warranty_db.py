@@ -88,6 +88,12 @@ class WarrantyDatabase:
         cur.execute("SELECT * FROM warranties WHERE sku = ? ORDER BY id DESC", (sku,))
         return [dict(r) for r in cur.fetchall()]
 
+    def list_all(self) -> List[Dict[str, Any]]:
+        """全保証書を取得"""
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM warranties ORDER BY id DESC")
+        return [dict(r) for r in cur.fetchall()]
+
     def close(self) -> None:
         if self.conn:
             self.conn.close()

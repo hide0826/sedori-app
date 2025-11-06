@@ -689,6 +689,12 @@ Content-Type: application/json
     - マッチング候補表示・店舗コード選択・確定→学習データ更新
     - レシート一覧表示・ダブルクリックで再読み込み
     - `main_window.py`にタブ追加
+  - 保証書管理UI実装: `python/desktop/ui/warranty_widget.py`
+    - 画像アップロード→OCR実行（バックグラウンドスレッド）→商品名抽出
+    - SKU候補表示・選択・保証期間入力・確定→`products`更新・学習
+    - 保証書一覧表示・ダブルクリックで再読み込み
+    - `warranty_db.py`に`list_all`メソッド追加
+    - `main_window.py`にタブ追加
 
 
 ---
