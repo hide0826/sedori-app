@@ -76,9 +76,9 @@ class ReceiptWidget(QWidget):
     
     def setup_ui(self):
         """UIの設定"""
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(10, 10, 10, 10)
+        self.layout.setSpacing(10)
         
         # 上部：画像アップロード
         self.setup_upload_section()
@@ -117,7 +117,7 @@ class ReceiptWidget(QWidget):
         self.image_path_label = QLabel("画像未選択")
         upload_layout.addWidget(self.image_path_label)
         
-        layout.addWidget(upload_group)
+        self.layout.addWidget(upload_group)
     
     def setup_result_section(self):
         """OCR結果・マッチング候補セクション"""
@@ -184,7 +184,7 @@ class ReceiptWidget(QWidget):
         btn_layout.addStretch()
         result_layout.addLayout(btn_layout)
         
-        layout.addWidget(result_group)
+        self.layout.addWidget(result_group)
     
     def setup_receipt_list(self):
         """レシート一覧セクション"""
@@ -200,7 +200,7 @@ class ReceiptWidget(QWidget):
         self.receipt_table.itemDoubleClicked.connect(self.load_receipt)
         list_layout.addWidget(self.receipt_table)
         
-        layout.addWidget(list_group)
+        self.layout.addWidget(list_group)
         self.refresh_receipt_list()
     
     def select_image(self):

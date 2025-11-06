@@ -78,20 +78,20 @@ class WarrantyWidget(QWidget):
     
     def setup_ui(self):
         """UIの設定"""
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(10, 10, 10, 10)
+        self.layout.setSpacing(10)
         
         # 上部：画像アップロード
-        self.setup_upload_section(layout)
+        self.setup_upload_section()
         
         # 中央：OCR結果・SKU候補
-        self.setup_result_section(layout)
+        self.setup_result_section()
         
         # 下部：保証書一覧
-        self.setup_warranty_list(layout)
+        self.setup_warranty_list()
     
-    def setup_upload_section(self, layout: QVBoxLayout):
+    def setup_upload_section(self):
         """画像アップロードセクション"""
         upload_group = QGroupBox("保証書画像アップロード")
         upload_layout = QVBoxLayout(upload_group)
@@ -119,9 +119,9 @@ class WarrantyWidget(QWidget):
         self.image_path_label = QLabel("画像未選択")
         upload_layout.addWidget(self.image_path_label)
         
-        layout.addWidget(upload_group)
+        self.layout.addWidget(upload_group)
     
-    def setup_result_section(self, layout: QVBoxLayout):
+    def setup_result_section(self):
         """OCR結果・SKU候補セクション"""
         result_group = QGroupBox("OCR結果・SKU候補")
         result_layout = QVBoxLayout(result_group)
@@ -180,9 +180,9 @@ class WarrantyWidget(QWidget):
         btn_layout.addStretch()
         result_layout.addLayout(btn_layout)
         
-        layout.addWidget(result_group)
+        self.layout.addWidget(result_group)
     
-    def setup_warranty_list(self, layout: QVBoxLayout):
+    def setup_warranty_list(self):
         """保証書一覧セクション"""
         list_group = QGroupBox("保証書一覧")
         list_layout = QVBoxLayout(list_group)
@@ -196,7 +196,7 @@ class WarrantyWidget(QWidget):
         self.warranty_table.itemDoubleClicked.connect(self.load_warranty)
         list_layout.addWidget(self.warranty_table)
         
-        layout.addWidget(list_group)
+        self.layout.addWidget(list_group)
         self.refresh_warranty_list()
     
     def select_image(self):
