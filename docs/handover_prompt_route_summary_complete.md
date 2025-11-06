@@ -661,6 +661,14 @@ Content-Type: application/json
   - 返品照合（SKUベース）
   - 保証情報（期間・満了日・保証書画像パス等）の保存先整備
   - レシート/保証書OCR後の自動紐付け先として利用
+- 新規DB実装: レシート/学習/保証書テーブルを追加
+  - `python/desktop/database/receipt_db.py`: `receipts`, `receipt_match_learnings`
+    - 項目（抜粋）: `file_path/purchase_date/store_name_raw/store_code/subtotal/tax/discount_amount/total_amount/paid_amount/ocr_text`
+  - `python/desktop/database/warranty_db.py`: `warranties`
+    - 項目（抜粋）: `file_path/ocr_product_name/sku/matched_confidence`
+  - 方針: 
+    - レシートは同日・店舗部分一致・金額一致（誤差±10円）で候補提示
+    - クーポン/値引きは確定申告用台帳にのみ出力（古物台帳は除外）
 
 
 ---
