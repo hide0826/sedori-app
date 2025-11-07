@@ -714,3 +714,31 @@ Content-Type: application/json
   - 法人マスタ連携を追加：支店名→チェーン名をキーワードマッチし、仕入先名（法人名）を自動入力。
   - 取引方法列を追加（買受固定）。
 
+## 追加作業記録（2025-11-07）
+- **OCR環境整備**
+  - `requirements.txt` に `Pillow` / `pytesseract` を追加済み。`pip install -r requirements.txt` を実行し依存パッケージを導入。
+  - Tesseract OCR 本体（Windows では UB-Mannheim 版推奨）をインストールし、日本語パック（`jpn`）を必ず追加。Path に `C:\Program Files\Tesseract-OCR\` を通すか、設定画面で `tesseract.exe` を指定する。
+  - Google Cloud Vision は任意のフォールバック。必要な場合、GCP 側で API を有効化し、サービスアカウントキー(JSON) を設定画面に指定する。
+- **レシート管理タブの仕上げ**
+  - `python/desktop/ui/receipt_widget.py`
+    - `StoreDatabase.list_stores()` を利用して店舗コード候補を取得するよう修正。
+    - レイアウト参照を `self.layout` に統一して初期化時の例外を解消。
+    - デスクトップ側 `services` を優先して読み込むフォールバック付きインポートを追加。
+- **保証書管理タブの仕上げ**
+  - `python/desktop/ui/warranty_widget.py`
+    - レイアウト参照を `self.layout` に統一。
+    - デスクトップ側 `WarrantyService` を優先して読み込むフォールバック付きインポートを追加。
+  - `python/desktop/database/warranty_db.py` に `list_all()` を追加済み（保証書一覧表示で利用）。
+- **確定申告用仕入台帳出力の拡張**
+  - `python/desktop/utils/data_exporter.py` に `export_tax_purchase_ledger(...)` を追加。
+    - 列: `purchase_date/store_code/store_name/sku/jan/asin/product_name/quantity/purchase_price/discount_amount/subtotal/tax/total_amount/paid_amount`
+    - CSV は UTF-8 BOM、Excel は openpyxl。古物台帳は従来仕様のまま。
+- **その他のエラーハンドリング強化**
+  - レシート/保証書タブ双方で `layout` 未定義エラーと `services` モジュール衝突を解消する修正を反映済み。
+
+- **レシートOCR改善（2025-11-07 続き）**
+  - `ReceiptService` で電話番号・商品点数を抽出するよう拡張。`ReceiptDatabase` にカラムを追加し、`ReceiptWidget` の入力欄・一覧テーブルを更新。
+  - 画像前処理（`preprocess_image_for_ocr`）にガウシアンブラー＋アンシャープマスクを追加し、Tesseract 呼び出しを `lang='jpn'`, `--oem 1 --psm 6` に統一。
+  - 日本語OCRの動作確認用スクリプト `python/scripts/ocr_japanese_test.py` を追加。テスト画像を自動生成し、結果をコンソール出力できるようにした。
+  - 現状は通常版 `tessdata` で確認。`tessdata_best` 導入時の挙動は未検証のため、次回以降に比較予定。
+

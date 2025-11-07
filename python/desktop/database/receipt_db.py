@@ -44,12 +44,14 @@ class ReceiptDatabase:
               file_path TEXT NOT NULL,
               purchase_date TEXT,            -- OCR抽出 or 手動
               store_name_raw TEXT,           -- OCR生文字列
+              phone_number TEXT,
               store_code TEXT,               -- 店舗マスタにマッチしたコード
               subtotal INTEGER,
               tax INTEGER,
               discount_amount INTEGER,
               total_amount INTEGER,
               paid_amount INTEGER,
+              items_count INTEGER,
               currency TEXT,
               ocr_provider TEXT,             -- 'tesseract' / 'gcv' など
               ocr_text TEXT,                 -- フルテキスト保管
@@ -80,11 +82,28 @@ class ReceiptDatabase:
 
         self.conn.commit()
 
+        # 既存DBの後方互換：不足カラムを追加
+        def _ensure_column(table: str, column: str, coltype: str) -> None:
+            try:
+                cur.execute(f"PRAGMA table_info({table})")
+                cols = [r[1] for r in cur.fetchall()]
+                if column not in cols:
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+                    self.conn.commit()
+            except Exception:
+                pass
+
+        for name, ctype in (
+            ("phone_number", "TEXT"),
+            ("items_count", "INTEGER"),
+        ):
+            _ensure_column("receipts", name, ctype)
+
     # ==== receipts 操作 ====
     def insert_receipt(self, data: Dict[str, Any]) -> int:
         fields = [
-            "file_path","purchase_date","store_name_raw","store_code","subtotal","tax",
-            "discount_amount","total_amount","paid_amount","currency","ocr_provider","ocr_text",
+            "file_path","purchase_date","store_name_raw","phone_number","store_code","subtotal","tax",
+            "discount_amount","total_amount","paid_amount","items_count","currency","ocr_provider","ocr_text",
         ]
         placeholders = ",".join(["?"] * len(fields))
         cur = self.conn.cursor()
@@ -116,17 +135,27 @@ class ReceiptDatabase:
         row = cur.fetchone()
         return dict(row) if row else None
 
-    def find_by_date_and_store(self, purchase_date: str, store_code: Optional[str] = None) -> List[Dict[str, Any]]:
+    def find_by_date_and_store(self, purchase_date: Optional[str], store_code: Optional[str] = None) -> List[Dict[str, Any]]:
         cur = self.conn.cursor()
-        if store_code:
+        if purchase_date:
+            if store_code:
+                cur.execute(
+                    "SELECT * FROM receipts WHERE purchase_date = ? AND store_code = ? ORDER BY id DESC",
+                    (purchase_date, store_code),
+                )
+            else:
+                cur.execute(
+                    "SELECT * FROM receipts WHERE purchase_date = ? ORDER BY id DESC",
+                    (purchase_date,),
+                )
+        elif store_code:
             cur.execute(
-                "SELECT * FROM receipts WHERE purchase_date = ? AND store_code = ? ORDER BY id DESC",
-                (purchase_date, store_code),
+                "SELECT * FROM receipts WHERE store_code = ? ORDER BY id DESC",
+                (store_code,),
             )
         else:
             cur.execute(
-                "SELECT * FROM receipts WHERE purchase_date = ? ORDER BY id DESC",
-                (purchase_date,),
+                "SELECT * FROM receipts ORDER BY id DESC",
             )
         return [dict(r) for r in cur.fetchall()]
 

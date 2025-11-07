@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageFilter
 
 
 def preprocess_image_for_ocr(image_path: str | Path, output_path: Optional[str | Path] = None) -> Image.Image:
@@ -37,6 +37,10 @@ def preprocess_image_for_ocr(image_path: str | Path, output_path: Optional[str |
     enhancer = ImageEnhance.Brightness(img)
     img = enhancer.enhance(1.1)
     
+    # ガウシアンブラーでノイズ除去後にシャープ化
+    img = img.filter(ImageFilter.GaussianBlur(radius=0.5))
+    img = img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=150, threshold=3))
+
     # シャープ化（オプション、必要に応じて）
     # enhancer = ImageEnhance.Sharpness(img)
     # img = enhancer.enhance(1.2)

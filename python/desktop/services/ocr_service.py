@@ -116,10 +116,14 @@ class OCRService:
                 img = preprocess_image_for_ocr(image_path)
             else:
                 img = Image.open(image_path)
-            
-            # 日本語+英語でOCR
-            text = pytesseract.image_to_string(img, lang='jpn+eng')
-            
+
+            # 日本語優先でOCR（必要なら英数字向けに eng を追加）
+            text = pytesseract.image_to_string(
+                img,
+                lang='jpn',
+                config='--oem 1 --psm 6'
+            )
+
             return {
                 "text": text.strip(),
                 "provider": "tesseract",

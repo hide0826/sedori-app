@@ -136,6 +136,10 @@ class ReceiptWidget(QWidget):
         self.store_name_edit = QLineEdit()
         ocr_layout.addWidget(self.store_name_edit)
         
+        ocr_layout.addWidget(QLabel("電話番号:"))
+        self.phone_edit = QLineEdit()
+        ocr_layout.addWidget(self.phone_edit)
+        
         ocr_layout.addWidget(QLabel("合計:"))
         self.total_edit = QLineEdit()
         ocr_layout.addWidget(self.total_edit)
@@ -143,6 +147,10 @@ class ReceiptWidget(QWidget):
         ocr_layout.addWidget(QLabel("値引:"))
         self.discount_edit = QLineEdit()
         ocr_layout.addWidget(self.discount_edit)
+        
+        ocr_layout.addWidget(QLabel("点数:"))
+        self.items_count_edit = QLineEdit()
+        ocr_layout.addWidget(self.items_count_edit)
         result_layout.addLayout(ocr_layout)
         
         # マッチング候補
@@ -192,9 +200,9 @@ class ReceiptWidget(QWidget):
         list_layout = QVBoxLayout(list_group)
         
         self.receipt_table = QTableWidget()
-        self.receipt_table.setColumnCount(6)
+        self.receipt_table.setColumnCount(8)
         self.receipt_table.setHorizontalHeaderLabels([
-            "ID", "日付", "店舗名", "合計", "値引", "店舗コード"
+            "ID", "日付", "店舗名", "電話番号", "合計", "値引", "点数", "店舗コード"
         ])
         self.receipt_table.horizontalHeader().setStretchLastSection(True)
         self.receipt_table.itemDoubleClicked.connect(self.load_receipt)
@@ -243,8 +251,11 @@ class ReceiptWidget(QWidget):
                 pass
         
         self.store_name_edit.setText(result.get('store_name_raw') or "")
+        self.phone_edit.setText(result.get('phone_number') or "")
         self.total_edit.setText(str(result.get('total_amount') or ""))
         self.discount_edit.setText(str(result.get('discount_amount') or ""))
+        items_count = result.get('items_count')
+        self.items_count_edit.setText(str(items_count) if items_count is not None else "")
         
         # 店舗コード候補を読み込み
         self.load_store_codes()
@@ -345,8 +356,10 @@ class ReceiptWidget(QWidget):
         self.current_receipt_data = None
         self.date_edit.setDate(QDate.currentDate())
         self.store_name_edit.clear()
+        self.phone_edit.clear()
         self.total_edit.clear()
         self.discount_edit.clear()
+        self.items_count_edit.clear()
         self.store_code_combo.clear()
         self.match_result_label.clear()
         self.confirm_btn.setEnabled(False)
@@ -361,9 +374,11 @@ class ReceiptWidget(QWidget):
             self.receipt_table.setItem(row, 0, QTableWidgetItem(str(receipt.get('id'))))
             self.receipt_table.setItem(row, 1, QTableWidgetItem(receipt.get('purchase_date') or ""))
             self.receipt_table.setItem(row, 2, QTableWidgetItem(receipt.get('store_name_raw') or ""))
-            self.receipt_table.setItem(row, 3, QTableWidgetItem(str(receipt.get('total_amount') or "")))
-            self.receipt_table.setItem(row, 4, QTableWidgetItem(str(receipt.get('discount_amount') or "")))
-            self.receipt_table.setItem(row, 5, QTableWidgetItem(receipt.get('store_code') or ""))
+            self.receipt_table.setItem(row, 3, QTableWidgetItem(receipt.get('phone_number') or ""))
+            self.receipt_table.setItem(row, 4, QTableWidgetItem(str(receipt.get('total_amount') or "")))
+            self.receipt_table.setItem(row, 5, QTableWidgetItem(str(receipt.get('discount_amount') or "")))
+            self.receipt_table.setItem(row, 6, QTableWidgetItem(str(receipt.get('items_count') or "")))
+            self.receipt_table.setItem(row, 7, QTableWidgetItem(receipt.get('store_code') or ""))
     
     def load_receipt(self, item: QTableWidgetItem):
         """レシートを読み込み"""
@@ -383,8 +398,11 @@ class ReceiptWidget(QWidget):
                     pass
             
             self.store_name_edit.setText(receipt.get('store_name_raw') or "")
+            self.phone_edit.setText(receipt.get('phone_number') or "")
             self.total_edit.setText(str(receipt.get('total_amount') or ""))
             self.discount_edit.setText(str(receipt.get('discount_amount') or ""))
+            items_count = receipt.get('items_count')
+            self.items_count_edit.setText(str(items_count) if items_count is not None else "")
             
             self.load_store_codes()
             if receipt.get('store_code'):

@@ -23,11 +23,13 @@ from ..services.ocr_service import OCRService
 class ReceiptParseResult:
     purchase_date: Optional[str]
     store_name_raw: Optional[str]
+    phone_number: Optional[str]
     subtotal: Optional[int]
     tax: Optional[int]
     discount_amount: Optional[int]
     total_amount: Optional[int]
     paid_amount: Optional[int]
+    items_count: Optional[int]
 
 
 class ReceiptService:
@@ -89,14 +91,57 @@ class ReceiptService:
         total_amount = _find_int([r"合計\s*[:：]?\s*([0-9,\.]+)", r"税込\s*[:：]?\s*([0-9,\.]+)"])
         paid_amount = _find_int([r"お預り\s*[:：]?\s*([0-9,\.]+)", r"お預かり\s*[:：]?\s*([0-9,\.]+)", r"支払\s*[:：]?\s*([0-9,\.]+)"])
 
+        # 電話番号
+        def _normalize_phone(raw: str | None) -> Optional[str]:
+            if not raw:
+                return None
+            import unicodedata
+
+            s = unicodedata.normalize('NFKC', raw)
+            s = s.replace('ー', '-').replace('−', '-').replace('―', '-').replace('‐', '-')
+            s = re.sub(r"[^0-9-]", "", s)
+            # 連続した数字のみの場合は標準的なハイフン位置に整形
+            if '-' not in s and len(s) in (10, 11):
+                if len(s) == 10:
+                    s = f"{s[0:2]}-{s[2:6]}-{s[6:]}"
+                else:
+                    s = f"{s[0:3]}-{s[3:7]}-{s[7:]}"
+            parts = [p for p in s.split('-') if p]
+            if len(parts) >= 3:
+                return "-".join(parts[:3])
+            return s or None
+
+        phone_number = None
+        phone_patterns = [
+            r"(?:TEL|Tel|tel|電話|☎|ＴＥＬ)\s*[:：]?\s*(\d{2,4}[-−‐ー―]?\d{2,4}[-−‐ー―]?\d{3,4})",
+            r"(\d{2,4}[-−‐ー―]?\d{2,4}[-−‐ー―]?\d{3,4})"
+        ]
+        for pat in phone_patterns:
+            m = re.search(pat, text)
+            if m:
+                phone_number = _normalize_phone(m.group(1))
+                if phone_number:
+                    break
+
+        # 商品点数
+        items_count = _find_int([
+            r"点数\s*[:：]?\s*([0-9０-９,\.]+)",
+            r"品数\s*[:：]?\s*([0-9０-９,\.]+)",
+            r"合計\s*品\s*[:：]?\s*([0-9０-９,\.]+)",
+            r"([0-9０-９]+)\s*点",
+            r"([0-9０-９]+)\s*品"
+        ])
+
         return ReceiptParseResult(
             purchase_date=purchase_date,
             store_name_raw=store_name_raw,
+            phone_number=phone_number,
             subtotal=subtotal,
             tax=tax,
             discount_amount=discount_amount,
             total_amount=total_amount,
             paid_amount=paid_amount,
+            items_count=items_count,
         )
 
     def process_receipt(self, image_path: str | Path, currency: str = "JPY") -> Dict[str, Any]:
@@ -111,12 +156,14 @@ class ReceiptService:
             "file_path": str(saved),
             "purchase_date": parsed.purchase_date,
             "store_name_raw": parsed.store_name_raw,
+            "phone_number": parsed.phone_number,
             "store_code": None,  # マッチング段階で確定
             "subtotal": parsed.subtotal,
             "tax": parsed.tax,
             "discount_amount": parsed.discount_amount,
             "total_amount": parsed.total_amount,
             "paid_amount": parsed.paid_amount,
+            "items_count": parsed.items_count,
             "currency": currency,
             "ocr_provider": ocr.get("provider"),
             "ocr_text": ocr.get("text"),
