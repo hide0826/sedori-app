@@ -264,7 +264,7 @@ class ReceiptWidget(QWidget):
         # 店舗マスタから読み込み（簡易実装）
         from database.store_db import StoreDatabase
         store_db = StoreDatabase()
-        stores = store_db.get_all_stores()
+        stores = store_db.list_stores()
         for store in stores:
             code = store.get('supplier_code')
             name = store.get('store_name')
