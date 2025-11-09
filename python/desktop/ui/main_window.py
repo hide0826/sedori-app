@@ -34,6 +34,7 @@ from ui.route_list_widget import RouteListWidget
 from ui.analysis_widget import AnalysisWidget
 from ui.receipt_widget import ReceiptWidget
 from ui.warranty_widget import WarrantyWidget
+from ui.product_widget import ProductWidget
 
 
 class APIServerThread(QThread):
@@ -135,6 +136,10 @@ class MainWindow(QMainWindow):
         # 店舗マスタタブ
         self.store_master_widget = StoreMasterWidget()
         self.tab_widget.addTab(self.store_master_widget, "店舗マスタ")
+
+        # 商品データベースタブ
+        self.product_widget = ProductWidget()
+        self.tab_widget.addTab(self.product_widget, "商品DB")
         
         # ルートサマリータブ（仕入管理ウィジェットへの参照を渡す）
         self.route_summary_widget = RouteSummaryWidget(self.api_client, inventory_widget=self.inventory_widget)

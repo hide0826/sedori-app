@@ -67,6 +67,10 @@ class RouteListWidget(QWidget):
         refresh_btn = QPushButton("更新")
         refresh_btn.clicked.connect(self.load_routes)
         button_layout.addWidget(refresh_btn)
+
+        delete_btn = QPushButton("削除")
+        delete_btn.clicked.connect(self.delete_selected_route)
+        button_layout.addWidget(delete_btn)
         
         button_layout.addStretch()
         
@@ -120,7 +124,11 @@ class RouteListWidget(QWidget):
         # ソート機能を一時的に無効化
         self.table.setSortingEnabled(False)
         
-        columns = ["日付", "ルート名", "総仕入点数", "総想定粗利", "平均仕入価格", "総稼働時間", "想定時給"]
+        columns = [
+            "日付", "ルート名", "総仕入点数", "総仕入額",
+            "総想定販売額", "総想定粗利", "平均仕入価格",
+            "総稼働時間", "想定時給"
+        ]
         
         self.table.setRowCount(len(routes))
         self.table.setColumnCount(len(columns))
@@ -142,34 +150,48 @@ class RouteListWidget(QWidget):
             item_count_item.setData(Qt.EditRole, total_item_count)
             item_count_item.setText(str(total_item_count))
             self.table.setItem(i, 2, item_count_item)
+
+            # 総仕入額
+            total_purchase_amount = route.get('total_purchase_amount', 0) or 0
+            purchase_item = QTableWidgetItem()
+            purchase_item.setData(Qt.EditRole, total_purchase_amount)
+            purchase_item.setText(f"{total_purchase_amount:,.0f}" if total_purchase_amount else "0")
+            self.table.setItem(i, 3, purchase_item)
+
+            # 総想定販売額
+            total_sales_amount = route.get('total_sales_amount', 0) or 0
+            sales_item = QTableWidgetItem()
+            sales_item.setData(Qt.EditRole, total_sales_amount)
+            sales_item.setText(f"{total_sales_amount:,.0f}" if total_sales_amount else "0")
+            self.table.setItem(i, 4, sales_item)
             
             # 総想定粗利
             total_gross_profit = route.get('total_gross_profit', 0) or 0
             profit_item = QTableWidgetItem()
             profit_item.setData(Qt.EditRole, total_gross_profit)
-            profit_item.setText(f"{total_gross_profit:,}" if total_gross_profit else "0")
-            self.table.setItem(i, 3, profit_item)
+            profit_item.setText(f"{total_gross_profit:,.0f}" if total_gross_profit else "0")
+            self.table.setItem(i, 5, profit_item)
             
             # 平均仕入価格
             avg_price = route.get('avg_purchase_price', 0) or 0
             avg_item = QTableWidgetItem()
             avg_item.setData(Qt.EditRole, avg_price)
             avg_item.setText(f"{avg_price:,.0f}" if avg_price else "0")
-            self.table.setItem(i, 4, avg_item)
+            self.table.setItem(i, 6, avg_item)
             
             # 総稼働時間
             working_hours = route.get('total_working_hours', 0) or 0
             hours_item = QTableWidgetItem()
             hours_item.setData(Qt.EditRole, working_hours)
             hours_item.setText(f"{working_hours:.1f}" if working_hours else "0.0")
-            self.table.setItem(i, 5, hours_item)
+            self.table.setItem(i, 7, hours_item)
             
             # 想定時給
             hourly_rate = route.get('estimated_hourly_rate', 0) or 0
             rate_item = QTableWidgetItem()
             rate_item.setData(Qt.EditRole, hourly_rate)
             rate_item.setText(f"{hourly_rate:,.0f}" if hourly_rate else "0")
-            self.table.setItem(i, 6, rate_item)
+            self.table.setItem(i, 8, rate_item)
             
             # 各行にIDを保持（ダブルクリック時の参照用）
             self.table.item(i, 0).setData(Qt.UserRole, route.get('id'))
@@ -179,6 +201,31 @@ class RouteListWidget(QWidget):
         
         # 列幅の自動調整
         self.table.resizeColumnsToContents()
+    
+    def delete_selected_route(self):
+        """選択中のルートサマリーを削除"""
+        selected = self.table.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "選択してください", "削除するルートを選択してください。")
+            return
+        route_id = selected[0].data(Qt.UserRole)
+        if not route_id:
+            QMessageBox.warning(self, "削除できません", "対象のルートIDが取得できませんでした。")
+            return
+        reply = QMessageBox.question(
+            self,
+            "確認",
+            "選択したルートサマリーを削除しますか？\n店舗訪問詳細も削除されます。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        if self.route_db.delete_route_summary(route_id):
+            QMessageBox.information(self, "削除完了", "ルートサマリーを削除しました。")
+            self.load_routes()
+        else:
+            QMessageBox.warning(self, "削除できません", "削除対象が見つかりませんでした。")
     
     def update_statistics(self):
         """統計情報を更新"""

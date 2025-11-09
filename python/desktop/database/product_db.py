@@ -126,6 +126,14 @@ class ProductDatabase:
         row = cur.fetchone()
         return dict(row) if row else None
 
+    def list_all(self) -> List[Dict[str, Any]]:
+        """全商品を更新日時の新しい順で取得"""
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT * FROM products ORDER BY IFNULL(updated_at, created_at) DESC, sku DESC"
+        )
+        return [dict(r) for r in cur.fetchall()]
+
     def list_by_date(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> List[Dict[str, Any]]:
         cur = self.conn.cursor()
         where = []
@@ -183,6 +191,12 @@ class ProductDatabase:
             "UPDATE products SET receipt_id = ?, updated_at = CURRENT_TIMESTAMP WHERE sku = ?",
             (receipt_id, sku),
         )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def delete(self, sku: str) -> bool:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM products WHERE sku = ?", (sku,))
         self.conn.commit()
         return cur.rowcount > 0
 

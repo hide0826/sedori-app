@@ -74,6 +74,7 @@ class RouteSummaryWidget(QWidget):
         self.current_route_id = None
         self.route_data = {}
         self.store_visits = []
+        self.latest_summary_metrics = {}
         
         # Undo/Redoスタック
         self.undo_stack = []
@@ -569,6 +570,37 @@ class RouteSummaryWidget(QWidget):
         result_layout.addWidget(self.calculation_label)
         
         parent_layout.addWidget(result_group)
+    
+    def update_calculation_results(self):
+        """計算結果ラベルを最新状態に更新"""
+        metrics = self._calculate_summary_metrics()
+        self.latest_summary_metrics = metrics or {}
+
+        if not metrics:
+            self.calculation_label.setText("計算結果: データ未入力")
+            return
+
+        def fmt_number(value, digits=0):
+            try:
+                if value is None:
+                    return "0"
+                if digits == 0:
+                    return f"{float(value):,.0f}"
+                return f"{float(value):,.2f}"
+            except (ValueError, TypeError):
+                return "0"
+
+        text = (
+            f"日付: {metrics.get('route_date', '')} / ルート: {metrics.get('route_name', '')}\n"
+            f"総仕入点数: {fmt_number(metrics.get('total_item_count'))}点 / "
+            f"総仕入額: {fmt_number(metrics.get('total_purchase_amount'))}円 / "
+            f"総想定販売額: {fmt_number(metrics.get('total_sales_amount'))}円\n"
+            f"総想定粗利: {fmt_number(metrics.get('total_gross_profit'))}円 / "
+            f"平均仕入価格: {fmt_number(metrics.get('avg_purchase_price'))}円\n"
+            f"総稼働時間: {fmt_number(metrics.get('total_working_hours'), 2)}h / "
+            f"想定時給: {fmt_number(metrics.get('estimated_hourly_rate'))}円"
+        )
+        self.calculation_label.setText(text)
     
     def update_route_codes(self):
         """ルートコード一覧を更新"""
@@ -1149,6 +1181,7 @@ class RouteSummaryWidget(QWidget):
                 msg = f"照合処理完了\n\n総行数: {total_rows}\nマッチした行数: {matched_rows}"
                 msg += "\n\n仕入管理タブのデータが更新され、\nルートサマリーの想定粗利も自動計算されました。"
                 QMessageBox.information(self, "照合処理完了", msg)
+                self.update_calculation_results()
             else:
                 QMessageBox.warning(self, "エラー", "照合処理に失敗しました")
                 
@@ -1676,23 +1709,43 @@ class RouteSummaryWidget(QWidget):
             stats = {**stats_defaults, **stats}
             route_data.update(stats)
             
-            # 総仕入点数と総想定粗利を計算（計算サービスの結果を上書き）
-            def _int_safe(x):
-                try:
-                    if x is None or x == '':
+            metrics = self.latest_summary_metrics or self._calculate_summary_metrics()
+            if metrics:
+                route_data['total_item_count'] = metrics.get('total_item_count', 0)
+                route_data['total_gross_profit'] = metrics.get('total_gross_profit', 0.0)
+                route_data['avg_purchase_price'] = metrics.get('avg_purchase_price', 0.0)
+                route_data['total_purchase_amount'] = metrics.get('total_purchase_amount', 0.0)
+                route_data['total_sales_amount'] = metrics.get('total_sales_amount', 0.0)
+                route_data['total_working_hours'] = metrics.get('total_working_hours', 0.0)
+                route_data['estimated_hourly_rate'] = metrics.get('estimated_hourly_rate', 0.0)
+            else:
+                def _int_safe(x):
+                    try:
+                        if x is None or x == '':
+                            return 0
+                        return int(float(x))
+                    except Exception:
                         return 0
-                    return int(float(x))
-                except Exception:
-                    return 0
-            def _float_safe(x):
-                try:
-                    if x is None or x == '':
+                def _float_safe(x):
+                    try:
+                        if x is None or x == '':
+                            return 0.0
+                        return float(x)
+                    except Exception:
                         return 0.0
-                    return float(x)
-                except Exception:
-                    return 0.0
-            route_data['total_item_count'] = sum(_int_safe(v.get('store_item_count')) for v in store_visits)
-            route_data['total_gross_profit'] = sum(_float_safe(v.get('store_gross_profit')) for v in store_visits)
+                route_data['total_item_count'] = sum(_int_safe(v.get('store_item_count')) for v in store_visits)
+                route_data['total_gross_profit'] = sum(_float_safe(v.get('store_gross_profit')) for v in store_visits)
+                route_data['total_purchase_amount'] = 0.0
+                route_data['total_sales_amount'] = 0.0
+                total_working_hours = self._calculate_total_working_hours(route_data.get('departure_time'), route_data.get('return_time'))
+                route_data['total_working_hours'] = total_working_hours
+                route_data['estimated_hourly_rate'] = self._calculate_hourly_rate(route_data.get('total_gross_profit'), total_working_hours)
+            
+            # 同日・同ルートが存在する場合は上書き
+            if not self.current_route_id:
+                existing = self.route_db.get_route_summary_by_date_code(route_data.get('route_date'), route_data.get('route_code'))
+                if existing:
+                    self.current_route_id = existing.get('id')
             
             if self.current_route_id:
                 self.route_db.update_route_summary(self.current_route_id, route_data)
@@ -1797,6 +1850,163 @@ class RouteSummaryWidget(QWidget):
             return f"{date_str} {h:02d}:{m:02d}:00"
         except (ValueError, TypeError):
             return ''
+
+    def _calculate_total_working_hours(self, departure_time: Optional[str], return_time: Optional[str]) -> float:
+        """総稼働時間（時間）を計算"""
+        dep_dt = None
+        ret_dt = None
+        if self.calc_service:
+            dep_dt = CalculationService.parse_datetime_string(departure_time)
+            ret_dt = CalculationService.parse_datetime_string(return_time)
+        if not dep_dt and departure_time:
+            try:
+                dep_dt = datetime.fromisoformat(departure_time.replace('Z', '+00:00'))
+            except Exception:
+                dep_dt = None
+        if not ret_dt and return_time:
+            try:
+                ret_dt = datetime.fromisoformat(return_time.replace('Z', '+00:00'))
+            except Exception:
+                ret_dt = None
+        if dep_dt and ret_dt:
+            if self.calc_service:
+                hours = CalculationService.calculate_total_working_hours(dep_dt, ret_dt)
+                if hours is not None:
+                    return max(round(hours, 2), 0.0)
+            diff = (ret_dt - dep_dt).total_seconds() / 3600.0
+            if diff < 0:
+                diff = 0.0
+            return round(diff, 2)
+        return 0.0
+
+    def _calculate_hourly_rate(self, gross_profit: Optional[float], working_hours: Optional[float]) -> float:
+        """想定時給を計算"""
+        gross = gross_profit or 0.0
+        hours = working_hours or 0.0
+        if self.calc_service:
+            value = CalculationService.calculate_hourly_rate(gross, hours)
+            if value is not None:
+                return max(round(value, 2), 0.0)
+        if hours > 0:
+            return round(gross / hours, 2)
+        return 0.0
+
+    def _calculate_summary_metrics(self) -> Optional[Dict[str, Any]]:
+        """現在の入力値からサマリー指標を算出"""
+        try:
+            route_date = self.route_date_edit.dateTime().toString('yyyy-MM-dd')
+        except Exception:
+            route_date = ''
+
+        route_code = self.get_selected_route_code()
+        route_name_display = self.route_code_combo.currentText().strip() or route_code
+        try:
+            if route_code:
+                resolved = self.store_db.get_route_name_by_code(route_code)
+                if resolved:
+                    route_name_display = resolved
+        except Exception:
+            pass
+
+        def to_float(value) -> Optional[float]:
+            if value is None:
+                return None
+            try:
+                if isinstance(value, str):
+                    value = value.replace(',', '').strip()
+                    if value == '':
+                        return None
+                return float(value)
+            except (ValueError, TypeError):
+                return None
+
+        def to_int(value) -> Optional[int]:
+            val = to_float(value)
+            if val is None:
+                return None
+            return int(round(val))
+
+        inventory_df = None
+        if self.inventory_widget and hasattr(self.inventory_widget, 'inventory_data'):
+            try:
+                data = self.inventory_widget.inventory_data
+                if data is not None:
+                    if hasattr(data, 'iterrows'):
+                        inventory_df = data.copy()
+                    elif isinstance(data, list):
+                        inventory_df = pd.DataFrame(data)
+            except Exception:
+                inventory_df = None
+
+        total_purchase = 0.0
+        total_sales = 0.0
+        total_profit = 0.0
+        total_items = 0
+
+        if inventory_df is not None and len(inventory_df) > 0:
+            for _, row in inventory_df.iterrows():
+                qty = to_float(
+                    row.get('仕入れ個数')
+                    or row.get('purchase_count')
+                    or row.get('quantity')
+                    or row.get('quantityPurchased')
+                    or row.get('数量')
+                ) or 0.0
+                purchase_price = to_float(row.get('仕入れ価格') or row.get('purchasePrice') or row.get('cost_price'))
+                sale_price = to_float(row.get('販売予定価格') or row.get('plannedPrice') or row.get('expected_sale_price'))
+                profit_unit = to_float(row.get('見込み利益') or row.get('expected_profit') or row.get('profit') or row.get('expectedProfit'))
+
+                total_items += int(round(qty))
+                if purchase_price is not None:
+                    total_purchase += purchase_price * qty
+                if sale_price is not None:
+                    total_sales += sale_price * qty
+                if profit_unit is not None:
+                    total_profit += profit_unit * qty
+
+            if total_sales == 0 and total_purchase and total_profit:
+                total_sales = total_purchase + total_profit
+            if total_profit == 0 and total_sales and total_purchase:
+                total_profit = total_sales - total_purchase
+
+        table_items = 0
+        table_profit = 0.0
+        for row in range(self.store_visits_table.rowCount()):
+            qty = to_float(self._get_table_item(row, 8)) or 0.0
+            table_items += int(round(qty))
+            profit_val = to_float(self._get_table_item(row, 7)) or 0.0
+            table_profit += profit_val
+
+        if total_items == 0:
+            total_items = table_items
+        if total_profit == 0:
+            total_profit = table_profit
+        if total_sales == 0 and total_purchase and total_profit:
+            total_sales = total_purchase + total_profit
+
+        avg_purchase_price = 0.0
+        if total_items > 0 and total_purchase:
+            avg_purchase_price = total_purchase / total_items
+
+        route_data_preview = self.get_route_data()
+        working_hours = self._calculate_total_working_hours(
+            route_data_preview.get('departure_time'),
+            route_data_preview.get('return_time')
+        )
+        hourly_rate = self._calculate_hourly_rate(total_profit, working_hours)
+
+        return {
+            'route_date': route_date,
+            'route_code': route_code,
+            'route_name': route_name_display,
+            'total_item_count': total_items,
+            'total_purchase_amount': total_purchase,
+            'total_sales_amount': total_sales,
+            'total_gross_profit': total_profit,
+            'avg_purchase_price': avg_purchase_price,
+            'total_working_hours': working_hours,
+            'estimated_hourly_rate': hourly_rate,
+        }
 
     def _get_table_item(self, row: int, col: int) -> str:
         item = self.store_visits_table.item(row, col)

@@ -61,6 +61,8 @@ class RouteDatabase:
                 meal_cost REAL,
                 other_expenses REAL,
                 remarks TEXT,
+                total_purchase_amount REAL,
+                total_sales_amount REAL,
                 total_working_hours REAL,
                 estimated_hourly_rate REAL,
                 total_gross_profit REAL,
@@ -78,6 +80,14 @@ class RouteDatabase:
         except sqlite3.OperationalError:
             # カラムが既に存在する場合はスキップ
             pass
+        for column, coltype in (
+            ("total_purchase_amount", "REAL"),
+            ("total_sales_amount", "REAL"),
+        ):
+            try:
+                cursor.execute(f"ALTER TABLE route_summaries ADD COLUMN {column} {coltype} DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
         
         # store_visit_details テーブル作成
         cursor.execute("""
@@ -149,9 +159,10 @@ class RouteDatabase:
                 route_date, route_code, departure_time, return_time,
                 toll_fee_outbound, toll_fee_return, parking_fee,
                 meal_cost, other_expenses, remarks,
+                total_purchase_amount, total_sales_amount,
                 total_working_hours, estimated_hourly_rate,
                 total_gross_profit, total_item_count, purchase_success_rate, avg_purchase_price
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             route_data.get('route_date'),
             route_data.get('route_code'),
@@ -163,6 +174,8 @@ class RouteDatabase:
             route_data.get('meal_cost'),
             route_data.get('other_expenses'),
             route_data.get('remarks'),
+            route_data.get('total_purchase_amount'),
+            route_data.get('total_sales_amount'),
             route_data.get('total_working_hours'),
             route_data.get('estimated_hourly_rate'),
             route_data.get('total_gross_profit'),
@@ -191,6 +204,8 @@ class RouteDatabase:
                 meal_cost = ?,
                 other_expenses = ?,
                 remarks = ?,
+                total_purchase_amount = ?,
+                total_sales_amount = ?,
                 total_working_hours = ?,
                 estimated_hourly_rate = ?,
                 total_gross_profit = ?,
@@ -209,6 +224,8 @@ class RouteDatabase:
             route_data.get('meal_cost'),
             route_data.get('other_expenses'),
             route_data.get('remarks'),
+            route_data.get('total_purchase_amount'),
+            route_data.get('total_sales_amount'),
             route_data.get('total_working_hours'),
             route_data.get('estimated_hourly_rate'),
             route_data.get('total_gross_profit'),
@@ -220,6 +237,17 @@ class RouteDatabase:
         
         conn.commit()
         return cursor.rowcount > 0
+    
+    def get_route_summary_by_date_code(self, route_date: str, route_code: str) -> Optional[Dict[str, Any]]:
+        """日付とルートコードでサマリーを取得"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM route_summaries WHERE route_date = ? AND route_code = ? ORDER BY id DESC LIMIT 1",
+            (route_date, route_code)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
     
     def delete_route_summary(self, route_id: int) -> bool:
         """ルートサマリーを削除（関連する店舗訪問詳細も削除される）"""
@@ -252,6 +280,7 @@ class RouteDatabase:
         query = (
             "SELECT id, route_date, route_code, departure_time, return_time, "
             "toll_fee_outbound, toll_fee_return, parking_fee, meal_cost, other_expenses, remarks, "
+            "total_purchase_amount, total_sales_amount, "
             "total_working_hours, estimated_hourly_rate, total_gross_profit, total_item_count, "
             "purchase_success_rate, avg_purchase_price, created_at, updated_at, "
             "datetime(updated_at, 'localtime') AS updated_at_local "
