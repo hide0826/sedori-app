@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView,
     QGroupBox, QSplitter, QMessageBox, QFrame,
     QCheckBox, QSpinBox, QDateEdit, QFileDialog,
-    QDialog, QDialogButtonBox
+    QDialog, QDialogButtonBox, QSizePolicy, QInputDialog
 )
 from PySide6.QtCore import Qt, QDate, Signal, QSettings
 from PySide6.QtGui import QFont, QColor, QPalette
@@ -22,12 +22,14 @@ from pathlib import Path
 import re
 import sys
 import os
+from typing import List, Dict, Any, Optional
 
 # プロジェクトルートをパスに追加（相対インポート用）
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from database.store_db import StoreDatabase
 from database.inventory_db import InventoryDatabase
+from database.inventory_route_snapshot_db import InventoryRouteSnapshotDatabase
 
 
 class InventoryWidget(QWidget):
@@ -50,9 +52,26 @@ class InventoryWidget(QWidget):
         # データベースの初期化
         self.store_db = StoreDatabase()
         self.inventory_db = InventoryDatabase()
+        self.route_snapshot_db = InventoryRouteSnapshotDatabase()
         
         # UIの初期化
+        self.route_template_btn = None
         self.setup_ui()
+    
+    def set_route_summary_widget(self, widget):
+        self.route_summary_widget = widget
+        if self.route_template_btn:
+            self.route_template_btn.setEnabled(widget is not None)
+        if widget and getattr(widget, "last_loaded_template_path", ""):
+            try:
+                path = widget.last_loaded_template_path
+                if path:
+                    self.route_template_status.setText(f"前回読込: {os.path.basename(path)}\n{path}")
+                    self.refresh_route_template_view()
+            except Exception:
+                pass
+        if widget:
+            self.refresh_route_template_view()
         
     def setup_ui(self):
         """UIの設定"""
@@ -63,16 +82,23 @@ class InventoryWidget(QWidget):
         # 上部：ファイル操作エリア
         self.setup_file_operations()
         
-        # 中央：検索・フィルタエリア
-        self.setup_search_filters()
+        # 表示モード切り替え
+        self.setup_view_mode_selector()
         
-        # 下部：データテーブルエリア
+        # 検索・フィルタ・出品設定
+        self.setup_search_listing_panel()
+        
+        # データテーブル（折りたたみ対応）
         self.setup_data_table()
         
-        # アクションボタンはファイル操作エリアに統合済み
+        # ルートテンプレート読み込みエリア
+        self.setup_route_template_panel()
         
-        # ワークフローパネルの追加
-        self.setup_workflow_panel()
+        # SKUテンプレ設定パネル（既存機能）
+        self.setup_settings_panel()
+        
+        # 初期表示モード適用
+        self.on_view_mode_changed(self.view_mode_combo.currentIndex())
         
     def setup_file_operations(self):
         """ファイル操作エリアの設定（改良版）"""
@@ -184,6 +210,12 @@ class InventoryWidget(QWidget):
         self.antique_register_btn.clicked.connect(self.generate_antique_register)
         self.antique_register_btn.setEnabled(False)
         action_ops_layout.addWidget(self.antique_register_btn)
+
+        # ルートテンプレート読み込みボタン
+        self.route_template_btn = QPushButton("ルートテンプレ読込")
+        self.route_template_btn.clicked.connect(self.apply_route_template)
+        self.route_template_btn.setEnabled(self.route_summary_widget is not None)
+        action_ops_layout.addWidget(self.route_template_btn)
         
         file_layout.addLayout(action_ops_layout)
 
@@ -197,151 +229,164 @@ class InventoryWidget(QWidget):
         # データ件数表示
         self.data_count_label = QLabel("データ件数: 0")
         file_layout.addWidget(self.data_count_label)
+        file_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         
         self.layout().addWidget(file_group)
-        
-    def setup_search_filters(self):
-        """検索・フィルタエリアの設定（折りたたみ対応）"""
-        self.filter_group = QGroupBox("検索・フィルタ")
-        self.filter_group.setCheckable(True)
-        self.filter_group.setChecked(True)
-        outer_layout = QVBoxLayout(self.filter_group)
-        outer_layout.setContentsMargins(8, 8, 8, 8)  # 小さくする
-        outer_layout.setSpacing(6)
 
-        # 折りたたみ対象のコンテンツ
-        self.filter_content = QWidget()
-        filter_layout = QVBoxLayout(self.filter_content)
-        filter_layout.setContentsMargins(0, 0, 0, 0)
-        filter_layout.setSpacing(6)
+    def setup_view_mode_selector(self):
+        selector_layout = QHBoxLayout()
+        mode_label = QLabel("表示モード:")
+        self.view_mode_combo = QComboBox()
+        self.view_mode_combo.addItems(["デフォルト", "仕入データビュー", "ルートテンプレートビュー"])
+        self.view_mode_combo.currentIndexChanged.connect(self.on_view_mode_changed)
+        selector_layout.addWidget(mode_label)
+        selector_layout.addWidget(self.view_mode_combo)
+        selector_layout.addStretch()
+        self.layout().addLayout(selector_layout)
+        self.view_mode_combo.setCurrentIndex(0)
+
+    def on_view_mode_changed(self, index: int):
+        mode = self.view_mode_combo.currentText()
+        search_group = getattr(self, "search_listing_group", None)
+        data_group = getattr(self, "data_group", None)
+        template_group = getattr(self, "route_template_group", None)
+        if mode == "デフォルト":
+            if search_group:
+                search_group.setVisible(True)
+            if data_group:
+                data_group.setVisible(True)
+            if template_group:
+                template_group.setVisible(True)
+        elif mode == "仕入データビュー":
+            if search_group:
+                search_group.setVisible(True)
+            if data_group:
+                data_group.setVisible(True)
+            if template_group:
+                template_group.setVisible(False)
+        elif mode == "ルートテンプレートビュー":
+            if search_group:
+                search_group.setVisible(False)
+            if data_group:
+                data_group.setVisible(False)
+            if template_group:
+                template_group.setVisible(True)
         
-        # 検索行
-        search_layout = QHBoxLayout()
+    def setup_search_listing_panel(self):
+        """検索・フィルタと出品設定をまとめたエリア"""
+        self.search_listing_group = QGroupBox("検索・フィルタと出品設定")
+        self.search_listing_group.setCheckable(True)
+        self.search_listing_group.setChecked(True)
+        outer_layout = QVBoxLayout(self.search_listing_group)
+        outer_layout.setContentsMargins(8, 8, 8, 8)
+        outer_layout.setSpacing(8)
         
-        # 検索ボックス
+        self.search_listing_content = QWidget()
+        content_layout = QHBoxLayout(self.search_listing_content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(12)
+        
+        # 検索エリア
+        search_widget = QWidget()
+        search_layout = QHBoxLayout(search_widget)
+        search_layout.setContentsMargins(0, 0, 0, 0)
+        search_layout.setSpacing(6)
         search_label = QLabel("検索:")
         search_layout.addWidget(search_label)
         
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("商品名、ASIN、JANコードで検索...")
         self.search_edit.textChanged.connect(self.apply_filters)
-        search_layout.addWidget(self.search_edit)
+        self.search_edit.setMinimumWidth(220)
+        search_layout.addWidget(self.search_edit, 1)
         
-        # 検索クリアボタン
         self.clear_search_btn = QPushButton("クリア")
         self.clear_search_btn.clicked.connect(self.clear_search)
         search_layout.addWidget(self.clear_search_btn)
+        content_layout.addWidget(search_widget, 2)
         
-        filter_layout.addLayout(search_layout)
+        # フィルタエリア
+        filter_widget = QWidget()
+        filter_layout = QHBoxLayout(filter_widget)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(6)
         
-        # フィルタ行
-        filter_row_layout = QHBoxLayout()
-        filter_row_layout.setSpacing(8)
-        
-        # Q列フィルタ（現在の列構成に含まれていないため非表示）
-        # q_filter_label = QLabel("Q列:")
-        # filter_row_layout.addWidget(q_filter_label)
-        # 
-        # self.q_filter_combo = QComboBox()
-        # self.q_filter_combo.addItems(["すべて", "Q1", "Q2", "Q3", "Q4", "Qなし"])
-        # self.q_filter_combo.currentTextChanged.connect(self.apply_filters)
-        # filter_row_layout.addWidget(self.q_filter_combo)
-        # 
-        # 後でコンディションフィルタを追加予定
-        
-        # 価格範囲フィルタ（販売予定価格でフィルタ）
-        price_label = QLabel("販売予定価格範囲:")
-        filter_row_layout.addWidget(price_label)
+        price_label = QLabel("販売予定価格:")
+        filter_layout.addWidget(price_label)
         
         self.min_price_spin = QSpinBox()
         self.min_price_spin.setRange(0, 999999)
         self.min_price_spin.setValue(0)
+        self.min_price_spin.setButtonSymbols(QSpinBox.NoButtons)
+        self.min_price_spin.setFixedWidth(70)
         self.min_price_spin.valueChanged.connect(self.apply_filters)
-        filter_row_layout.addWidget(self.min_price_spin)
+        filter_layout.addWidget(self.min_price_spin)
         
         price_to_label = QLabel("〜")
-        filter_row_layout.addWidget(price_to_label)
+        filter_layout.addWidget(price_to_label)
         
         self.max_price_spin = QSpinBox()
         self.max_price_spin.setRange(0, 999999)
         self.max_price_spin.setValue(999999)
+        self.max_price_spin.setButtonSymbols(QSpinBox.NoButtons)
+        self.max_price_spin.setFixedWidth(70)
         self.max_price_spin.valueChanged.connect(self.apply_filters)
-        filter_row_layout.addWidget(self.max_price_spin)
+        filter_layout.addWidget(self.max_price_spin)
         
-        filter_row_layout.addStretch()
-        
-        # フィルタリセットボタン
-        self.reset_filters_btn = QPushButton("フィルタリセット")
+        self.reset_filters_btn = QPushButton("リセット")
         self.reset_filters_btn.clicked.connect(self.reset_filters)
-        filter_row_layout.addWidget(self.reset_filters_btn)
+        filter_layout.addWidget(self.reset_filters_btn)
+        content_layout.addWidget(filter_widget, 1)
         
-        filter_layout.addLayout(filter_row_layout)
-
-        # グループ本体に追加
-        outer_layout.addWidget(self.filter_content)
-        # チェック切替で折りたたみ（表示/非表示）
-        def _on_filter_toggled(checked: bool):
-            self.filter_content.setVisible(checked)
-        self.filter_group.toggled.connect(_on_filter_toggled)
-
-        self.layout().addWidget(self.filter_group)
-
-        # SKUテンプレ設定パネル（折りたたみ）
-        self.setup_settings_panel()
-
-        # 出品リスト生成設定パネル（折りたたみ）
-        self.setup_listing_settings_panel()
-
-    def setup_listing_settings_panel(self):
-        settings_group = QGroupBox("出品リスト生成設定")
-        settings_group.setCheckable(True)
-        settings_group.setChecked(True)
-        outer = QVBoxLayout(settings_group)
-        outer.setContentsMargins(8, 8, 8, 8)
-        outer.setSpacing(6)
-
-        self.listing_settings_content = QWidget()
-        lay = QHBoxLayout(self.listing_settings_content)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(8)
-
-        # タイトル出力の有無
+        # 出品設定エリア
+        listing_settings_widget = self.create_listing_settings_section()
+        content_layout.addWidget(listing_settings_widget, 1)
+        
+        content_layout.addStretch()
+        
+        outer_layout.addWidget(self.search_listing_content)
+        self.search_listing_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        
+        def _on_toggle(checked: bool):
+            self.search_listing_content.setVisible(checked)
+        self.search_listing_group.toggled.connect(_on_toggle)
+        
+        self.layout().addWidget(self.search_listing_group)
+    
+    def create_listing_settings_section(self) -> QWidget:
+        """出品リスト生成設定のUI"""
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        
         self.chk_include_title = QCheckBox("タイトルを出力する")
         self.chk_include_title.setChecked(True)
         self.chk_include_title.setToolTip("無効にすると、出品CSVのtitle列を空欄で出力します")
-        lay.addWidget(self.chk_include_title)
-
-        # 高値設定（takane）
+        layout.addWidget(self.chk_include_title)
+        
         self.chk_enable_takane = QCheckBox("高値を設定する")
         self.chk_enable_takane.setToolTip("有効にすると、takane欄にpriceの〇%上を自動設定")
-        lay.addWidget(self.chk_enable_takane)
-
+        layout.addWidget(self.chk_enable_takane)
+        
         self.lbl_takane_pct = QLabel("+%:")
-        lay.addWidget(self.lbl_takane_pct)
-
+        layout.addWidget(self.lbl_takane_pct)
+        
         self.spin_takane_pct = QSpinBox()
         self.spin_takane_pct.setRange(0, 200)
         self.spin_takane_pct.setValue(5)
         self.spin_takane_pct.setFixedWidth(60)
-        lay.addWidget(self.spin_takane_pct)
-
-        lay.addStretch()
-
-        outer.addWidget(self.listing_settings_content)
-
-        def _on_settings_toggled(checked: bool):
-            self.listing_settings_content.setVisible(checked)
-        settings_group.toggled.connect(_on_settings_toggled)
-
-        self.layout().addWidget(settings_group)
-
-        # 永続化: 値変更時に保存
+        layout.addWidget(self.spin_takane_pct)
+        
+        layout.addStretch()
+        
+        # 永続化
         self.chk_include_title.toggled.connect(self.save_listing_settings)
         self.chk_enable_takane.toggled.connect(self.save_listing_settings)
         self.spin_takane_pct.valueChanged.connect(self.save_listing_settings)
-
-        # 初期値の読み込み
         self.load_listing_settings()
+        
+        return container
 
     def _get_qsettings(self) -> QSettings:
         # 会社名/アプリ名は任意の固定値で統一
@@ -372,16 +417,28 @@ class InventoryWidget(QWidget):
             print(f"出品設定セーブ失敗: {e}")
         
     def setup_data_table(self):
-        """データテーブルエリアの設定（改良版）"""
-        # データ表示グループ
-        data_group = QGroupBox("取り込んだデータ一覧")
-        data_layout = QVBoxLayout(data_group)
+        """データテーブルエリアの設定（折りたたみ対応）"""
+        self.data_group = QGroupBox("取り込んだデータ一覧")
+        self.data_group.setCheckable(True)
+        self.data_group.setChecked(True)
+        outer_layout = QVBoxLayout(self.data_group)
+        outer_layout.setContentsMargins(8, 8, 8, 8)
+        outer_layout.setSpacing(8)
+        
+        self.data_group_content = QWidget()
+        data_layout = QVBoxLayout(self.data_group_content)
+        data_layout.setContentsMargins(0, 0, 0, 0)
+        data_layout.setSpacing(6)
         
         # テーブルウィジェットの作成
         self.data_table = QTableWidget()
         self.data_table.setAlternatingRowColors(True)
         self.data_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.data_table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
+        default_row_height = self.data_table.verticalHeader().defaultSectionSize()
+        approx_height = default_row_height * 12 + self.data_table.horizontalHeader().height() + 80
+        self.data_table.setMinimumHeight(approx_height)
+        self.data_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
         # ヘッダーの設定
         header = self.data_table.horizontalHeader()
@@ -416,9 +473,251 @@ class InventoryWidget(QWidget):
         stats_layout.addStretch()
         data_layout.addLayout(stats_layout)
         
-        # グループをレイアウトに追加
-        self.layout().addWidget(data_group)
+        self.data_group_content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        outer_layout.addWidget(self.data_group_content)
         
+        def _on_toggle(checked: bool):
+            self.data_group_content.setVisible(checked)
+        self.data_group.toggled.connect(_on_toggle)
+        self.data_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        
+        self.layout().addWidget(self.data_group)
+
+    def setup_route_template_panel(self):
+        """ルートテンプレート読み込みエリア（レイアウト先行の仮実装）"""
+        self.route_template_group = QGroupBox("ルートテンプレート読み込み")
+        self.route_template_group.setCheckable(True)
+        self.route_template_group.setChecked(True)
+        outer_layout = QVBoxLayout(self.route_template_group)
+        outer_layout.setContentsMargins(8, 8, 8, 8)
+        outer_layout.setSpacing(6)
+        
+        self.route_template_content = QWidget()
+        content_layout = QVBoxLayout(self.route_template_content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(6)
+        
+        self.route_template_summary_label = QLabel("ルート情報: ー")
+        self.route_template_summary_label.setStyleSheet("font-weight: bold;")
+        content_layout.addWidget(self.route_template_summary_label)
+        
+        self.route_template_table = QTableWidget()
+        headers = [
+            "訪問順序", "店舗コード", "店舗名", "IN時間", "OUT時間",
+            "滞在(分)", "移動(分)", "想定粗利", "仕入点数", "評価", "メモ"
+        ]
+        self.route_template_table.setColumnCount(len(headers))
+        self.route_template_table.setHorizontalHeaderLabels(headers)
+        self.route_template_table.setAlternatingRowColors(True)
+        self.route_template_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.route_template_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.route_template_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.route_template_table.horizontalHeader().setStretchLastSection(True)
+        self.route_template_table.setMinimumHeight(220)
+        self.route_template_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        content_layout.addWidget(self.route_template_table)
+        
+        buttons_layout = QHBoxLayout()
+        self.combined_save_btn = QPushButton("統合保存")
+        self.combined_save_btn.clicked.connect(self.save_combined_snapshot)
+        buttons_layout.addWidget(self.combined_save_btn)
+        
+        self.combined_load_btn = QPushButton("統合読込")
+        self.combined_load_btn.clicked.connect(self.open_combined_snapshot_history)
+        buttons_layout.addWidget(self.combined_load_btn)
+        buttons_layout.addStretch()
+        content_layout.addLayout(buttons_layout)
+        
+        self.route_template_status = QLabel("テンプレート未選択")
+        self.route_template_status.setWordWrap(True)
+        self.route_template_status.setStyleSheet("color: #cccccc;")
+        content_layout.addWidget(self.route_template_status)
+        
+        outer_layout.addWidget(self.route_template_content)
+        try:
+            s = self._get_qsettings()
+            last_path = s.value("route_template/last_selected", "", type=str) or ""
+            if last_path:
+                self.route_template_status.setText(f"前回読込: {os.path.basename(last_path)}\n{last_path}")
+        except Exception:
+            pass
+        
+        def _on_toggle(checked: bool):
+            self.route_template_content.setVisible(checked)
+        self.route_template_group.toggled.connect(_on_toggle)
+        self.route_template_content.setVisible(True)
+        
+        self.layout().addWidget(self.route_template_group)
+        self.refresh_route_template_view()
+
+    def apply_route_template(self):
+        """ルートテンプレートの読み込みを実行"""
+        if not self.route_summary_widget:
+            QMessageBox.warning(self, "ルートテンプレート", "ルート機能が未初期化です。ルータブが有効か確認してください。")
+            return
+        try:
+            file_path = self.route_summary_widget.load_template()
+            if not file_path:
+                self.route_template_status.setText("テンプレート未選択")
+                return
+            try:
+                s = self._get_qsettings()
+                s.setValue("route_template/last_selected", file_path)
+            except Exception:
+                pass
+            self.refresh_route_template_view()
+            self.route_template_status.setText(f"読み込み完了: {os.path.basename(file_path)}\n{file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "テンプレート読込エラー", f"テンプレートの読み込みに失敗しました:\n{e}")
+        
+    def refresh_route_template_view(self):
+        """ルートテンプレートの情報を表示に反映"""
+        if not self.route_summary_widget:
+            self.route_template_table.setRowCount(0)
+            self.route_template_summary_label.setText("ルート情報: ー")
+            return
+        try:
+            route_data = self.route_summary_widget.get_route_data()
+            visits = self.route_summary_widget.get_store_visits_data()
+            self.populate_route_template_table(visits)
+            route_code = route_data.get('route_code', '')
+            route_date = route_data.get('route_date', '')
+            dep = self._format_hm(route_data.get('departure_time'))
+            ret = self._format_hm(route_data.get('return_time'))
+            summary_parts = []
+            if route_date:
+                summary_parts.append(route_date)
+            if route_code:
+                summary_parts.append(route_code)
+            times = []
+            if dep:
+                times.append(f"出発 {dep}")
+            if ret:
+                times.append(f"帰宅 {ret}")
+            summary_text = " / ".join(summary_parts) if summary_parts else "ー"
+            if times:
+                summary_text = f"{summary_text} | {' / '.join(times)}"
+            self.route_template_summary_label.setText(f"ルート情報: {summary_text}")
+        except Exception as e:
+            self.route_template_table.setRowCount(0)
+            self.route_template_summary_label.setText("ルート情報: ー")
+            print(f"ルートテンプレート表示更新エラー: {e}")
+
+    def populate_route_template_table(self, visits: List[Dict[str, Any]]):
+        if not isinstance(visits, list):
+            visits = []
+        headers = [
+            "訪問順序", "店舗コード", "店舗名", "IN時間", "OUT時間",
+            "滞在(分)", "移動(分)", "想定粗利", "仕入点数", "評価", "メモ"
+        ]
+        self.route_template_table.setRowCount(len(visits))
+        self.route_template_table.setColumnCount(len(headers))
+        self.route_template_table.setHorizontalHeaderLabels(headers)
+        for row, visit in enumerate(visits):
+            def _set(col: int, value: Any):
+                item = QTableWidgetItem("" if value is None else str(value))
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.route_template_table.setItem(row, col, item)
+            _set(0, visit.get('visit_order', row + 1))
+            _set(1, visit.get('store_code', ''))
+            _set(2, visit.get('store_name', ''))
+            _set(3, self._format_hm(visit.get('store_in_time')))
+            _set(4, self._format_hm(visit.get('store_out_time')))
+            _set(5, visit.get('stay_duration', ''))
+            _set(6, visit.get('travel_time_from_prev', ''))
+            _set(7, visit.get('store_gross_profit', ''))
+            _set(8, visit.get('store_item_count', ''))
+            _set(9, visit.get('store_rating', ''))
+            _set(10, visit.get('store_notes', ''))
+        self.route_template_table.resizeColumnsToContents()
+
+    @staticmethod
+    def _format_hm(value: Optional[str]) -> str:
+        if not value:
+            return ''
+        text = str(value)
+        if ' ' in text:
+            text = text.split(' ')[1]
+        return text[:5]
+
+    def save_combined_snapshot(self):
+        if self.inventory_data is None or len(self.inventory_data) == 0:
+            QMessageBox.information(self, "統合保存", "仕入データがありません。")
+            return
+        if not self.route_summary_widget:
+            QMessageBox.information(self, "統合保存", "ルートテンプレートが未ロードです。")
+            return
+        try:
+            purchase_records = self.inventory_data.fillna("").to_dict(orient="records")
+        except Exception:
+            purchase_records = []
+        route_data = self.route_summary_widget.get_route_data()
+        visits = self.route_summary_widget.get_store_visits_data()
+        payload = {"route": route_data, "visits": visits}
+        route_date = route_data.get('route_date', '')
+        route_code = route_data.get('route_code', '')
+        snapshot_name = (route_date or "未設定").strip()
+        if route_code:
+            snapshot_name = f"{snapshot_name} {route_code}".strip()
+        if not snapshot_name or snapshot_name == "未設定":
+            from datetime import datetime
+            snapshot_name = datetime.now().strftime("Snapshot %Y-%m-%d %H:%M:%S")
+        self.route_snapshot_db.save_snapshot(snapshot_name, purchase_records, payload)
+        QMessageBox.information(self, "統合保存", f"統合スナップショットを保存しました。\n{snapshot_name}")
+
+    def open_combined_snapshot_history(self):
+        snapshots = self.route_snapshot_db.list_snapshots()
+        if not snapshots:
+            QMessageBox.information(self, "統合読込", "統合スナップショットがありません。")
+            return
+        items = [f"{snap['snapshot_name']} ({snap['created_at']})" for snap in snapshots]
+        selection, ok = QInputDialog.getItem(
+            self,
+            "統合スナップショット読込",
+            "読み込むスナップショットを選択してください:",
+            items,
+            0,
+            False
+        )
+        if not ok or not selection:
+            return
+        index = items.index(selection)
+        snapshot_id = snapshots[index]["id"]
+        snapshot = self.route_snapshot_db.get_snapshot(snapshot_id)
+        if not snapshot:
+            QMessageBox.warning(self, "統合読込", "選択したスナップショットを取得できませんでした。")
+            return
+        self._restore_combined_snapshot(snapshot)
+
+    def _restore_combined_snapshot(self, snapshot: Dict[str, Any]):
+        try:
+            purchase_data = snapshot.get("purchase_data") or []
+            if purchase_data:
+                try:
+                    self.inventory_data = pd.DataFrame(purchase_data)
+                except Exception:
+                    self.inventory_data = pd.DataFrame()
+                self.filtered_data = self.inventory_data.copy()
+                self.update_table()
+                self.update_data_count()
+            else:
+                self.inventory_data = pd.DataFrame()
+                self.filtered_data = self.inventory_data
+                self.update_table()
+                self.update_data_count()
+            
+            route_payload = snapshot.get("route_data") or {}
+            route_data = route_payload.get("route", {})
+            visits = route_payload.get("visits", [])
+            if self.route_summary_widget and route_data:
+                if hasattr(self.route_summary_widget, "apply_route_snapshot"):
+                    self.route_summary_widget.apply_route_snapshot(route_data, visits)
+                self.refresh_route_template_view()
+            self.route_template_status.setText(f"スナップショット読込: {snapshot.get('snapshot_name', 'N/A')}")
+            QMessageBox.information(self, "統合読込", "統合スナップショットを読み込みました。")
+        except Exception as e:
+            QMessageBox.critical(self, "統合読込エラー", f"スナップショットの読み込みに失敗しました:\n{e}")
+
     # アクションボタンはファイル操作エリアに統合済み
         
     def import_csv(self):

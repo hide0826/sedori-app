@@ -29,8 +29,7 @@ from ui.antique_widget import AntiqueWidget
 from ui.settings_widget import SettingsWidget
 from ui.workflow_panel import WorkflowPanel
 from ui.store_master_widget import StoreMasterWidget
-from ui.route_summary_widget import RouteSummaryWidget
-from ui.route_list_widget import RouteListWidget
+from ui.route_management_widget import RouteManagementWidget
 from ui.analysis_widget import AnalysisWidget
 from ui.receipt_widget import ReceiptWidget
 from ui.warranty_widget import WarrantyWidget
@@ -138,22 +137,15 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(self.store_master_widget, "店舗マスタ")
 
         # 商品データベースタブ
-        self.product_widget = ProductWidget()
+        self.product_widget = ProductWidget(inventory_widget=self.inventory_widget)
         self.tab_widget.addTab(self.product_widget, "商品DB")
         
-        # ルートサマリータブ（仕入管理ウィジェットへの参照を渡す）
-        self.route_summary_widget = RouteSummaryWidget(self.api_client, inventory_widget=self.inventory_widget)
-        self.tab_widget.addTab(self.route_summary_widget, "ルート登録")
+        # ルート関連タブ（登録・サマリー・訪問DBを統合）
+        self.route_widget = RouteManagementWidget(self.api_client, inventory_widget=self.inventory_widget)
+        self.tab_widget.addTab(self.route_widget, "ルート")
         
-        # ルートサマリーウィジェットへの参照を仕入管理ウィジェットに追加
-        self.inventory_widget.route_summary_widget = self.route_summary_widget
-        
-        # ルートサマリー一覧タブ
-        self.route_list_widget = RouteListWidget()
-        self.tab_widget.addTab(self.route_list_widget, "ルートサマリー")
-        
-        # ルート登録保存時にサマリー一覧を更新
-        self.route_summary_widget.data_saved.connect(self.route_list_widget.load_routes)
+        # 仕入管理ウィジェットから参照できるように設定
+        self.inventory_widget.set_route_summary_widget(self.route_widget.route_summary_widget)
         
         # 分析タブ
         self.analysis_widget = AnalysisWidget()

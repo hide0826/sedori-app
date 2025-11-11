@@ -103,6 +103,7 @@ class RouteListWidget(QWidget):
         
         # 統計情報ラベル
         self.stats_label = QLabel("統計: 読み込み中...")
+        self.stats_label.setWordWrap(True)
         table_layout.addWidget(self.stats_label)
         
         parent_layout.addWidget(table_group)
@@ -125,9 +126,9 @@ class RouteListWidget(QWidget):
         self.table.setSortingEnabled(False)
         
         columns = [
-            "日付", "ルート名", "総仕入点数", "総仕入額",
-            "総想定販売額", "総想定粗利", "平均仕入価格",
-            "総稼働時間", "想定時給"
+            "日付", "ルート名", "出発時間", "帰宅時間",
+            "総仕入点数", "総仕入額", "総想定販売額",
+            "総想定粗利", "平均仕入価格", "総稼働時間 (h)", "想定時給"
         ]
         
         self.table.setRowCount(len(routes))
@@ -144,54 +145,60 @@ class RouteListWidget(QWidget):
             route_name = self.store_db.get_route_name_by_code(route_code) or route_code
             self.table.setItem(i, 1, QTableWidgetItem(route_name))
             
+            # 出発時間・帰宅時間
+            dep_time = self._format_time(route.get('departure_time'))
+            ret_time = self._format_time(route.get('return_time'))
+            self.table.setItem(i, 2, QTableWidgetItem(dep_time))
+            self.table.setItem(i, 3, QTableWidgetItem(ret_time))
+            
             # 総仕入点数
             total_item_count = route.get('total_item_count', 0) or 0
             item_count_item = QTableWidgetItem()
             item_count_item.setData(Qt.EditRole, total_item_count)
             item_count_item.setText(str(total_item_count))
-            self.table.setItem(i, 2, item_count_item)
+            self.table.setItem(i, 4, item_count_item)
 
             # 総仕入額
             total_purchase_amount = route.get('total_purchase_amount', 0) or 0
             purchase_item = QTableWidgetItem()
             purchase_item.setData(Qt.EditRole, total_purchase_amount)
-            purchase_item.setText(f"{total_purchase_amount:,.0f}" if total_purchase_amount else "0")
-            self.table.setItem(i, 3, purchase_item)
+            purchase_item.setText(self._format_currency(total_purchase_amount))
+            self.table.setItem(i, 5, purchase_item)
 
             # 総想定販売額
             total_sales_amount = route.get('total_sales_amount', 0) or 0
             sales_item = QTableWidgetItem()
             sales_item.setData(Qt.EditRole, total_sales_amount)
-            sales_item.setText(f"{total_sales_amount:,.0f}" if total_sales_amount else "0")
-            self.table.setItem(i, 4, sales_item)
+            sales_item.setText(self._format_currency(total_sales_amount))
+            self.table.setItem(i, 6, sales_item)
             
             # 総想定粗利
             total_gross_profit = route.get('total_gross_profit', 0) or 0
             profit_item = QTableWidgetItem()
             profit_item.setData(Qt.EditRole, total_gross_profit)
-            profit_item.setText(f"{total_gross_profit:,.0f}" if total_gross_profit else "0")
-            self.table.setItem(i, 5, profit_item)
+            profit_item.setText(self._format_currency(total_gross_profit))
+            self.table.setItem(i, 7, profit_item)
             
             # 平均仕入価格
             avg_price = route.get('avg_purchase_price', 0) or 0
             avg_item = QTableWidgetItem()
             avg_item.setData(Qt.EditRole, avg_price)
-            avg_item.setText(f"{avg_price:,.0f}" if avg_price else "0")
-            self.table.setItem(i, 6, avg_item)
+            avg_item.setText(self._format_currency(avg_price))
+            self.table.setItem(i, 8, avg_item)
             
             # 総稼働時間
             working_hours = route.get('total_working_hours', 0) or 0
             hours_item = QTableWidgetItem()
             hours_item.setData(Qt.EditRole, working_hours)
-            hours_item.setText(f"{working_hours:.1f}" if working_hours else "0.0")
-            self.table.setItem(i, 7, hours_item)
+            hours_item.setText(self._format_hours(working_hours))
+            self.table.setItem(i, 9, hours_item)
             
             # 想定時給
             hourly_rate = route.get('estimated_hourly_rate', 0) or 0
             rate_item = QTableWidgetItem()
             rate_item.setData(Qt.EditRole, hourly_rate)
-            rate_item.setText(f"{hourly_rate:,.0f}" if hourly_rate else "0")
-            self.table.setItem(i, 8, rate_item)
+            rate_item.setText(self._format_currency(hourly_rate))
+            self.table.setItem(i, 10, rate_item)
             
             # 各行にIDを保持（ダブルクリック時の参照用）
             self.table.item(i, 0).setData(Qt.UserRole, route.get('id'))
@@ -230,8 +237,21 @@ class RouteListWidget(QWidget):
     def update_statistics(self):
         """統計情報を更新"""
         routes = self.route_db.list_route_summaries()
+        total_routes = len(routes)
+        total_items = sum((route.get('total_item_count') or 0) for route in routes)
+        total_purchase = sum((route.get('total_purchase_amount') or 0) for route in routes)
+        total_sales = sum((route.get('total_sales_amount') or 0) for route in routes)
+        total_profit = sum((route.get('total_gross_profit') or 0) for route in routes)
+        avg_hourly = 0.0
+        hourly_values = [route.get('estimated_hourly_rate') for route in routes if route.get('estimated_hourly_rate')]
+        if hourly_values:
+            avg_hourly = sum(hourly_values) / len(hourly_values)
         self.stats_label.setText(
-            f"統計: ルート数 {len(routes)}件"
+            f"統計: ルート数 {total_routes}件 / 総仕入点数 {total_items:,}点 / "
+            f"総仕入額 {self._format_currency(total_purchase)} / "
+            f"総想定販売額 {self._format_currency(total_sales)} / "
+            f"総想定粗利 {self._format_currency(total_profit)} / "
+            f"平均想定時給 {self._format_currency(avg_hourly)}"
         )
     
     def on_item_double_clicked(self, item: QTableWidgetItem):
@@ -239,4 +259,35 @@ class RouteListWidget(QWidget):
         route_id = item.data(Qt.UserRole)
         if route_id:
             self.route_selected.emit(route_id)
+
+    # ==================== ヘルパーメソッド ====================
+
+    def _format_time(self, datetime_str: str) -> str:
+        if not datetime_str:
+            return ""
+        try:
+            parts = str(datetime_str).strip()
+            if " " in parts:
+                parts = parts.split(" ")[1]
+            if "T" in parts:
+                parts = parts.split("T")[1]
+            return parts[:5]
+        except Exception:
+            return ""
+
+    def _format_currency(self, value) -> str:
+        try:
+            if value is None:
+                return "0"
+            return f"{float(value):,.0f}"
+        except (TypeError, ValueError):
+            return "0"
+
+    def _format_hours(self, value) -> str:
+        try:
+            if value is None:
+                return "0.0"
+            return f"{float(value):.2f}"
+        except (TypeError, ValueError):
+            return "0.0"
 

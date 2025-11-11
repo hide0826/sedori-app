@@ -211,3 +211,6 @@ __marimo__/
 *.db-journal
 python/tmp/
 python/desktop/data/*.db
+python/desktop/data/receipts/
+
+python/python/

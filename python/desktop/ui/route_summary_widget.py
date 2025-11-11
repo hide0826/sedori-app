@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QDialog, QFormLayout, QDialogButtonBox, QTabWidget, QStyledItemDelegate, QStyle, QInputDialog
 )
 from ui.star_rating_widget import StarRatingWidget
-from PySide6.QtCore import Qt, QDateTime, QTime, Signal
+from PySide6.QtCore import Qt, QDateTime, QTime, Signal, QSettings
 from PySide6.QtGui import QColor, QShortcut, QKeySequence
 import pandas as pd
 from pathlib import Path
@@ -29,12 +29,14 @@ import os
 from datetime import time as dt_time
 import openpyxl
 import logging
+from functools import partial
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from database.route_db import RouteDatabase
 from database.store_db import StoreDatabase
+from database.route_visit_db import RouteVisitDatabase
 
 # サービス・ユーティリティのインポート（相対パス）
 import sys
@@ -66,6 +68,7 @@ class RouteSummaryWidget(QWidget):
         super().__init__()
         self.route_db = RouteDatabase()
         self.store_db = StoreDatabase()
+        self.route_visit_db = RouteVisitDatabase()
         self.matching_service = RouteMatchingService() if RouteMatchingService else None
         self.calc_service = CalculationService() if CalculationService else None
         self.api_client = api_client
@@ -75,6 +78,10 @@ class RouteSummaryWidget(QWidget):
         self.route_data = {}
         self.store_visits = []
         self.latest_summary_metrics = {}
+        self.settings = QSettings("HIRIO", "SedoriDesktopApp")
+        stored_dir = self.settings.value("route_template/default_load_dir", "")
+        self.template_default_dir = str(stored_dir) if stored_dir else ""
+        self.last_loaded_template_path: str = ""
         
         # Undo/Redoスタック
         self.undo_stack = []
@@ -143,6 +150,21 @@ class RouteSummaryWidget(QWidget):
         button_layout.addWidget(new_btn)
         
         button_layout.addStretch()
+
+        template_dir_label = QLabel("テンプレート読込フォルダ:")
+        template_dir_label.setStyleSheet("color: #cccccc;")
+        button_layout.addWidget(template_dir_label)
+
+        self.template_dir_edit = QLineEdit()
+        self.template_dir_edit.setPlaceholderText("未設定")
+        self.template_dir_edit.setFixedWidth(260)
+        self.template_dir_edit.setText(self.template_default_dir)
+        self.template_dir_edit.editingFinished.connect(self.on_template_dir_edit_finished)
+        button_layout.addWidget(self.template_dir_edit)
+
+        browse_dir_btn = QPushButton("参照…")
+        browse_dir_btn.clicked.connect(self.browse_template_dir)
+        button_layout.addWidget(browse_dir_btn)
         
         parent_layout.addWidget(button_group)
     
@@ -321,8 +343,21 @@ class RouteSummaryWidget(QWidget):
             "QTableView::item{border: none;}"
         )
 
-        # ドラッグ＆ドロップのため選択は有効（単一行）
+        # 店舗評価の計算ロジック案内
+        rating_info_layout = QHBoxLayout()
+        rating_info_layout.addStretch()
+        self.rating_info_button = QPushButton("※ 店舗評価の計算ロジック")
+        self.rating_info_button.setCursor(Qt.PointingHandCursor)
+        self.rating_info_button.setFlat(True)
+        self.rating_info_button.setStyleSheet(
+            "QPushButton { color: #5aa2ff; text-decoration: underline; border: none; font-size: 10pt; }"
+            "QPushButton:hover { color: #8fc4ff; }"
+        )
+        self.rating_info_button.clicked.connect(self.show_rating_logic_popup)
+        rating_info_layout.addWidget(self.rating_info_button)
+        visits_layout.addLayout(rating_info_layout)
 
+        # ドラッグ＆ドロップのため選択は有効（単一行）
         visits_layout.addWidget(self.store_visits_table)
         
         # 行追加・削除・全クリア・Undo/Redoボタン
@@ -602,6 +637,96 @@ class RouteSummaryWidget(QWidget):
         )
         self.calculation_label.setText(text)
     
+    def show_rating_logic_popup(self):
+        """店舗評価の計算ロジックを表示"""
+        detail_text = (
+            "【店舗評価の自動計算】\n\n"
+            "1. 基礎星スコア（仕入れ点数）\n"
+            "   1〜2点: ★1 / 3〜4点: ★2 / 5〜6点: ★3 / 7〜9点: ★4 / 10点以上: ★5\n\n"
+            "2. 粗利係数（想定粗利）\n"
+            "   〜5,000円:0.8 / 5,001〜10,000円:1.0 / 10,001〜20,000円:1.2 /\n"
+            "   20,001〜40,000円:1.4 / 40,001円以上:1.6\n\n"
+            "3. 最終スコア\n"
+            "   最終スコア = (基礎星スコア × 粗利係数) × (想定粗利 ÷ 滞在時間)\n"
+            "   ※滞在時間が1分未満の場合は1分として計算します。\n\n"
+            "4. 星への変換\n"
+            "   〜1.5→★1 / 1.6〜2.5→★2 / 2.6〜3.5→★3 /\n"
+            "   3.6〜4.5→★4 / 4.6以上→★5\n\n"
+            "仕入れ点数または想定粗利が未入力の場合は★0を設定します。"
+        )
+        QMessageBox.information(self, "店舗評価の計算ロジック", detail_text)
+
+    def auto_calculate_store_ratings(self):
+        """店舗訪問テーブルの星評価を自動計算"""
+        if not hasattr(self, "store_visits_table"):
+            return
+        row_count = self.store_visits_table.rowCount()
+        for row in range(row_count):
+            rating = self._calculate_store_rating_for_row(row)
+            if rating <= 0:
+                rating = 0.0
+            else:
+                rating = max(0.0, min(5.0, round(rating * 2) / 2))
+            star_widget = self.store_visits_table.cellWidget(row, 9)
+            if not isinstance(star_widget, StarRatingWidget):
+                star_widget = StarRatingWidget(self.store_visits_table, rating=0, star_size=14)
+                star_widget.rating_changed.connect(partial(self.on_star_rating_changed, row))
+                self.store_visits_table.setCellWidget(row, 9, star_widget)
+            # setRatingでシグナルが発火してUndo履歴が増えないよう一時的にブロック
+            block_prev = star_widget.blockSignals(True)
+            try:
+                star_widget.setRating(rating)
+            finally:
+                star_widget.blockSignals(block_prev)
+
+    def _calculate_store_rating_for_row(self, row: int) -> float:
+        """指定行の星評価を算出"""
+        qty = self._parse_float_value(self._get_table_item(row, 8))
+        profit = self._parse_float_value(self._get_table_item(row, 7))
+        stay = self._parse_float_value(self._get_table_item(row, 5))
+
+        if qty <= 0 or profit <= 0:
+            return 0
+        stay = max(1.0, stay)
+
+        base_score = self._determine_base_score(int(round(qty)))
+        profit_per_minute = profit / stay
+
+        profit_threshold = 190.0
+        profit_scale = 30.0
+        profit_factor = max(0.0, min(5.0, (profit_per_minute - profit_threshold) / profit_scale))
+
+        base_weight = 0.7
+        profit_weight = 0.3
+
+        final_score = (base_weight * base_score) + (profit_weight * profit_factor)
+        return max(0.0, min(5.0, final_score))
+
+    def _determine_base_score(self, item_count: int) -> int:
+        if item_count >= 10:
+            return 5
+        if item_count >= 7:
+            return 4
+        if item_count >= 5:
+            return 3
+        if item_count >= 3:
+            return 2
+        return 1
+
+    def _parse_float_value(self, value: Any) -> float:
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if not text:
+            return 0.0
+        text = text.replace(',', '')
+        try:
+            return float(text)
+        except ValueError:
+            return 0.0
+
     def update_route_codes(self):
         """ルートコード一覧を更新"""
         try:
@@ -853,7 +978,7 @@ class RouteSummaryWidget(QWidget):
             )
             
             if not file_path:
-                return
+                return None
             
             # 選択されたルートの店舗一覧を取得
             stores = []
@@ -887,15 +1012,20 @@ class RouteSummaryWidget(QWidget):
     def load_template(self):
         """テンプレート読み込み"""
         try:
+            initial_dir = self.get_template_default_dir()
             file_path, _ = QFileDialog.getOpenFileName(
                 self,
                 "テンプレートファイルを選択",
-                "",
+                initial_dir,
                 "Excelファイル (*.xlsx *.xlsm);;CSVファイル (*.csv);;すべてのファイル (*)"
             )
             
             if not file_path:
                 return
+            
+            # 保存済みのデフォルトフォルダが空の場合のみ更新（初回設定用）
+            if not self.template_default_dir:
+                self.update_template_default_dir(os.path.dirname(file_path))
             
             # Excel読み込み
             if file_path.endswith(('.xlsx', '.xlsm')):
@@ -1059,15 +1189,29 @@ class RouteSummaryWidget(QWidget):
                 # 下部情報（17行目以降）
                 try:
                     bottom_map = {}
-                    for rr in range(17, 17 + 10):
+                    for rr in range(17, 17 + 15):
                         key = ws[f'A{rr}'].value
                         val = ws[f'B{rr}'].value
-                        if key:
-                            bottom_map[str(key).strip()] = val
+                        if (key is None or str(key).strip() == '') and ws[f'B{rr}'].value:
+                            key = ws[f'B{rr}'].value
+                            val = ws[f'C{rr}'].value
+                        if key is None or str(key).strip() == '':
+                            # 連続して空行が続いたら抜ける
+                            if (ws[f'B{rr}'].value is None or str(ws[f'B{rr}'].value).strip() == '') and \
+                               (ws[f'C{rr}'].value is None or str(ws[f'C{rr}'].value).strip() == ''):
+                                break
+                            continue
+                        bottom_map[str(key).strip()] = val
 
                     # 出発時刻・帰宅時刻
-                    dep_str = _to_time_str(bottom_map.get('出発時刻'))
-                    ret_str = _to_time_str(bottom_map.get('帰宅時刻'))
+                    dep_raw = bottom_map.get('出発時刻')
+                    if dep_raw is None:
+                        dep_raw = bottom_map.get('出発時間')
+                    ret_raw = bottom_map.get('帰宅時刻')
+                    if ret_raw is None:
+                        ret_raw = bottom_map.get('帰宅時間')
+                    dep_str = _to_time_str(dep_raw)
+                    ret_str = _to_time_str(ret_raw)
                     if dep_str:
                         self.departure_time_edit.setText(dep_str)
                     if ret_str:
@@ -1075,11 +1219,11 @@ class RouteSummaryWidget(QWidget):
 
                     # 高速代
                     try:
-                        self.toll_fee_outbound_spin.setValue(float(bottom_map.get('往路高速代') or 0))
+                        self.toll_fee_outbound_spin.setValue(float(str(bottom_map.get('往路高速代') or '0').replace(',', '')))
                     except Exception:
                         pass
                     try:
-                        self.toll_fee_return_spin.setValue(float(bottom_map.get('復路高速代') or 0))
+                        self.toll_fee_return_spin.setValue(float(str(bottom_map.get('復路高速代') or '0').replace(',', '')))
                     except Exception:
                         pass
                 except Exception as _:
@@ -1092,9 +1236,64 @@ class RouteSummaryWidget(QWidget):
             # 移動時間（分）を自動計算
             self.recalc_travel_times()
             getattr(self, 'update_calculation_results', lambda: None)()
+            self.last_loaded_template_path = file_path
+            try:
+                self.settings.setValue("route_template/last_selected", file_path)
+            except Exception:
+                pass
+            return file_path
             
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"テンプレート読み込み中にエラーが発生しました:\n{str(e)}")
+            return None
+    
+    def browse_template_dir(self):
+        """テンプレート読込フォルダの選択"""
+        current_dir = self.get_template_default_dir(fallback=False)
+        selected_dir = QFileDialog.getExistingDirectory(
+            self,
+            "テンプレート読込フォルダを選択",
+            current_dir or str(Path.home())
+        )
+        if selected_dir:
+            self.update_template_default_dir(selected_dir)
+    
+    def on_template_dir_edit_finished(self):
+        """手入力でテンプレートフォルダを更新"""
+        text = self.template_dir_edit.text().strip()
+        if not text:
+            self.update_template_default_dir("")
+            return
+        expanded = os.path.expanduser(text)
+        if not os.path.isdir(expanded):
+            QMessageBox.warning(self, "エラー", "指定したフォルダが存在しません。")
+            # 元の値へ戻す
+            self.template_dir_edit.blockSignals(True)
+            self.template_dir_edit.setText(self.template_default_dir)
+            self.template_dir_edit.blockSignals(False)
+            return
+        self.update_template_default_dir(os.path.abspath(expanded))
+    
+    def update_template_default_dir(self, directory: str):
+        """テンプレートフォルダの設定を保存"""
+        normalized = directory if directory else ""
+        if normalized and not os.path.isdir(normalized):
+            return
+        self.template_default_dir = normalized
+        if hasattr(self, "template_dir_edit"):
+            self.template_dir_edit.blockSignals(True)
+            self.template_dir_edit.setText(self.template_default_dir)
+            self.template_dir_edit.blockSignals(False)
+        if self.settings is not None:
+            self.settings.setValue("route_template/default_load_dir", self.template_default_dir)
+    
+    def get_template_default_dir(self, fallback: bool = True) -> str:
+        """テンプレートフォルダの取得"""
+        if self.template_default_dir and os.path.isdir(self.template_default_dir):
+            return self.template_default_dir
+        if fallback:
+            return str(Path.home())
+        return ""
     
     def run_matching(self):
         """照合処理実行（改良版：仕入管理データを参照）"""
@@ -1399,13 +1598,19 @@ class RouteSummaryWidget(QWidget):
                         self.store_visits_table.setItem(i, 8, QTableWidgetItem('0'))
                     else:
                         self.store_visits_table.setItem(i, 8, QTableWidgetItem(str(int(item_count))))
-                    star_widget = StarRatingWidget(self.store_visits_table, rating=int(v.get('store_rating') or 0), star_size=14)
+                    existing_rating = v.get('store_rating')
+                    try:
+                        rating_value = float(existing_rating) if existing_rating not in (None, '') else 0.0
+                    except (TypeError, ValueError):
+                        rating_value = 0.0
+                    star_widget = StarRatingWidget(self.store_visits_table, rating=rating_value, star_size=14)
                     star_widget.rating_changed.connect(lambda rating, r=i: self.on_star_rating_changed(r, rating))
                     self.store_visits_table.setCellWidget(i, 9, star_widget)
                     self.store_visits_table.setItem(i, 10, QTableWidgetItem(v.get('store_notes','') or ''))
             finally:
                 self.store_visits_table.blockSignals(False)
             
+            self.auto_calculate_store_ratings()
             self.update_visit_order()
             getattr(self, 'update_calculation_results', lambda: None)()
             # Undo基点
@@ -1686,6 +1891,7 @@ class RouteSummaryWidget(QWidget):
         try:
             route_data = self.get_route_data()
             store_visits = self.get_store_visits_data()
+            route_name_display = self.route_code_combo.currentText().strip() or route_data.get('route_code', '')
             
             if not route_data.get('route_code'):
                 QMessageBox.warning(self, "警告", "ルートコードを入力してください")
@@ -1708,6 +1914,7 @@ class RouteSummaryWidget(QWidget):
             }
             stats = {**stats_defaults, **stats}
             route_data.update(stats)
+            route_data['route_name_display'] = route_name_display
             
             metrics = self.latest_summary_metrics or self._calculate_summary_metrics()
             if metrics:
@@ -1758,6 +1965,17 @@ class RouteSummaryWidget(QWidget):
             for visit in store_visits:
                 visit['route_summary_id'] = self.current_route_id
                 self.route_db.add_store_visit(visit)
+
+            try:
+                if self.route_visit_db:
+                    self.route_visit_db.replace_route_visits(
+                        route_data.get('route_date'),
+                        route_data.get('route_code'),
+                        route_name_display,
+                        store_visits
+                    )
+            except Exception as db_err:
+                logging.exception(f"ルート訪問履歴の保存に失敗しました: {db_err}")
             
             QMessageBox.information(self, "完了", "データを保存しました")
             self.data_saved.emit(self.current_route_id)
@@ -1828,6 +2046,79 @@ class RouteSummaryWidget(QWidget):
             }
             visits.append(visit)
         return visits
+
+    @staticmethod
+    def _format_hm(value: Optional[str]) -> str:
+        if not value:
+            return ''
+        text = str(value)
+        if ' ' in text:
+            text = text.split(' ')[1]
+        return text[:5]
+
+    def apply_route_snapshot(self, route_data: Dict[str, Any], visits: List[Dict[str, Any]]):
+        """外部から受け取ったルート情報・店舗情報をUIに反映"""
+        if route_data is None:
+            route_data = {}
+        date_str = route_data.get('route_date')
+        if date_str:
+            try:
+                self.route_date_edit.setDateTime(QDateTime.fromString(date_str, 'yyyy-MM-dd'))
+            except Exception:
+                pass
+        display_value = route_data.get('route_name_display') or route_data.get('route_code', '')
+        if display_value:
+            self.route_code_combo.blockSignals(True)
+            try:
+                self.update_route_codes()
+                idx = self.route_code_combo.findText(display_value)
+                if idx >= 0:
+                    self.route_code_combo.setCurrentIndex(idx)
+                else:
+                    self.route_code_combo.addItem(display_value)
+                    idx = self.route_code_combo.findText(display_value)
+                    if idx >= 0:
+                        self.route_code_combo.setCurrentIndex(idx)
+                    else:
+                        self.route_code_combo.setCurrentText(display_value)
+            finally:
+                self.route_code_combo.blockSignals(False)
+        self.departure_time_edit.setText(self._format_hm(route_data.get('departure_time')))
+        self.return_time_edit.setText(self._format_hm(route_data.get('return_time')))
+        try:
+            self.toll_fee_outbound_spin.setValue(float(route_data.get('toll_fee_outbound') or 0))
+        except Exception:
+            self.toll_fee_outbound_spin.setValue(0)
+        try:
+            self.toll_fee_return_spin.setValue(float(route_data.get('toll_fee_return') or 0))
+        except Exception:
+            self.toll_fee_return_spin.setValue(0)
+        self.remarks_edit.setPlainText(route_data.get('remarks', '') or '')
+        
+        self.store_visits_table.blockSignals(True)
+        try:
+            self.store_visits_table.setRowCount(len(visits))
+            for i, visit in enumerate(visits):
+                order_item = QTableWidgetItem(str(visit.get('visit_order', i + 1)))
+                order_item.setFlags(order_item.flags() & ~Qt.ItemIsEditable)
+                self.store_visits_table.setItem(i, 0, order_item)
+                self.store_visits_table.setItem(i, 1, QTableWidgetItem(visit.get('store_code', '')))
+                self.store_visits_table.setItem(i, 2, QTableWidgetItem(visit.get('store_name', '')))
+                self.store_visits_table.setItem(i, 3, QTableWidgetItem(self._format_hm(visit.get('store_in_time'))))
+                self.store_visits_table.setItem(i, 4, QTableWidgetItem(self._format_hm(visit.get('store_out_time'))))
+                self.store_visits_table.setItem(i, 5, QTableWidgetItem(str(visit.get('stay_duration', ''))))
+                self.store_visits_table.setItem(i, 6, QTableWidgetItem(str(visit.get('travel_time_from_prev', ''))))
+                self.store_visits_table.setItem(i, 7, QTableWidgetItem(str(visit.get('store_gross_profit', ''))))
+                self.store_visits_table.setItem(i, 8, QTableWidgetItem(str(visit.get('store_item_count', ''))))
+                rating = visit.get('store_rating', 0) or 0
+                star_widget = StarRatingWidget(self.store_visits_table, rating=rating, star_size=14)
+                self.store_visits_table.setCellWidget(i, 9, star_widget)
+                self.store_visits_table.setItem(i, 10, QTableWidgetItem(visit.get('store_notes', '') or ''))
+        finally:
+            self.store_visits_table.blockSignals(False)
+        self.update_visit_order()
+        getattr(self, 'recalc_travel_times', lambda: None)()
+        self.current_route_id = None
     
     def _combine_datetime(self, date_str: str, time_str: str) -> str:
         """ルート日付と時間（HH:MM）を結合してDATETIME形式にする"""
@@ -2086,6 +2377,7 @@ class RouteSummaryWidget(QWidget):
             
             # 粗利再計算
             self._update_route_gross_profit_from_inventory(purchase_data)
+            self.update_calculation_results()
             
             QMessageBox.information(self, "完了", "照合再計算が完了しました")
             
@@ -2227,6 +2519,8 @@ class RouteSummaryWidget(QWidget):
                 except Exception as _e:
                     print(f"UI反映フォールバックでエラー: {_e}")
             
+            self.auto_calculate_store_ratings()
+
         except Exception as e:
             # エラーはログに記録するが、ユーザーには通知しない（主要処理は成功しているため）
             logging.error(f"ルート粗利更新エラー: {str(e)}")

@@ -105,7 +105,7 @@ class RouteDatabase:
                 store_item_count INTEGER,
                 purchase_success INTEGER DEFAULT 0,
                 no_purchase_reason TEXT,
-                store_rating INTEGER,
+                store_rating REAL,
                 store_notes TEXT,
                 next_visit_recommendation TEXT,
                 category_breakdown TEXT,

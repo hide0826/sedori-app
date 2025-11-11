@@ -668,7 +668,7 @@ class StoreListWidget(QWidget):
         self.load_custom_fields()
         
         # 基本カラム + カスタムフィールドカラム
-        basic_columns = ["ID", "所属ルート名", "ルートコード", "仕入れ先コード", "店舗名", "住所", "電話番号"]
+        basic_columns = ["ID", "所属ルート名", "ルートコード", "仕入れ先コード", "店舗名", "住所", "電話番号", "備考"]
         custom_columns = [field['display_name'] for field in self.custom_fields_def]
         columns = basic_columns + custom_columns
         
@@ -691,6 +691,7 @@ class StoreListWidget(QWidget):
             self.store_table.setItem(i, 4, QTableWidgetItem(store.get('store_name', '')))
             self.store_table.setItem(i, 5, QTableWidgetItem(store.get('address', '')))
             self.store_table.setItem(i, 6, QTableWidgetItem(store.get('phone', '')))
+            self.store_table.setItem(i, 7, QTableWidgetItem(store.get('notes', '') or ''))
             
             # カスタムフィールド
             custom_fields = store.get('custom_fields', {})

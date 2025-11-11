@@ -7,19 +7,25 @@ from __future__ import annotations
 
 import sys
 import os
-from typing import Optional
+import re
+import unicodedata
+import calendar
+from datetime import datetime
+from typing import Optional, List, Dict, Any
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QGroupBox, QFormLayout, QLineEdit, QDialog, QDialogButtonBox,
-    QMessageBox, QLabel
+    QMessageBox, QLabel, QTabWidget, QHeaderView
 )
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from database.product_db import ProductDatabase
+from database.warranty_db import WarrantyDatabase
+from database.product_purchase_db import ProductPurchaseDatabase
 
 
 class ProductEditDialog(QDialog):
@@ -129,13 +135,40 @@ class ProductEditDialog(QDialog):
 
 
 class ProductWidget(QWidget):
-    """商品データ閲覧・編集タブ"""
+    """商品データ＋仕入/販売DBタブ"""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, inventory_widget=None):
         super().__init__(parent)
         self.db = ProductDatabase()
+        self.warranty_db = WarrantyDatabase()
+        self.purchase_db = ProductPurchaseDatabase()
+        self.inventory_widget = inventory_widget
+        self.inventory_columns = self._resolve_inventory_columns()
+        self.purchase_columns: List[str] = list(self.inventory_columns)
+        self.purchase_records: List[Dict[str, Any]] = []
+        self.sales_records: List[Dict[str, Any]] = []
         self.setup_ui()
         self.load_products()
+        self.restore_latest_purchase_snapshot()
+        self.load_purchase_data(self.purchase_records)
+        self.load_sales_data()
+
+    def _resolve_inventory_columns(self) -> List[str]:
+        """仕入管理タブの列構成を取得（未設定時はデフォルト）"""
+        if self.inventory_widget is not None:
+            headers = getattr(self.inventory_widget, "column_headers", None)
+            if headers:
+                # コピーして改変から保護
+                base = list(headers)
+                for extra in ["保証期間", "レシートID", "保証書ID"]:
+                    if extra not in base:
+                        base.append(extra)
+                return base
+        return [
+            "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
+            "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "コメント",
+            "発送方法", "仕入先", "コンディション説明", "保証期間", "レシートID", "保証書ID"
+        ]
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -145,6 +178,30 @@ class ProductWidget(QWidget):
         header = QLabel("商品データベース")
         header.setStyleSheet("font-size: 18px; font-weight: bold;")
         layout.addWidget(header)
+
+        self.tab_widget = QTabWidget()
+        layout.addWidget(self.tab_widget)
+
+        # 商品DBタブ
+        self.product_tab = QWidget()
+        self.setup_product_tab()
+        self.tab_widget.addTab(self.product_tab, "商品一覧")
+
+        # 仕入DBタブ
+        self.purchase_tab = QWidget()
+        self.setup_purchase_tab()
+        self.tab_widget.addTab(self.purchase_tab, "仕入DB")
+
+        # 販売DBタブ（仮）
+        self.sales_tab = QWidget()
+        self.setup_sales_tab()
+        self.tab_widget.addTab(self.sales_tab, "販売DB")
+
+    # --- 商品タブ ---
+    def setup_product_tab(self):
+        layout = QVBoxLayout(self.product_tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
 
         controls_layout = QHBoxLayout()
         self.reload_button = QPushButton("再読み込み")
@@ -179,6 +236,61 @@ class ProductWidget(QWidget):
         self.table.verticalHeader().setVisible(False)
         layout.addWidget(self.table)
 
+    # --- 仕入DBタブ ---
+    def setup_purchase_tab(self):
+        layout = QVBoxLayout(self.purchase_tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        controls = QHBoxLayout()
+        self.import_purchase_button = QPushButton("仕入管理データを取り込み")
+        self.import_purchase_button.clicked.connect(self.import_purchase_data)
+        controls.addWidget(self.import_purchase_button)
+        self.delete_selected_button = QPushButton("行削除")
+        self.delete_selected_button.clicked.connect(self.delete_selected_purchase_row)
+        controls.addWidget(self.delete_selected_button)
+        self.clear_all_button = QPushButton("全行削除")
+        self.clear_all_button.clicked.connect(self.clear_all_purchase_rows)
+        controls.addWidget(self.clear_all_button)
+        controls.addStretch()
+        layout.addLayout(controls)
+
+        self.purchase_table = QTableWidget()
+        self.purchase_table.setColumnCount(len(self.purchase_columns))
+        self.purchase_table.setHorizontalHeaderLabels(self.purchase_columns)
+        self.purchase_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.purchase_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.purchase_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.purchase_table.verticalHeader().setVisible(False)
+        self._apply_purchase_column_resize(self.purchase_columns)
+        layout.addWidget(self.purchase_table)
+
+    # --- 販売DBタブ ---
+    def setup_sales_tab(self):
+        layout = QVBoxLayout(self.sales_tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        info_label = QLabel("販売DB（仮）\n※後日項目を確定予定。現在はサンプル列のみ表示しています。")
+        info_label.setStyleSheet("color: #cccccc;")
+        layout.addWidget(info_label)
+
+        self.sales_table = QTableWidget()
+        sales_columns = [
+            "販売ID", "SKU", "販売日", "販売価格", "数量", "手数料",
+            "利益", "販売先", "備考"
+        ]
+        self.sales_table.setColumnCount(len(sales_columns))
+        self.sales_table.setHorizontalHeaderLabels(sales_columns)
+        self.sales_table.horizontalHeader().setStretchLastSection(True)
+        self.sales_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.sales_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.sales_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.sales_table.verticalHeader().setVisible(False)
+        layout.addWidget(self.sales_table)
+
+    # ===== データ読み込み・更新 =====
+
     def load_products(self):
         products = self.db.list_all()
         self.table.setRowCount(len(products))
@@ -200,6 +312,41 @@ class ProductWidget(QWidget):
             _set(8, product.get("store_name"))
             _set(9, product.get("warranty_period_days"))
             _set(10, product.get("warranty_until"))
+
+    def load_purchase_data(self, records: Optional[List[Dict[str, Any]]] = None):
+        """仕入DBテーブルを更新（recordsがNoneの場合は空で初期化）"""
+        if records is not None:
+            self.purchase_records = records
+        self.populate_purchase_table(self.purchase_records)
+
+    def load_sales_data(self, records: Optional[List[Dict[str, Any]]] = None):
+        """販売DBテーブルを初期表示（暫定データ）"""
+        if records is not None:
+            self.sales_records = records
+        if not self.sales_records:
+            # 仮データを1件表示
+            self.sales_records = [{
+                "販売ID": "SAMPLE-0001",
+                "SKU": "SAMPLE-SKU",
+                "販売日": "2025-01-01",
+                "販売価格": 12345,
+                "数量": 1,
+                "手数料": 1000,
+                "利益": 3045,
+                "販売先": "Amazon",
+                "備考": "サンプルデータ（後で置き換え）"
+            }]
+        columns = [
+            "販売ID", "SKU", "販売日", "販売価格", "数量", "手数料",
+            "利益", "販売先", "備考"
+        ]
+        self.sales_table.setRowCount(len(self.sales_records))
+        self.sales_table.setColumnCount(len(columns))
+        self.sales_table.setHorizontalHeaderLabels(columns)
+        for row, record in enumerate(self.sales_records):
+            for col, header in enumerate(columns):
+                value = record.get(header, "")
+                self.sales_table.setItem(row, col, QTableWidgetItem("" if value is None else str(value)))
 
     def _get_selected_sku(self) -> Optional[str]:
         selected = self.table.selectedItems()
@@ -261,4 +408,246 @@ class ProductWidget(QWidget):
             self.load_products()
         except Exception as e:
             QMessageBox.critical(self, "削除エラー", f"商品削除に失敗しました:\n{e}")
+
+    # ===== 仕入DBロジック =====
+
+    def import_purchase_data(self):
+        """仕入管理タブからデータを取り込み"""
+        records = self._collect_inventory_records()
+        if records is None:
+            return
+        self.purchase_records = records
+        self.populate_purchase_table(records)
+        try:
+            self.purchase_db.save_snapshot("自動保存(仕入DB)", records)
+        except Exception as e:
+            print(f"仕入DB自動保存失敗: {e}")
+        QMessageBox.information(self, "取り込み完了", f"{len(records)}件の仕入データを取り込みました。")
+
+    def delete_selected_purchase_row(self):
+        """デバッグ用: 選択行を削除"""
+        row = self.purchase_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "行削除", "削除する行を選択してください。")
+            return
+        self.purchase_table.removeRow(row)
+        if 0 <= row < len(self.purchase_records):
+            del self.purchase_records[row]
+
+    def clear_all_purchase_rows(self):
+        """デバッグ用: 全行削除"""
+        self.purchase_table.setRowCount(0)
+        self.purchase_records = []
+
+    def restore_latest_purchase_snapshot(self):
+        """最新の仕入DBスナップショットを読み込み"""
+        try:
+            snapshots = self.purchase_db.list_snapshots()
+            if not snapshots:
+                return
+            latest_id = snapshots[0]["id"]
+            latest = self.purchase_db.get_snapshot(latest_id)
+            if latest and latest.get("data"):
+                self.purchase_records = latest["data"]
+        except Exception as e:
+            print(f"仕入DBスナップショット読み込み失敗: {e}")
+
+    def _collect_inventory_records(self) -> Optional[List[Dict[str, Any]]]:
+        if not self.inventory_widget:
+            QMessageBox.warning(self, "取り込み不可", "仕入管理タブへの参照がありません。")
+            return None
+        try:
+            df = None
+            if hasattr(self.inventory_widget, "get_table_data"):
+                df = self.inventory_widget.get_table_data()
+            if df is None:
+                df = getattr(self.inventory_widget, "inventory_data", None)
+            if df is None or len(df) == 0:
+                QMessageBox.warning(self, "データなし", "仕入管理のデータが空です。")
+                return None
+        except Exception as e:
+            QMessageBox.critical(self, "取り込みエラー", f"仕入データ取得に失敗しました:\n{e}")
+            return None
+
+        try:
+            df = df.fillna("")
+        except Exception:
+            pass
+        try:
+            records = df.to_dict(orient="records")
+        except Exception as e:
+            QMessageBox.critical(self, "変換エラー", f"データ変換に失敗しました:\n{e}")
+            return None
+        return self._augment_purchase_records(records)
+
+    def _augment_purchase_records(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """保証・レシート情報を付与"""
+        augmented: List[Dict[str, Any]] = []
+        for record in records:
+            row = dict(record)
+            sku = row.get("SKU") or row.get("sku")
+            # コメントから保証期間を算出
+            comment_warranty = self._infer_warranty_from_comment(row)
+            if comment_warranty:
+                row["保証期間"] = comment_warranty
+
+            if sku:
+                try:
+                    product = self.db.get_by_sku(sku)
+                except Exception:
+                    product = None
+                if product:
+                    if ("保証期間" not in row or not row.get("保証期間")) and product.get("warranty_until"):
+                        row["保証期間"] = product.get("warranty_until")
+                    if "レシートID" not in row and product.get("receipt_id") is not None:
+                        row["レシートID"] = product.get("receipt_id")
+                # 保証書情報は warranties テーブルを参照
+                try:
+                    warranties = self.warranty_db.list_by_sku(sku)
+                except Exception:
+                    warranties = []
+                warranty_id = warranties[0]["id"] if warranties else None
+                if "保証書ID" not in row and warranty_id is not None:
+                    row["保証書ID"] = warranty_id
+            augmented.append(row)
+        return augmented
+
+    def _apply_purchase_column_resize(self, columns: List[str]) -> None:
+        """列幅を設定（商品名以外は自動調整）"""
+        header = self.purchase_table.horizontalHeader()
+        for idx, name in enumerate(columns):
+            if name == "商品名":
+                header.setSectionResizeMode(idx, QHeaderView.Stretch)
+            else:
+                header.setSectionResizeMode(idx, QHeaderView.ResizeToContents)
+
+    def populate_purchase_table(self, records: List[Dict[str, Any]]):
+        """仕入DBテーブルにレコードを反映"""
+        base_columns = list(self.inventory_columns)
+        if not base_columns:
+            base_columns = self._resolve_inventory_columns()
+        columns = list(base_columns)
+        seen = set(columns)
+        for record in records:
+            for key in record.keys():
+                if key not in seen:
+                    seen.add(key)
+                    columns.append(key)
+        self.purchase_columns = columns
+        self.purchase_table.setRowCount(len(records))
+        self.purchase_table.setColumnCount(len(columns))
+        self.purchase_table.setHorizontalHeaderLabels(columns)
+        self._apply_purchase_column_resize(columns)
+
+        for row, record in enumerate(records):
+            for col, header in enumerate(columns):
+                value = record.get(header, "")
+                if header == "商品名":
+                    full_text = "" if value is None else str(value)
+                    display_text = self._truncate_text(full_text, 50)
+                    item = QTableWidgetItem(display_text)
+                    if full_text:
+                        item.setToolTip(full_text)
+                    item.setData(Qt.UserRole, full_text)
+                else:
+                    item = QTableWidgetItem("" if value is None else str(value))
+                self.purchase_table.setItem(row, col, item)
+
+    @staticmethod
+    def _truncate_text(text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "..."
+
+    def _infer_warranty_from_comment(self, row: Dict[str, Any]) -> Optional[str]:
+        """コメント欄から保証期間（月）を推定し、仕入日からの満了日を返す"""
+        comment = row.get("コメント") or row.get("comment")
+        if not comment:
+            return None
+
+        normalized = unicodedata.normalize("NFKC", str(comment))
+        months = self._extract_warranty_months(normalized)
+        if months is None:
+            return None
+
+        purchase_date_str = row.get("仕入れ日") or row.get("purchase_date")
+        purchase_date = self._parse_purchase_date(purchase_date_str)
+        if not purchase_date:
+            return None
+
+        end_date = self._add_months(purchase_date, months)
+        return end_date.strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _extract_warranty_months(text: str) -> Optional[int]:
+        """コメントから保証期間（月数）を抽出"""
+        patterns = [
+            r'(\d+)\s*[ヶヵケかカｶ]?\s*(?:月|ヶ月|か月|カ月)\s*保証',
+            r'保証\s*(\d+)\s*[ヶヵケかカｶ]?\s*(?:月|ヶ月|か月|カ月)',
+        ]
+        for pat in patterns:
+            m = re.search(pat, text)
+            if m:
+                try:
+                    return int(m.group(1))
+                except ValueError:
+                    continue
+
+        # 特殊表現
+        if "半年保証" in text or "半年の保証" in text:
+            return 6
+        if "1年保証" in text or "一年保証" in text:
+            return 12
+
+        return None
+
+    @staticmethod
+    def _parse_purchase_date(value: Optional[str]) -> Optional[datetime]:
+        if not value:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+
+        # 一部フォーマット（年月日）を変換
+        text = (
+            text.replace("年", "/")
+                .replace("月", "/")
+                .replace("日", "")
+        )
+        text = text.replace("-", "/")
+        text = text.replace(".", "/")
+
+        # 時刻を分離
+        candidates = [text]
+        if " " in text:
+            date_part, time_part = text.split(" ", 1)
+            candidates = [
+                f"{date_part} {time_part}",
+                date_part
+            ]
+        else:
+            candidates = [text]
+
+        fmts = [
+            "%Y/%m/%d %H:%M",
+            "%Y/%m/%d %H:%M:%S",
+            "%Y/%m/%d",
+        ]
+
+        for candidate in candidates:
+            for fmt in fmts:
+                try:
+                    return datetime.strptime(candidate, fmt)
+                except ValueError:
+                    continue
+        return None
+
+    @staticmethod
+    def _add_months(base_date: datetime, months: int) -> datetime:
+        month = base_date.month - 1 + months
+        year = base_date.year + month // 12
+        month = month % 12 + 1
+        day = min(base_date.day, calendar.monthrange(year, month)[1])
+        return datetime(year, month, day)
 
