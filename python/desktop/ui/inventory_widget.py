@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from database.store_db import StoreDatabase
 from database.inventory_db import InventoryDatabase
 from database.inventory_route_snapshot_db import InventoryRouteSnapshotDatabase
+from ui.star_rating_widget import StarRatingWidget
 
 
 class InventoryWidget(QWidget):
@@ -56,12 +57,15 @@ class InventoryWidget(QWidget):
         
         # UIの初期化
         self.route_template_btn = None
+        self.matching_btn = None
         self.setup_ui()
     
     def set_route_summary_widget(self, widget):
         self.route_summary_widget = widget
         if self.route_template_btn:
             self.route_template_btn.setEnabled(widget is not None)
+        if self.matching_btn:
+            self.matching_btn.setEnabled(widget is not None)
         if widget and getattr(widget, "last_loaded_template_path", ""):
             try:
                 path = widget.last_loaded_template_path
@@ -216,6 +220,25 @@ class InventoryWidget(QWidget):
         self.route_template_btn.clicked.connect(self.apply_route_template)
         self.route_template_btn.setEnabled(self.route_summary_widget is not None)
         action_ops_layout.addWidget(self.route_template_btn)
+        
+        # 照合処理実行ボタン
+        self.matching_btn = QPushButton("照合処理実行")
+        self.matching_btn.clicked.connect(self.run_matching)
+        self.matching_btn.setEnabled(self.route_summary_widget is not None)
+        self.matching_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #007bff;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #0056b3;
+            }
+        """)
+        action_ops_layout.addWidget(self.matching_btn)
         
         file_layout.addLayout(action_ops_layout)
 
@@ -511,8 +534,13 @@ class InventoryWidget(QWidget):
         self.route_template_table.setAlternatingRowColors(True)
         self.route_template_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.route_template_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.route_template_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.route_template_table.horizontalHeader().setStretchLastSection(True)
+        header = self.route_template_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        # 評価列（列インデックス9）だけは後で手動調整するため、一旦Interactiveに設定
+        header.setSectionResizeMode(9, QHeaderView.Interactive)
+        header.setStretchLastSection(True)
+        # 星評価が綺麗に収まるように行の高さを調整
+        self.route_template_table.verticalHeader().setDefaultSectionSize(24)
         self.route_template_table.setMinimumHeight(220)
         self.route_template_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         content_layout.addWidget(self.route_template_table)
@@ -578,7 +606,49 @@ class InventoryWidget(QWidget):
             return
         try:
             route_data = self.route_summary_widget.get_route_data()
-            visits = self.route_summary_widget.get_store_visits_data()
+            
+            # ルートIDがある場合はデータベースから最新データを取得
+            route_id = self.route_summary_widget.current_route_id
+            if route_id:
+                try:
+                    # データベースから店舗訪問詳細を取得
+                    from database.route_db import RouteDatabase
+                    route_db = RouteDatabase()
+                    visits_from_db = route_db.get_store_visits_by_route(route_id)
+                    
+                    # 店舗名を補完し、評価が無い場合は計算
+                    visits = []
+                    for visit in visits_from_db:
+                        store_code = visit.get('store_code', '')
+                        store_name = visit.get('store_name', '')
+                        if not store_name and store_code:
+                            # 店舗マスタから店舗名を取得
+                            store_info = self.store_db.get_store_by_supplier_code(store_code)
+                            if store_info:
+                                store_name = store_info.get('store_name', '')
+                        visit['store_name'] = store_name
+                        
+                        # 評価が無い、または0の場合、かつ仕入れ点数と想定粗利がある場合は計算する
+                        store_rating = visit.get('store_rating')
+                        store_item_count = visit.get('store_item_count', 0)
+                        store_gross_profit = visit.get('store_gross_profit', 0)
+                        
+                        # 評価が無い、または0の場合で、仕入れ点数と想定粗利がある場合は評価を計算
+                        if (not store_rating or store_rating == 0) and store_item_count and store_gross_profit:
+                            rating = self._calculate_store_rating_from_visit(visit)
+                            visit['store_rating'] = rating
+                        elif not store_rating:
+                            visit['store_rating'] = 0.0
+                        
+                        visits.append(visit)
+                except Exception as db_err:
+                    # データベース取得に失敗した場合はテーブルから取得
+                    print(f"DBから取得失敗、テーブルから取得: {db_err}")
+                    visits = self.route_summary_widget.get_store_visits_data()
+            else:
+                # ルートIDがない場合はテーブルから取得
+                visits = self.route_summary_widget.get_store_visits_data()
+            
             self.populate_route_template_table(visits)
             route_code = route_data.get('route_code', '')
             route_date = route_data.get('route_date', '')
@@ -602,6 +672,8 @@ class InventoryWidget(QWidget):
             self.route_template_table.setRowCount(0)
             self.route_template_summary_label.setText("ルート情報: ー")
             print(f"ルートテンプレート表示更新エラー: {e}")
+            import traceback
+            traceback.print_exc()
 
     def populate_route_template_table(self, visits: List[Dict[str, Any]]):
         if not isinstance(visits, list):
@@ -618,6 +690,7 @@ class InventoryWidget(QWidget):
                 item = QTableWidgetItem("" if value is None else str(value))
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self.route_template_table.setItem(row, col, item)
+            
             _set(0, visit.get('visit_order', row + 1))
             _set(1, visit.get('store_code', ''))
             _set(2, visit.get('store_name', ''))
@@ -627,10 +700,97 @@ class InventoryWidget(QWidget):
             _set(6, visit.get('travel_time_from_prev', ''))
             _set(7, visit.get('store_gross_profit', ''))
             _set(8, visit.get('store_item_count', ''))
-            _set(9, visit.get('store_rating', ''))
+            
+            # 評価列に星評価ウィジェットを設定（ルート登録タブのロジックに合わせる）
+            store_rating = visit.get('store_rating')
+            try:
+                rating_value = float(store_rating) if store_rating not in (None, '') else 0.0
+            except (TypeError, ValueError):
+                rating_value = 0.0
+            # 星評価ウィジェットを設定（編集不可）
+            star_widget = StarRatingWidget(self.route_template_table, rating=rating_value, star_size=14)
+            star_widget.setEnabled(False)  # 編集不可にする
+            self.route_template_table.setCellWidget(row, 9, star_widget)
+            
             _set(10, visit.get('store_notes', ''))
+        
+        # 列幅の調整（評価列の右端が見切れないように）
         self.route_template_table.resizeColumnsToContents()
+        
+        # 評価列（列インデックス9）の幅を自動調整（StarRatingWidgetのsizeHint()に基づく）
+        # 最初の行の星評価ウィジェットから実際のサイズを取得
+        if len(visits) > 0:
+            first_star_widget = self.route_template_table.cellWidget(0, 9)
+            if first_star_widget and isinstance(first_star_widget, StarRatingWidget):
+                # sizeHint()で推奨サイズを取得
+                recommended_size = first_star_widget.sizeHint()
+                # 余裕を持たせて+10px追加
+                rating_column_width = recommended_size.width() + 10
+                self.route_template_table.setColumnWidth(9, rating_column_width)
+            else:
+                # フォールバック: 固定幅を設定
+                self.route_template_table.setColumnWidth(9, 130)
+        else:
+            # データがない場合のフォールバック
+            self.route_template_table.setColumnWidth(9, 130)
 
+    def _calculate_store_rating_from_visit(self, visit: Dict[str, Any]) -> float:
+        """店舗訪問データから評価を計算（ルート登録タブのロジックに合わせる）"""
+        try:
+            # 仕入れ点数、想定粗利、滞在時間を取得
+            qty = self._safe_float(visit.get('store_item_count', 0))
+            profit = self._safe_float(visit.get('store_gross_profit', 0))
+            stay = self._safe_float(visit.get('stay_duration', 0))
+            
+            if qty <= 0 or profit <= 0:
+                return 0.0
+            
+            stay = max(1.0, stay)
+            
+            # 基礎スコアを決定（仕入れ点数ベース）
+            base_score = self._determine_base_score(int(round(qty)))
+            
+            # 粗利係数を計算
+            profit_per_minute = profit / stay
+            profit_threshold = 190.0
+            profit_scale = 30.0
+            profit_factor = max(0.0, min(5.0, (profit_per_minute - profit_threshold) / profit_scale))
+            
+            # 最終スコアを計算
+            base_weight = 0.7
+            profit_weight = 0.3
+            final_score = (base_weight * base_score) + (profit_weight * profit_factor)
+            
+            # 0.0〜5.0の範囲に制限し、0.5刻みに丸める
+            final_score = max(0.0, min(5.0, final_score))
+            return round(final_score * 2) / 2
+        except Exception as e:
+            print(f"評価計算エラー: {e}")
+            return 0.0
+    
+    def _determine_base_score(self, item_count: int) -> int:
+        """仕入れ点数から基礎スコアを決定"""
+        if item_count >= 10:
+            return 5
+        if item_count >= 7:
+            return 4
+        if item_count >= 5:
+            return 3
+        if item_count >= 3:
+            return 2
+        if item_count >= 1:
+            return 1
+        return 0
+    
+    def _safe_float(self, value: Any) -> float:
+        """安全にfloatに変換"""
+        if value is None or value == '':
+            return 0.0
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+    
     @staticmethod
     def _format_hm(value: Optional[str]) -> str:
         if not value:
@@ -1750,6 +1910,149 @@ class InventoryWidget(QWidget):
             elif action == 'delete' and snapshot_id:
                 self.delete_saved_data(snapshot_id)
         
+    def run_matching(self):
+        """照合処理実行（仕入管理タブから実行）"""
+        try:
+            # ルートサマリーウィジェットの確認
+            if not self.route_summary_widget:
+                QMessageBox.warning(self, "警告", "ルート機能が未初期化です。ルータブが有効か確認してください。")
+                return
+            
+            # 現在のルートIDを取得
+            route_id = self.route_summary_widget.current_route_id
+            temp_saved = False
+            
+            # ルートIDがない場合、ルートテンプレートが読み込まれているか確認
+            if not route_id:
+                # ルートテンプレートのデータを確認
+                route_data = self.route_summary_widget.get_route_data()
+                store_visits = self.route_summary_widget.get_store_visits_data()
+                
+                # ルートテンプレートが読み込まれている場合、一時保存を試みる
+                if route_data.get('route_code') and len(store_visits) > 0:
+                    reply = QMessageBox.question(
+                        self,
+                        "ルートの一時保存",
+                        "照合処理を実行するにはルートの保存が必要です。\nルートテンプレートの情報を一時的に保存してから照合処理を実行しますか？\n（後で削除することもできます）",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.Yes
+                    )
+                    if reply == QMessageBox.Yes:
+                        try:
+                            # 一時保存を実行
+                            self.route_summary_widget.save_data()
+                            route_id = self.route_summary_widget.current_route_id
+                            if route_id:
+                                temp_saved = True
+                                QMessageBox.information(self, "保存完了", "ルートを一時保存しました。照合処理を実行します。")
+                            else:
+                                QMessageBox.warning(self, "エラー", "ルートの保存に失敗しました。")
+                                return
+                        except Exception as e:
+                            QMessageBox.warning(self, "エラー", f"ルートの保存中にエラーが発生しました:\n{str(e)}")
+                            return
+                    else:
+                        return
+                else:
+                    # ルートテンプレートが読み込まれていない場合
+                    QMessageBox.warning(
+                        self,
+                        "ルート情報なし",
+                        "照合処理を実行するにはルート情報が必要です。\n"
+                        "以下のいずれかを実行してください：\n"
+                        "1. ルート登録タブでルートを保存する\n"
+                        "2. ルートテンプレートを読み込む"
+                    )
+                    return
+            
+            # 仕入管理データの確認
+            if self.inventory_data is None or len(self.inventory_data) == 0:
+                # データがない場合、CSVファイル選択にフォールバック
+                reply = QMessageBox.question(
+                    self,
+                    "データなし",
+                    "仕入管理にデータがありません。\nCSVファイルを選択して処理しますか？",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply == QMessageBox.Yes:
+                    # ルートサマリーウィジェットのCSVファイル選択処理を呼び出し
+                    if hasattr(self.route_summary_widget, 'execute_matching_from_csv'):
+                        self.route_summary_widget.execute_matching_from_csv()
+                return
+            
+            # 時間許容誤差の設定
+            tolerance, ok = QInputDialog.getInt(
+                self,
+                "時間許容誤差",
+                "時間許容誤差（分）:",
+                30, 0, 120, 1
+            )
+            if not ok:
+                return
+            
+            # データをJSON形式に変換（NaN値を事前に処理）
+            # テーブルから最新データを取得（手入力の変更を反映）
+            self.sync_inventory_data_from_table()
+            
+            # NaN値を空文字列に置換してからJSON化
+            clean_data = self.inventory_data.fillna('')
+            purchase_data = clean_data.to_dict(orient="records")
+            
+            # APIクライアント確認
+            if not self.api_client:
+                QMessageBox.warning(self, "エラー", "APIクライアントが初期化されていません")
+                return
+            
+            # API呼び出し
+            QMessageBox.information(self, "処理中", "照合処理を実行しています...")
+            result = self.api_client.inventory_match_stores_from_data(
+                purchase_data=purchase_data,
+                route_summary_id=route_id,
+                time_tolerance_minutes=tolerance
+            )
+            
+            # 結果を仕入管理ウィジェットに反映
+            if result.get('status') == 'success':
+                # 照合後のデータで仕入管理データを更新
+                result_data = result.get('data', [])
+                if result_data:
+                    import pandas as pd
+                    updated_df = pd.DataFrame(result_data)
+                    
+                    # 仕入管理ウィジェットのデータを更新
+                    self.inventory_data = updated_df
+                    self.filtered_data = updated_df.copy()
+                    self.update_table()
+                    self.update_data_count()
+                
+                # 店舗コード別の粗利を集計してルートサマリーを更新
+                if hasattr(self.route_summary_widget, '_update_route_gross_profit_from_inventory'):
+                    self.route_summary_widget._update_route_gross_profit_from_inventory(result_data)
+                
+                # ルートテンプレート読み込みエリアの表示を更新
+                # データベースが更新された後、最新データを表示に反映
+                self.refresh_route_template_view()
+                
+                # 結果表示
+                stats = result.get('stats', {})
+                matched_rows = stats.get('matched_rows', 0)
+                total_rows = stats.get('total_rows', 0)
+                
+                msg = f"照合処理完了\n\n総行数: {total_rows}\nマッチした行数: {matched_rows}"
+                msg += "\n\n仕入管理タブのデータが更新され、\nルートサマリーの想定粗利も自動計算されました。"
+                QMessageBox.information(self, "照合処理完了", msg)
+                
+                # ルートサマリーの計算結果を更新
+                if hasattr(self.route_summary_widget, 'update_calculation_results'):
+                    self.route_summary_widget.update_calculation_results()
+            else:
+                QMessageBox.warning(self, "エラー", "照合処理に失敗しました")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"照合処理中にエラーが発生しました:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+    
     def generate_antique_register(self):
         """古物台帳生成"""
         if self.filtered_data is None:
