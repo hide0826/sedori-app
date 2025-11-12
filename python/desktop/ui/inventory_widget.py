@@ -70,7 +70,7 @@ class InventoryWidget(QWidget):
             try:
                 path = widget.last_loaded_template_path
                 if path:
-                    self.route_template_status.setText(f"前回読込: {os.path.basename(path)}\n{path}")
+                    # route_template_status は削除済み
                     self.refresh_route_template_view()
             except Exception:
                 pass
@@ -295,6 +295,23 @@ class InventoryWidget(QWidget):
             if template_group:
                 template_group.setVisible(True)
         
+        # 表示モード切り替え後にテーブルのサイズを再調整
+        # レイアウトの再計算を促す
+        if hasattr(self, 'data_table'):
+            # テーブルのサイズポリシーを確認し、必要に応じて再設定
+            self.data_table.updateGeometry()
+            # 親ウィジェットのレイアウトを更新
+            if self.data_table.parent():
+                self.data_table.parent().updateGeometry()
+            # データがある場合はテーブルを再更新して全行が表示されるようにする
+            if self.filtered_data is not None and len(self.filtered_data) > 0:
+                # テーブルの行数を確認し、必要に応じて再設定
+                current_rows = self.data_table.rowCount()
+                expected_rows = len(self.filtered_data)
+                if current_rows != expected_rows:
+                    # 行数が一致しない場合は再更新
+                    self.update_table()
+        
     def setup_search_listing_panel(self):
         """検索・フィルタと出品設定をまとめたエリア"""
         self.search_listing_group = QGroupBox("検索・フィルタと出品設定")
@@ -458,10 +475,16 @@ class InventoryWidget(QWidget):
         self.data_table.setAlternatingRowColors(True)
         self.data_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.data_table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
-        default_row_height = self.data_table.verticalHeader().defaultSectionSize()
-        approx_height = default_row_height * 12 + self.data_table.horizontalHeader().height() + 80
-        self.data_table.setMinimumHeight(approx_height)
+        
+        # スクロールバーの設定（常に表示）
+        self.data_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.data_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        
+        # テーブルのサイズポリシー（高さはExpandingでスクロール可能に）
         self.data_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        
+        # 最小高さは設定しない（レイアウトに任せる）
+        # 代わりに、親ウィジェットのレイアウトで適切にサイズが決まるようにする
         
         # ヘッダーの設定
         header = self.data_table.horizontalHeader()
@@ -481,8 +504,8 @@ class InventoryWidget(QWidget):
         # 選択変更時の自動スクロール・ハイライト機能
         self.data_table.itemSelectionChanged.connect(self.on_data_selection_changed)
         
-        # テーブルをグループに追加
-        data_layout.addWidget(self.data_table)
+        # テーブルをグループに追加（stretch factorを1に設定してスクロール可能に）
+        data_layout.addWidget(self.data_table, 1)
         
         # 統計情報をグループ内に配置
         stats_layout = QHBoxLayout()
@@ -496,19 +519,78 @@ class InventoryWidget(QWidget):
         stats_layout.addStretch()
         data_layout.addLayout(stats_layout)
         
-        self.data_group_content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        outer_layout.addWidget(self.data_group_content)
+        # コンテンツエリアのサイズポリシー（Expandingでスクロール可能に）
+        self.data_group_content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        outer_layout.addWidget(self.data_group_content, 1)  # stretch factorを1に設定
         
         def _on_toggle(checked: bool):
             self.data_group_content.setVisible(checked)
+            # 折りたたみ時にエリアの高さを調整
+            if checked:
+                # 展開時：Expandingで高さを確保
+                self.data_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+                self.data_group.setMaximumHeight(16777215)  # 制限を解除
+                # ルートテンプレートエリアを制限（取り込んだデータ一覧が優先）
+                if hasattr(self, 'route_template_group'):
+                    self.route_template_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+                    self.route_template_group.setMaximumHeight(200)  # 最大高さを制限
+                    # 店舗履歴テーブルを制限
+                    if hasattr(self, 'route_template_table'):
+                        self.route_template_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                        self.route_template_table.setMaximumHeight(200)  # 最大高さを制限
+                        # テーブルの stretch factor を0に（制限）
+                        if hasattr(self, 'route_template_content'):
+                            content_layout = self.route_template_content.layout()
+                            if isinstance(content_layout, QVBoxLayout):
+                                content_layout.setStretchFactor(self.route_template_table, 0)  # テーブルを制限
+                    # レイアウトの stretch factor を動的に変更
+                    main_layout = self.layout()
+                    if isinstance(main_layout, QVBoxLayout):
+                        # 取り込んだデータ一覧の stretch factor を3に（展開時）
+                        main_layout.setStretchFactor(self.data_group, 3)
+                        # ルートテンプレートの stretch factor を0に（制限）
+                        main_layout.setStretchFactor(self.route_template_group, 0)
+            else:
+                # 折りたたみ時：Maximumで高さを最小限に
+                self.data_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+                # 折りたたみ時は高さを最小限にする（ヘッダーの高さのみ）
+                header_height = self.data_group.sizeHint().height()
+                self.data_group.setMaximumHeight(header_height)
+                # ルートテンプレートエリアを拡張（空いたスペースを利用）
+                if hasattr(self, 'route_template_group'):
+                    self.route_template_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+                    self.route_template_group.setMaximumHeight(16777215)  # 制限を解除
+                    # 店舗履歴テーブルを拡張（ルート情報ラベルは固定）
+                    if hasattr(self, 'route_template_table'):
+                        self.route_template_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                        self.route_template_table.setMaximumHeight(16777215)  # 制限を解除
+                        # テーブルの stretch factor を大きく（空いたスペースを利用）
+                        if hasattr(self, 'route_template_content'):
+                            content_layout = self.route_template_content.layout()
+                            if isinstance(content_layout, QVBoxLayout):
+                                content_layout.setStretchFactor(self.route_template_table, 1)  # テーブルを拡張
+                    # レイアウトの stretch factor を動的に変更
+                    main_layout = self.layout()
+                    if isinstance(main_layout, QVBoxLayout):
+                        # 取り込んだデータ一覧の stretch factor を0に（折りたたみ時）
+                        main_layout.setStretchFactor(self.data_group, 0)
+                        # ルートテンプレートの stretch factor を大きく（空いたスペースを利用）
+                        main_layout.setStretchFactor(self.route_template_group, 3)
+            # レイアウトを再計算
+            self.data_group.updateGeometry()
+            if hasattr(self, 'route_template_group'):
+                self.route_template_group.updateGeometry()
+            if self.data_group.parent():
+                self.data_group.parent().updateGeometry()
         self.data_group.toggled.connect(_on_toggle)
         self.data_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         
-        self.layout().addWidget(self.data_group)
+        # レイアウトに追加（stretch factorを大きくして、取り込んだデータ一覧エリアの高さを確保）
+        self.layout().addWidget(self.data_group, 3)  # stretch factor = 3（高さを優先）
 
     def setup_route_template_panel(self):
         """ルートテンプレート読み込みエリア（レイアウト先行の仮実装）"""
-        self.route_template_group = QGroupBox("ルートテンプレート読み込み")
+        self.route_template_group = QGroupBox("ルートテンプレート")
         self.route_template_group.setCheckable(True)
         self.route_template_group.setChecked(True)
         outer_layout = QVBoxLayout(self.route_template_group)
@@ -522,7 +604,8 @@ class InventoryWidget(QWidget):
         
         self.route_template_summary_label = QLabel("ルート情報: ー")
         self.route_template_summary_label.setStyleSheet("font-weight: bold;")
-        content_layout.addWidget(self.route_template_summary_label)
+        # ルート情報ラベルは固定サイズ（stretch factor = 0）
+        content_layout.addWidget(self.route_template_summary_label, 0)
         
         self.route_template_table = QTableWidget()
         headers = [
@@ -541,9 +624,12 @@ class InventoryWidget(QWidget):
         header.setStretchLastSection(True)
         # 星評価が綺麗に収まるように行の高さを調整
         self.route_template_table.verticalHeader().setDefaultSectionSize(24)
-        self.route_template_table.setMinimumHeight(220)
-        self.route_template_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        content_layout.addWidget(self.route_template_table)
+        # ルートテンプレートテーブルの高さ設定（初期値は制限あり）
+        self.route_template_table.setMinimumHeight(150)
+        self.route_template_table.setMaximumHeight(200)  # 初期は最大高さを制限
+        self.route_template_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        # テーブルをレイアウトに追加（stretch factorを0にして高さを制限、折りたたみ時に動的に変更）
+        content_layout.addWidget(self.route_template_table, 0)
         
         buttons_layout = QHBoxLayout()
         self.combined_save_btn = QPushButton("統合保存")
@@ -556,26 +642,36 @@ class InventoryWidget(QWidget):
         buttons_layout.addStretch()
         content_layout.addLayout(buttons_layout)
         
-        self.route_template_status = QLabel("テンプレート未選択")
-        self.route_template_status.setWordWrap(True)
-        self.route_template_status.setStyleSheet("color: #cccccc;")
-        content_layout.addWidget(self.route_template_status)
+        # 前回読込表示を削除（取り込んだデータ一覧エリアの高さを確保）
+        # self.route_template_status は削除
         
         outer_layout.addWidget(self.route_template_content)
-        try:
-            s = self._get_qsettings()
-            last_path = s.value("route_template/last_selected", "", type=str) or ""
-            if last_path:
-                self.route_template_status.setText(f"前回読込: {os.path.basename(last_path)}\n{last_path}")
-        except Exception:
-            pass
         
         def _on_toggle(checked: bool):
             self.route_template_content.setVisible(checked)
+            # 折りたたみ時にエリアの高さを調整
+            if checked:
+                # 展開時：Maximumで高さを制限
+                self.route_template_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+                self.route_template_group.setMaximumHeight(16777215)  # 制限を解除
+            else:
+                # 折りたたみ時：Maximumで高さを最小限に
+                self.route_template_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+                # 折りたたみ時は高さを最小限にする（ヘッダーの高さのみ）
+                header_height = self.route_template_group.sizeHint().height()
+                self.route_template_group.setMaximumHeight(header_height)
+            # レイアウトを再計算
+            self.route_template_group.updateGeometry()
+            if self.route_template_group.parent():
+                self.route_template_group.parent().updateGeometry()
         self.route_template_group.toggled.connect(_on_toggle)
         self.route_template_content.setVisible(True)
         
-        self.layout().addWidget(self.route_template_group)
+        # ルートテンプレートグループのサイズポリシーを制限（高さを縮小）
+        self.route_template_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        
+        # レイアウトに追加（stretch factorを小さくして、取り込んだデータ一覧エリアの高さを確保）
+        self.layout().addWidget(self.route_template_group, 0)  # stretch factor = 0（最小限の高さ）
         self.refresh_route_template_view()
 
     def apply_route_template(self):
@@ -586,7 +682,7 @@ class InventoryWidget(QWidget):
         try:
             file_path = self.route_summary_widget.load_template()
             if not file_path:
-                self.route_template_status.setText("テンプレート未選択")
+                # route_template_status は削除済み
                 return
             try:
                 s = self._get_qsettings()
@@ -594,7 +690,7 @@ class InventoryWidget(QWidget):
             except Exception:
                 pass
             self.refresh_route_template_view()
-            self.route_template_status.setText(f"読み込み完了: {os.path.basename(file_path)}\n{file_path}")
+            # route_template_status は削除済み（読み込み完了メッセージは表示しない）
         except Exception as e:
             QMessageBox.critical(self, "テンプレート読込エラー", f"テンプレートの読み込みに失敗しました:\n{e}")
         
@@ -654,6 +750,8 @@ class InventoryWidget(QWidget):
             route_date = route_data.get('route_date', '')
             dep = self._format_hm(route_data.get('departure_time'))
             ret = self._format_hm(route_data.get('return_time'))
+            toll_outbound = route_data.get('toll_fee_outbound', 0)
+            toll_return = route_data.get('toll_fee_return', 0)
             summary_parts = []
             if route_date:
                 summary_parts.append(route_date)
@@ -664,9 +762,24 @@ class InventoryWidget(QWidget):
                 times.append(f"出発 {dep}")
             if ret:
                 times.append(f"帰宅 {ret}")
+            costs = []
+            if toll_outbound is not None:
+                try:
+                    toll_outbound_val = float(toll_outbound)
+                    costs.append(f"往路高速代 {int(toll_outbound_val):,}円")
+                except (ValueError, TypeError):
+                    pass
+            if toll_return is not None:
+                try:
+                    toll_return_val = float(toll_return)
+                    costs.append(f"復路高速代 {int(toll_return_val):,}円")
+                except (ValueError, TypeError):
+                    pass
             summary_text = " / ".join(summary_parts) if summary_parts else "ー"
             if times:
                 summary_text = f"{summary_text} | {' / '.join(times)}"
+            if costs:
+                summary_text = f"{summary_text} | {' / '.join(costs)}"
             self.route_template_summary_label.setText(f"ルート情報: {summary_text}")
         except Exception as e:
             self.route_template_table.setRowCount(0)
@@ -830,24 +943,18 @@ class InventoryWidget(QWidget):
         if not snapshots:
             QMessageBox.information(self, "統合読込", "統合スナップショットがありません。")
             return
-        items = [f"{snap['snapshot_name']} ({snap['created_at']})" for snap in snapshots]
-        selection, ok = QInputDialog.getItem(
-            self,
-            "統合スナップショット読込",
-            "読み込むスナップショットを選択してください:",
-            items,
-            0,
-            False
-        )
-        if not ok or not selection:
-            return
-        index = items.index(selection)
-        snapshot_id = snapshots[index]["id"]
-        snapshot = self.route_snapshot_db.get_snapshot(snapshot_id)
-        if not snapshot:
-            QMessageBox.warning(self, "統合読込", "選択したスナップショットを取得できませんでした。")
-            return
-        self._restore_combined_snapshot(snapshot)
+        
+        # カスタムダイアログを使用
+        dlg = CombinedSnapshotDialog(self.route_snapshot_db, self)
+        res = dlg.exec()
+        if res == QDialog.Accepted:
+            snapshot_id = dlg.get_selected_snapshot_id()
+            if snapshot_id:
+                snapshot = self.route_snapshot_db.get_snapshot(snapshot_id)
+                if not snapshot:
+                    QMessageBox.warning(self, "統合読込", "選択したスナップショットを取得できませんでした。")
+                    return
+                self._restore_combined_snapshot(snapshot)
 
     def _restore_combined_snapshot(self, snapshot: Dict[str, Any]):
         try:
@@ -873,7 +980,7 @@ class InventoryWidget(QWidget):
                 if hasattr(self.route_summary_widget, "apply_route_snapshot"):
                     self.route_summary_widget.apply_route_snapshot(route_data, visits)
                 self.refresh_route_template_view()
-            self.route_template_status.setText(f"スナップショット読込: {snapshot.get('snapshot_name', 'N/A')}")
+            # route_template_status は削除済み（スナップショット読込メッセージは表示しない）
             QMessageBox.information(self, "統合読込", "統合スナップショットを読み込みました。")
         except Exception as e:
             QMessageBox.critical(self, "統合読込エラー", f"スナップショットの読み込みに失敗しました:\n{e}")
@@ -1067,46 +1174,76 @@ class InventoryWidget(QWidget):
             return
             
         # テーブルの設定
-        self.data_table.setRowCount(len(self.filtered_data))
+        row_count = len(self.filtered_data)
+        print(f"[DEBUG] update_table: filtered_data行数={row_count}, inventory_data行数={len(self.inventory_data) if self.inventory_data is not None else 0}")
+        self.data_table.setRowCount(row_count)
         
-        # データの設定
-        for i, row in self.filtered_data.iterrows():
-            for j, column in enumerate(self.column_headers):
-                value = str(row.get(column, ""))
-                
-                # SKU列の特別処理（空の場合は「未実装」と表示）
-                if column == "SKU":
-                    if not value or value == "" or value == "nan" or pd.isna(value):
-                        item = QTableWidgetItem("未実装")
+        # データの設定（テーブルの行番号は0から始まる連続した番号にする）
+        processed_rows = 0
+        try:
+            # iterrows()の代わりに、インデックスで直接アクセス
+            for table_row_idx in range(row_count):
+                if table_row_idx >= len(self.filtered_data):
+                    break
+                row = self.filtered_data.iloc[table_row_idx]
+                for j, column in enumerate(self.column_headers):
+                    # Seriesから値を取得（get()ではなく直接アクセス）
+                    if column in row.index:
+                        value = row[column]
                     else:
-                        item = QTableWidgetItem(str(value))
-                # 商品名列の特別処理（50文字制限+ツールチップ）
-                elif column == "商品名":
-                    original_value = value
-                    display_value = original_value[:50] + '...' if len(original_value) > 50 else original_value
-                    item = QTableWidgetItem(display_value)
-                    # 常にフルテキストをツールチップ/UserRoleに保持（保存時はこれを使う）
-                    item.setToolTip(original_value)
-                    item.setData(Qt.UserRole, original_value)
-                else:
-                    item = QTableWidgetItem(value)
-                
-                # 価格列の数値フォーマット
-                if column in ["仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点"]:
-                    try:
-                        # 数値に変換できるかチェック
-                        if value and str(value).replace(".", "").replace("-", "").replace(",", "").isdigit():
-                            num_value = float(str(value).replace(",", ""))
-                            item.setText(f"{num_value:,.0f}")
+                        value = ""
+                    value = str(value) if pd.notna(value) else ""
+                    
+                    # SKU列の特別処理（空の場合は「未実装」と表示）
+                    if column == "SKU":
+                        if not value or value == "" or value == "nan" or pd.isna(value):
+                            item = QTableWidgetItem("未実装")
                         else:
+                            item = QTableWidgetItem(str(value))
+                    # 商品名列の特別処理（50文字制限+ツールチップ）
+                    elif column == "商品名":
+                        original_value = value
+                        display_value = original_value[:50] + '...' if len(original_value) > 50 else original_value
+                        item = QTableWidgetItem(display_value)
+                        # 常にフルテキストをツールチップ/UserRoleに保持（保存時はこれを使う）
+                        item.setToolTip(original_value)
+                        item.setData(Qt.UserRole, original_value)
+                    else:
+                        item = QTableWidgetItem(value)
+                    
+                    # 価格列の数値フォーマット
+                    if column in ["仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点"]:
+                        try:
+                            # 数値に変換できるかチェック
+                            if value and str(value).replace(".", "").replace("-", "").replace(",", "").isdigit():
+                                num_value = float(str(value).replace(",", ""))
+                                item.setText(f"{num_value:,.0f}")
+                            else:
+                                item.setText(str(value))
+                        except:
                             item.setText(str(value))
-                    except:
-                        item.setText(str(value))
-                
-                self.data_table.setItem(i, j, item)
+                    
+                    self.data_table.setItem(table_row_idx, j, item)
+                processed_rows = max(processed_rows, table_row_idx + 1)
+        except Exception as e:
+            print(f"[ERROR] update_table: データ設定中にエラー発生: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        print(f"[DEBUG] update_table: 処理完了。設定した行数={processed_rows}, テーブルの行数={self.data_table.rowCount()}, filtered_data行数={row_count}")
+        
+        # 行数が一致しない場合は再設定
+        if self.data_table.rowCount() != row_count:
+            print(f"[WARNING] update_table: テーブルの行数が不一致。再設定します。現在={self.data_table.rowCount()}, 期待値={row_count}")
+            self.data_table.setRowCount(row_count)
         
         # 列幅の自動調整
         self.data_table.resizeColumnsToContents()
+        
+        # 最終確認: テーブルの行数を再度確認
+        final_row_count = self.data_table.rowCount()
+        if final_row_count != row_count:
+            print(f"[ERROR] update_table: 最終確認で行数が不一致。テーブル={final_row_count}, 期待値={row_count}")
 
         # 除外ハイライトがONなら適用
         if self.excluded_highlight_on:
@@ -1194,8 +1331,10 @@ class InventoryWidget(QWidget):
         # 検索条件
         search_text = self.search_edit.text().lower()
         
-        # Q列フィルタ
-        q_filter = self.q_filter_combo.currentText()
+        # Q列フィルタ（存在する場合のみ）
+        q_filter = ""
+        if hasattr(self, 'q_filter_combo') and self.q_filter_combo:
+            q_filter = self.q_filter_combo.currentText()
         
         # 価格範囲フィルタ
         min_price = self.min_price_spin.value()
@@ -2345,6 +2484,91 @@ class InventoryWidget(QWidget):
                     parts.append(f"{{custom:{text}}}")
         tpl = "-".join(parts) if parts else self.tpl_edit.text().strip()
         self.tpl_edit.setText(tpl)
+
+
+class CombinedSnapshotDialog(QDialog):
+    """統合スナップショットの一覧から選択して読込するダイアログ"""
+    
+    def __init__(self, route_snapshot_db, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("統合スナップショット読込")
+        self.resize(720, 420)
+        self.route_snapshot_db = route_snapshot_db
+        self._selected_snapshot_id = None
+        
+        layout = QVBoxLayout(self)
+        
+        # 説明ラベル
+        info_label = QLabel("読み込むスナップショットを選択してください:")
+        layout.addWidget(info_label)
+        
+        # 一覧テーブル
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["ID", "保存名", "作成日時"])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setStretchLastSection(True)
+        layout.addWidget(self.table)
+        
+        # ボタン
+        btns = QDialogButtonBox()
+        self.load_btn = QPushButton("OK")
+        self.cancel_btn = QPushButton("Cancel")
+        btns.addButton(self.load_btn, QDialogButtonBox.AcceptRole)
+        btns.addButton(self.cancel_btn, QDialogButtonBox.RejectRole)
+        layout.addWidget(btns)
+        
+        self.load_btn.clicked.connect(self._on_load)
+        self.cancel_btn.clicked.connect(self.reject)
+        
+        self._reload()
+    
+    def _reload(self):
+        """一覧を再読み込み"""
+        try:
+            snapshots = self.route_snapshot_db.list_snapshots()
+            
+            self.table.setRowCount(len(snapshots))
+            for i, snap in enumerate(snapshots):
+                snapshot_id = str(snap.get('id', ''))
+                snapshot_name = str(snap.get('snapshot_name', ''))
+                created_at = str(snap.get('created_at', ''))
+                
+                self.table.setItem(i, 0, QTableWidgetItem(snapshot_id))
+                self.table.setItem(i, 1, QTableWidgetItem(snapshot_name))
+                self.table.setItem(i, 2, QTableWidgetItem(created_at))
+            
+            self.table.resizeColumnsToContents()
+        except Exception as e:
+            QMessageBox.warning(self, "エラー", f"一覧の読み込みに失敗しました:\n{str(e)}")
+    
+    def _selected_id(self):
+        """選択されている行のIDを取得"""
+        sel = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        if not sel:
+            return None
+        r = sel[0].row()
+        item = self.table.item(r, 0)
+        try:
+            return int(item.text()) if item else None
+        except Exception:
+            return None
+    
+    def _on_load(self):
+        """読み込みボタンクリック"""
+        snapshot_id = self._selected_id()
+        if snapshot_id is None:
+            QMessageBox.information(self, "情報", "読み込むスナップショットを選択してください")
+            return
+        self._selected_snapshot_id = snapshot_id
+        self.accept()
+    
+    def get_selected_snapshot_id(self):
+        """選択されたスナップショットIDを取得"""
+        return self._selected_snapshot_id
 
 
 class SavedInventoryDialog(QDialog):
