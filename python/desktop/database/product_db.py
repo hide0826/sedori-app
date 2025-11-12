@@ -194,6 +194,35 @@ class ProductDatabase:
         self.conn.commit()
         return cur.rowcount > 0
 
+    def find_by_date_and_asin(self, purchase_date: str, asin: str) -> Optional[Dict[str, Any]]:
+        """
+        仕入れ日とASINで商品を検索する
+        
+        Args:
+            purchase_date: 仕入れ日（yyyy-MM-dd または yyyy/MM/dd 形式）
+            asin: ASINコード
+        
+        Returns:
+            マッチした商品情報（最初の1件）、見つからない場合はNone
+        """
+        if not purchase_date or not asin:
+            return None
+        
+        # 日付形式を正規化（yyyy-MM-dd または yyyy/MM/dd を yyyy-MM-dd に統一）
+        normalized_date = purchase_date.replace('/', '-')
+        # 時刻部分がある場合は日付部分のみ抽出
+        if ' ' in normalized_date:
+            normalized_date = normalized_date.split(' ')[0]
+        
+        cur = self.conn.cursor()
+        # 仕入れ日とASINで検索（ASINは大文字小文字を区別しない）
+        cur.execute(
+            "SELECT * FROM products WHERE purchase_date LIKE ? AND UPPER(asin) = UPPER(?) ORDER BY updated_at DESC LIMIT 1",
+            (f"{normalized_date}%", asin)
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
     def delete(self, sku: str) -> bool:
         cur = self.conn.cursor()
         cur.execute("DELETE FROM products WHERE sku = ?", (sku,))

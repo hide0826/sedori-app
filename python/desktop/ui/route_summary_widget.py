@@ -121,12 +121,6 @@ class RouteSummaryWidget(QWidget):
         load_template_btn.clicked.connect(self.load_template)
         button_layout.addWidget(load_template_btn)
         
-        # 照合処理ボタン
-        matching_btn = QPushButton("照合処理実行")
-        matching_btn.clicked.connect(self.run_matching)
-        matching_btn.setStyleSheet("background-color: #007bff; color: white;")
-        button_layout.addWidget(matching_btn)
-        
         # 店舗自動追加ボタン
         auto_add_btn = QPushButton("選択ルートの店舗を自動追加")
         auto_add_btn.clicked.connect(self.auto_add_stores)
@@ -378,12 +372,6 @@ class RouteSummaryWidget(QWidget):
         clear_all_btn.clicked.connect(self.clear_all_rows)
         clear_all_btn.setStyleSheet("background-color: #dc3545; color: white;")
         button_layout.addWidget(clear_all_btn)
-        
-        # 照合再計算ボタン
-        recalc_btn = QPushButton("照合再計算")
-        recalc_btn.clicked.connect(self.recalculate_matching)
-        recalc_btn.setStyleSheet("background-color: #ff9800; color: white;")
-        button_layout.addWidget(recalc_btn)
         
         button_layout.addStretch()
         
@@ -985,6 +973,16 @@ class RouteSummaryWidget(QWidget):
             store_codes = []
             if route_name:
                 stores = self.get_stores_for_route(route_name)
+                # 店舗マスタの備考欄を取得してstoresに追加
+                for store in stores:
+                    supplier_code = store.get('supplier_code')
+                    if supplier_code:
+                        store_info = self.store_db.get_store_by_supplier_code(supplier_code)
+                        if store_info:
+                            custom_fields = store_info.get('custom_fields', {})
+                            notes = custom_fields.get('notes', '')
+                            # storesに備考を追加（テンプレート生成時に使用）
+                            store['notes'] = notes
                 store_codes = [
                     store.get('supplier_code')
                     for store in stores

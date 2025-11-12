@@ -237,13 +237,15 @@ class TemplateGenerator:
             if stores_data:
                 # 店舗データを使用してテンプレートを生成
                 for i, store in enumerate(stores_data, 1):
+                    # 店舗マスタの備考欄からメモを取得
+                    notes = store.get('notes', '')
                     visit_data_rows.append([
                         store.get('supplier_code', ''),  # 店舗コード
                         store.get('store_name', ''),  # 店舗名
                         '',  # 到着時刻
                         '',  # 出発時刻
                         '0',  # 滞在時間（数式で自動計算される）
-                        ''   # 備考
+                        notes   # 備考（店舗マスタから取得）
                     ])
             elif store_codes:
                 # 店舗コードのみの場合

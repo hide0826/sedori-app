@@ -30,6 +30,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from database.store_db import StoreDatabase
 from database.inventory_db import InventoryDatabase
 from database.inventory_route_snapshot_db import InventoryRouteSnapshotDatabase
+from database.product_db import ProductDatabase
+from database.product_purchase_db import ProductPurchaseDatabase
 from ui.star_rating_widget import StarRatingWidget
 
 
@@ -54,6 +56,8 @@ class InventoryWidget(QWidget):
         self.store_db = StoreDatabase()
         self.inventory_db = InventoryDatabase()
         self.route_snapshot_db = InventoryRouteSnapshotDatabase()
+        self.product_db = ProductDatabase()
+        self.product_purchase_db = ProductPurchaseDatabase()
         
         # UIの初期化
         self.route_template_btn = None
@@ -745,6 +749,9 @@ class InventoryWidget(QWidget):
                 # ルートIDがない場合はテーブルから取得
                 visits = self.route_summary_widget.get_store_visits_data()
             
+            # メモ欄があれば店舗マスタの備考欄に保存・追記
+            self._save_memos_to_store_master(visits)
+            
             self.populate_route_template_table(visits)
             route_code = route_data.get('route_code', '')
             route_date = route_data.get('route_date', '')
@@ -825,7 +832,18 @@ class InventoryWidget(QWidget):
             star_widget.setEnabled(False)  # 編集不可にする
             self.route_template_table.setCellWidget(row, 9, star_widget)
             
-            _set(10, visit.get('store_notes', ''))
+            # メモ列（列インデックス10）は読み込み専用
+            # 店舗マスタの備考欄からメモを取得して表示
+            store_code = visit.get('store_code', '')
+            memo_text = visit.get('store_notes', '')
+            if store_code and not memo_text:
+                # 店舗マスタから備考を取得
+                store_info = self.store_db.get_store_by_supplier_code(store_code)
+                if store_info:
+                    custom_fields = store_info.get('custom_fields', {})
+                    memo_text = custom_fields.get('notes', '')
+            
+            _set(10, memo_text)
         
         # 列幅の調整（評価列の右端が見切れないように）
         self.route_template_table.resizeColumnsToContents()
@@ -847,6 +865,54 @@ class InventoryWidget(QWidget):
             # データがない場合のフォールバック
             self.route_template_table.setColumnWidth(9, 130)
 
+    def _save_memos_to_store_master(self, visits: List[Dict[str, Any]]):
+        """ルートテンプレート読み込み時にメモ欄があれば店舗マスタの備考欄に保存・追記"""
+        for visit in visits:
+            store_code = visit.get('store_code', '')
+            memo_text = visit.get('store_notes', '').strip()
+            
+            # メモ欄が空の場合はスキップ
+            if not store_code or not memo_text:
+                continue
+            
+            # 店舗マスタから現在の備考を取得
+            store_info = self.store_db.get_store_by_supplier_code(store_code)
+            if not store_info:
+                continue
+            
+            # custom_fieldsから現在のnotesを取得
+            custom_fields = store_info.get('custom_fields', {})
+            current_notes = custom_fields.get('notes', '').strip()
+            
+            # 新しいメモを追記（カンマ区切り）
+            if current_notes:
+                # 既存の備考に新しいメモを追記（重複チェック）
+                notes_list = [n.strip() for n in current_notes.split(',') if n.strip()]
+                if memo_text not in notes_list:
+                    notes_list.append(memo_text)
+                    updated_notes = ', '.join(notes_list)
+                else:
+                    updated_notes = current_notes  # 既に存在する場合は変更なし
+            else:
+                updated_notes = memo_text  # 既存の備考がない場合は新しいメモを設定
+            
+            # 店舗マスタの備考欄を更新
+            custom_fields['notes'] = updated_notes
+            store_data = {
+                'affiliated_route_name': store_info.get('affiliated_route_name'),
+                'route_code': store_info.get('route_code'),
+                'supplier_code': store_info.get('supplier_code'),
+                'store_name': store_info.get('store_name'),
+                'address': store_info.get('address'),
+                'phone': store_info.get('phone'),
+                'custom_fields': custom_fields
+            }
+            
+            try:
+                self.store_db.update_store(store_info['id'], store_data)
+            except Exception as e:
+                print(f"店舗マスタの備考欄更新エラー: {e}")
+    
     def _calculate_store_rating_from_visit(self, visit: Dict[str, Any]) -> float:
         """店舗訪問データから評価を計算（ルート登録タブのロジックに合わせる）"""
         try:
@@ -965,6 +1031,10 @@ class InventoryWidget(QWidget):
                 except Exception:
                     self.inventory_data = pd.DataFrame()
                 self.filtered_data = self.inventory_data.copy()
+                
+                # SKU自動マッチング処理（商品DBから仕入れ日・ASINで検索）
+                self._auto_match_sku_from_product_db()
+                
                 self.update_table()
                 self.update_data_count()
             else:
@@ -986,6 +1056,114 @@ class InventoryWidget(QWidget):
             QMessageBox.critical(self, "統合読込エラー", f"スナップショットの読み込みに失敗しました:\n{e}")
 
     # アクションボタンはファイル操作エリアに統合済み
+    
+    def _auto_match_sku_from_product_db(self):
+        """
+        商品DBから仕入れ日とASINでマッチングしてSKUを自動設定する
+        
+        取り込んだデータ一覧のSKUが「未実装」の行について、
+        商品DBタブの仕入DBに仕入れ日・ASINを確認してマッチする物はSKUを取得して設定する
+        """
+        if self.inventory_data is None or len(self.inventory_data) == 0:
+            return
+        
+        matched_count = 0
+        try:
+            # 商品DBタブの仕入DBから最新スナップショットを取得
+            purchase_records = []
+            try:
+                snapshots = self.product_purchase_db.list_snapshots()
+                if snapshots:
+                    latest_snapshot = self.product_purchase_db.get_snapshot(snapshots[0]["id"])
+                    if latest_snapshot and latest_snapshot.get("data"):
+                        purchase_records = latest_snapshot["data"]
+            except Exception:
+                pass
+            
+            # SKUが「未実装」の行をチェック
+            for idx, row in self.inventory_data.iterrows():
+                sku = str(row.get('SKU', '')).strip()
+                # NaNや空文字列も「未実装」として扱う
+                if pd.isna(row.get('SKU')) or sku == '' or sku == 'nan' or sku == 'None':
+                    sku = '未実装'
+                
+                if sku != '未実装':
+                    continue
+                
+                # 仕入れ日とASINを取得
+                purchase_date = str(row.get('仕入れ日', '')).strip()
+                asin = str(row.get('ASIN', '')).strip()
+                
+                # 仕入れ日とASINが両方ある場合のみ検索
+                if not purchase_date or not asin or purchase_date == 'nan' or asin == 'nan':
+                    continue
+                
+                matched_sku = None
+                
+                # 1. 商品DBタブの仕入DB（最新スナップショット）から検索
+                if purchase_records:
+                    normalized_target_date = self._normalize_date_for_match(purchase_date)
+                    for purchase_record in purchase_records:
+                        record_date = str(purchase_record.get('仕入れ日', '') or purchase_record.get('purchase_date', '')).strip()
+                        record_asin = str(purchase_record.get('ASIN', '') or purchase_record.get('asin', '')).strip()
+                        record_sku = str(purchase_record.get('SKU', '') or purchase_record.get('sku', '')).strip()
+                        
+                        normalized_record_date = self._normalize_date_for_match(record_date)
+                        
+                        # 日付形式を正規化して比較
+                        if normalized_record_date == normalized_target_date:
+                            if record_asin.upper() == asin.upper() and record_sku and record_sku != '未実装':
+                                matched_sku = record_sku
+                                break
+                
+                # 2. 商品DB（productsテーブル）から検索（フォールバック）
+                if not matched_sku:
+                    product = self.product_db.find_by_date_and_asin(purchase_date, asin)
+                    if product and product.get('sku'):
+                        matched_sku = product['sku']
+                
+                # SKUを設定
+                if matched_sku:
+                    self.inventory_data.at[idx, 'SKU'] = matched_sku
+                    matched_count += 1
+            
+            # マッチした場合はfiltered_dataも更新してテーブルを再描画
+            if matched_count > 0:
+                self.filtered_data = self.inventory_data.copy()
+                self.update_table()
+        except Exception:
+            pass
+    
+    def _normalize_date_for_match(self, date_str: str) -> str:
+        """
+        日付文字列を正規化して比較用の形式に変換
+        
+        例:
+        - "2025/11/8 10:22" -> "2025-11-08"
+        - "2025-11-08" -> "2025-11-08"
+        - "2025/11/08" -> "2025-11-08"
+        """
+        if not date_str or date_str == 'nan':
+            return ''
+        
+        date_str = str(date_str).strip()
+        
+        # 時刻部分を削除
+        if ' ' in date_str:
+            date_str = date_str.split(' ')[0]
+        
+        # スラッシュをハイフンに変換
+        date_str = date_str.replace('/', '-')
+        
+        # 日付部分を抽出（yyyy-MM-dd形式に統一）
+        parts = date_str.split('-')
+        if len(parts) >= 3:
+            year = parts[0].zfill(4)
+            month = parts[1].zfill(2)
+            day = parts[2].zfill(2)
+            return f"{year}-{month}-{day}"
+        
+        return date_str
         
     def import_csv(self):
         """CSVファイルの取込"""
@@ -1007,6 +1185,9 @@ class InventoryWidget(QWidget):
                 # 列マッピングと並び替え
                 self.inventory_data = self._map_and_reorder_columns(df)
                 self.filtered_data = self.inventory_data.copy()
+                
+                # SKU自動マッチング処理（商品DBから仕入れ日・ASINで検索）
+                self._auto_match_sku_from_product_db()
                 
                 # テーブルの更新
                 self.update_table()
