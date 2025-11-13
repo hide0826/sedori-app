@@ -95,13 +95,41 @@ class RouteVisitLogWidget(QWidget):
 
         button_layout = QHBoxLayout()
         button_layout.addStretch()
-        delete_btn = QPushButton("選択削除")
+        
+        # 個別削除ボタン（デバッグ用）
+        delete_btn = QPushButton("選択削除（デバッグ用）")
         delete_btn.clicked.connect(self.delete_selected_visit)
+        delete_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ff9800;
+                color: white;
+                border: none;
+                padding: 6px 12px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #f57c00;
+            }
+        """)
         button_layout.addWidget(delete_btn)
 
+        # 全削除ボタン（デバッグ用）
         clear_btn = QPushButton("全削除（デバッグ用）")
         clear_btn.clicked.connect(self.delete_all_visits)
-        clear_btn.setStyleSheet("color: #ff7676;")
+        clear_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                border: none;
+                padding: 6px 12px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #d32f2f;
+            }
+        """)
         button_layout.addWidget(clear_btn)
 
         table_layout.addLayout(button_layout)
@@ -218,7 +246,7 @@ class RouteVisitLogWidget(QWidget):
         return text[:5]
 
     def delete_selected_visit(self):
-        """選択行を削除"""
+        """選択行を削除（デバッグ用）"""
         selected = self.table.selectionModel().selectedRows()
         if not selected:
             QMessageBox.warning(self, "削除", "削除する行を選択してください。")
@@ -237,34 +265,73 @@ class RouteVisitLogWidget(QWidget):
 
         reply = QMessageBox.question(
             self,
-            "確認",
-            f"{len(visit_ids)}件の訪問データを削除しますか？",
+            "削除確認（デバッグ用）",
+            f"{len(visit_ids)}件の訪問データを削除しますか？\n\n※この操作は取り消せません。",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
         if reply != QMessageBox.Yes:
             return
 
-        for vid in visit_ids:
-            self.visit_db.delete_visit_by_id(vid)
+        try:
+            deleted_count = 0
+            for vid in visit_ids:
+                self.visit_db.delete_visit_by_id(vid)
+                deleted_count += 1
 
-        self.load_route_codes()
-        self.load_data()
+            QMessageBox.information(
+                self,
+                "削除完了",
+                f"{deleted_count}件の訪問データを削除しました。"
+            )
+            
+            self.load_route_codes()
+            self.load_data()
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "削除エラー",
+                f"削除中にエラーが発生しました:\n{str(e)}"
+            )
 
     def delete_all_visits(self):
         """全件削除（デバッグ用途）"""
-        reply = QMessageBox.question(
+        # 二重確認ダイアログ
+        reply1 = QMessageBox.warning(
             self,
-            "全削除の確認",
-            "ルート訪問DBの全データを削除します。よろしいですか？",
+            "全削除の確認（デバッグ用）",
+            "⚠️ 警告 ⚠️\n\nルート訪問DBの全データを削除します。\nこの操作は取り消せません。\n\n本当に実行しますか？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
-        if reply != QMessageBox.Yes:
+        if reply1 != QMessageBox.Yes:
             return
 
-        self.visit_db.delete_all_visits()
-        self.load_route_codes()
-        self.load_data()
+        # 最終確認
+        reply2 = QMessageBox.question(
+            self,
+            "最終確認",
+            "最後の確認です。\n\n全データを削除してよろしいですか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply2 != QMessageBox.Yes:
+            return
+
+        try:
+            self.visit_db.delete_all_visits()
+            QMessageBox.information(
+                self,
+                "削除完了",
+                "ルート訪問DBの全データを削除しました。"
+            )
+            self.load_route_codes()
+            self.load_data()
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "削除エラー",
+                f"削除中にエラーが発生しました:\n{str(e)}"
+            )
 
 

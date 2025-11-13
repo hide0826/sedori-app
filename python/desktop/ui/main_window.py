@@ -29,11 +29,14 @@ from ui.antique_widget import AntiqueWidget
 from ui.settings_widget import SettingsWidget
 from ui.workflow_panel import WorkflowPanel
 from ui.store_master_widget import StoreMasterWidget
-from ui.route_management_widget import RouteManagementWidget
+from ui.route_summary_widget import RouteSummaryWidget
+from ui.route_list_widget import RouteListWidget
+from ui.route_visit_widget import RouteVisitLogWidget
 from ui.analysis_widget import AnalysisWidget
 from ui.receipt_widget import ReceiptWidget
 from ui.warranty_widget import WarrantyWidget
 from ui.product_widget import ProductWidget
+from ui.condition_template_widget import ConditionTemplateWidget
 
 
 class APIServerThread(QThread):
@@ -116,13 +119,18 @@ class MainWindow(QMainWindow):
         
     def setup_tabs(self):
         """タブの設定"""
-        # 価格改定タブ
+        # 価格改定タブ（サブタブを持つ）
+        # 各価格改定ウィジェットの作成
         self.repricer_widget = RepricerWidget(self.api_client)
-        self.tab_widget.addTab(self.repricer_widget, "価格改定")
-        
-        # 価格改定ルール設定タブ
         self.repricer_settings_widget = RepricerSettingsWidget(self.api_client)
-        self.tab_widget.addTab(self.repricer_settings_widget, "価格改定ルール")
+        
+        # 価格改定用のサブタブウィジェットを作成
+        repricer_tabs = QTabWidget()
+        repricer_tabs.addTab(self.repricer_widget, "改定実行")
+        repricer_tabs.addTab(self.repricer_settings_widget, "改定ルール")
+        
+        # メインタブに追加
+        self.tab_widget.addTab(repricer_tabs, "価格改定")
         
         # 仕入管理タブ（仮に作成）
         self.inventory_widget = InventoryWidget(self.api_client)
@@ -132,20 +140,38 @@ class MainWindow(QMainWindow):
         self.antique_widget = AntiqueWidget(self.api_client, inventory_widget=self.inventory_widget)
         self.tab_widget.addTab(self.antique_widget, "古物台帳")
         
-        # 店舗マスタタブ
-        self.store_master_widget = StoreMasterWidget()
-        self.tab_widget.addTab(self.store_master_widget, "店舗マスタ")
-
-        # 商品データベースタブ
-        self.product_widget = ProductWidget(inventory_widget=self.inventory_widget)
-        self.tab_widget.addTab(self.product_widget, "商品DB")
+        # ===== ルートタブ（メインタブ） =====
+        # ルート登録とルートサマリーをまとめる
+        route_tabs = QTabWidget()
+        self.route_summary_widget = RouteSummaryWidget(self.api_client, inventory_widget=self.inventory_widget)
+        route_tabs.addTab(self.route_summary_widget, "ルート登録")
+        self.route_list_widget = RouteListWidget()
+        route_tabs.addTab(self.route_list_widget, "ルートサマリー")
         
-        # ルート関連タブ（登録・サマリー・訪問DBを統合）
-        self.route_widget = RouteManagementWidget(self.api_client, inventory_widget=self.inventory_widget)
-        self.tab_widget.addTab(self.route_widget, "ルート")
+        # 保存完了時にサマリー一覧を更新
+        self.route_summary_widget.data_saved.connect(self.route_list_widget.load_routes)
+        
+        # メインタブに追加
+        self.tab_widget.addTab(route_tabs, "ルート")
         
         # 仕入管理ウィジェットから参照できるように設定
-        self.inventory_widget.set_route_summary_widget(self.route_widget.route_summary_widget)
+        self.inventory_widget.set_route_summary_widget(self.route_summary_widget)
+        
+        # ===== データベース管理タブ（メインタブ） =====
+        # 商品DB、店舗マスタ、ルート訪問DB、コンディション説明をまとめる
+        self.store_master_widget = StoreMasterWidget()
+        self.product_widget = ProductWidget(inventory_widget=self.inventory_widget)
+        self.route_visit_widget = RouteVisitLogWidget()
+        self.condition_template_widget = ConditionTemplateWidget()
+        
+        db_management_tabs = QTabWidget()
+        db_management_tabs.addTab(self.product_widget, "商品DB")
+        db_management_tabs.addTab(self.store_master_widget, "店舗マスタ")
+        db_management_tabs.addTab(self.route_visit_widget, "ルート訪問DB")
+        db_management_tabs.addTab(self.condition_template_widget, "コンディション説明")
+        
+        # メインタブに追加
+        self.tab_widget.addTab(db_management_tabs, "データベース管理")
         
         # 分析タブ
         self.analysis_widget = AnalysisWidget()

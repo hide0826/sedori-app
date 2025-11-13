@@ -32,6 +32,7 @@ from database.inventory_db import InventoryDatabase
 from database.inventory_route_snapshot_db import InventoryRouteSnapshotDatabase
 from database.product_db import ProductDatabase
 from database.product_purchase_db import ProductPurchaseDatabase
+from database.route_visit_db import RouteVisitDatabase
 from ui.star_rating_widget import StarRatingWidget
 
 
@@ -58,6 +59,7 @@ class InventoryWidget(QWidget):
         self.route_snapshot_db = InventoryRouteSnapshotDatabase()
         self.product_db = ProductDatabase()
         self.product_purchase_db = ProductPurchaseDatabase()
+        self.route_visit_db = RouteVisitDatabase()
         
         # UIの初期化
         self.route_template_btn = None
@@ -146,31 +148,22 @@ class InventoryWidget(QWidget):
         self.clear_btn.setEnabled(False)
         file_ops_layout.addWidget(self.clear_btn)
         
-        # 保存ボタン
-        self.save_btn = QPushButton("保存")
-        self.save_btn.clicked.connect(self.save_inventory_data)
-        self.save_btn.setEnabled(False)
-        self.save_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #ffc107;
-                color: #000;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #e0a800;
-            }
-        """)
-        file_ops_layout.addWidget(self.save_btn)
+        # 統合保存ボタン
+        self.combined_save_btn = QPushButton("統合保存")
+        self.combined_save_btn.clicked.connect(self.save_combined_snapshot)
+        file_ops_layout.addWidget(self.combined_save_btn)
         
-        # 保存履歴ボタン
-        self.load_history_btn = QPushButton("保存履歴")
-        self.load_history_btn.clicked.connect(self.open_saved_history)
-        self.load_history_btn.setStyleSheet("""
+        # 統合読込ボタン
+        self.combined_load_btn = QPushButton("統合読込")
+        self.combined_load_btn.clicked.connect(self.open_combined_snapshot_history)
+        file_ops_layout.addWidget(self.combined_load_btn)
+        
+        # DB保存ボタン
+        self.db_save_btn = QPushButton("DB保存")
+        self.db_save_btn.clicked.connect(self.save_to_databases)
+        self.db_save_btn.setStyleSheet("""
             QPushButton {
-                background-color: #17a2b8;
+                background-color: #4caf50;
                 color: white;
                 border: none;
                 padding: 8px 16px;
@@ -178,10 +171,10 @@ class InventoryWidget(QWidget):
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #138496;
+                background-color: #45a049;
             }
         """)
-        file_ops_layout.addWidget(self.load_history_btn)
+        file_ops_layout.addWidget(self.db_save_btn)
         
         file_layout.addLayout(file_ops_layout)
         
@@ -462,7 +455,7 @@ class InventoryWidget(QWidget):
         
     def setup_data_table(self):
         """データテーブルエリアの設定（折りたたみ対応）"""
-        self.data_group = QGroupBox("取り込んだデータ一覧")
+        self.data_group = QGroupBox("仕入データ一覧")
         self.data_group.setCheckable(True)
         self.data_group.setChecked(True)
         outer_layout = QVBoxLayout(self.data_group)
@@ -594,7 +587,7 @@ class InventoryWidget(QWidget):
 
     def setup_route_template_panel(self):
         """ルートテンプレート読み込みエリア（レイアウト先行の仮実装）"""
-        self.route_template_group = QGroupBox("ルートテンプレート")
+        self.route_template_group = QGroupBox("ルート情報")
         self.route_template_group.setCheckable(True)
         self.route_template_group.setChecked(True)
         outer_layout = QVBoxLayout(self.route_template_group)
@@ -634,17 +627,6 @@ class InventoryWidget(QWidget):
         self.route_template_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         # テーブルをレイアウトに追加（stretch factorを0にして高さを制限、折りたたみ時に動的に変更）
         content_layout.addWidget(self.route_template_table, 0)
-        
-        buttons_layout = QHBoxLayout()
-        self.combined_save_btn = QPushButton("統合保存")
-        self.combined_save_btn.clicked.connect(self.save_combined_snapshot)
-        buttons_layout.addWidget(self.combined_save_btn)
-        
-        self.combined_load_btn = QPushButton("統合読込")
-        self.combined_load_btn.clicked.connect(self.open_combined_snapshot_history)
-        buttons_layout.addWidget(self.combined_load_btn)
-        buttons_layout.addStretch()
-        content_layout.addLayout(buttons_layout)
         
         # 前回読込表示を削除（取り込んだデータ一覧エリアの高さを確保）
         # self.route_template_status は削除
@@ -763,7 +745,13 @@ class InventoryWidget(QWidget):
             if route_date:
                 summary_parts.append(route_date)
             if route_code:
-                summary_parts.append(route_code)
+                # ルートコードを日本語名に変換
+                route_name = self.store_db.get_route_name_by_code(route_code)
+                if route_name:
+                    summary_parts.append(route_name)
+                else:
+                    # 日本語名が取得できない場合はコードをそのまま表示
+                    summary_parts.append(route_code)
             times = []
             if dep:
                 times.append(f"出発 {dep}")
@@ -995,14 +983,170 @@ class InventoryWidget(QWidget):
         payload = {"route": route_data, "visits": visits}
         route_date = route_data.get('route_date', '')
         route_code = route_data.get('route_code', '')
-        snapshot_name = (route_date or "未設定").strip()
+        
+        # ルートコードを日本語名に変換
+        route_name = None
         if route_code:
+            route_name = self.store_db.get_route_name_by_code(route_code)
+        
+        # 保存名を生成（日付 + 日本語ルート名）
+        snapshot_name = (route_date or "未設定").strip()
+        if route_name:
+            snapshot_name = f"{snapshot_name} {route_name}".strip()
+        elif route_code:
+            # 日本語名が取得できない場合はコードをそのまま使用
             snapshot_name = f"{snapshot_name} {route_code}".strip()
+        
         if not snapshot_name or snapshot_name == "未設定":
             from datetime import datetime
             snapshot_name = datetime.now().strftime("Snapshot %Y-%m-%d %H:%M:%S")
-        self.route_snapshot_db.save_snapshot(snapshot_name, purchase_records, payload)
+        
+        # 日付とルートが同じ場合は上書き保存、それ以外は新規保存
+        self.route_snapshot_db.save_snapshot(
+            snapshot_name, 
+            purchase_records, 
+            payload,
+            route_date=route_date,
+            route_code=route_code
+        )
         QMessageBox.information(self, "統合保存", f"統合スナップショットを保存しました。\n{snapshot_name}")
+    
+    def save_to_databases(self):
+        """仕入データ一覧とルート情報をそれぞれのDBに保存"""
+        import json
+        
+        messages = []
+        purchase_saved = False
+        route_saved = False
+        
+        # 1. 仕入データ一覧を商品DBの仕入DBに保存
+        if self.inventory_data is not None and len(self.inventory_data) > 0:
+            try:
+                # テーブルの編集内容をDataFrameに同期
+                self.sync_inventory_data_from_table()
+                purchase_records = self.inventory_data.fillna("").to_dict(orient="records")
+                
+                # 最新スナップショットと比較
+                snapshots = self.product_purchase_db.list_snapshots()
+                if snapshots:
+                    latest_snapshot = self.product_purchase_db.get_snapshot(snapshots[0]["id"])
+                    if latest_snapshot:
+                        existing_data = latest_snapshot.get("data", [])
+                        # データを正規化して比較（JSON文字列として比較）
+                        existing_json = json.dumps(existing_data, ensure_ascii=False, sort_keys=True, default=str)
+                        current_json = json.dumps(purchase_records, ensure_ascii=False, sort_keys=True, default=str)
+                        
+                        if existing_json == current_json:
+                            messages.append("仕入データ: 変更なし（スキップ）")
+                        else:
+                            # 差分がある場合は上書き保存
+                            self.product_purchase_db.save_snapshot("仕入管理から保存", purchase_records)
+                            purchase_saved = True
+                            messages.append(f"仕入データ: {len(purchase_records)}件を保存しました")
+                else:
+                    # スナップショットがない場合は新規保存
+                    self.product_purchase_db.save_snapshot("仕入管理から保存", purchase_records)
+                    purchase_saved = True
+                    messages.append(f"仕入データ: {len(purchase_records)}件を保存しました")
+            except Exception as e:
+                messages.append(f"仕入データ保存エラー: {str(e)}")
+        else:
+            messages.append("仕入データ: データがありません")
+        
+        # 2. ルート情報をルート訪問DBに保存
+        if self.route_summary_widget:
+            try:
+                route_data = self.route_summary_widget.get_route_data()
+                visits = self.route_summary_widget.get_store_visits_data()
+                
+                route_date = route_data.get('route_date', '')
+                route_code = route_data.get('route_code', '')
+                
+                if route_date and route_code and len(visits) > 0:
+                    # ルートコードを日本語名に変換
+                    route_name = self.store_db.get_route_name_by_code(route_code)
+                    if not route_name:
+                        route_name = route_code
+                    
+                    # 既存データを取得
+                    existing_visits = self.route_visit_db.list_route_visits(
+                        route_date=route_date,
+                        route_code=route_code
+                    )
+                    
+                    if existing_visits:
+                        # 既存データと比較
+                        # 訪問データを正規化して比較
+                        existing_visits_normalized = [
+                            {
+                                'visit_order': v.get('visit_order'),
+                                'store_code': v.get('store_code'),
+                                'store_name': v.get('store_name'),
+                                'store_in_time': v.get('store_in_time'),
+                                'store_out_time': v.get('store_out_time'),
+                                'stay_duration': v.get('stay_duration'),
+                                'travel_time_from_prev': v.get('travel_time_from_prev'),
+                                'store_gross_profit': v.get('store_gross_profit'),
+                                'store_item_count': v.get('store_item_count'),
+                                'store_rating': v.get('store_rating'),
+                                'store_notes': v.get('store_notes'),
+                            }
+                            for v in existing_visits
+                        ]
+                        current_visits_normalized = [
+                            {
+                                'visit_order': v.get('visit_order'),
+                                'store_code': v.get('store_code'),
+                                'store_name': v.get('store_name'),
+                                'store_in_time': v.get('store_in_time'),
+                                'store_out_time': v.get('store_out_time'),
+                                'stay_duration': v.get('stay_duration'),
+                                'travel_time_from_prev': v.get('travel_time_from_prev'),
+                                'store_gross_profit': v.get('store_gross_profit'),
+                                'store_item_count': v.get('store_item_count'),
+                                'store_rating': v.get('store_rating'),
+                                'store_notes': v.get('store_notes'),
+                            }
+                            for v in visits
+                        ]
+                        
+                        existing_json = json.dumps(existing_visits_normalized, ensure_ascii=False, sort_keys=True, default=str)
+                        current_json = json.dumps(current_visits_normalized, ensure_ascii=False, sort_keys=True, default=str)
+                        
+                        if existing_json == current_json:
+                            messages.append(f"ルート情報 ({route_date} {route_name}): 変更なし（スキップ）")
+                        else:
+                            # 差分がある場合は上書き保存
+                            self.route_visit_db.replace_route_visits(route_date, route_code, route_name, visits)
+                            route_saved = True
+                            messages.append(f"ルート情報 ({route_date} {route_name}): {len(visits)}件を保存しました")
+                    else:
+                        # 既存データがない場合は新規保存
+                        self.route_visit_db.replace_route_visits(route_date, route_code, route_name, visits)
+                        route_saved = True
+                        messages.append(f"ルート情報 ({route_date} {route_name}): {len(visits)}件を保存しました")
+                else:
+                    messages.append("ルート情報: ルートデータが不完全です（日付・ルートコード・訪問データが必要）")
+            except Exception as e:
+                messages.append(f"ルート情報保存エラー: {str(e)}")
+                import traceback
+                traceback.print_exc()
+        else:
+            messages.append("ルート情報: ルートテンプレートが未ロードです")
+        
+        # 結果メッセージを表示
+        if purchase_saved or route_saved:
+            QMessageBox.information(
+                self,
+                "DB保存完了",
+                "DB保存が完了しました。\n\n" + "\n".join(messages)
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "DB保存",
+                "DB保存を実行しました。\n\n" + "\n".join(messages)
+            )
 
     def open_combined_snapshot_history(self):
         snapshots = self.route_snapshot_db.list_snapshots()
@@ -1195,7 +1339,6 @@ class InventoryWidget(QWidget):
                 # ボタンの有効化
                 self.export_btn.setEnabled(True)
                 self.clear_btn.setEnabled(True)
-                self.save_btn.setEnabled(True)
                 self.generate_sku_btn.setEnabled(True)
                 self.export_listing_btn.setEnabled(True)
                 self.antique_register_btn.setEnabled(True)
@@ -2055,181 +2198,6 @@ class InventoryWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"出品CSV生成中にエラーが発生しました:\n{str(e)}")
     
-    def save_inventory_data(self):
-        """仕入データを保存"""
-        if self.filtered_data is None or len(self.filtered_data) == 0:
-            QMessageBox.warning(self, "エラー", "データがありません")
-            return
-        
-        try:
-            from PySide6.QtWidgets import QInputDialog
-            from datetime import datetime
-            
-            # まずテーブルの編集内容を DataFrame に同期（手入力の変更を反映）
-            self.sync_inventory_data_from_table()
-            
-            # 仕入れ日の取得（最初の行から）
-            first_row = self.filtered_data.iloc[0]
-            purchase_date = first_row.get('仕入れ日', '')
-            
-            # 日付のフォーマット変換
-            date_str = ""
-            if purchase_date:
-                try:
-                    # 日付文字列をパース（複数のフォーマットに対応）
-                    if isinstance(purchase_date, str):
-                        # "2025/11/02" や "2025-11-02" など
-                        for fmt in ['%Y/%m/%d', '%Y-%m-%d', '%Y.%m.%d']:
-                            try:
-                                dt = datetime.strptime(purchase_date, fmt)
-                                date_str = dt.strftime('%Y/%m/%d')
-                                break
-                            except ValueError:
-                                continue
-                    
-                    # パースできなかった場合はそのまま使用
-                    if not date_str:
-                        date_str = str(purchase_date)
-                except Exception:
-                    date_str = str(purchase_date)
-            
-            # ルート名の取得
-            route_name = ""
-            if self.route_summary_widget:
-                try:
-                    route_name = self.route_summary_widget.route_code_combo.currentText()
-                except Exception:
-                    pass
-            
-            # 保存名の生成
-            if date_str and route_name:
-                default_name = f"{date_str} {route_name}"
-            elif date_str:
-                default_name = f"{date_str} 仕入リスト"
-            else:
-                default_name = f"仕入リスト {len(self.filtered_data)}件"
-            
-            # スナップショット名の入力ダイアログ
-            snapshot_name, ok = QInputDialog.getText(
-                self,
-                "データ保存",
-                f"この名称で保存してよろしいですか？\n編集も可能です:",
-                text=default_name
-            )
-            
-            if not ok or not snapshot_name.strip():
-                return
-            
-            # データを辞書形式に変換（同期後の最新データ）
-            # 商品名が50文字で切られていないか確認（デバッグ用）
-            sample_product_name = None
-            for row in self.filtered_data.itertuples():
-                if hasattr(row, '商品名') and row.商品名:
-                    sample_product_name = str(row.商品名)
-                    if len(sample_product_name) > 50:
-                        print(f"保存前の商品名（全文）: {sample_product_name[:100]}...")
-                    break
-            
-            data_list = self.filtered_data.to_dict('records')
-            
-            # データベースに保存
-            snapshot_id = self.inventory_db.save_inventory_data(
-                snapshot_name.strip(),
-                data_list
-            )
-            
-            QMessageBox.information(
-                self,
-                "保存完了",
-                f"データを保存しました\nID: {snapshot_id}\n件数: {len(data_list)}件"
-            )
-            
-        except Exception as e:
-            QMessageBox.critical(self, "エラー", f"データ保存中にエラーが発生しました:\n{str(e)}")
-            import traceback
-            traceback.print_exc()
-    
-    def load_saved_data(self, snapshot_id: int):
-        """指定IDの保存データを読み込む"""
-        try:
-            snapshot = self.inventory_db.get_snapshot_by_id(snapshot_id)
-            if not snapshot:
-                QMessageBox.information(self, "情報", "保存済みデータが見つかりませんでした")
-                return
-            
-            # データをDataFrameに変換
-            data_list = snapshot.get('data', [])
-            if not data_list:
-                QMessageBox.warning(self, "警告", "データが空です")
-                return
-            
-            # DataFrameとして読み込み
-            self.inventory_data = pd.DataFrame(data_list)
-            self.filtered_data = self.inventory_data.copy()
-            
-            # テーブル更新
-            self.update_table()
-            
-            # ボタンの有効化
-            self.export_btn.setEnabled(True)
-            self.clear_btn.setEnabled(True)
-            self.save_btn.setEnabled(True)
-            self.generate_sku_btn.setEnabled(True)
-            self.export_listing_btn.setEnabled(True)
-            self.antique_register_btn.setEnabled(True)
-            
-            # データ件数更新
-            self.update_data_count()
-            
-            QMessageBox.information(
-                self,
-                "読み込み完了",
-                f"データを読み込みました\n件数: {len(self.filtered_data)}件"
-            )
-            
-        except Exception as e:
-            QMessageBox.critical(self, "エラー", f"データ読み込み中にエラーが発生しました:\n{str(e)}")
-            import traceback
-            traceback.print_exc()
-    
-    def delete_saved_data(self, snapshot_id: int):
-        """指定IDの保存済みデータを削除"""
-        try:
-            reply = QMessageBox.question(
-                self,
-                "削除確認",
-                "この保存データを削除しますか？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
-            )
-            
-            if reply != QMessageBox.Yes:
-                return
-            
-            ok = self.inventory_db.delete_snapshot(snapshot_id)
-            if ok:
-                QMessageBox.information(self, "完了", "保存データを削除しました")
-            else:
-                QMessageBox.warning(self, "警告", "削除できませんでした")
-                
-        except Exception as e:
-            QMessageBox.critical(self, "エラー", f"保存データの削除に失敗しました:\n{str(e)}")
-            import traceback
-            traceback.print_exc()
-    
-    def open_saved_history(self):
-        """保存履歴ダイアログを開き、読み込み/削除を実行"""
-        from typing import Optional
-        
-        dlg = SavedInventoryDialog(self.inventory_db, self)
-        res = dlg.exec()
-        if res == QDialog.Accepted:
-            action, snapshot_id = dlg.get_result()
-            if action == 'load' and snapshot_id:
-                self.load_saved_data(snapshot_id)
-            elif action == 'delete' and snapshot_id:
-                self.delete_saved_data(snapshot_id)
-        
     def run_matching(self):
         """照合処理実行（仕入管理タブから実行）"""
         try:
@@ -2752,118 +2720,3 @@ class CombinedSnapshotDialog(QDialog):
         return self._selected_snapshot_id
 
 
-class SavedInventoryDialog(QDialog):
-    """保存済み仕入データの一覧から選択して読込/削除するダイアログ"""
-    
-    def __init__(self, inventory_db: 'InventoryDatabase', parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("保存履歴")
-        self.resize(720, 420)
-        self.inventory_db = inventory_db
-        self._result_action = None  # 'load' or 'delete'
-        self._result_id = None
-        
-        layout = QVBoxLayout(self)
-        
-        # 検索行
-        filt = QHBoxLayout()
-        from PySide6.QtWidgets import QDateEdit
-        self.chk_name = QCheckBox("名前")
-        self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("保存名で検索")
-        search_btn = QPushButton("検索")
-        search_btn.clicked.connect(self._reload)
-        filt.addWidget(self.chk_name)
-        filt.addWidget(self.name_edit)
-        filt.addWidget(search_btn)
-        filt.addStretch()
-        layout.addLayout(filt)
-        
-        # 一覧テーブル
-        self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["ID", "保存名", "件数", "作成日時"])
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setStretchLastSection(True)
-        layout.addWidget(self.table)
-        
-        # ボタン
-        btns = QDialogButtonBox()
-        self.load_btn = QPushButton("読み込み")
-        self.del_btn = QPushButton("削除")
-        self.cancel_btn = QPushButton("閉じる")
-        btns.addButton(self.load_btn, QDialogButtonBox.AcceptRole)
-        btns.addButton(self.del_btn, QDialogButtonBox.ActionRole)
-        btns.addButton(self.cancel_btn, QDialogButtonBox.RejectRole)
-        layout.addWidget(btns)
-        
-        self.load_btn.clicked.connect(self._on_load)
-        self.del_btn.clicked.connect(self._on_delete)
-        self.cancel_btn.clicked.connect(self.reject)
-        
-        self._reload()
-    
-    def _reload(self):
-        """一覧を再読み込み"""
-        try:
-            if self.chk_name.isChecked():
-                name_keyword = self.name_edit.text().strip()
-                rows = self.inventory_db.search_snapshots(name_keyword)
-            else:
-                rows = self.inventory_db.get_all_snapshots()
-            
-            self.table.setRowCount(len(rows))
-            for i, r in enumerate(rows):
-                rid = str(r.get('id', ''))
-                name = str(r.get('snapshot_name', ''))
-                count = str(r.get('item_count', ''))
-                created_at = str(r.get('created_at', ''))
-                
-                self.table.setItem(i, 0, QTableWidgetItem(rid))
-                self.table.setItem(i, 1, QTableWidgetItem(name))
-                self.table.setItem(i, 2, QTableWidgetItem(count))
-                self.table.setItem(i, 3, QTableWidgetItem(created_at))
-            
-            self.table.resizeColumnsToContents()
-        except Exception as e:
-            QMessageBox.warning(self, "エラー", f"一覧の読み込みに失敗しました:\n{str(e)}")
-    
-    def _selected_id(self):
-        """選択されている行のIDを取得"""
-        sel = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
-        if not sel:
-            return None
-        r = sel[0].row()
-        item = self.table.item(r, 0)
-        try:
-            return int(item.text()) if item else None
-        except Exception:
-            return None
-    
-    def _on_load(self):
-        """読み込みボタンクリック"""
-        rid = self._selected_id()
-        if rid is None:
-            QMessageBox.information(self, "情報", "読み込む行を選択してください")
-            return
-        self._result_action = 'load'
-        self._result_id = rid
-        self.accept()
-    
-    def _on_delete(self):
-        """削除ボタンクリック"""
-        rid = self._selected_id()
-        if rid is None:
-            QMessageBox.information(self, "情報", "削除する行を選択してください")
-            return
-        self._result_action = 'delete'
-        self._result_id = rid
-        # 削除後もダイアログは開いたまま
-        self._reload()
-    
-    def get_result(self):
-        """結果を取得"""
-        return self._result_action, self._result_id

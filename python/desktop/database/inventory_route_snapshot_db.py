@@ -53,8 +53,48 @@ class InventoryRouteSnapshotDatabase:
         snapshot_name: str,
         purchase_data: List[Dict[str, Any]],
         route_payload: Dict[str, Any],
+        route_date: Optional[str] = None,
+        route_code: Optional[str] = None,
     ) -> int:
         cur = self.conn.cursor()
+        
+        # 日付とルートが同じ場合は既存レコードを検索して上書き
+        if route_date and route_code:
+            # 既存のスナップショットを取得して、route_dataからroute_dateとroute_codeを抽出
+            cur.execute(
+                """
+                SELECT id, route_data FROM inventory_route_snapshots
+                ORDER BY created_at DESC
+                """
+            )
+            existing_rows = cur.fetchall()
+            for row in existing_rows:
+                try:
+                    existing_route_data = json.loads(row["route_data"])
+                    existing_route = existing_route_data.get("route", {})
+                    existing_route_date = existing_route.get("route_date", "")
+                    existing_route_code = existing_route.get("route_code", "")
+                    
+                    # 日付とルートコードが一致する場合は上書き
+                    if existing_route_date == route_date and existing_route_code == route_code:
+                        existing_id = row["id"]
+                        purchase_json = json.dumps(purchase_data, ensure_ascii=False, default=str)
+                        route_json = json.dumps(route_payload, ensure_ascii=False, default=str)
+                        cur.execute(
+                            """
+                            UPDATE inventory_route_snapshots
+                            SET snapshot_name = ?, purchase_data = ?, route_data = ?, updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ?
+                            """,
+                            (snapshot_name, purchase_json, route_json, existing_id),
+                        )
+                        self.conn.commit()
+                        return existing_id
+                except (json.JSONDecodeError, KeyError):
+                    # JSON解析エラーやキーエラーの場合はスキップ
+                    continue
+        
+        # 新規保存の場合
         purchase_json = json.dumps(purchase_data, ensure_ascii=False, default=str)
         route_json = json.dumps(route_payload, ensure_ascii=False, default=str)
         cur.execute(
@@ -65,6 +105,25 @@ class InventoryRouteSnapshotDatabase:
             (snapshot_name, purchase_json, route_json),
         )
         snapshot_id = cur.lastrowid
+        
+        # 20件を超える場合は古いものから削除
+        cur.execute(
+            """
+            SELECT id FROM inventory_route_snapshots
+            ORDER BY created_at ASC
+            """
+        )
+        all_ids = [row["id"] for row in cur.fetchall()]
+        if len(all_ids) > 20:
+            # 古いものから削除（created_atが古い順に削除）
+            ids_to_delete = all_ids[:-20]  # 最新20件以外を取得
+            if ids_to_delete:
+                placeholders = ",".join("?" * len(ids_to_delete))
+                cur.execute(
+                    f"DELETE FROM inventory_route_snapshots WHERE id IN ({placeholders})",
+                    ids_to_delete,
+                )
+        
         self.conn.commit()
         return snapshot_id
 

@@ -430,10 +430,20 @@ class StoreDatabase:
         return row[0] if row else None
     
     def get_route_name_by_code(self, route_code: str) -> Optional[str]:
-        """ルートコードからルート名を取得（最初に見つかったものを返す）"""
+        """ルートコードからルート名を取得（routesテーブルを優先、なければstoresテーブルから）"""
         conn = self._get_connection()
         cursor = conn.cursor()
         
+        # まずroutesテーブルから取得を試みる
+        cursor.execute(
+            "SELECT route_name FROM routes WHERE route_code = ? LIMIT 1",
+            (route_code,)
+        )
+        row = cursor.fetchone()
+        if row and row[0]:
+            return row[0]
+        
+        # routesテーブルにない場合はstoresテーブルから取得
         cursor.execute(
             "SELECT affiliated_route_name FROM stores WHERE route_code = ? AND affiliated_route_name IS NOT NULL AND affiliated_route_name != '' LIMIT 1",
             (route_code,)
