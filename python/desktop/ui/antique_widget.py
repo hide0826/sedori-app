@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QDate, QThread, Signal, QSettings
 from PySide6.QtGui import QFont, QColor
-from typing import Optional
+from typing import Optional, List, Dict, Any
 import re
 import pandas as pd
 from pathlib import Path
@@ -283,6 +283,7 @@ class AntiqueWidget(QWidget):
 
         # 取込データ保持
         self._imported_store_rows = []
+        self._imported_route_info = None  # ルート情報（仕入管理タブから転送された場合）
 
     def _commit_single_row(self):
         """フォーム1行をバリデーションして ledger_entries に保存"""
@@ -748,6 +749,178 @@ class AntiqueWidget(QWidget):
             QMessageBox.information(self, "取込完了", f"仕入管理から {len(rows)} 件を取り込みました。")
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"取込でエラーが発生しました:\n{e}")
+    
+    def import_inventory_data(self, records: List[dict], route_info: Optional[dict] = None) -> None:
+        """
+        仕入管理タブからデータを受け取って古物台帳タブに表示する
+        
+        Args:
+            records: 仕入データのリスト（辞書形式）
+            route_info: ルート情報（オプション）
+        """
+        try:
+            import pandas as pd
+            
+            if not records or len(records) == 0:
+                QMessageBox.information(self, "情報", "転送するデータがありません。")
+                return
+            
+            # ルート情報を内部メンバーに保持（後続処理で活用可能）
+            self._imported_route_info = route_info
+            
+            # データフレームに変換（既存の処理と互換性を保つ）
+            df = pd.DataFrame(records)
+            
+            # 列の取得（inventory_widgetの列名は日本語で統一済み）
+            def pick_series(name: str) -> pd.Series:
+                return df[name] if name in df.columns else pd.Series([""] * len(df))
+            
+            date_s = pick_series("仕入れ日")
+            title_s = pick_series("商品名")
+            qty_s = pick_series("仕入れ個数")
+            unit_s = pick_series("仕入れ価格")
+            asin_s = pick_series("ASIN")
+            jan_s = pick_series("JAN")
+            notes_s = pick_series("コメント")
+            name_s = pick_series("仕入先")
+            
+            user_dict = self._load_user_dictionary()
+            # 法人マスタを一括取得（チェーン名→法人名）
+            company_rows = []
+            try:
+                from desktop.database.store_db import StoreDatabase
+                _sdb_for_company = StoreDatabase()
+                company_rows = _sdb_for_company.list_companies()
+            except Exception:
+                company_rows = []
+            
+            rows = []
+            for i in range(len(df)):
+                # 数値正規化
+                def to_int(v):
+                    try:
+                        s = str(v).replace(',', '').strip()
+                        return int(float(s)) if s not in ('', 'nan') else 0
+                    except Exception:
+                        return 0
+                qty_v = to_int(qty_s.iloc[i])
+                unit_v = to_int(unit_s.iloc[i])
+                amount_v = qty_v * unit_v
+                identifier_v = str(jan_s.iloc[i] or '') or str(asin_s.iloc[i] or '')
+                
+                # 品名から区分推定（学習データを優先）
+                cat = ""
+                title_val = str(title_s.iloc[i])
+                
+                # 1. 識別情報（JAN/ASIN）から直接マッチング（最高優先度）
+                if identifier_v:
+                    try:
+                        from desktop.database.ledger_db import LedgerDatabase
+                        db = LedgerDatabase()
+                        matched = db.match_category_by_id(identifier_v)
+                        if matched:
+                            cat = matched
+                    except Exception:
+                        pass
+                
+                # 2. 学習済みキーワード辞書から推定
+                if not cat:
+                    try:
+                        from desktop.database.ledger_db import LedgerDatabase
+                        db = LedgerDatabase()
+                        result = db.match_category_by_keywords(title_val)
+                        if result:
+                            cat = result[0]  # 品目名を取得
+                    except Exception:
+                        pass
+                
+                # 3. ユーザー辞書（既存の簡易辞書）から推定
+                if not cat:
+                    for key, cat_name in user_dict.items():
+                        if key and key.lower() in (title_val or "").lower():
+                            cat = cat_name
+                            break
+                
+                # 仕入先コード→店舗マスタ参照
+                supplier_code = str(name_s.iloc[i] or '').strip()
+                store_name = ""; address=""; phone=""; corp_name=""
+                try:
+                    if supplier_code:
+                        from desktop.database.store_db import StoreDatabase
+                        sdb = StoreDatabase()
+                        st = sdb.get_store_by_supplier_code(supplier_code)
+                        if st:
+                            store_name = st.get('store_name','')
+                            address = st.get('address','')
+                            phone = st.get('phone','')
+                            cf = st.get('custom_fields',{}) or {}
+                            # 候補キーから法人/チェーン名を推測
+                            for k in ['chain_name','chain','corporation','corp_name','法人名','チェーン名']:
+                                if k in cf and cf.get(k):
+                                    corp_name = cf.get(k); break
+                    
+                    # 法人マスタでチェーン名キーワードマッチ（支店名→チェーン名→法人名）
+                    if not corp_name:
+                        branch_text = store_name or supplier_code
+                        bt_norm = str(branch_text or '').replace('　',' ').strip()
+                        def norm(s: str) -> str:
+                            return str(s or '').replace('　',' ').strip()
+                        best_match = None
+                        for comp in company_rows:
+                            chain = norm(comp.get('chain_name',''))
+                            if not chain:
+                                continue
+                            # 完全一致/部分一致の両方を許容
+                            if chain in bt_norm or bt_norm in chain:
+                                best_match = comp
+                                break
+                            # チェーン名を区切りで分解して部分一致ワードを探す
+                            for token in [t for t in re.split(r"[\s\-/・()（）]+", chain) if len(t) >= 2]:
+                                if token and token in bt_norm:
+                                    best_match = comp
+                                    break
+                            if best_match:
+                                break
+                        if best_match:
+                            corp_name = best_match.get('company_name','')
+                except Exception:
+                    pass
+                
+                # 取引日の時刻部分を削除
+                date_val = str(date_s.iloc[i]) if pd.notna(date_s.iloc[i]) else ""
+                normalized_date = self._normalize_date(date_val) if date_val else ""
+                
+                rows.append({
+                    # 共通列
+                    "entry_date": normalized_date,
+                    "kobutsu_kind": cat,
+                    "hinmei": str(title_s.iloc[i]),
+                    "transaction_method": "買受",
+                    "qty": qty_v,
+                    "unit_price": unit_v,
+                    "amount": amount_v,
+                    "identifier": identifier_v,
+                    "counterparty_type": "店舗",
+                    "notes": str(notes_s.iloc[i]),
+                    # 店舗列（支店/住所/連絡先/レシート番号は不明のため空）
+                    "counterparty_name": corp_name,  # 仕入先名（法人）
+                    "counterparty_branch": store_name if store_name else supplier_code,  # 支店（店舗名）
+                    "counterparty_address": address,
+                    "contact": phone,
+                    "receipt_no": "",
+                })
+            
+            # 相手区分を「店舗」に設定
+            if hasattr(self, 'cmb_counterparty'):
+                idx_store = self.cmb_counterparty.findText('店舗')
+                if idx_store >= 0:
+                    self.cmb_counterparty.setCurrentIndex(idx_store)
+            
+            self._imported_store_rows = rows
+            self._refresh_store_list_table()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"データの取込でエラーが発生しました:\n{e}")
 
     def _refresh_store_list_table(self) -> None:
         try:

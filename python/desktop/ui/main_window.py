@@ -156,6 +156,7 @@ class MainWindow(QMainWindow):
         
         # 仕入管理ウィジェットから参照できるように設定
         self.inventory_widget.set_route_summary_widget(self.route_summary_widget)
+        self.inventory_widget.set_antique_widget(self.antique_widget)
         
         # ===== データベース管理タブ（メインタブ） =====
         # 商品DB、店舗マスタ、ルート訪問DB、コンディション説明をまとめる

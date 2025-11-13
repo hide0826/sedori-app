@@ -52,6 +52,7 @@ class InventoryWidget(QWidget):
         
         # ルートサマリーウィジェットへの参照（後で設定される）
         self.route_summary_widget = None
+        self.antique_widget = None  # 古物台帳ウィジェットへの参照
         
         # データベースの初期化
         self.store_db = StoreDatabase()
@@ -72,16 +73,10 @@ class InventoryWidget(QWidget):
             self.route_template_btn.setEnabled(widget is not None)
         if self.matching_btn:
             self.matching_btn.setEnabled(widget is not None)
-        if widget and getattr(widget, "last_loaded_template_path", ""):
-            try:
-                path = widget.last_loaded_template_path
-                if path:
-                    # route_template_status は削除済み
-                    self.refresh_route_template_view()
-            except Exception:
-                pass
-        if widget:
-            self.refresh_route_template_view()
+    
+    def set_antique_widget(self, widget):
+        """古物台帳ウィジェットへの参照を設定"""
+        self.antique_widget = widget
         
     def setup_ui(self):
         """UIの設定"""
@@ -1181,11 +1176,26 @@ class InventoryWidget(QWidget):
                 
                 self.update_table()
                 self.update_data_count()
+                
+                # ボタンの有効化（データが読み込まれた場合）
+                if len(self.inventory_data) > 0:
+                    self.export_btn.setEnabled(True)
+                    self.clear_btn.setEnabled(True)
+                    self.generate_sku_btn.setEnabled(True)
+                    self.export_listing_btn.setEnabled(True)
+                    self.antique_register_btn.setEnabled(True)
             else:
                 self.inventory_data = pd.DataFrame()
                 self.filtered_data = self.inventory_data
                 self.update_table()
                 self.update_data_count()
+                
+                # ボタンの無効化（データが空の場合）
+                self.export_btn.setEnabled(False)
+                self.clear_btn.setEnabled(False)
+                self.generate_sku_btn.setEnabled(False)
+                self.export_listing_btn.setEnabled(False)
+                self.antique_register_btn.setEnabled(False)
             
             route_payload = snapshot.get("route_data") or {}
             route_data = route_payload.get("route", {})
@@ -2342,62 +2352,69 @@ class InventoryWidget(QWidget):
             traceback.print_exc()
     
     def generate_antique_register(self):
-        """古物台帳生成"""
-        if self.filtered_data is None:
-            QMessageBox.warning(self, "エラー", "データがありません")
+        """古物台帳生成：仕入データ＋ルート情報を古物台帳タブへ転送"""
+        if self.filtered_data is None or len(self.filtered_data) == 0:
+            QMessageBox.warning(self, "エラー", "データがありません。先に仕入データを取り込んでください。")
             return
-            
+        
+        # 古物台帳ウィジェットの参照確認
+        if not self.antique_widget:
+            QMessageBox.warning(
+                self, 
+                "エラー", 
+                "古物台帳タブが初期化されていません。\nアプリケーションを再起動してください。"
+            )
+            return
+        
         try:
-            # 日付範囲の入力ダイアログ（簡易版）
-            from PySide6.QtWidgets import QInputDialog
-            start_date, ok1 = QInputDialog.getText(
-                self, 
-                "古物台帳生成", 
-                "開始日を入力してください (YYYY-MM-DD):",
-                text="2025-01-01"
+            # 仕入データを辞書形式に変換
+            data_list = self.filtered_data.to_dict('records')
+            
+            # ルート情報を取得（あれば）
+            route_info = None
+            if self.route_summary_widget:
+                try:
+                    route_data = self.route_summary_widget.get_route_data()
+                    store_visits = self.route_summary_widget.get_store_visits_data()
+                    if route_data and len(store_visits) > 0:
+                        route_info = {
+                            'route': route_data,
+                            'visits': store_visits
+                        }
+                except Exception:
+                    # ルート情報の取得に失敗しても処理は継続
+                    pass
+            
+            # 古物台帳タブにデータを転送
+            self.antique_widget.import_inventory_data(data_list, route_info)
+            
+            # 古物台帳タブに切り替え
+            # 親ウィジェット（MainWindow）のタブウィジェットを取得
+            parent = self.parent()
+            while parent:
+                if hasattr(parent, 'tab_widget'):
+                    # MainWindowのtab_widgetを取得
+                    tab_widget = parent.tab_widget
+                    # 古物台帳タブのインデックスを探す
+                    for i in range(tab_widget.count()):
+                        if tab_widget.widget(i) == self.antique_widget:
+                            tab_widget.setCurrentIndex(i)
+                            break
+                    break
+                parent = parent.parent()
+            
+            # ユーザーに案内メッセージを表示
+            QMessageBox.information(
+                self,
+                "古物台帳タブへ転送完了",
+                f"仕入データ {len(data_list)} 件を古物台帳タブへ転送しました。\n"
+                "古物台帳タブで内容を確認・編集してから、台帳登録・出力を行ってください。"
             )
             
-            if not ok1:
-                return
-                
-            end_date, ok2 = QInputDialog.getText(
-                self, 
-                "古物台帳生成", 
-                "終了日を入力してください (YYYY-MM-DD):",
-                text="2025-01-31"
-            )
-            
-            if not ok2:
-                return
-            
-            # APIクライアントで古物台帳生成
-            result = self.api_client.antique_register_generate(start_date, end_date)
-            
-            if result['status'] == 'success':
-                # ファイル保存ダイアログ
-                file_path, _ = QFileDialog.getSaveFileName(
-                    self,
-                    "古物台帳ファイルを保存",
-                    f"antique_register_{start_date}_{end_date}.csv",
-                    "CSVファイル (*.csv)"
-                )
-                
-                if file_path:
-                    # 生成されたデータをCSVファイルに保存
-                    import pandas as pd
-                    df = pd.DataFrame(result['items'])
-                    df.to_csv(file_path, index=False, encoding='utf-8')
-                    
-                    QMessageBox.information(
-                        self, 
-                        "古物台帳生成完了", 
-                        f"古物台帳生成が完了しました\n期間: {result['period']}\n件数: {result['total_items']}件\n合計金額: {result['total_value']:,}円\n保存先: {file_path}"
-                    )
-            else:
-                QMessageBox.warning(self, "古物台帳生成失敗", "古物台帳生成に失敗しました")
-                
         except Exception as e:
-            QMessageBox.critical(self, "エラー", f"古物台帳生成中にエラーが発生しました:\n{str(e)}")
+            QMessageBox.critical(self, "エラー", f"古物台帳タブへのデータ転送中にエラーが発生しました:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
     
     def setup_workflow_panel(self):
         """ワークフローパネルの設定（改良版）"""
