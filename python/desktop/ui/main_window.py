@@ -162,6 +162,8 @@ class MainWindow(QMainWindow):
         # 商品DB、店舗マスタ、ルート訪問DB、コンディション説明をまとめる
         self.store_master_widget = StoreMasterWidget()
         self.product_widget = ProductWidget(inventory_widget=self.inventory_widget)
+        # InventoryWidgetにProductWidgetへの参照を設定
+        self.inventory_widget.set_product_widget(self.product_widget)
         self.route_visit_widget = RouteVisitLogWidget()
         self.condition_template_widget = ConditionTemplateWidget()
         

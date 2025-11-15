@@ -242,6 +242,40 @@ class ProductWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
+        # 検索エリア
+        search_group = QGroupBox("検索")
+        search_layout = QHBoxLayout(search_group)
+        
+        search_layout.addWidget(QLabel("日付:"))
+        self.purchase_search_date = QLineEdit()
+        self.purchase_search_date.setPlaceholderText("yyyy-mm-dd または yyyy/mm/dd")
+        search_layout.addWidget(self.purchase_search_date)
+        
+        search_layout.addWidget(QLabel("SKU:"))
+        self.purchase_search_sku = QLineEdit()
+        self.purchase_search_sku.setPlaceholderText("SKUで検索")
+        search_layout.addWidget(self.purchase_search_sku)
+        
+        search_layout.addWidget(QLabel("ASIN:"))
+        self.purchase_search_asin = QLineEdit()
+        self.purchase_search_asin.setPlaceholderText("ASINで検索")
+        search_layout.addWidget(self.purchase_search_asin)
+        
+        search_layout.addWidget(QLabel("JAN:"))
+        self.purchase_search_jan = QLineEdit()
+        self.purchase_search_jan.setPlaceholderText("JANで検索")
+        search_layout.addWidget(self.purchase_search_jan)
+        
+        self.purchase_search_button = QPushButton("検索")
+        self.purchase_search_button.clicked.connect(self.search_purchase_data)
+        search_layout.addWidget(self.purchase_search_button)
+        
+        self.purchase_clear_search_button = QPushButton("クリア")
+        self.purchase_clear_search_button.clicked.connect(self.clear_purchase_search)
+        search_layout.addWidget(self.purchase_clear_search_button)
+        
+        layout.addWidget(search_group)
+
         controls = QHBoxLayout()
         self.import_purchase_button = QPushButton("仕入管理データを取り込み")
         self.import_purchase_button.clicked.connect(self.import_purchase_data)
@@ -252,6 +286,11 @@ class ProductWidget(QWidget):
         self.clear_all_button = QPushButton("全行削除")
         self.clear_all_button.clicked.connect(self.clear_all_purchase_rows)
         controls.addWidget(self.clear_all_button)
+        
+        # 保存件数表示
+        self.purchase_count_label = QLabel("")
+        controls.addWidget(self.purchase_count_label)
+        
         controls.addStretch()
         layout.addLayout(controls)
 
@@ -264,6 +303,9 @@ class ProductWidget(QWidget):
         self.purchase_table.verticalHeader().setVisible(False)
         self._apply_purchase_column_resize(self.purchase_columns)
         layout.addWidget(self.purchase_table)
+        
+        # 全データを保持（検索用）
+        self.purchase_all_records: List[Dict[str, Any]] = []
 
     # --- 販売DBタブ ---
     def setup_sales_tab(self):
@@ -317,7 +359,12 @@ class ProductWidget(QWidget):
         """仕入DBテーブルを更新（recordsがNoneの場合は空で初期化）"""
         if records is not None:
             self.purchase_records = records
+            self.purchase_all_records = records.copy()  # 検索用に全データを保持
+        else:
+            self.purchase_all_records = self.purchase_records.copy() if self.purchase_records else []
         self.populate_purchase_table(self.purchase_records)
+        if hasattr(self, 'update_purchase_count_label'):
+            self.update_purchase_count_label()
 
     def load_sales_data(self, records: Optional[List[Dict[str, Any]]] = None):
         """販売DBテーブルを初期表示（暫定データ）"""
@@ -416,13 +463,43 @@ class ProductWidget(QWidget):
         records = self._collect_inventory_records()
         if records is None:
             return
-        self.purchase_records = records
-        self.populate_purchase_table(records)
+        
+        # 既存データとマージ（重複チェック）
+        existing_skus = {r.get("SKU") or r.get("sku", "") for r in self.purchase_all_records if r.get("SKU") or r.get("sku")}
+        new_records = []
+        updated_count = 0
+        
+        for record in records:
+            sku = record.get("SKU") or record.get("sku", "")
+            if sku and sku in existing_skus:
+                # 既存データを更新（同じSKUの既存レコードを置き換え）
+                for i, existing in enumerate(self.purchase_all_records):
+                    existing_sku = existing.get("SKU") or existing.get("sku", "")
+                    if existing_sku == sku:
+                        self.purchase_all_records[i] = record
+                        updated_count += 1
+                        break
+            else:
+                # 新規データを追加
+                new_records.append(record)
+        
+        # 新規データを追加
+        self.purchase_all_records.extend(new_records)
+        self.purchase_records = self.purchase_all_records.copy()
+        
+        self.populate_purchase_table(self.purchase_records)
+        self.update_purchase_count_label()
+        
         try:
-            self.purchase_db.save_snapshot("自動保存(仕入DB)", records)
+            self.purchase_db.save_snapshot("自動保存(仕入DB)", self.purchase_all_records)
         except Exception as e:
             print(f"仕入DB自動保存失敗: {e}")
-        QMessageBox.information(self, "取り込み完了", f"{len(records)}件の仕入データを取り込みました。")
+        
+        message = f"{len(new_records)}件の新規データを追加"
+        if updated_count > 0:
+            message += f"、{updated_count}件を更新"
+        message += f"しました。（合計: {len(self.purchase_all_records)}件）"
+        QMessageBox.information(self, "取り込み完了", message)
 
     def delete_selected_purchase_row(self):
         """デバッグ用: 選択行を削除"""
@@ -430,14 +507,42 @@ class ProductWidget(QWidget):
         if row < 0:
             QMessageBox.information(self, "行削除", "削除する行を選択してください。")
             return
-        self.purchase_table.removeRow(row)
-        if 0 <= row < len(self.purchase_records):
-            del self.purchase_records[row]
+        
+        reply = QMessageBox.question(
+            self, "確認", "選択した行を削除しますか？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            if 0 <= row < len(self.purchase_records):
+                deleted_record = self.purchase_records[row]
+                # 全データからも削除
+                sku = deleted_record.get("SKU") or deleted_record.get("sku", "")
+                if sku:
+                    self.purchase_all_records = [
+                        r for r in self.purchase_all_records
+                        if (r.get("SKU") or r.get("sku", "")) != sku
+                    ]
+                del self.purchase_records[row]
+                self.populate_purchase_table(self.purchase_records)
+                self.update_purchase_count_label()
+                
+                # スナップショットも更新
+                try:
+                    self.purchase_db.save_snapshot("自動保存(仕入DB)", self.purchase_all_records)
+                except Exception as e:
+                    print(f"仕入DB自動保存失敗: {e}")
 
     def clear_all_purchase_rows(self):
         """デバッグ用: 全行削除"""
-        self.purchase_table.setRowCount(0)
-        self.purchase_records = []
+        reply = QMessageBox.question(
+            self, "確認", "すべての仕入DBデータを削除しますか？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.purchase_table.setRowCount(0)
+            self.purchase_records = []
+            self.purchase_all_records = []
+            self.update_purchase_count_label()
 
     def restore_latest_purchase_snapshot(self):
         """最新の仕入DBスナップショットを読み込み"""
@@ -449,8 +554,118 @@ class ProductWidget(QWidget):
             latest = self.purchase_db.get_snapshot(latest_id)
             if latest and latest.get("data"):
                 self.purchase_records = latest["data"]
+                self.purchase_all_records = latest["data"].copy()  # 検索用に全データを保持
+                self.update_purchase_count_label()
         except Exception as e:
             print(f"仕入DBスナップショット読み込み失敗: {e}")
+    
+    def search_purchase_data(self):
+        """仕入DBデータを検索"""
+        search_date = self.purchase_search_date.text().strip()
+        search_sku = self.purchase_search_sku.text().strip()
+        search_asin = self.purchase_search_asin.text().strip()
+        search_jan = self.purchase_search_jan.text().strip()
+        
+        # 検索条件がすべて空の場合は全件表示
+        if not any([search_date, search_sku, search_asin, search_jan]):
+            self.purchase_records = self.purchase_all_records.copy()
+            self.populate_purchase_table(self.purchase_records)
+            self.update_purchase_count_label()
+            return
+        
+        # 日付の正規化
+        normalized_date = None
+        if search_date:
+            normalized_date = self._normalize_date_for_search(search_date)
+        
+        filtered_records = []
+        for record in self.purchase_all_records:
+            match = True
+            
+            # 日付検索
+            if normalized_date:
+                record_date = record.get("仕入れ日") or record.get("purchase_date") or ""
+                if not self._date_matches(record_date, normalized_date):
+                    match = False
+            
+            # SKU検索
+            if match and search_sku:
+                record_sku = str(record.get("SKU") or record.get("sku") or "").upper()
+                if search_sku.upper() not in record_sku:
+                    match = False
+            
+            # ASIN検索
+            if match and search_asin:
+                record_asin = str(record.get("ASIN") or record.get("asin") or "").upper()
+                if search_asin.upper() not in record_asin:
+                    match = False
+            
+            # JAN検索
+            if match and search_jan:
+                record_jan = str(record.get("JAN") or record.get("jan") or "").upper()
+                if search_jan.upper() not in record_jan:
+                    match = False
+            
+            if match:
+                filtered_records.append(record)
+        
+        self.purchase_records = filtered_records
+        self.populate_purchase_table(self.purchase_records)
+        self.update_purchase_count_label()
+    
+    def clear_purchase_search(self):
+        """検索条件をクリアして全件表示"""
+        self.purchase_search_date.clear()
+        self.purchase_search_sku.clear()
+        self.purchase_search_asin.clear()
+        self.purchase_search_jan.clear()
+        self.purchase_records = self.purchase_all_records.copy()
+        self.populate_purchase_table(self.purchase_records)
+        self.update_purchase_count_label()
+    
+    def update_purchase_count_label(self):
+        """保存件数ラベルを更新"""
+        total_count = len(self.purchase_all_records)
+        filtered_count = len(self.purchase_records)
+        
+        if total_count == filtered_count:
+            self.purchase_count_label.setText(f"保存件数: {total_count}件（スナップショット: 最大10件まで）")
+        else:
+            self.purchase_count_label.setText(f"表示: {filtered_count}件 / 全件: {total_count}件（スナップショット: 最大10件まで）")
+    
+    def _normalize_date_for_search(self, date_str: str) -> Optional[str]:
+        """検索用に日付を正規化（yyyy-mm-dd形式）"""
+        if not date_str:
+            return None
+        
+        # 区切り文字を統一
+        date_str = date_str.replace("/", "-").replace(".", "-").replace("年", "-").replace("月", "-").replace("日", "")
+        
+        # yyyy-mm-dd形式に変換を試みる
+        parts = date_str.split("-")
+        if len(parts) >= 3:
+            try:
+                year = int(parts[0])
+                month = int(parts[1])
+                day = int(parts[2])
+                return f"{year:04d}-{month:02d}-{day:02d}"
+            except ValueError:
+                pass
+        
+        return date_str
+    
+    def _date_matches(self, record_date: str, search_date: str) -> bool:
+        """日付が一致するかチェック（部分一致対応）"""
+        if not record_date or not search_date:
+            return False
+        
+        # 日付を正規化
+        normalized_record = self._normalize_date_for_search(str(record_date))
+        if not normalized_record:
+            return False
+        
+        # 部分一致チェック（yyyy-mm-ddの形式で比較）
+        return search_date in normalized_record or normalized_record.startswith(search_date)
 
     def _collect_inventory_records(self) -> Optional[List[Dict[str, Any]]]:
         if not self.inventory_widget:

@@ -23,6 +23,7 @@ import re
 import sys
 import os
 from typing import List, Dict, Any, Optional
+from datetime import datetime
 
 # プロジェクトルートをパスに追加（相対インポート用）
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -33,6 +34,7 @@ from database.inventory_route_snapshot_db import InventoryRouteSnapshotDatabase
 from database.product_db import ProductDatabase
 from database.product_purchase_db import ProductPurchaseDatabase
 from database.route_visit_db import RouteVisitDatabase
+from database.warranty_db import WarrantyDatabase
 from ui.star_rating_widget import StarRatingWidget
 
 
@@ -53,6 +55,7 @@ class InventoryWidget(QWidget):
         # ルートサマリーウィジェットへの参照（後で設定される）
         self.route_summary_widget = None
         self.antique_widget = None  # 古物台帳ウィジェットへの参照
+        self.product_widget = None  # 商品DBウィジェットへの参照
         
         # データベースの初期化
         self.store_db = StoreDatabase()
@@ -61,6 +64,9 @@ class InventoryWidget(QWidget):
         self.product_db = ProductDatabase()
         self.product_purchase_db = ProductPurchaseDatabase()
         self.route_visit_db = RouteVisitDatabase()
+        self.warranty_db = WarrantyDatabase()
+        from desktop.database.condition_template_db import ConditionTemplateDatabase
+        self.condition_template_db = ConditionTemplateDatabase()
         
         # UIの初期化
         self.route_template_btn = None
@@ -77,6 +83,10 @@ class InventoryWidget(QWidget):
     def set_antique_widget(self, widget):
         """古物台帳ウィジェットへの参照を設定"""
         self.antique_widget = widget
+    
+    def set_product_widget(self, widget):
+        """商品DBウィジェットへの参照を設定"""
+        self.product_widget = widget
         
     def setup_ui(self):
         """UIの設定"""
@@ -137,8 +147,8 @@ class InventoryWidget(QWidget):
         self.export_btn.setEnabled(False)
         file_ops_layout.addWidget(self.export_btn)
         
-        # データクリアボタン
-        self.clear_btn = QPushButton("データクリア")
+        # オールクリアボタン
+        self.clear_btn = QPushButton("オールクリア")
         self.clear_btn.clicked.connect(self.clear_data)
         self.clear_btn.setEnabled(False)
         file_ops_layout.addWidget(self.clear_btn)
@@ -508,6 +518,19 @@ class InventoryWidget(QWidget):
         self.toggle_excluded_btn.setToolTip("コメントに『除外』、または発送方法がFBA以外の商品をハイライト表示します。もう一度押すと解除。")
         self.toggle_excluded_btn.clicked.connect(self.toggle_excluded_highlight)
         stats_layout.addWidget(self.toggle_excluded_btn)
+        
+        # クリアボタン
+        self.data_clear_btn = QPushButton("クリア")
+        self.data_clear_btn.clicked.connect(self.clear_inventory_data)
+        self.data_clear_btn.setEnabled(False)
+        stats_layout.addWidget(self.data_clear_btn)
+        
+        # 行削除ボタン
+        self.data_delete_row_btn = QPushButton("行削除")
+        self.data_delete_row_btn.clicked.connect(self.delete_selected_inventory_rows)
+        self.data_delete_row_btn.setEnabled(False)
+        stats_layout.addWidget(self.data_delete_row_btn)
+        
         stats_layout.addStretch()
         data_layout.addLayout(stats_layout)
         
@@ -609,6 +632,8 @@ class InventoryWidget(QWidget):
         self.route_template_table.setAlternatingRowColors(True)
         self.route_template_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.route_template_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        # 選択変更時のイベントハンドラ
+        self.route_template_table.itemSelectionChanged.connect(self.on_route_selection_changed)
         header = self.route_template_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         # 評価列（列インデックス9）だけは後で手動調整するため、一旦Interactiveに設定
@@ -622,6 +647,21 @@ class InventoryWidget(QWidget):
         self.route_template_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         # テーブルをレイアウトに追加（stretch factorを0にして高さを制限、折りたたみ時に動的に変更）
         content_layout.addWidget(self.route_template_table, 0)
+        
+        # ルート情報の操作ボタン
+        route_ops_layout = QHBoxLayout()
+        self.route_clear_btn = QPushButton("クリア")
+        self.route_clear_btn.clicked.connect(self.clear_route_data)
+        self.route_clear_btn.setEnabled(False)
+        route_ops_layout.addWidget(self.route_clear_btn)
+        
+        self.route_delete_row_btn = QPushButton("行削除")
+        self.route_delete_row_btn.clicked.connect(self.delete_selected_route_rows)
+        self.route_delete_row_btn.setEnabled(False)
+        route_ops_layout.addWidget(self.route_delete_row_btn)
+        
+        route_ops_layout.addStretch()
+        content_layout.addLayout(route_ops_layout)
         
         # 前回読込表示を削除（取り込んだデータ一覧エリアの高さを確保）
         # self.route_template_status は削除
@@ -771,9 +811,19 @@ class InventoryWidget(QWidget):
             if costs:
                 summary_text = f"{summary_text} | {' / '.join(costs)}"
             self.route_template_summary_label.setText(f"ルート情報: {summary_text}")
+            
+            # ボタンの有効/無効を更新
+            has_route_data = self.route_template_table.rowCount() > 0
+            if hasattr(self, 'route_clear_btn'):
+                self.route_clear_btn.setEnabled(has_route_data)
         except Exception as e:
             self.route_template_table.setRowCount(0)
             self.route_template_summary_label.setText("ルート情報: ー")
+            # ボタンの無効化
+            if hasattr(self, 'route_clear_btn'):
+                self.route_clear_btn.setEnabled(False)
+            if hasattr(self, 'route_delete_row_btn'):
+                self.route_delete_row_btn.setEnabled(False)
             print(f"ルートテンプレート表示更新エラー: {e}")
             import traceback
             traceback.print_exc()
@@ -847,6 +897,11 @@ class InventoryWidget(QWidget):
         else:
             # データがない場合のフォールバック
             self.route_template_table.setColumnWidth(9, 130)
+        
+        # ボタンの有効/無効を更新
+        has_route_data = self.route_template_table.rowCount() > 0
+        if hasattr(self, 'route_clear_btn'):
+            self.route_clear_btn.setEnabled(has_route_data)
 
     def _save_memos_to_store_master(self, visits: List[Dict[str, Any]]):
         """ルートテンプレート読み込み時にメモ欄があれば店舗マスタの備考欄に保存・追記"""
@@ -1014,39 +1069,74 @@ class InventoryWidget(QWidget):
         purchase_saved = False
         route_saved = False
         
-        # 1. 仕入データ一覧を商品DBの仕入DBに保存
-        if self.inventory_data is not None and len(self.inventory_data) > 0:
-            try:
-                # テーブルの編集内容をDataFrameに同期
-                self.sync_inventory_data_from_table()
-                purchase_records = self.inventory_data.fillna("").to_dict(orient="records")
+        # 1. 仕入データ一覧を商品DBの仕入DBに保存（仕入DBタブの取り込みと同じ処理）
+        try:
+            # テーブルから最新データを取得（手入力商品も含む）
+            df = self.get_table_data()
+            if df is None or len(df) == 0:
+                df = self.inventory_data
+            if df is None or len(df) == 0:
+                messages.append("仕入データ: データがありません")
+            else:
+                # DataFrameを辞書形式に変換
+                df = df.fillna("")
+                purchase_records = df.to_dict(orient="records")
                 
-                # 最新スナップショットと比較
+                # 保証・レシート情報を付与
+                purchase_records = self._augment_purchase_records_for_db(purchase_records)
+                
+                # 最新スナップショットから既存データを取得
                 snapshots = self.product_purchase_db.list_snapshots()
+                existing_all_records = []
                 if snapshots:
                     latest_snapshot = self.product_purchase_db.get_snapshot(snapshots[0]["id"])
                     if latest_snapshot:
-                        existing_data = latest_snapshot.get("data", [])
-                        # データを正規化して比較（JSON文字列として比較）
-                        existing_json = json.dumps(existing_data, ensure_ascii=False, sort_keys=True, default=str)
-                        current_json = json.dumps(purchase_records, ensure_ascii=False, sort_keys=True, default=str)
-                        
-                        if existing_json == current_json:
-                            messages.append("仕入データ: 変更なし（スキップ）")
-                        else:
-                            # 差分がある場合は上書き保存
-                            self.product_purchase_db.save_snapshot("仕入管理から保存", purchase_records)
-                            purchase_saved = True
-                            messages.append(f"仕入データ: {len(purchase_records)}件を保存しました")
-                else:
-                    # スナップショットがない場合は新規保存
-                    self.product_purchase_db.save_snapshot("仕入管理から保存", purchase_records)
-                    purchase_saved = True
-                    messages.append(f"仕入データ: {len(purchase_records)}件を保存しました")
-            except Exception as e:
-                messages.append(f"仕入データ保存エラー: {str(e)}")
-        else:
-            messages.append("仕入データ: データがありません")
+                        existing_all_records = latest_snapshot.get("data", [])
+                
+                # 既存データとマージ（重複チェック）
+                existing_skus = {r.get("SKU") or r.get("sku", "") for r in existing_all_records if r.get("SKU") or r.get("sku")}
+                new_records = []
+                updated_count = 0
+                
+                for record in purchase_records:
+                    sku = record.get("SKU") or record.get("sku", "")
+                    if sku and sku in existing_skus:
+                        # 既存データを更新（同じSKUの既存レコードを置き換え）
+                        for i, existing in enumerate(existing_all_records):
+                            existing_sku = existing.get("SKU") or existing.get("sku", "")
+                            if existing_sku == sku:
+                                existing_all_records[i] = record
+                                updated_count += 1
+                                break
+                    else:
+                        # 新規データを追加
+                        new_records.append(record)
+                
+                # 新規データを追加
+                existing_all_records.extend(new_records)
+                
+                # スナップショットに保存
+                self.product_purchase_db.save_snapshot("自動保存(仕入DB)", existing_all_records)
+                purchase_saved = True
+                
+                # 仕入DBタブの表示を更新（参照があれば）
+                if self.product_widget:
+                    try:
+                        # 最新スナップショットを読み込んで表示を更新
+                        self.product_widget.restore_latest_purchase_snapshot()
+                        self.product_widget.load_purchase_data(existing_all_records)
+                    except Exception as e:
+                        print(f"仕入DBタブの表示更新エラー: {e}")
+                
+                message = f"仕入データ: {len(new_records)}件の新規データを追加"
+                if updated_count > 0:
+                    message += f"、{updated_count}件を更新"
+                message += f"しました。（合計: {len(existing_all_records)}件）"
+                messages.append(message)
+        except Exception as e:
+            messages.append(f"仕入データ保存エラー: {str(e)}")
+            import traceback
+            traceback.print_exc()
         
         # 2. ルート情報をルート訪問DBに保存
         if self.route_summary_widget:
@@ -1134,14 +1224,155 @@ class InventoryWidget(QWidget):
             QMessageBox.information(
                 self,
                 "DB保存完了",
-                "DB保存が完了しました。\n\n" + "\n".join(messages)
+                "DB保存が完了しました。\n\n" + "\n".join(messages),
+                QMessageBox.Ok
             )
         else:
             QMessageBox.information(
                 self,
                 "DB保存",
-                "DB保存を実行しました。\n\n" + "\n".join(messages)
+                "DB保存を実行しました。\n\n" + "\n".join(messages),
+                QMessageBox.Ok
             )
+    
+    def _augment_purchase_records_for_db(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """保証・レシート情報を付与（仕入DBタブの_augment_purchase_recordsと同じ処理）"""
+        import re
+        import unicodedata
+        import calendar
+        
+        augmented: List[Dict[str, Any]] = []
+        for record in records:
+            row = dict(record)
+            sku = row.get("SKU") or row.get("sku")
+            
+            # コメントから保証期間を算出
+            comment_warranty = self._infer_warranty_from_comment_for_db(row)
+            if comment_warranty:
+                row["保証期間"] = comment_warranty
+            
+            if sku:
+                try:
+                    product = self.product_db.get_by_sku(sku)
+                except Exception:
+                    product = None
+                if product:
+                    if ("保証期間" not in row or not row.get("保証期間")) and product.get("warranty_until"):
+                        row["保証期間"] = product.get("warranty_until")
+                    if "レシートID" not in row and product.get("receipt_id") is not None:
+                        row["レシートID"] = product.get("receipt_id")
+                
+                # 保証書情報は warranties テーブルを参照
+                try:
+                    warranties = self.warranty_db.list_by_sku(sku)
+                except Exception:
+                    warranties = []
+                warranty_id = warranties[0]["id"] if warranties else None
+                if "保証書ID" not in row and warranty_id is not None:
+                    row["保証書ID"] = warranty_id
+            augmented.append(row)
+        return augmented
+    
+    def _infer_warranty_from_comment_for_db(self, row: Dict[str, Any]) -> Optional[str]:
+        """コメント欄から保証期間（月）を推定し、仕入日からの満了日を返す"""
+        comment = row.get("コメント") or row.get("comment")
+        if not comment:
+            return None
+        
+        import re
+        import unicodedata
+        import calendar
+        
+        normalized = unicodedata.normalize("NFKC", str(comment))
+        months = self._extract_warranty_months_for_db(normalized)
+        if months is None:
+            return None
+        
+        purchase_date_str = row.get("仕入れ日") or row.get("purchase_date")
+        purchase_date = self._parse_purchase_date_for_db(purchase_date_str)
+        if not purchase_date:
+            return None
+        
+        end_date = self._add_months_for_db(purchase_date, months)
+        return end_date.strftime("%Y-%m-%d")
+    
+    @staticmethod
+    def _extract_warranty_months_for_db(text: str) -> Optional[int]:
+        """コメントから保証期間（月数）を抽出"""
+        import re
+        patterns = [
+            r'(\d+)\s*[ヶヵケかカｶ]?\s*(?:月|ヶ月|か月|カ月)\s*保証',
+            r'保証\s*(\d+)\s*[ヶヵケかカｶ]?\s*(?:月|ヶ月|か月|カ月)',
+        ]
+        for pat in patterns:
+            m = re.search(pat, text)
+            if m:
+                try:
+                    return int(m.group(1))
+                except ValueError:
+                    continue
+        
+        # 特殊表現
+        if "半年保証" in text or "半年の保証" in text:
+            return 6
+        if "1年保証" in text or "一年保証" in text:
+            return 12
+        
+        return None
+    
+    @staticmethod
+    def _parse_purchase_date_for_db(value: Optional[str]) -> Optional[datetime]:
+        """仕入日をdatetimeに変換"""
+        if not value:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        
+        # 一部フォーマット（年月日）を変換
+        text = (
+            text.replace("年", "/")
+                .replace("月", "/")
+                .replace("日", "")
+        )
+        text = text.replace("-", "/")
+        text = text.replace(".", "/")
+        
+        # 時刻を分離
+        candidates = [text]
+        if " " in text:
+            date_part, time_part = text.split(" ", 1)
+            candidates = [
+                f"{date_part} {time_part}",
+                date_part
+            ]
+        else:
+            candidates = [text]
+        
+        fmts = [
+            "%Y/%m/%d %H:%M",
+            "%Y/%m/%d %H:%M:%S",
+            "%Y/%m/%d",
+        ]
+        
+        for candidate in candidates:
+            for fmt in fmts:
+                try:
+                    return datetime.strptime(candidate, fmt)
+                except ValueError:
+                    continue
+        return None
+    
+    @staticmethod
+    def _add_months_for_db(base_date: datetime, months: int) -> datetime:
+        """月数を加算"""
+        import calendar
+        from datetime import datetime
+        month = base_date.month - 1 + months
+        year = base_date.year + month // 12
+        month = month % 12 + 1
+        day = min(base_date.day, calendar.monthrange(year, month)[1])
+        return datetime(year, month, day)
 
     def open_combined_snapshot_history(self):
         snapshots = self.route_snapshot_db.list_snapshots()
@@ -1582,6 +1813,11 @@ class InventoryWidget(QWidget):
         # 除外ハイライトがONなら適用
         if self.excluded_highlight_on:
             self.update_excluded_highlight()
+        
+        # ボタンの有効/無効を更新
+        has_data = self.data_table.rowCount() > 0
+        if hasattr(self, 'data_clear_btn'):
+            self.data_clear_btn.setEnabled(has_data)
 
     def _is_excluded_row(self, row: dict) -> bool:
         """除外条件の判定: コメントに『除外』または 発送方法がFBA以外"""
@@ -1726,6 +1962,12 @@ class InventoryWidget(QWidget):
         try:
             # 選択された行を取得
             selected_items = self.data_table.selectedItems()
+            
+            # 行削除ボタンの有効/無効を制御
+            has_selection = len(selected_items) > 0
+            if hasattr(self, 'data_delete_row_btn'):
+                self.data_delete_row_btn.setEnabled(has_selection)
+            
             if not selected_items:
                 return
             
@@ -1816,10 +2058,26 @@ class InventoryWidget(QWidget):
         self.stats_label.setText(stats_text)
         
     def clear_data(self):
-        """データのクリア"""
+        """データのクリア（仕入データ一覧とルート情報の両方をクリア）"""
+        # 仕入データのクリア
         self.inventory_data = None
         self.filtered_data = None
         self.data_table.setRowCount(0)
+        
+        # ルート情報のクリア
+        self.route_template_table.setRowCount(0)
+        self.route_template_summary_label.setText("ルート情報: ー")
+        
+        # ルートサマリーウィジェットのデータもクリア（可能であれば）
+        if self.route_summary_widget:
+            try:
+                # ルートサマリーウィジェットのデータをクリア
+                if hasattr(self.route_summary_widget, 'clear_route_data'):
+                    self.route_summary_widget.clear_route_data()
+                elif hasattr(self.route_summary_widget, 'current_route_id'):
+                    self.route_summary_widget.current_route_id = None
+            except Exception as e:
+                print(f"ルート情報のクリア中にエラー: {e}")
         
         # ボタンの無効化
         self.export_btn.setEnabled(False)
@@ -1831,6 +2089,188 @@ class InventoryWidget(QWidget):
         # 表示のクリア
         self.data_count_label.setText("データ件数: 0")
         self.stats_label.setText("統計: なし")
+        
+        # 各エリアのボタンも無効化
+        if hasattr(self, 'data_clear_btn'):
+            self.data_clear_btn.setEnabled(False)
+        if hasattr(self, 'data_delete_row_btn'):
+            self.data_delete_row_btn.setEnabled(False)
+        if hasattr(self, 'route_clear_btn'):
+            self.route_clear_btn.setEnabled(False)
+        if hasattr(self, 'route_delete_row_btn'):
+            self.route_delete_row_btn.setEnabled(False)
+    
+    def clear_inventory_data(self):
+        """仕入データ一覧のみをクリア"""
+        reply = QMessageBox.question(
+            self,
+            "確認",
+            "仕入データ一覧をクリアしますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.inventory_data = None
+            self.filtered_data = None
+            self.data_table.setRowCount(0)
+            
+            # ボタンの無効化
+            self.export_btn.setEnabled(False)
+            self.clear_btn.setEnabled(False)
+            self.generate_sku_btn.setEnabled(False)
+            self.export_listing_btn.setEnabled(False)
+            self.antique_register_btn.setEnabled(False)
+            if hasattr(self, 'data_clear_btn'):
+                self.data_clear_btn.setEnabled(False)
+            if hasattr(self, 'data_delete_row_btn'):
+                self.data_delete_row_btn.setEnabled(False)
+            
+            # 表示のクリア
+            self.data_count_label.setText("データ件数: 0")
+            self.stats_label.setText("統計: なし")
+    
+    def delete_selected_inventory_rows(self):
+        """選択された仕入データの行を削除"""
+        selected_rows = set()
+        for item in self.data_table.selectedItems():
+            selected_rows.add(item.row())
+        
+        if not selected_rows:
+            QMessageBox.warning(self, "警告", "削除する行を選択してください")
+            return
+        
+        reply = QMessageBox.question(
+            self,
+            "確認",
+            f"{len(selected_rows)}行を削除しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # 行番号を降順にソート（後ろから削除することでインデックスがずれない）
+            sorted_rows = sorted(selected_rows, reverse=True)
+            
+            # filtered_dataから削除
+            if self.filtered_data is not None:
+                indices_to_drop = [self.filtered_data.index[i] for i in sorted_rows if i < len(self.filtered_data)]
+                self.filtered_data = self.filtered_data.drop(indices_to_drop)
+                self.filtered_data = self.filtered_data.reset_index(drop=True)
+            
+            # inventory_dataからも削除（該当する行を探して削除）
+            if self.inventory_data is not None:
+                # テーブルの行番号とinventory_dataのインデックスを対応させる
+                for row_idx in sorted_rows:
+                    if row_idx < len(self.filtered_data) if self.filtered_data is not None else False:
+                        # filtered_dataのインデックスを使ってinventory_dataからも削除
+                        if self.filtered_data is not None and row_idx < len(self.filtered_data):
+                            # 実際のデータはupdate_tableで再構築されるので、ここではテーブルから削除のみ
+                            pass
+            
+            # テーブルから行を削除
+            for row_idx in sorted_rows:
+                self.data_table.removeRow(row_idx)
+            
+            # テーブルを更新
+            self.update_table()
+            self.update_stats()
+            
+            # ボタンの有効/無効を更新
+            if self.data_table.rowCount() == 0:
+                if hasattr(self, 'data_clear_btn'):
+                    self.data_clear_btn.setEnabled(False)
+                if hasattr(self, 'data_delete_row_btn'):
+                    self.data_delete_row_btn.setEnabled(False)
+    
+    def clear_route_data(self):
+        """ルート情報のみをクリア"""
+        reply = QMessageBox.question(
+            self,
+            "確認",
+            "ルート情報をクリアしますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.route_template_table.setRowCount(0)
+            self.route_template_summary_label.setText("ルート情報: ー")
+            
+            # ルートサマリーウィジェットのデータもクリア（可能であれば）
+            if self.route_summary_widget:
+                try:
+                    if hasattr(self.route_summary_widget, 'clear_route_data'):
+                        self.route_summary_widget.clear_route_data()
+                    elif hasattr(self.route_summary_widget, 'current_route_id'):
+                        self.route_summary_widget.current_route_id = None
+                except Exception as e:
+                    print(f"ルート情報のクリア中にエラー: {e}")
+            
+            # ボタンの無効化
+            if hasattr(self, 'route_clear_btn'):
+                self.route_clear_btn.setEnabled(False)
+            if hasattr(self, 'route_delete_row_btn'):
+                self.route_delete_row_btn.setEnabled(False)
+    
+    def delete_selected_route_rows(self):
+        """選択されたルート情報の行を削除"""
+        selected_rows = set()
+        for item in self.route_template_table.selectedItems():
+            selected_rows.add(item.row())
+        
+        if not selected_rows:
+            QMessageBox.warning(self, "警告", "削除する行を選択してください")
+            return
+        
+        reply = QMessageBox.question(
+            self,
+            "確認",
+            f"{len(selected_rows)}行を削除しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # 行番号を降順にソート（後ろから削除することでインデックスがずれない）
+            sorted_rows = sorted(selected_rows, reverse=True)
+            
+            # テーブルから行を削除
+            for row_idx in sorted_rows:
+                self.route_template_table.removeRow(row_idx)
+            
+            # ルートサマリーウィジェットのデータも更新（可能であれば）
+            if self.route_summary_widget:
+                try:
+                    # テーブルから現在のデータを取得してルートサマリーウィジェットに反映
+                    visits = []
+                    for i in range(self.route_template_table.rowCount()):
+                        visit = {
+                            'visit_order': int(self.route_template_table.item(i, 0).text()) if self.route_template_table.item(i, 0) else i + 1,
+                            'store_code': self.route_template_table.item(i, 1).text() if self.route_template_table.item(i, 1) else '',
+                            'store_name': self.route_template_table.item(i, 2).text() if self.route_template_table.item(i, 2) else '',
+                            'in_time': self.route_template_table.item(i, 3).text() if self.route_template_table.item(i, 3) else '',
+                            'out_time': self.route_template_table.item(i, 4).text() if self.route_template_table.item(i, 4) else '',
+                        }
+                        visits.append(visit)
+                    
+                    # ルートサマリーウィジェットに反映（メソッドがあれば）
+                    if hasattr(self.route_summary_widget, 'update_store_visits_from_list'):
+                        self.route_summary_widget.update_store_visits_from_list(visits)
+                except Exception as e:
+                    print(f"ルート情報の更新中にエラー: {e}")
+            
+            # ボタンの有効/無効を更新
+            if self.route_template_table.rowCount() == 0:
+                if hasattr(self, 'route_clear_btn'):
+                    self.route_clear_btn.setEnabled(False)
+                if hasattr(self, 'route_delete_row_btn'):
+                    self.route_delete_row_btn.setEnabled(False)
+    
+    def on_route_selection_changed(self):
+        """ルート情報テーブルの選択変更時の処理"""
+        selected_items = self.route_template_table.selectedItems()
+        has_selection = len(selected_items) > 0
+        if hasattr(self, 'route_delete_row_btn'):
+            self.route_delete_row_btn.setEnabled(has_selection)
         
     def generate_sku(self):
         """SKU生成（店舗マスタ連携対応）"""
@@ -2094,8 +2534,116 @@ class InventoryWidget(QWidget):
             traceback.print_exc()
             return False
     
+    def _extract_missing_info(self, comment: str) -> Optional[str]:
+        """
+        コメントから欠品情報を抽出・変換
+        
+        Returns:
+            - 辞書にマッチ: 変換後の文章
+            - 辞書にないが「欠品」キーワードあり: 空文字列（見出しのみ用）
+            - どちらでもない: None
+        """
+        if not comment or not comment.strip():
+            return None
+        
+        comment = comment.strip()
+        
+        try:
+            # 欠品キーワード辞書を読み込み
+            missing_keywords = self.condition_template_db.load_missing_keywords()
+            
+            # 1. よくある欠品情報の辞書をチェック
+            for keyword, converted_text in missing_keywords.get('keywords', {}).items():
+                if keyword in comment:
+                    return converted_text
+            
+            # 2. 辞書にないが「欠品」キーワードが含まれているかチェック
+            detection_keywords = missing_keywords.get('detection_keywords', ['欠品', 'なし', '無し', '欠'])
+            for keyword in detection_keywords:
+                if keyword in comment:
+                    # 見出しのみ（内容は空）
+                    return ""
+            
+            # 3. どちらでもない
+            return None
+        except Exception:
+            # エラー時はNoneを返す
+            return None
+    
+    def _get_condition_key(self, condition_text: str) -> str:
+        """
+        コンディション文字列からキーを取得
+        
+        Args:
+            condition_text: コンディション文字列（「新品」「ほぼ新品」など）
+        
+        Returns:
+            コンディションキー（'new', 'like_new', etc.）
+        """
+        condition_map = {
+            '新品': 'new',
+            'ほぼ新品': 'like_new',
+            '非常に良い': 'very_good',
+            '良い': 'good',
+            '可': 'acceptable',
+        }
+        return condition_map.get(condition_text, 'new')  # デフォルトは新品
+    
+    def _build_condition_note(self, condition_key: str, comment: str) -> str:
+        """
+        conditionNoteを生成（{欠品}プレースホルダー対応）
+        
+        Args:
+            condition_key: コンディションキー（'new', 'like_new', etc.）
+            comment: 仕入データのコメント欄
+        
+        Returns:
+            生成されたconditionNote
+        """
+        try:
+            # テンプレート説明文を取得
+            template_text = self.condition_template_db.get_condition_description_text(condition_key)
+            if not template_text:
+                template_text = ""
+            
+            # 欠品情報を抽出
+            missing_info = self._extract_missing_info(comment)
+            
+            # {欠品}プレースホルダーがテンプレート内にあるかチェック
+            if "{欠品}" in template_text:
+                # プレースホルダー方式
+                if missing_info is not None:
+                    if missing_info:
+                        # 辞書にマッチして変換された文章がある
+                        replacement = f"【欠品情報】\n{missing_info}"
+                    else:
+                        # 辞書にないが「欠品」キーワードあり（見出しのみ）
+                        replacement = "【欠品情報】"
+                    # {欠品}を置換
+                    condition_note = template_text.replace("{欠品}", replacement)
+                else:
+                    # 欠品情報なし → {欠品}を削除（前後の改行も整理）
+                    condition_note = template_text.replace("{欠品}", "").strip()
+                    # 連続する改行を1つに
+                    import re
+                    condition_note = re.sub(r'\n\n+', '\n\n', condition_note)
+            else:
+                # プレースホルダーなし → 従来の動作（先頭に追加）
+                if missing_info is not None:
+                    if missing_info:
+                        condition_note = f"【欠品情報】\n{missing_info}\n\n{template_text}"
+                    else:
+                        condition_note = f"【欠品情報】\n\n{template_text}"
+                else:
+                    condition_note = template_text
+            
+            return condition_note.strip()
+        except Exception as e:
+            # エラー時はコメントをそのまま返す
+            return comment if comment else ""
+    
     def export_listing_csv(self):
-        """出品CSV生成"""
+        """出品CSV生成（conditionNote統合版）"""
         if self.filtered_data is None:
             QMessageBox.warning(self, "エラー", "データがありません")
             return
@@ -2131,6 +2679,16 @@ class InventoryWidget(QWidget):
                 except Exception:
                     pass
 
+                # コンディションキーを取得
+                condition_text = row.get('コンディション', '新品')
+                condition_key = self._get_condition_key(condition_text)
+                
+                # コメント欄を取得
+                comment = row.get('コメント', '') or row.get('コンディション説明', '')
+                
+                # conditionNoteを生成
+                condition_note = self._build_condition_note(condition_key, comment)
+
                 mapped_row = {
                     'sku': row.get('SKU', ''),
                     'asin': row.get('ASIN', ''),
@@ -2141,8 +2699,8 @@ class InventoryWidget(QWidget):
                     'purchasePrice': row.get('仕入れ価格', 0),
                     'breakEven': row.get('損益分岐点', 0),
                     'takane': takane_val,
-                    'condition': row.get('コンディション', ''),
-                    'conditionNote': row.get('コンディション説明', ''),
+                    'condition': condition_text,
+                    'conditionNote': condition_note,
                     'priceTrace': row.get('priceTrace', 0)
                 }
                 mapped_data.append(mapped_row)

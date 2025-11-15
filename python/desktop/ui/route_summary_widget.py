@@ -1184,10 +1184,49 @@ class RouteSummaryWidget(QWidget):
                     star_widget.rating_changed.connect(lambda rating, r=i: self.on_star_rating_changed(r, rating))
                     self.store_visits_table.setCellWidget(i, 9, star_widget)
 
-                # 下部情報（17行目以降）
+                # 下部情報の読み込み
                 try:
+                    # A列を1行目から順にチェックして出発時刻・帰宅時刻を探す
+                    dep_row = None
+                    ret_row = None
+                    
+                    # 1行目から100行目までチェック（十分な範囲を確保）
+                    for row_num in range(1, 101):
+                        a_cell_value = ws[f'A{row_num}'].value
+                        if a_cell_value is None:
+                            continue
+                        
+                        a_key = str(a_cell_value).strip()
+                        
+                        # 出発時刻・出発時間を探す
+                        if dep_row is None and a_key in ('出発時刻', '出発時間'):
+                            dep_row = row_num
+                        
+                        # 帰宅時刻・帰宅時間を探す
+                        if ret_row is None and a_key in ('帰宅時刻', '帰宅時間'):
+                            ret_row = row_num
+                        
+                        # 両方見つかったら終了
+                        if dep_row is not None and ret_row is not None:
+                            break
+                    
+                    # 出発時刻を読み込み
+                    if dep_row is not None:
+                        dep_raw = ws[f'B{dep_row}'].value
+                        dep_str = _to_time_str(dep_raw)
+                        if dep_str:
+                            self.departure_time_edit.setText(dep_str)
+                    
+                    # 帰宅時刻を読み込み
+                    if ret_row is not None:
+                        ret_raw = ws[f'B{ret_row}'].value
+                        ret_str = _to_time_str(ret_raw)
+                        if ret_str:
+                            self.return_time_edit.setText(ret_str)
+                    
+                    # その他の下部情報（15行目以降、出発時刻・帰宅時刻以外）
                     bottom_map = {}
-                    for rr in range(17, 17 + 15):
+                    for rr in range(15, 15 + 20):  # 15行目から35行目まで
                         key = ws[f'A{rr}'].value
                         val = ws[f'B{rr}'].value
                         if (key is None or str(key).strip() == '') and ws[f'B{rr}'].value:
@@ -1199,21 +1238,28 @@ class RouteSummaryWidget(QWidget):
                                (ws[f'C{rr}'].value is None or str(ws[f'C{rr}'].value).strip() == ''):
                                 break
                             continue
-                        bottom_map[str(key).strip()] = val
-
-                    # 出発時刻・帰宅時刻
-                    dep_raw = bottom_map.get('出発時刻')
-                    if dep_raw is None:
-                        dep_raw = bottom_map.get('出発時間')
-                    ret_raw = bottom_map.get('帰宅時刻')
-                    if ret_raw is None:
-                        ret_raw = bottom_map.get('帰宅時間')
-                    dep_str = _to_time_str(dep_raw)
-                    ret_str = _to_time_str(ret_raw)
-                    if dep_str:
-                        self.departure_time_edit.setText(dep_str)
-                    if ret_str:
-                        self.return_time_edit.setText(ret_str)
+                        key_str = str(key).strip()
+                        # 出発時刻・帰宅時刻は既に処理済みなのでスキップ
+                        if key_str in ('出発時刻', '出発時間', '帰宅時刻', '帰宅時間'):
+                            continue
+                        bottom_map[key_str] = val
+                    
+                    # 出発時刻・帰宅時刻がまだ設定されていない場合、bottom_mapからも試す（フォールバック）
+                    if not self.departure_time_edit.text() or self.departure_time_edit.text() == QTime.currentTime().toString('HH:mm'):
+                        dep_raw = bottom_map.get('出発時刻')
+                        if dep_raw is None:
+                            dep_raw = bottom_map.get('出発時間')
+                        dep_str = _to_time_str(dep_raw)
+                        if dep_str:
+                            self.departure_time_edit.setText(dep_str)
+                    
+                    if not self.return_time_edit.text() or self.return_time_edit.text() == QTime.currentTime().toString('HH:mm'):
+                        ret_raw = bottom_map.get('帰宅時刻')
+                        if ret_raw is None:
+                            ret_raw = bottom_map.get('帰宅時間')
+                        ret_str = _to_time_str(ret_raw)
+                        if ret_str:
+                            self.return_time_edit.setText(ret_str)
 
                     # 高速代
                     try:
