@@ -9,6 +9,7 @@
 """
 
 import sqlite3
+import json
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -256,6 +257,60 @@ class ConditionTemplateDatabase:
             ))
         
         conn.commit()
+
+    def _get_missing_keywords_path(self) -> Path:
+        """欠品キーワード辞書のJSONファイルパスを取得"""
+        base_dir = Path(self.db_path).parent
+        return base_dir / "missing_keywords.json"
+    
+    def load_missing_keywords(self) -> Dict[str, Any]:
+        """欠品キーワード辞書をJSONファイルから読み込み"""
+        json_path = self._get_missing_keywords_path()
+        
+        # ファイルが存在しない場合は初期データを作成
+        if not json_path.exists():
+            default_data = {
+                "keywords": {
+                    "取説欠品": "取扱説明書が欠品しています。メーカーサイトにてダウンロード可能です。",
+                    "付属ROM欠品": "付属ROMが欠品しています。",
+                    "内箱欠品": "内箱なし",
+                    "外箱欠品": "外箱なし"
+                },
+                "detection_keywords": ["欠品", "なし", "無し", "欠"]
+            }
+            self.save_missing_keywords(default_data)
+            return default_data
+        
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            # 読み込みエラーの場合はデフォルトデータを返す
+            default_data = {
+                "keywords": {},
+                "detection_keywords": ["欠品", "なし", "無し", "欠"]
+            }
+            return default_data
+    
+    def save_missing_keywords(self, keywords_dict: Dict[str, Any]):
+        """欠品キーワード辞書をJSONファイルに保存"""
+        json_path = self._get_missing_keywords_path()
+        
+        try:
+            # ディレクトリが存在しない場合は作成
+            json_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(keywords_dict, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            raise Exception(f"欠品キーワード辞書の保存に失敗しました: {str(e)}")
+    
+    def get_condition_description_text(self, condition_key: str) -> str:
+        """コンディションキーから説明文のテキストのみを取得"""
+        condition = self.get_condition_by_key(condition_key)
+        if condition and condition.get('description'):
+            return condition['description']
+        return ""
 
     def close(self):
         """データベース接続を閉じる"""
