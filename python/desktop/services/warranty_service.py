@@ -31,6 +31,7 @@ class WarrantyService:
         base_dir: Optional[str | Path] = None,
         tesseract_cmd: Optional[str] = None,
         gcv_credentials_path: Optional[str] = None,
+        tessdata_dir: Optional[str] = None,
         default_warranty_days: int = 365,  # デフォルト1年
     ):
         self.base_dir = Path(base_dir) if base_dir else Path(__file__).resolve().parents[2] / "python" / "desktop" / "data" / "warranties"
@@ -39,7 +40,7 @@ class WarrantyService:
         self.product_db = ProductDatabase()
         self.warranty_db = WarrantyDatabase()
         self.ledger_db = LedgerDatabase()
-        self.ocr = OCRService(tesseract_cmd=tesseract_cmd, gcv_credentials_path=gcv_credentials_path)
+        self.ocr = OCRService(tesseract_cmd=tesseract_cmd, gcv_credentials_path=gcv_credentials_path, tessdata_dir=tessdata_dir)
 
     def save_image(self, src_path: str | Path) -> Path:
         """保証書画像を保存"""

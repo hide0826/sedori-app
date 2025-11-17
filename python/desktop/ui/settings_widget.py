@@ -232,6 +232,47 @@ class SettingsWidget(QWidget):
         
         layout.addWidget(log_group)
         
+        # OCR設定
+        ocr_group = QGroupBox("OCR設定")
+        ocr_layout = QGridLayout(ocr_group)
+        
+        # Tesseract実行ファイルパス
+        ocr_layout.addWidget(QLabel("Tesseract実行ファイル:"), 0, 0)
+        self.tesseract_cmd_edit = QLineEdit()
+        self.tesseract_cmd_edit.setPlaceholderText("C:\\Program Files\\Tesseract-OCR\\tesseract.exe")
+        ocr_layout.addWidget(self.tesseract_cmd_edit, 0, 1)
+        
+        tesseract_browse_btn = QPushButton("参照")
+        tesseract_browse_btn.clicked.connect(lambda: self.browse_file(self.tesseract_cmd_edit, "Tesseract実行ファイル", "実行ファイル (*.exe)"))
+        ocr_layout.addWidget(tesseract_browse_btn, 0, 2)
+        
+        # Tessdataディレクトリパス（tessdata_best用）
+        ocr_layout.addWidget(QLabel("Tessdataディレクトリ:"), 1, 0)
+        self.tessdata_dir_edit = QLineEdit()
+        self.tessdata_dir_edit.setPlaceholderText("C:\\Program Files\\Tesseract-OCR\\tessdata")
+        ocr_layout.addWidget(self.tessdata_dir_edit, 1, 1)
+        
+        tessdata_browse_btn = QPushButton("参照")
+        tessdata_browse_btn.clicked.connect(lambda: self.browse_directory(self.tessdata_dir_edit))
+        ocr_layout.addWidget(tessdata_browse_btn, 1, 2)
+        
+        # Google Cloud Vision API認証情報パス（オプション）
+        ocr_layout.addWidget(QLabel("GCV認証情報(JSON):"), 2, 0)
+        self.gcv_credentials_edit = QLineEdit()
+        self.gcv_credentials_edit.setPlaceholderText("（オプション）Google Cloud Vision API認証情報")
+        ocr_layout.addWidget(self.gcv_credentials_edit, 2, 1)
+        
+        gcv_browse_btn = QPushButton("参照")
+        gcv_browse_btn.clicked.connect(lambda: self.browse_file(self.gcv_credentials_edit, "GCV認証情報", "JSONファイル (*.json)"))
+        ocr_layout.addWidget(gcv_browse_btn, 2, 2)
+        
+        # OCRテストボタン
+        self.test_ocr_btn = QPushButton("OCR設定テスト")
+        self.test_ocr_btn.clicked.connect(self.test_ocr_settings)
+        ocr_layout.addWidget(self.test_ocr_btn, 3, 0, 1, 3)
+        
+        layout.addWidget(ocr_group)
+        
         layout.addStretch()
         parent.addTab(advanced_widget, "詳細設定")
         
@@ -330,13 +371,13 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         if directory:
             line_edit.setText(directory)
             
-    def browse_file(self, line_edit, title):
+    def browse_file(self, line_edit, title, file_filter="すべてのファイル (*)"):
         """ファイル選択ダイアログ"""
-        file_path, _ = QFileDialog.getSaveFileName(
+        file_path, _ = QFileDialog.getOpenFileName(
             self,
             title,
             line_edit.text() or str(Path.home()),
-            "すべてのファイル (*)"
+            file_filter
         )
         if file_path:
             line_edit.setText(file_path)
@@ -358,6 +399,93 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             
         except Exception as e:
             QMessageBox.critical(self, "接続テストエラー", f"接続テスト中にエラーが発生しました:\n{str(e)}")
+    
+    def test_ocr_settings(self):
+        """OCR設定のテスト"""
+        try:
+            tesseract_cmd = self.tesseract_cmd_edit.text().strip() or None
+            tessdata_dir = self.tessdata_dir_edit.text().strip() or None
+            gcv_credentials = self.gcv_credentials_edit.text().strip() or None
+            
+            # OCRServiceをインポートしてテスト
+            import sys
+            import os
+            from pathlib import Path
+            # python/desktop をパスに追加
+            desktop_dir = Path(__file__).parent.parent
+            sys.path.insert(0, str(desktop_dir))
+            
+            # デスクトップ側servicesを優先して読み込む
+            try:
+                from services.ocr_service import OCRService  # python/desktop/services
+            except ImportError:
+                # フォールバック
+                from desktop.services.ocr_service import OCRService
+            
+            # 環境変数を一時的に設定
+            old_tessdata_prefix = os.environ.get('TESSDATA_PREFIX')
+            if tessdata_dir:
+                os.environ['TESSDATA_PREFIX'] = tessdata_dir
+            
+            try:
+                ocr_service = OCRService(
+                    tesseract_cmd=tesseract_cmd,
+                    gcv_credentials_path=gcv_credentials,
+                    tessdata_dir=tessdata_dir
+                )
+                
+                # 結果メッセージを構築
+                messages = []
+                
+                # GCVの確認
+                if OCRService.is_gcv_available():
+                    if gcv_credentials:
+                        if Path(gcv_credentials).exists():
+                            if ocr_service.gcv_client:
+                                messages.append("✅ Google Cloud Vision API: 設定済み・利用可能")
+                            else:
+                                messages.append("⚠️  Google Cloud Vision API: 認証情報ファイルは存在しますが、初期化に失敗しました")
+                        else:
+                            messages.append("❌ Google Cloud Vision API: 認証情報ファイルが見つかりません")
+                    else:
+                        messages.append("ℹ️  Google Cloud Vision API: 認証情報が設定されていません（オプション）")
+                else:
+                    messages.append("ℹ️  Google Cloud Vision API: google-cloud-visionパッケージがインストールされていません")
+                
+                # Tesseractの確認
+                if OCRService.is_tesseract_available():
+                    if tesseract_cmd:
+                        if Path(tesseract_cmd).exists():
+                            messages.append(f"✅ Tesseract OCR: 設定済み ({tesseract_cmd})")
+                        else:
+                            messages.append(f"❌ Tesseract OCR: 実行ファイルが見つかりません ({tesseract_cmd})")
+                    else:
+                        messages.append("✅ Tesseract OCR: 利用可能（デフォルト設定）")
+                    
+                    if tessdata_dir:
+                        if Path(tessdata_dir).exists():
+                            messages.append(f"✅ Tessdataディレクトリ: {tessdata_dir}")
+                        else:
+                            messages.append(f"⚠️  Tessdataディレクトリが見つかりません: {tessdata_dir}")
+                else:
+                    messages.append("❌ Tesseract OCR: pytesseractがインストールされていません")
+                
+                # メッセージを表示
+                message_text = "OCR設定テスト結果\n\n" + "\n".join(messages)
+                
+                if any("✅" in msg for msg in messages):
+                    QMessageBox.information(self, "OCR設定テスト", message_text)
+                else:
+                    QMessageBox.warning(self, "OCR設定テスト", message_text)
+            finally:
+                # 環境変数を元に戻す
+                if old_tessdata_prefix:
+                    os.environ['TESSDATA_PREFIX'] = old_tessdata_prefix
+                elif 'TESSDATA_PREFIX' in os.environ:
+                    del os.environ['TESSDATA_PREFIX']
+                    
+        except Exception as e:
+            QMessageBox.critical(self, "OCR設定テストエラー", f"OCR設定テスト中にエラーが発生しました:\n{str(e)}")
             
     def load_settings(self):
         """設定の読み込み"""
@@ -388,6 +516,11 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.log_file_cb.setChecked(self.settings.value("log/file_enabled", True, type=bool))
         self.log_file_edit.setText(self.settings.value("log/file_path", "logs/hirio.log"))
         
+        # OCR設定
+        self.tesseract_cmd_edit.setText(self.settings.value("ocr/tesseract_cmd", ""))
+        self.tessdata_dir_edit.setText(self.settings.value("ocr/tessdata_dir", ""))
+        self.gcv_credentials_edit.setText(self.settings.value("ocr/gcv_credentials", ""))
+        
     def save_settings(self):
         """設定の保存"""
         try:
@@ -417,6 +550,11 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             self.settings.setValue("log/level", self.log_level_combo.currentText())
             self.settings.setValue("log/file_enabled", self.log_file_cb.isChecked())
             self.settings.setValue("log/file_path", self.log_file_edit.text())
+            
+            # OCR設定
+            self.settings.setValue("ocr/tesseract_cmd", self.tesseract_cmd_edit.text())
+            self.settings.setValue("ocr/tessdata_dir", self.tessdata_dir_edit.text())
+            self.settings.setValue("ocr/gcv_credentials", self.gcv_credentials_edit.text())
             
             # 設定変更シグナルを発火
             settings_dict = self.get_current_settings()
@@ -462,6 +600,9 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.log_level_combo.setCurrentText("INFO")
         self.log_file_cb.setChecked(True)
         self.log_file_edit.setText("logs/hirio.log")
+        self.tesseract_cmd_edit.setText("")
+        self.tessdata_dir_edit.setText("")
+        self.gcv_credentials_edit.setText("")
         
     def get_current_settings(self):
         """現在の設定を辞書で取得"""
@@ -492,5 +633,10 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                 "level": self.log_level_combo.currentText(),
                 "file_enabled": self.log_file_cb.isChecked(),
                 "file_path": self.log_file_edit.text()
+            },
+            "ocr": {
+                "tesseract_cmd": self.tesseract_cmd_edit.text(),
+                "tessdata_dir": self.tessdata_dir_edit.text(),
+                "gcv_credentials": self.gcv_credentials_edit.text()
             }
         }

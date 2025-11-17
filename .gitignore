@@ -212,5 +212,9 @@ __marimo__/
 python/tmp/
 python/desktop/data/*.db
 python/desktop/data/receipts/
+python/desktop/data/credentials/
+*credentials*.json
+*gcv*.json
+*google*.json
 
 python/python/

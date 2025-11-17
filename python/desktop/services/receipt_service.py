@@ -33,11 +33,11 @@ class ReceiptParseResult:
 
 
 class ReceiptService:
-    def __init__(self, base_dir: Optional[str | Path] = None, tesseract_cmd: Optional[str] = None, gcv_credentials_path: Optional[str] = None):
+    def __init__(self, base_dir: Optional[str | Path] = None, tesseract_cmd: Optional[str] = None, gcv_credentials_path: Optional[str] = None, tessdata_dir: Optional[str] = None):
         self.base_dir = Path(base_dir) if base_dir else Path(__file__).resolve().parents[2] / "python" / "desktop" / "data" / "receipts"
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.db = ReceiptDatabase()
-        self.ocr = OCRService(tesseract_cmd=tesseract_cmd, gcv_credentials_path=gcv_credentials_path)
+        self.ocr = OCRService(tesseract_cmd=tesseract_cmd, gcv_credentials_path=gcv_credentials_path, tessdata_dir=tessdata_dir)
 
     def save_image(self, src_path: str | Path) -> Path:
         src_path = Path(src_path)

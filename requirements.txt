@@ -7,4 +7,4 @@ openpyxl
 matplotlib
 Pillow
 pytesseract
-# google-cloud-vision  # Optional: For OCR fallback (requires API key)
+google-cloud-vision  # Optional: For OCR fallback (requires API key)
