@@ -61,6 +61,35 @@ class ReceiptService:
 
 
 
+        
+        # パターン2: yyyy年mm月dd日 or yyyy年mm月dd
+        if not purchase_date:
+            m_date = re.search(r"(20\d{2})年(\d{1,2})月(\d{1,2})日?", text)
+            if m_date:
+                y, mo, d = m_date.groups()
+                purchase_date = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+        
+        # パターン3: 令和X年mm月dd日 (令和7年 = 2025年)
+        if not purchase_date:
+            m_date = re.search(r"令和(\d{1,2})年(\d{1,2})月(\d{1,2})日?", text)
+            if m_date:
+                reiwa_year, mo, d = m_date.groups()
+                # 令和年を西暦に変換（令和1年 = 2019年）
+                y = 2018 + int(reiwa_year)
+                purchase_date = f"{y:04d}-{int(mo):02d}-{int(d):02d}"
+        
+        # パターン4: R7年mm月dd日 (R7年 = 2025年)
+        if not purchase_date:
+            m_date = re.search(r"R(\d{1,2})年(\d{1,2})月(\d{1,2})日?", text)
+            if m_date:
+                reiwa_year, mo, d = m_date.groups()
+                # 令和年を西暦に変換（令和1年 = 2019年）
+                y = 2018 + int(reiwa_year)
+                purchase_date = f"{y:04d}-{int(mo):02d}-{int(d):02d}"
+        
+
+
+
         # 店舗名の抽出（新規実装）
         # レシートの一般的な構造を考慮して店舗名を抽出
         lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
@@ -136,7 +165,11 @@ class ReceiptService:
                         continue
                     if len(line) >= 3:
                         store_name_raw = line[:64]
-                        break
+        
+        # SSで始まる店舗名を「セカンドストリート」に変換
+        if store_name_raw and store_name_raw.startswith('SS'):
+            store_name_raw = 'セカンドストリート' + store_name_raw[2:]
+        
 
         # 金額類（日本語表記の代表パターン）
         def _find_int(patterns: list[str]) -> Optional[int]:
