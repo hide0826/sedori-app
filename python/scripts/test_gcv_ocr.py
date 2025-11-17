@@ -202,7 +202,7 @@ def main():
         return 0
     except Exception as e:
         print(f"[ERROR] 引数解析エラー: {e}")
-        input("\nEnterキーを押して終了してください...")
+        # バッチファイル側で待機処理を行うため、ここでは待機しない
         return 1
     
     try:
@@ -217,17 +217,13 @@ def main():
             print("テスト完了")
             print("=" * 60)
         
-        # 必ず待機（エラーコードに関係なく）
-        print("\nEnterキーを押して終了してください...")
-        try:
-            input()
-        except (EOFError, KeyboardInterrupt):
-            pass
+        # バッチファイル側で待機処理を行うため、ここでは待機しない
+        # ドラッグ&ドロップ実行時は標準入力が閉じられている可能性があるため
         
         return exit_code
     except KeyboardInterrupt:
         print("\n\n[WARNING] ユーザーによって中断されました")
-        input("\nEnterキーを押して終了してください...")
+        # バッチファイル側で待機処理を行うため、ここでは待機しない
         return 1
     except Exception as e:
         print(f"\n[ERROR] 予期しないエラー: {e}")
@@ -237,7 +233,7 @@ def main():
         import traceback
         traceback.print_exc()
         print("=" * 60)
-        input("\nEnterキーを押して終了してください...")
+        # バッチファイル側で待機処理を行うため、ここでは待機しない
         return 1
 
 if __name__ == "__main__":
@@ -245,12 +241,12 @@ if __name__ == "__main__":
         sys.exit(main())
     except KeyboardInterrupt:
         print("\n\n[WARNING] ユーザーによって中断されました")
-        input("\nEnterキーを押して終了してください...")
+        # バッチファイル側で待機処理を行うため、ここでは待機しない
         sys.exit(1)
     except Exception as e:
         print(f"\n[ERROR] 予期しないエラー: {e}")
         import traceback
         traceback.print_exc()
-        input("\nEnterキーを押して終了してください...")
+        # バッチファイル側で待機処理を行うため、ここでは待機しない
         sys.exit(1)
 

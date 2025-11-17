@@ -59,9 +59,84 @@ class ReceiptService:
             y, mo, d = m_date.groups()
             purchase_date = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
 
-        # 店舗名（先頭行近辺の全角/半角混在文字を想定。ここでは1行目を仮採用）
-        first_line = text.strip().splitlines()[0] if text.strip().splitlines() else ""
-        store_name_raw = first_line[:64] if first_line else None
+
+
+        # 店舗名の抽出（新規実装）
+        # レシートの一般的な構造を考慮して店舗名を抽出
+        lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+        store_name_raw = None
+        
+        # スキップする一般的なレシートヘッダー
+        skip_patterns = [
+            "領収書", "お買上げ明細", "お買い上げ明細", "レシート", "receipt",
+            "合計", "小計", "税", "お預り", "お預かり", "支払",
+            "商品名", "金額", "商品", "明細", "内訳"
+        ]
+        
+        # 電話番号の位置を特定
+        phone_line_idx = None
+        for i, line in enumerate(lines):
+            if re.search(r"\d{2,4}[-−‐ー―]?\d{2,4}[-−‐ー―]?\d{3,4}", line):
+                phone_line_idx = i
+                break
+        
+        # 店舗名の候補を探す（優先度付き）
+        candidates = []
+        for i, line in enumerate(lines):
+            # スキップパターンに該当する行は除外
+            if any(pattern in line for pattern in skip_patterns):
+                continue
+            
+            # 数字のみ、記号のみ、住所らしい行は除外
+            if re.match(r"^[\d\s,\.]+$", line):
+                continue
+            if re.match(r"^[*★☆\-=]+$", line):
+                continue
+            if re.search(r"[都道府県市区町村]", line):
+                continue
+            
+            # 優先度を計算
+            priority = 0
+            
+            # 電話番号の近く（前後3行以内）を優先
+            if phone_line_idx is not None:
+                distance = abs(i - phone_line_idx)
+                if distance <= 3:
+                    priority += (10 - distance) * 2  # 近いほど優先度が高い
+            
+            # 店舗名らしいキーワードを含む行を優先
+            if re.search(r"(店|ショップ|ストア|マート|センター|ファクトリー|フリー|マーケット)", line):
+                priority += 20
+            
+            # 長い行（店舗名の可能性が高い）を優先
+            if len(line) >= 5:
+                priority += 5
+            
+            # 店舗名らしい文字列（カタカナ、漢字、英字を含む）を優先
+            if re.search(r"[ァ-ヶ一-龠A-Za-z]", line):
+                priority += 3
+            
+            if priority > 0:
+                candidates.append((priority, i, line))
+        
+        # 優先度順にソートして最上位を選択
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            store_name_raw = candidates[0][2][:64]  # 最大64文字
+        else:
+            # 候補が見つからない場合は、電話番号の前の行を試す
+            if phone_line_idx is not None and phone_line_idx > 0:
+                for i in range(phone_line_idx - 1, max(0, phone_line_idx - 4), -1):
+                    line = lines[i]
+                    if any(pattern in line for pattern in skip_patterns):
+                        continue
+                    if re.match(r"^[\d\s,\.]+$", line):
+                        continue
+                    if re.search(r"[都道府県市区町村]", line):
+                        continue
+                    if len(line) >= 3:
+                        store_name_raw = line[:64]
+                        break
 
         # 金額類（日本語表記の代表パターン）
         def _find_int(patterns: list[str]) -> Optional[int]:
@@ -131,6 +206,18 @@ class ReceiptService:
             r"([0-9０-９]+)\s*点",
             r"([0-9０-９]+)\s*品"
         ])
+
+        return ReceiptParseResult(
+            purchase_date=purchase_date,
+            store_name_raw=store_name_raw,
+            phone_number=phone_number,
+            subtotal=subtotal,
+            tax=tax,
+            discount_amount=discount_amount,
+            total_amount=total_amount,
+            paid_amount=paid_amount,
+            items_count=items_count,
+        )
 
         return ReceiptParseResult(
             purchase_date=purchase_date,

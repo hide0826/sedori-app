@@ -213,10 +213,12 @@ class ReceiptWidget(QWidget):
     
     def select_image(self):
         """画像ファイルを選択"""
+        # デフォルトディレクトリを設定（暫定的）
+        default_dir = r"D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳\20251115八王子ルート\レシート"
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "レシート画像を選択",
-            "",
+            default_dir,
             "画像ファイル (*.jpg *.jpeg *.png *.bmp)"
         )
         if file_path:
