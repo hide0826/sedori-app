@@ -225,6 +225,52 @@
   - リモートリポジトリへのプッシュ完了
 - **次回**: 動作確認を進めながら細かい修正
 
+### 2025-01-26
+- **チャット**: Agentモード（実装）
+- **内容**: Google Cloud Vision API統合とOCR機能改善
+- **実装完了**:
+  - **Google Cloud Vision API統合**
+    - services/ocr_service.py: GCVを優先的に使用するOCRサービス実装
+    - GCVが利用可能な場合は優先使用、失敗時はTesseractにフォールバック
+    - QSettingsからOCR設定（Tesseract実行ファイル、Tessdataディレクトリ、GCV認証情報）を読み込み
+  - **OCRテキスト正規化機能**
+    - utils/ocr_normalizer.py: OCRで抽出されたテキストの正規化機能
+    - 全角英数字・記号を半角に変換（NFKC正規化）
+    - 連続する空白文字を1つの半角スペースにまとめる
+    - 日本語特有の文字の揺れを吸収（例: ー → -）
+  - **OCR設定画面拡張**
+    - ui/settings_widget.py: OCR設定グループを追加
+    - Tesseract実行ファイルパス設定
+    - Tessdataディレクトリパス設定（tessdata_best用）
+    - GCV認証情報(JSON)パス設定
+    - OCR設定テストボタン（動的にOCRServiceをインポートしてテスト）
+  - **OCRサービス統合**
+    - services/receipt_service.py: tessdata_dirパラメータを追加
+    - services/warranty_service.py: tessdata_dirパラメータを追加
+  - **GCV OCRテストスクリプト**
+    - scripts/test_gcv_ocr.py: GCV OCR動作確認用スクリプト
+    - scripts/test_gcv_ocr.bat: ドラッグ&ドロップ対応バッチファイル
+    - エラーハンドリング強化、UTF-8出力対応
+  - **セットアップドキュメント**
+    - docs/google_cloud_vision_setup.md: GCV APIセットアップ手順書
+    - サービスアカウント作成手順
+    - 認証情報JSONファイルの保存場所
+    - 動作確認方法
+  - **依存関係追加**
+    - requirements.txt: google-cloud-visionパッケージを追加
+    - .gitignore: GCV認証情報ファイルを除外
+- **動作確認**: 
+  - Pythonスクリプトは正常に動作（Cursorでテスト済み）
+  - OCR処理は成功（GCVでテキスト抽出成功）
+  - バッチファイルの文字化け問題は修正中（英語メッセージに変更）
+- **既知の問題**:
+  - バッチファイル（test_gcv_ocr.bat）をダブルクリックで実行すると、まだウィンドウがすぐに閉じる問題が残っている
+  - Pythonスクリプト側のinput()で待機処理を追加済みだが、バッチファイル経由では動作しない場合がある
+- **Gitコミット**: 
+  - feat: Google Cloud Vision API統合とOCR機能改善 (d3f504d)
+  - リモートリポジトリへのプッシュ完了
+- **次回**: バッチファイルのウィンドウが閉じる問題の解決
+
 ---
-**最終更新**: 2025-01-28
+**最終更新**: 2025-01-26
 **更新者**: Agentモード（実装）
