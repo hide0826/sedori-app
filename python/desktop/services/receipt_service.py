@@ -52,15 +52,14 @@ class ReceiptService:
 
     def parse_receipt_text(self, text: str) -> ReceiptParseResult:
         """OCRテキストからレシート情報を抽出（簡易版）"""
-        # 日付（yyyy-mm-dd or yyyy/mm/dd or yyyy.mm.dd）
-        m_date = re.search(r"(20\d{2})[./-](\d{1,2})[./-](\d{1,2})", text)
+        # 日付抽出（複数形式に対応）
         purchase_date = None
+        
+        # パターン1: yyyy-mm-dd or yyyy/mm/dd or yyyy.mm.dd
+        m_date = re.search(r"(20\d{2})[./-](\d{1,2})[./-](\d{1,2})", text)
         if m_date:
             y, mo, d = m_date.groups()
             purchase_date = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
-
-
-
         
         # パターン2: yyyy年mm月dd日 or yyyy年mm月dd
         if not purchase_date:
@@ -86,13 +85,12 @@ class ReceiptService:
                 # 令和年を西暦に変換（令和1年 = 2019年）
                 y = 2018 + int(reiwa_year)
                 purchase_date = f"{y:04d}-{int(mo):02d}-{int(d):02d}"
-        
-
-
 
         # 店舗名の抽出（新規実装）
         # レシートの一般的な構造を考慮して店舗名を抽出
         lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+        import unicodedata
+        normalized_lines = [unicodedata.normalize('NFKC', line) for line in lines]
         store_name_raw = None
         
         # スキップする一般的なレシートヘッダー
@@ -165,11 +163,11 @@ class ReceiptService:
                         continue
                     if len(line) >= 3:
                         store_name_raw = line[:64]
+                        break
         
         # SSで始まる店舗名を「セカンドストリート」に変換
         if store_name_raw and store_name_raw.startswith('SS'):
             store_name_raw = 'セカンドストリート' + store_name_raw[2:]
-        
 
         # 金額類（日本語表記の代表パターン）
         def _find_int(patterns: list[str]) -> Optional[int]:
@@ -184,20 +182,247 @@ class ReceiptService:
         def _to_int(s: str | None) -> Optional[int]:
             if not s:
                 return None
-            # カンマ・空白を除去、全角→半角
+            # カンマ・空白・ドットを除去、全角→半角
+            # レシートでは「5, 291」「5.291」のような揺れがあるため、
+            # ドットも桁区切りとして扱い、単純に削除する
             import unicodedata
             s = unicodedata.normalize('NFKC', s)
-            s = s.replace(',', '').replace(' ', '')
+            # 数値以外の通貨記号などを除去
+            for ch in [',', ' ', '\t', '.', '¥', '￥']:
+                s = s.replace(ch, '')
+            # 末尾のマイナスや括弧は無視（例: "5291-" "(5291)"）
+            s = s.strip()
+            if s.endswith('-'):
+                s = s[:-1]
+            if s.startswith('(') and s.endswith(')') and len(s) > 2:
+                s = s[1:-1]
+            if not s or not re.search(r'\d', s):
+                return None
             try:
-                return int(round(float(s)))
+                return int(s)
             except Exception:
                 return None
 
-        subtotal = _find_int([r"小計\s*[:：]?\s*([0-9,\.]+)", r"税抜\s*[:：]?\s*([0-9,\.]+)"])  # 税抜/小計
-        tax = _find_int([r"税\s*[:：]?\s*([0-9,\.]+)", r"消費税\s*[:：]?\s*([0-9,\.]+)"])
-        discount_amount = _find_int([r"値引[き|き額]?\s*[:：-]?\s*([0-9,\.]+)", r"クーポン\s*[:：-]?\s*([0-9,\.]+)"])
-        total_amount = _find_int([r"合計\s*[:：]?\s*([0-9,\.]+)", r"税込\s*[:：]?\s*([0-9,\.]+)"])
-        paid_amount = _find_int([r"お預り\s*[:：]?\s*([0-9,\.]+)", r"お預かり\s*[:：]?\s*([0-9,\.]+)", r"支払\s*[:：]?\s*([0-9,\.]+)"])
+        # 数値部分は「5,291」「5, 291」のようにカンマ後に半角スペースが入るケースがあるため
+        # 空白も許容するパターンにしている（[0-9,\. \t]+）
+        subtotal = _find_int([r"小計\s*[:：]?\s*([0-9,\. \t]+)", r"税抜\s*[:：]?\s*([0-9,\. \t]+)"])  # 税抜/小計
+        tax = _find_int([r"税\s*[:：]?\s*([0-9,\. \t]+)", r"消費税\s*[:：]?\s*([0-9,\. \t]+)", r"内税\s*[:：]?\s*\(?10%\)?\s*[:：]?\s*([0-9,\. \t]+)"])
+        discount_amount = _find_int([r"値引[き|き額]?\s*[:：-]?\s*([0-9,\. \t]+)", r"クーポン\s*[:：-]?\s*([0-9,\. \t]+)"])
+        paid_amount = _find_int([
+            r"お預り\s*[:：]?\s*([0-9,\.]+)",
+            r"お預かり\s*[:：]?\s*([0-9,\.]+)",
+            r"支払\s*[:：]?\s*([0-9,\.]+)",
+            r"支払い\s*[:：]?\s*([0-9,\.]+)",
+            r"クレジットカード預り額\s*[:：]?\s*([0-9,\.]+)",
+            r"クレジット\s*[:：]?\s*([0-9,\.]+)"
+        ])
+        # 合計の抽出を強化（「合計」や「クレジット決済」キーワードの後の金額を優先）
+        # 「合計 total」→改行→「¥5, 291」のように行が分かれていてもマッチするように、
+        # キーワードの後は「数字が出てくるまでの任意文字＋任意の¥記号」を許容する
+        raw_total_amount = None
+        total_patterns = [
+            r"合計\s+total\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",  # 合計 total -> 5,291
+            r"合計\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",         # 合計: 5,291 / 合計 ¥5,291
+            r"合\s*計\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",      # 合 計: 5,291
+            r"税込\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",         # 税込 5,291
+            r"10%対象計\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",    # 10%対象計 5,291
+            r"10%\s*対象計\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",  # 10% 対象計 5,291
+            r"クレジット決済\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)", # クレジット決済 5,291
+            r"クレジットカード預り額\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",  # クレジットカード預り額 5,291
+            r"クレジット\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",   # クレジット 5,291
+        ]
+        for pat in total_patterns:
+            m = re.search(pat, text, flags=re.IGNORECASE)
+            if m:
+                val = _to_int(m.group(1))
+                if val is not None and val >= 100:  # 100円未満は除外（点数などの誤検出防止）
+                    raw_total_amount = val
+                    break
+        
+        # 正規化されたテキストでも検索（OCRの誤認識に対応）
+        if raw_total_amount is None:
+            for pat in total_patterns:
+                m = re.search(pat, '\n'.join(normalized_lines), flags=re.IGNORECASE)
+                if m:
+                    val = _to_int(m.group(1))
+                    if val is not None and val >= 100:
+                        raw_total_amount = val
+                        break
+
+        def _extract_amount_from_line(line: str) -> Optional[int]:
+            """行から金額を抽出（キーワードの後の大きな数字を優先）"""
+            # 店舗IDやレジ番号などの除外パターン
+            exclude_patterns = [
+                r"Store\s*ID", r"StoreID", r"店舗ID", r"店ID",
+                r"レジ\s*[:：]?\s*\d+", r"レジNo", r"レジ番号",
+                r"No\.\s*\d+", r"番号\s*\d+", r"会員番号",
+                r"登録番号", r"Transaction\s*Number", r"取引番号",
+                r"^\d{4,5}\s*$",  # 4桁または5桁の数字だけの行（店舗IDの可能性が高い）
+            ]
+            if any(re.search(pat, line, flags=re.IGNORECASE) for pat in exclude_patterns):
+                return None
+            
+            # 商品価格行を除外（商品名を含む行は除外）
+            product_keywords = [
+                r"キッズ", r"日用品", r"玩具", r"生活用品", r"レジ袋",
+                r"商品名", r"商品", r"品名", r"名称",
+                r"^\s*[A-Za-z0-9]+\s+",  # 商品コードで始まる行
+            ]
+            # ただし、「合計」などのキーワードが含まれている場合は除外しない
+            has_total_keyword = re.search(r"合計|税込|対象計|クレジット|支払", line, flags=re.IGNORECASE)
+            if not has_total_keyword and any(re.search(pat, line, flags=re.IGNORECASE) for pat in product_keywords):
+                return None
+            
+            # キーワードの後の金額を探す（例：「合計 4,405」）
+            # キーワードマッチングが成功した場合のみ金額を返す
+            keyword_patterns = [
+                r"合計\s+total\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",  # 合計 total: 5,291
+                r"合計\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",
+                r"合\s*計\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",
+                r"税込\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",
+                r"10%対象計\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",  # 10%対象計: 4,405
+                r"10%\s*対象計\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",  # 10% 対象計: 4,405
+                r"対象計\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",
+                r"クレジットカード預り額\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",  # クレジットカード預り額: 4,405
+                r"クレジットカード\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",
+                r"クレジット決済\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",  # クレジット決済: 5,291
+                r"クレジット\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",
+                r"支払\s*[:：]?[^\d¥\-]*¥?\s*([0-9,\. \t]+)",
+            ]
+            for pat in keyword_patterns:
+                m = re.search(pat, line, flags=re.IGNORECASE)
+                if m:
+                    val = _to_int(m.group(1))
+                    if val is not None and val >= 100:
+                        return val
+            
+            # キーワードマッチングが失敗した場合は、金額を抽出しない
+            # （商品価格や店舗IDなどの誤検出を防ぐため）
+            return None
+
+        def _determine_total_amount() -> Optional[int]:
+            # 最終的に返す合計候補（途中でより大きな値が見つかったら更新）
+            total_candidate: Optional[int] = raw_total_amount
+
+            keyword_priorities = [
+                (100, ["合計", "総合計", "合 計", "合計金額", "合　計", "合計 total"]),
+                (95, ["10%対象計", "10%対象金額", "10%対象額", "10% 対象計"]),  # 税率行の合計も有効
+                (90, ["税込合計", "税込金額", "税込計", "総計"]),
+                (85, ["クレジットカード預り額", "カード預り額", "クレジットカード", "クレジット決済"]),  # 支払額も有効
+                (80, ["対象計", "対象金額", "対象額"]),
+                (70, ["お支払金額", "お支払い金額", "支払合計", "支払額", "クレジット"]),
+                (60, ["預り額", "カード預り"]),
+            ]
+            exclude_keywords = [
+                "お釣り", "釣銭", "釣り銭", "ポイント", "pt残高", "会員", "残高", 
+                "ポイント利用", "発行ポイント", "利用ポイント", "会員ポイント",
+                "有効期限", "登録事業者", "担当者", "レジNo", "レシートNo", "レジ:",
+                "Store ID", "StoreID", "店舗ID", "店ID", "Transaction Number"
+            ]
+            # 商品価格行を除外するキーワード
+            product_keywords = [
+                "キッズ", "日用品", "玩具", "生活用品", "レジ袋",
+                "商品名", "商品", "品名", "名称"
+            ]
+            currency_tokens = ("¥", "円", "YEN", "yen", "￥", "込")
+            candidates: list[tuple[int, int, int]] = []
+
+            for idx, line in enumerate(normalized_lines):
+                # 除外キーワードを含む行はスキップ
+                if any(ex in line for ex in exclude_keywords):
+                    continue
+                
+                # 「10%」だけの行（税率表示）は除外
+                if re.match(r"^10%", line.strip()) and len(line.strip()) < 20:
+                    continue
+                
+                # 商品価格行を除外（商品名を含む行は除外）
+                # ただし、「合計」などのキーワードが含まれている場合は除外しない
+                has_total_keyword = re.search(r"合計|税込|対象計|クレジット|支払", line, flags=re.IGNORECASE)
+                if not has_total_keyword and any(keyword in line for keyword in product_keywords):
+                    continue
+                
+                amount = _extract_amount_from_line(line)
+                if amount is None:
+                    continue
+                
+                # 100円未満は除外（点数や税率などの誤検出防止）
+                if amount < 100:
+                    continue
+                
+                # 「点」を含む行で通貨記号がない場合は除外
+                contains_currency = any(token in line for token in currency_tokens)
+                if "点" in line and not contains_currency:
+                    continue
+                
+                # キーワードマッチング
+                for priority, keywords in keyword_priorities:
+                    if any(keyword in line for keyword in keywords):
+                        candidates.append((priority, -idx, amount))
+                        break
+
+            if candidates:
+                candidates.sort(reverse=True)
+                best_from_lines = candidates[0][2]
+                if total_candidate is None or best_from_lines > total_candidate:
+                    total_candidate = best_from_lines
+
+            # フォールバック1：小計+税
+            if subtotal is not None and tax is not None:
+                calculated_total = subtotal + tax
+                if calculated_total >= 100:  # 100円未満は除外
+                    if total_candidate is None or calculated_total > total_candidate:
+                        total_candidate = calculated_total
+
+            # フォールバック2：支払額
+            if paid_amount is not None and paid_amount >= 100:
+                if total_candidate is None or paid_amount > total_candidate:
+                    total_candidate = paid_amount
+
+            # フォールバック3：行ごとに検索して最大の金額を返す（キーワードがマッチしない場合）
+            # ただし、カンマ区切りの数字のみを抽出（金額は通常カンマ区切り、店舗IDはカンマなし）
+            fallback_amounts = []
+            store_id_patterns = [
+                r"Store\s*ID", r"StoreID", r"店舗ID", r"店ID",
+                r"レジ\s*[:：]?\s*\d+", r"レジNo", r"レジ番号",
+                r"No\.\s*\d+", r"番号\s*\d+", r"会員番号",
+                r"登録番号", r"Transaction\s*Number", r"取引番号",
+                r"^\d{4,5}\s*$",  # 4桁または5桁の数字だけの行（店舗IDの可能性が高い）
+            ]
+            for line in normalized_lines:
+                # 除外キーワードを含む行はスキップ
+                if any(ex in line for ex in exclude_keywords):
+                    continue
+                # 店舗IDやレジ番号を含む行はスキップ
+                if any(re.search(pat, line, flags=re.IGNORECASE) for pat in store_id_patterns):
+                    continue
+                # 「10%」だけの短い行は除外
+                if re.match(r"^10%", line.strip()) and len(line.strip()) < 20:
+                    continue
+                # 商品価格行を除外（商品名を含む行は除外）
+                has_total_keyword = re.search(r"合計|税込|対象計|クレジット|支払", line, flags=re.IGNORECASE)
+                if not has_total_keyword and any(keyword in line for keyword in product_keywords):
+                    continue
+                # カンマ区切りの数字のみを抽出（金額は通常カンマ区切り）
+                comma_matches = re.findall(r"([0-9]{1,3}(?:,[0-9]{3})+)", line)
+                for match in comma_matches:
+                    val = _to_int(match)
+                    if val is not None and val >= 100:  # 100円以上
+                        fallback_amounts.append(val)
+            
+            if fallback_amounts:
+                # 最も頻繁に出現する金額を返す（合計は通常複数回出現する）
+                from collections import Counter
+                counter = Counter(fallback_amounts)
+                most_common = counter.most_common(1)
+                if most_common:
+                    max_fallback = most_common[0][0]
+                    if total_candidate is None or max_fallback > total_candidate:
+                        total_candidate = max_fallback
+
+            return total_candidate
+
+        total_amount = _determine_total_amount()
 
         # 電話番号
         def _normalize_phone(raw: str | None) -> Optional[str]:
@@ -233,24 +458,12 @@ class ReceiptService:
 
         # 商品点数
         items_count = _find_int([
-            r"点数\s*[:：]?\s*([0-9０-９,\.]+)",
-            r"品数\s*[:：]?\s*([0-9０-９,\.]+)",
-            r"合計\s*品\s*[:：]?\s*([0-9０-９,\.]+)",
+            r"点数\s*[:：]?\s*([0-9０-９,\. \t]+)",
+            r"品数\s*[:：]?\s*([0-9０-９,\. \t]+)",
+            r"合計\s*品\s*[:：]?\s*([0-9０-９,\. \t]+)",
             r"([0-9０-９]+)\s*点",
             r"([0-9０-９]+)\s*品"
         ])
-
-        return ReceiptParseResult(
-            purchase_date=purchase_date,
-            store_name_raw=store_name_raw,
-            phone_number=phone_number,
-            subtotal=subtotal,
-            tax=tax,
-            discount_amount=discount_amount,
-            total_amount=total_amount,
-            paid_amount=paid_amount,
-            items_count=items_count,
-        )
 
         return ReceiptParseResult(
             purchase_date=purchase_date,
@@ -270,7 +483,32 @@ class ReceiptService:
         """
         saved = self.save_image(image_path)
         ocr = self.ocr.extract_text(saved, use_preprocessing=True)
-        parsed = self.parse_receipt_text(ocr.get("text") or "")
+        raw_text = ocr.get("text") or ""
+        parsed = self.parse_receipt_text(raw_text)
+
+        # デバッグ用ログ: OCRテキストと抽出結果を記録（原因調査用）
+        try:
+            log_path = Path(__file__).resolve().parents[2] / "python" / "desktop" / "desktop_error.log"
+            with open(log_path, "a", encoding="utf-8") as f:
+                from datetime import datetime
+
+                f.write("\n\n==== ReceiptService.process_receipt Debug ====\n")
+                f.write(f"timestamp   : {datetime.now().isoformat(timespec='seconds')}\n")
+                f.write(f"image_path  : {saved}\n")
+                f.write(f"purchase_date: {parsed.purchase_date}\n")
+                f.write(f"store_name  : {parsed.store_name_raw}\n")
+                f.write(f"subtotal    : {parsed.subtotal}\n")
+                f.write(f"tax         : {parsed.tax}\n")
+                f.write(f"discount    : {parsed.discount_amount}\n")
+                f.write(f"total_amount: {parsed.total_amount}\n")
+                f.write(f"paid_amount : {parsed.paid_amount}\n")
+                f.write(f"items_count : {parsed.items_count}\n")
+                f.write("---- OCR text ----\n")
+                f.write(raw_text)
+                f.write("\n==== End Debug ====\n")
+        except Exception:
+            # ログ出力に失敗しても本処理には影響させない
+            pass
 
         receipt_data = {
             "file_path": str(saved),
@@ -286,7 +524,7 @@ class ReceiptService:
             "items_count": parsed.items_count,
             "currency": currency,
             "ocr_provider": ocr.get("provider"),
-            "ocr_text": ocr.get("text"),
+            "ocr_text": raw_text,
         }
         receipt_id = self.db.insert_receipt(receipt_data)
         receipt_data["id"] = receipt_id
