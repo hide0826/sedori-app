@@ -138,6 +138,12 @@ class ReceiptWidget(QWidget):
         self.date_edit.setDate(QDate.currentDate())
         ocr_layout.addWidget(self.date_edit)
         
+        ocr_layout.addWidget(QLabel("時刻:"))
+        self.time_edit = QLineEdit()
+        self.time_edit.setPlaceholderText("HH:MM")
+        self.time_edit.setMaximumWidth(80)
+        ocr_layout.addWidget(self.time_edit)
+        
         ocr_layout.addWidget(QLabel("店舗名（生）:"))
         self.store_name_edit = QLineEdit()
         ocr_layout.addWidget(self.store_name_edit)
@@ -263,6 +269,10 @@ class ReceiptWidget(QWidget):
                 self.date_edit.setDate(date)
             except Exception:
                 pass
+        
+        # 時刻を表示
+        purchase_time = result.get('purchase_time')
+        self.time_edit.setText(purchase_time or "")
         
         self.store_name_edit.setText(result.get('store_name_raw') or "")
         self.phone_edit.setText(result.get('phone_number') or "")
@@ -451,12 +461,12 @@ class ReceiptWidget(QWidget):
             QMessageBox.warning(self, "警告", "日付が設定されていません。")
             return
         
-        # レシートIDを生成
+        # レシートIDを生成（カスタムID、表示用）
         receipt_id_str = self.receipt_db.generate_receipt_id(purchase_date, store_code)
         
         # 同名のレシートIDが存在するか確認
         existing_receipt = self.receipt_db.find_by_receipt_id(receipt_id_str)
-        if existing_receipt:
+        if existing_receipt and existing_receipt.get('id') != self.current_receipt_id:
             reply = QMessageBox.question(
                 self, "確認",
                 f"レシートID「{receipt_id_str}」は既に存在します。\n上書きしますか？",
@@ -482,18 +492,86 @@ class ReceiptWidget(QWidget):
             return
         
         old_image_path = current_receipt.get('file_path')
+        original_file_path = current_receipt.get('original_file_path')  # 元のファイルパス
         if not old_image_path:
             QMessageBox.warning(self, "警告", "画像ファイルパスが見つかりません。")
             return
         
         # 新しい画像ファイル名を生成
         from pathlib import Path
+        import os
+        import traceback
+        from datetime import datetime
+        
+        # デバッグログ出力先
+        log_path = Path(__file__).resolve().parents[1] / "desktop_error.log"
+        
+        def _write_log(message: str):
+            """デバッグログを書き込む"""
+            try:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] レシートリネーム処理\n")
+                    f.write(f"{message}\n")
+                    f.write("-" * 80 + "\n")
+            except Exception:
+                pass
+        
+        # DBのID（receipt_id）を取得（ファイル名に使用）
+        db_receipt_id = self.current_receipt_id
+        
+        _write_log(f"開始: レシートID（カスタム）={receipt_id_str}, DB ID={db_receipt_id}, コピー先パス={old_image_path}, 元のパス={original_file_path}")
+        
+        # コピー先ファイルのパスを絶対パスに正規化
         old_image_file = Path(old_image_path)
-        new_image_name = f"{receipt_id_str}{old_image_file.suffix}"
+        _write_log(f"コピー先パス解析: is_absolute={old_image_file.is_absolute()}, パス={old_image_file}")
+        
+        if not old_image_file.is_absolute():
+            # 相対パスの場合は現在の作業ディレクトリから解決を試みる
+            old_image_file = Path(os.path.abspath(old_image_path))
+            _write_log(f"絶対パス変換後: {old_image_file}")
+        
+        # 元のファイルパスを取得（リネーム対象）
+        original_file = None
+        if original_file_path:
+            original_file = Path(original_file_path)
+            if not original_file.is_absolute():
+                original_file = Path(os.path.abspath(original_file_path))
+            _write_log(f"元のファイルパス: {original_file}, 存在={original_file.exists() if original_file else False}")
+        
+        # コピー先ファイルの存在確認
+        file_exists = old_image_file.exists()
+        _write_log(f"コピー先ファイル存在確認: {file_exists}, パス={old_image_file}")
+        
+        if not file_exists:
+            error_msg = (
+                f"画像ファイルが見つかりません:\n{old_image_file}\n\n"
+                f"元のパス: {old_image_path}"
+            )
+            _write_log(f"エラー: {error_msg}")
+            QMessageBox.warning(self, "警告", error_msg)
+            return
+        
+        # 新しいファイル名を生成: {YYYYMMDD}_{store_code}_{receipt_id}.{拡張子}
+        date_str = purchase_date.replace("-", "") if purchase_date else "UNKNOWN"
+        if len(date_str) == 10:  # yyyy-MM-dd形式
+            date_str = date_str[:4] + date_str[5:7] + date_str[8:10]
+        elif len(date_str) != 8:
+            date_str = "UNKNOWN"
+        
+        new_image_name = f"{date_str}_{store_code}_{db_receipt_id}{old_image_file.suffix}"
         new_image_path = old_image_file.parent / new_image_name
         
-        # 同名ファイルが存在する場合の確認
-        if new_image_path.exists() and str(new_image_path) != str(old_image_file):
+        # 元のファイルの新しいパスも生成
+        new_original_path = None
+        if original_file and original_file.exists():
+            new_original_path = original_file.parent / f"{date_str}_{store_code}_{db_receipt_id}{original_file.suffix}"
+            _write_log(f"元のファイルの新しいパス: {new_original_path}")
+        
+        _write_log(f"新しいファイル名生成: {new_image_name}, コピー先パス={new_image_path}")
+        
+        # 同名ファイルが存在する場合の確認（自分自身でない場合のみ）
+        if new_image_path.exists() and new_image_path != old_image_file:
+            _write_log(f"同名ファイル存在: {new_image_path}")
             reply = QMessageBox.question(
                 self, "確認",
                 f"画像ファイル「{new_image_name}」は既に存在します。\n上書きしますか？",
@@ -501,27 +579,113 @@ class ReceiptWidget(QWidget):
                 QMessageBox.No
             )
             if reply != QMessageBox.Yes:
+                _write_log("ユーザーが上書きをキャンセル")
                 return
         
-        # 画像ファイルをリネーム
-        try:
-            if str(new_image_path) != str(old_image_file):
+        # 元のファイルも同名ファイルが存在する場合の確認
+        if new_original_path and new_original_path.exists() and new_original_path != original_file:
+            _write_log(f"元のファイルの同名ファイル存在: {new_original_path}")
+            reply = QMessageBox.question(
+                self, "確認",
+                f"元の画像ファイル「{new_original_path.name}」は既に存在します。\n上書きしますか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                _write_log("ユーザーが元のファイルの上書きをキャンセル")
+                return
+        
+        # コピー先ファイルをリネーム（ファイル名が変更される場合のみ）
+        if new_image_path != old_image_file:
+            _write_log(f"コピー先リネーム実行: {old_image_file} -> {new_image_path}")
+            try:
                 import shutil
+                # ファイルをリネーム（移動）
+                _write_log(f"shutil.move実行前: 元ファイル存在={old_image_file.exists()}, 新ファイル存在={new_image_path.exists()}")
                 shutil.move(str(old_image_file), str(new_image_path))
-        except Exception as e:
-            QMessageBox.warning(self, "警告", f"画像ファイルのリネームに失敗しました:\n{e}")
-            return
+                _write_log(f"shutil.move実行後: 元ファイル存在={old_image_file.exists()}, 新ファイル存在={new_image_path.exists()}")
+                
+                # リネーム後のファイルが存在することを確認
+                if not new_image_path.exists():
+                    raise Exception(f"リネーム後のファイルが見つかりません: {new_image_path}")
+                
+                _write_log(f"コピー先リネーム成功: {new_image_path}")
+            except Exception as e:
+                error_detail = traceback.format_exc()
+                _write_log(f"コピー先リネームエラー: {str(e)}\n{error_detail}")
+                QMessageBox.critical(
+                    self, "エラー",
+                    f"画像ファイルのリネームに失敗しました:\n\n"
+                    f"エラー: {str(e)}\n\n"
+                    f"元のファイル: {old_image_file}\n"
+                    f"新しいファイル: {new_image_path}\n\n"
+                    f"詳細はログファイルを確認してください:\n{log_path}"
+                )
+                return
+        else:
+            _write_log(f"コピー先リネーム不要: ファイル名が同じです（{old_image_file} == {new_image_path}）")
+        
+        # 元のファイルもリネーム（存在する場合）
+        if original_file and original_file.exists() and new_original_path:
+            if new_original_path != original_file:
+                _write_log(f"元のファイルリネーム実行: {original_file} -> {new_original_path}")
+                try:
+                    import shutil
+                    _write_log(f"元のファイルshutil.move実行前: 元ファイル存在={original_file.exists()}, 新ファイル存在={new_original_path.exists()}")
+                    shutil.move(str(original_file), str(new_original_path))
+                    _write_log(f"元のファイルshutil.move実行後: 元ファイル存在={original_file.exists()}, 新ファイル存在={new_original_path.exists()}")
+                    
+                    # リネーム後のファイルが存在することを確認
+                    if not new_original_path.exists():
+                        raise Exception(f"元のファイルのリネーム後のファイルが見つかりません: {new_original_path}")
+                    
+                    _write_log(f"元のファイルリネーム成功: {new_original_path}")
+                except Exception as e:
+                    error_detail = traceback.format_exc()
+                    _write_log(f"元のファイルリネームエラー: {str(e)}\n{error_detail}")
+                    # 元のファイルのリネーム失敗は警告のみ（コピー先は成功しているため）
+                    QMessageBox.warning(
+                        self, "警告",
+                        f"元の画像ファイルのリネームに失敗しました:\n\n"
+                        f"エラー: {str(e)}\n\n"
+                        f"元のファイル: {original_file}\n"
+                        f"新しいファイル: {new_original_path}\n\n"
+                        f"コピー先のリネームは成功しています。"
+                    )
+            else:
+                _write_log(f"元のファイルリネーム不要: ファイル名が同じです（{original_file} == {new_original_path}）")
         
         # レシートDBを更新（店舗コード、点数、レシートID、画像パス）
+        # リネームが実行された場合は新しいパス、実行されなかった場合は元のパスを使用
+        final_image_path = str(new_image_path) if new_image_path != old_image_file else str(old_image_file)
+        final_original_path = str(new_original_path) if (new_original_path and original_file and new_original_path != original_file) else original_file_path
+        _write_log(f"DB更新: 最終的なコピー先パス={final_image_path}, 最終的な元のパス={final_original_path}")
+        
+        # 時刻を取得（HH:MM形式）
+        purchase_time = self.time_edit.text().strip()
+        # 時刻の形式を検証（HH:MM形式）
+        if purchase_time:
+            import re
+            if not re.match(r"^\d{1,2}:\d{2}$", purchase_time):
+                # 形式が正しくない場合は警告（ただし処理は継続）
+                QMessageBox.warning(self, "警告", f"時刻の形式が正しくありません（HH:MM形式で入力してください）: {purchase_time}")
+                purchase_time = None
+        
         updates = {
             "store_code": store_code,
             "receipt_id": receipt_id_str,
-            "file_path": str(new_image_path)
+            "file_path": final_image_path
         }
+        if purchase_time:
+            updates["purchase_time"] = purchase_time
+        if final_original_path:
+            updates["original_file_path"] = final_original_path
         if items_count is not None:
             updates["items_count"] = items_count
         
-        self.receipt_db.update_receipt(self.current_receipt_id, updates)
+        _write_log(f"DB更新内容: {updates}")
+        update_result = self.receipt_db.update_receipt(self.current_receipt_id, updates)
+        _write_log(f"DB更新結果: {update_result}")
         
         # 学習
         self.matching_service.learn_store_correction(self.current_receipt_id, store_code)
@@ -538,6 +702,7 @@ class ReceiptWidget(QWidget):
         self.current_receipt_id = None
         self.current_receipt_data = None
         self.date_edit.setDate(QDate.currentDate())
+        self.time_edit.clear()
         self.store_name_edit.clear()
         self.phone_edit.clear()
         self.total_edit.clear()
@@ -581,6 +746,10 @@ class ReceiptWidget(QWidget):
                     self.date_edit.setDate(date)
                 except Exception:
                     pass
+            
+            # 時刻を表示
+            purchase_time = receipt.get('purchase_time')
+            self.time_edit.setText(purchase_time or "")
             
             self.store_name_edit.setText(receipt.get('store_name_raw') or "")
             self.phone_edit.setText(receipt.get('phone_number') or "")

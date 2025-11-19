@@ -97,15 +97,17 @@ class ReceiptDatabase:
             ("phone_number", "TEXT"),
             ("items_count", "INTEGER"),
             ("receipt_id", "TEXT"),  # カスタムレシートID（日付_店舗コード_連番）
+            ("original_file_path", "TEXT"),  # 元のファイルパス（リネーム用）
+            ("purchase_time", "TEXT"),  # 購入時刻（HH:MM形式）
         ):
             _ensure_column("receipts", name, ctype)
 
     # ==== receipts 操作 ====
     def insert_receipt(self, data: Dict[str, Any]) -> int:
         fields = [
-            "file_path","purchase_date","store_name_raw","phone_number","store_code","subtotal","tax",
+            "file_path","purchase_date","purchase_time","store_name_raw","phone_number","store_code","subtotal","tax",
             "discount_amount","total_amount","paid_amount","items_count","currency","ocr_provider","ocr_text",
-            "receipt_id",
+            "receipt_id","original_file_path",
         ]
         placeholders = ",".join(["?"] * len(fields))
         cur = self.conn.cursor()

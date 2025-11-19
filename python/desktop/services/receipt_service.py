@@ -22,6 +22,7 @@ from ..services.ocr_service import OCRService
 @dataclass
 class ReceiptParseResult:
     purchase_date: Optional[str]
+    purchase_time: Optional[str]  # HH:MM形式
     store_name_raw: Optional[str]
     phone_number: Optional[str]
     subtotal: Optional[int]
@@ -48,7 +49,8 @@ class ReceiptService:
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         dst = self.base_dir / f"receipt_{stamp}_{uuid.uuid4().hex}{src_path.suffix.lower()}"
         shutil.copy2(src_path, dst)
-        return dst
+        # 絶対パスを返す（リネーム処理で確実にファイルを見つけられるように）
+        return dst.resolve()
 
     def parse_receipt_text(self, text: str) -> ReceiptParseResult:
         """OCRテキストからレシート情報を抽出（簡易版）"""
@@ -86,6 +88,80 @@ class ReceiptService:
                 y = 2018 + int(reiwa_year)
                 purchase_date = f"{y:04d}-{int(mo):02d}-{int(d):02d}"
 
+        # 時刻抽出（日付の近くを優先的に検索）
+        purchase_time = None
+        if purchase_date:
+            # 日付が見つかった行の近くを検索
+            lines = text.splitlines()
+            date_line_idx = None
+            for i, line in enumerate(lines):
+                if purchase_date.replace("-", "")[:8] in line.replace("-", "").replace("/", "").replace(".", ""):
+                    date_line_idx = i
+                    break
+            
+            # 日付の行とその前後3行を検索範囲とする
+            search_lines = []
+            if date_line_idx is not None:
+                start_idx = max(0, date_line_idx - 3)
+                end_idx = min(len(lines), date_line_idx + 4)
+                search_lines = lines[start_idx:end_idx]
+            else:
+                # 日付が見つからない場合は全体を検索
+                search_lines = lines
+            
+            # 時刻パターン1: HH:MM形式（例: 14:30）
+            for line in search_lines:
+                m_time = re.search(r"(\d{1,2}):(\d{2})(?::\d{2})?", line)
+                if m_time:
+                    h, m = m_time.groups()[:2]
+                    try:
+                        hour = int(h)
+                        minute = int(m)
+                        if 0 <= hour <= 23 and 0 <= minute <= 59:
+                            purchase_time = f"{hour:02d}:{minute:02d}"
+                            break
+                    except ValueError:
+                        continue
+            
+            # 時刻パターン2: HH時MM分形式（例: 14時30分）
+            if not purchase_time:
+                for line in search_lines:
+                    m_time = re.search(r"(\d{1,2})時(\d{1,2})分", line)
+                    if m_time:
+                        h, m = m_time.groups()
+                        try:
+                            hour = int(h)
+                            minute = int(m)
+                            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                                purchase_time = f"{hour:02d}:{minute:02d}"
+                                break
+                        except ValueError:
+                            continue
+            
+            # 時刻パターン3: HHMM形式（例: 1430）
+            if not purchase_time:
+                for line in search_lines:
+                    m_time = re.search(r"(\d{1,2})(\d{2})(?!\d)", line)
+                    if m_time:
+                        h, m = m_time.groups()
+                        try:
+                            hour = int(h)
+                            minute = int(m)
+                            # 4桁の数字で、時刻として妥当な範囲かチェック
+                            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                                # 前後の文字をチェック（商品コードなどと区別）
+                                match_start = m_time.start()
+                                match_end = m_time.end()
+                                # 前後に時刻を示すキーワードがあるか、または単独で存在するか
+                                context = line[max(0, match_start-5):min(len(line), match_end+5)]
+                                if any(keyword in context for keyword in ["時", "分", ":", "時刻", "時間"]) or \
+                                   (match_start == 0 or not line[match_start-1].isdigit()) and \
+                                   (match_end >= len(line) or not line[match_end].isdigit()):
+                                    purchase_time = f"{hour:02d}:{minute:02d}"
+                                    break
+                        except ValueError:
+                            continue
+        
         # 店舗名の抽出（新規実装）
         # レシートの一般的な構造を考慮して店舗名を抽出
         lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
@@ -469,6 +545,7 @@ class ReceiptService:
 
         return ReceiptParseResult(
             purchase_date=purchase_date,
+            purchase_time=purchase_time,
             store_name_raw=store_name_raw,
             phone_number=phone_number,
             subtotal=subtotal,
@@ -483,6 +560,8 @@ class ReceiptService:
         """
         レシート画像を保存→OCR→抽出→DB保存まで行い、保存結果を返す
         """
+        # 元のファイルパスを保存（リネーム用）
+        original_path = Path(image_path).resolve() if image_path else None
         saved = self.save_image(image_path)
         ocr = self.ocr.extract_text(saved, use_preprocessing=True)
         raw_text = ocr.get("text") or ""
@@ -498,6 +577,7 @@ class ReceiptService:
                 f.write(f"timestamp   : {datetime.now().isoformat(timespec='seconds')}\n")
                 f.write(f"image_path  : {saved}\n")
                 f.write(f"purchase_date: {parsed.purchase_date}\n")
+                f.write(f"purchase_time: {parsed.purchase_time}\n")
                 f.write(f"store_name  : {parsed.store_name_raw}\n")
                 f.write(f"subtotal    : {parsed.subtotal}\n")
                 f.write(f"tax         : {parsed.tax}\n")
@@ -514,7 +594,9 @@ class ReceiptService:
 
         receipt_data = {
             "file_path": str(saved),
+            "original_file_path": str(original_path) if original_path else None,  # 元のファイルパス
             "purchase_date": parsed.purchase_date,
+            "purchase_time": parsed.purchase_time,  # 購入時刻（HH:MM形式）
             "store_name_raw": parsed.store_name_raw,
             "phone_number": parsed.phone_number,
             "store_code": None,  # マッチング段階で確定
@@ -530,4 +612,37 @@ class ReceiptService:
         }
         receipt_id = self.db.insert_receipt(receipt_data)
         receipt_data["id"] = receipt_id
+        
+        # ファイル名を新しい形式にリネーム: receipt_{YYYYMMDD}_{store_code}_{receipt_id}.{拡張子}
+        try:
+            # 日付をYYYYMMDD形式に変換
+            date_str = parsed.purchase_date.replace("-", "") if parsed.purchase_date else "UNKNOWN"
+            if len(date_str) == 10:  # yyyy-MM-dd形式
+                date_str = date_str[:4] + date_str[5:7] + date_str[8:10]
+            elif len(date_str) != 8:
+                date_str = "UNKNOWN"
+            
+            # 店舗コード（未確定時はUNKNOWN）
+            store_code = receipt_data.get("store_code") or "UNKNOWN"
+            
+            # 新しいファイル名を生成: {YYYYMMDD}_{store_code}_{receipt_id}.{拡張子}
+            new_name = f"{date_str}_{store_code}_{receipt_id}{saved.suffix}"
+            new_path = saved.parent / new_name
+            
+            # ファイルをリネーム
+            if saved != new_path and saved.exists():
+                saved.rename(new_path)
+                # DBのfile_pathを更新
+                self.db.update_receipt(receipt_id, {"file_path": str(new_path)})
+                receipt_data["file_path"] = str(new_path)
+        except Exception as e:
+            # リネーム失敗時はログ出力して続行（元のパスを使用）
+            try:
+                log_path = Path(__file__).resolve().parents[2] / "python" / "desktop" / "desktop_error.log"
+                with open(log_path, "a", encoding="utf-8") as f:
+                    from datetime import datetime
+                    f.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ReceiptService: Failed to rename receipt image: {e}\n")
+            except Exception:
+                pass
+        
         return receipt_data
