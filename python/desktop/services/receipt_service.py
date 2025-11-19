@@ -313,12 +313,14 @@ class ReceiptService:
                 (70, ["お支払金額", "お支払い金額", "支払合計", "支払額", "クレジット"]),
                 (60, ["預り額", "カード預り"]),
             ]
-            exclude_keywords = [
-                "お釣り", "釣銭", "釣り銭", "ポイント", "pt残高", "会員", "残高", 
-                "ポイント利用", "発行ポイント", "利用ポイント", "会員ポイント",
-                "有効期限", "登録事業者", "担当者", "レジNo", "レシートNo", "レジ:",
-                "Store ID", "StoreID", "店舗ID", "店ID", "Transaction Number"
+            # 除外キーワード（正規表現パターンに変更）
+            exclude_patterns = [
+                r"お釣り", r"釣銭", r"釣り銭", r"ポイント", r"pt残高", r"会員", r"残高", 
+                r"有効期限", r"登録事業者", r"担当者", r"レジNo", r"レシートNo", r"レジ\s*:",
+                r"Store\s*ID", r"StoreID", r"店舗ID", r"店ID", r"Transaction\s*Number",
+                r"会\s*員\s*番\s*号", r"会\s*員\s*ポ\s*イ\s*ン\s*ト", r"発\s*行\s*ポ\s*イ\s*ン\s*ト"
             ]
+            
             # 商品価格行を除外するキーワード
             product_keywords = [
                 "キッズ", "日用品", "玩具", "生活用品", "レジ袋",
@@ -328,8 +330,8 @@ class ReceiptService:
             candidates: list[tuple[int, int, int]] = []
 
             for idx, line in enumerate(normalized_lines):
-                # 除外キーワードを含む行はスキップ
-                if any(ex in line for ex in exclude_keywords):
+                # 除外パターンを含む行はスキップ（正規表現でスペース揺らぎに対応）
+                if any(re.search(pat, line, flags=re.IGNORECASE) for pat in exclude_patterns):
                     continue
                 
                 # 「10%」だけの行（税率表示）は除外
@@ -390,8 +392,8 @@ class ReceiptService:
                 r"^\d{4,5}\s*$",  # 4桁または5桁の数字だけの行（店舗IDの可能性が高い）
             ]
             for line in normalized_lines:
-                # 除外キーワードを含む行はスキップ
-                if any(ex in line for ex in exclude_keywords):
+                # 除外パターンを含む行はスキップ
+                if any(re.search(pat, line, flags=re.IGNORECASE) for pat in exclude_patterns):
                     continue
                 # 店舗IDやレジ番号を含む行はスキップ
                 if any(re.search(pat, line, flags=re.IGNORECASE) for pat in store_id_patterns):

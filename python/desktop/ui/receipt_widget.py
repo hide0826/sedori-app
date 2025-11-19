@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QComboBox,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QGroupBox, QMessageBox, QFileDialog, QDialog,
-    QDialogButtonBox, QTextEdit, QDateEdit, QSpinBox
+    QDialogButtonBox, QTextEdit, QDateEdit, QSpinBox,
+    QScrollArea
 )
 from PySide6.QtCore import Qt, QDate, QThread, Signal
 from PySide6.QtGui import QPixmap
@@ -65,6 +66,7 @@ class ReceiptWidget(QWidget):
         super().__init__()
         self.api_client = api_client
         self.inventory_widget = inventory_widget
+        self.product_widget = None  # ProductWidgetへの参照
         self.receipt_service = ReceiptService()
         self.matching_service = ReceiptMatchingService()
         self.receipt_db = ReceiptDatabase()
@@ -73,6 +75,10 @@ class ReceiptWidget(QWidget):
         self.current_receipt_data = None
         
         self.setup_ui()
+    
+    def set_product_widget(self, product_widget):
+        """ProductWidgetへの参照を設定"""
+        self.product_widget = product_widget
     
     def setup_ui(self):
         """UIの設定"""
@@ -164,6 +170,12 @@ class ReceiptWidget(QWidget):
         self.match_btn.clicked.connect(self.run_matching)
         self.match_btn.setEnabled(False)
         match_layout.addWidget(self.match_btn)
+        
+        self.view_image_btn = QPushButton("画像確認")
+        self.view_image_btn.clicked.connect(self.view_receipt_image)
+        self.view_image_btn.setEnabled(False)
+        match_layout.addWidget(self.view_image_btn)
+        
         result_layout.addLayout(match_layout)
         
         # マッチング結果表示
@@ -200,9 +212,9 @@ class ReceiptWidget(QWidget):
         list_layout = QVBoxLayout(list_group)
         
         self.receipt_table = QTableWidget()
-        self.receipt_table.setColumnCount(8)
+        self.receipt_table.setColumnCount(9)
         self.receipt_table.setHorizontalHeaderLabels([
-            "ID", "日付", "店舗名", "電話番号", "合計", "値引", "点数", "店舗コード"
+            "ID", "レシートID", "日付", "店舗名", "電話番号", "合計", "値引", "点数", "店舗コード"
         ])
         self.receipt_table.horizontalHeader().setStretchLastSection(True)
         self.receipt_table.itemDoubleClicked.connect(self.load_receipt)
@@ -262,7 +274,11 @@ class ReceiptWidget(QWidget):
         # 店舗コード候補を読み込み
         self.load_store_codes()
         
+        # 仕入DBから自動検索・入力
+        self.search_from_purchase_db()
+        
         self.match_btn.setEnabled(True)
+        self.view_image_btn.setEnabled(True)
         QMessageBox.information(self, "OCR完了", "レシート情報を抽出しました。")
     
     def on_ocr_error(self, error_msg: str):
@@ -284,41 +300,124 @@ class ReceiptWidget(QWidget):
             if code:
                 self.store_code_combo.addItem(f"{code} - {name}", code)
     
+    def search_from_purchase_db(self):
+        """仕入DBから日付・店舗名・電話番号で検索して店舗コードと点数を自動入力"""
+        if not self.product_widget:
+            return
+        
+        # OCR結果から日付・店舗名・電話番号を取得
+        purchase_date = self.date_edit.date().toString("yyyy-MM-dd")
+        store_name_raw = self.store_name_edit.text().strip()
+        phone_number = self.phone_edit.text().strip()
+        
+        if not purchase_date or not store_name_raw:
+            return
+        
+        # 仕入DBの全データを取得
+        purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
+        if not purchase_records:
+            return
+        
+        # 店舗マスタから電話番号で店舗を検索
+        from database.store_db import StoreDatabase
+        store_db = StoreDatabase()
+        stores = store_db.list_stores()
+        
+        # 電話番号で店舗を検索（部分一致）
+        matched_store_code = None
+        if phone_number:
+            for store in stores:
+                store_phone = store.get('phone') or ''
+                if store_phone and (phone_number in store_phone or store_phone in phone_number):
+                    matched_store_code = store.get('supplier_code')
+                    break
+        
+        # 店舗名でも検索（電話番号で見つからない場合）
+        if not matched_store_code:
+            for store in stores:
+                store_name = store.get('store_name') or ''
+                # 店舗名の部分一致チェック
+                if store_name and store_name_raw and (store_name_raw in store_name or store_name in store_name_raw):
+                    matched_store_code = store.get('supplier_code')
+                    break
+        
+        if not matched_store_code:
+            return
+        
+        # 日付を正規化（yyyy-MM-dd形式）
+        normalized_date = purchase_date.replace('/', '-')
+        if ' ' in normalized_date:
+            normalized_date = normalized_date.split(' ')[0]
+        
+        # 仕入DBから該当日付・店舗コードで検索
+        matched_records = []
+        for record in purchase_records:
+            record_date = record.get('仕入れ日') or record.get('purchase_date') or ''
+            record_store_code = record.get('仕入先') or record.get('store_code') or ''
+            
+            # 日付の正規化
+            normalized_record_date = record_date.replace('/', '-')
+            if ' ' in normalized_record_date:
+                normalized_record_date = normalized_record_date.split(' ')[0]
+            
+            # 日付と店舗コードでマッチング
+            if normalized_record_date.startswith(normalized_date) and record_store_code == matched_store_code:
+                matched_records.append(record)
+        
+        if matched_records:
+            # 店舗コードを入力
+            idx = self.store_code_combo.findData(matched_store_code)
+            if idx >= 0:
+                self.store_code_combo.setCurrentIndex(idx)
+            
+            # 仕入れ点数を集計
+            total_items = 0
+            for record in matched_records:
+                quantity = record.get('仕入れ個数') or record.get('quantity') or 0
+                try:
+                    total_items += int(quantity)
+                except (ValueError, TypeError):
+                    pass
+            
+            # 点数欄に入力
+            if total_items > 0:
+                self.items_count_edit.setText(str(total_items))
+    
     def run_matching(self):
         """マッチングを実行"""
         if not self.current_receipt_data:
             QMessageBox.warning(self, "警告", "レシートデータがありません。")
             return
         
-        # 仕入管理データを取得
-        if not self.inventory_widget:
-            QMessageBox.warning(self, "警告", "仕入管理データがありません。")
+        # 仕入DBデータを取得
+        if not self.product_widget:
+            QMessageBox.warning(self, "警告", "仕入DBへの参照がありません。")
             return
         
-        # 仕入管理データを取得（DataFrame形式）
-        if hasattr(self.inventory_widget, 'inventory_data') and self.inventory_widget.inventory_data is not None:
-            inventory_data = self.inventory_widget.inventory_data
-            if hasattr(inventory_data, 'to_dict'):
-                inventory_list = inventory_data.to_dict('records')
-            else:
-                inventory_list = inventory_data if isinstance(inventory_data, list) else []
-        else:
-            inventory_list = []
-        
-        if not inventory_list:
-            QMessageBox.warning(self, "警告", "仕入管理にデータがありません。")
+        # 仕入DBの全データを取得
+        purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
+        if not purchase_records:
+            QMessageBox.warning(self, "警告", "仕入DBにデータがありません。")
             return
         
         # マッチング実行
         candidates = self.matching_service.find_match_candidates(
             self.current_receipt_data,
-            inventory_list,
+            purchase_records,
             preferred_store_code=self.store_code_combo.currentData(),
         )
         
         if candidates:
             candidate = candidates[0]
             diff = candidate.diff
+            
+            # マッチング結果の点数を点数欄に入力
+            if candidate.items_count > 0:
+                self.items_count_edit.setText(str(candidate.items_count))
+                # current_receipt_dataにも反映
+                if self.current_receipt_data:
+                    self.current_receipt_data['items_count'] = candidate.items_count
+            
             if diff is not None and diff <= 10:
                 self.match_result_label.setText(
                     f"マッチ成功: 差額 {diff}円（許容範囲内）\n"
@@ -342,12 +441,94 @@ class ReceiptWidget(QWidget):
             return
         
         store_code = self.store_code_combo.currentData()
-        if store_code:
-            # 学習
-            self.matching_service.learn_store_correction(self.current_receipt_id, store_code)
-            QMessageBox.information(self, "確定", "レシートを確定し、学習データを更新しました。")
-        else:
+        if not store_code:
             QMessageBox.warning(self, "警告", "店舗コードを選択してください。")
+            return
+        
+        # 日付を取得
+        purchase_date = self.date_edit.date().toString("yyyy-MM-dd")
+        if not purchase_date:
+            QMessageBox.warning(self, "警告", "日付が設定されていません。")
+            return
+        
+        # レシートIDを生成
+        receipt_id_str = self.receipt_db.generate_receipt_id(purchase_date, store_code)
+        
+        # 同名のレシートIDが存在するか確認
+        existing_receipt = self.receipt_db.find_by_receipt_id(receipt_id_str)
+        if existing_receipt:
+            reply = QMessageBox.question(
+                self, "確認",
+                f"レシートID「{receipt_id_str}」は既に存在します。\n上書きしますか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+        
+        # 点数を取得
+        items_count_text = self.items_count_edit.text().strip()
+        items_count = None
+        if items_count_text:
+            try:
+                items_count = int(items_count_text)
+            except ValueError:
+                pass
+        
+        # 現在の画像パスを取得
+        current_receipt = self.receipt_db.get_receipt(self.current_receipt_id)
+        if not current_receipt:
+            QMessageBox.warning(self, "警告", "レシートデータが見つかりません。")
+            return
+        
+        old_image_path = current_receipt.get('file_path')
+        if not old_image_path:
+            QMessageBox.warning(self, "警告", "画像ファイルパスが見つかりません。")
+            return
+        
+        # 新しい画像ファイル名を生成
+        from pathlib import Path
+        old_image_file = Path(old_image_path)
+        new_image_name = f"{receipt_id_str}{old_image_file.suffix}"
+        new_image_path = old_image_file.parent / new_image_name
+        
+        # 同名ファイルが存在する場合の確認
+        if new_image_path.exists() and str(new_image_path) != str(old_image_file):
+            reply = QMessageBox.question(
+                self, "確認",
+                f"画像ファイル「{new_image_name}」は既に存在します。\n上書きしますか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+        
+        # 画像ファイルをリネーム
+        try:
+            if str(new_image_path) != str(old_image_file):
+                import shutil
+                shutil.move(str(old_image_file), str(new_image_path))
+        except Exception as e:
+            QMessageBox.warning(self, "警告", f"画像ファイルのリネームに失敗しました:\n{e}")
+            return
+        
+        # レシートDBを更新（店舗コード、点数、レシートID、画像パス）
+        updates = {
+            "store_code": store_code,
+            "receipt_id": receipt_id_str,
+            "file_path": str(new_image_path)
+        }
+        if items_count is not None:
+            updates["items_count"] = items_count
+        
+        self.receipt_db.update_receipt(self.current_receipt_id, updates)
+        
+        # 学習
+        self.matching_service.learn_store_correction(self.current_receipt_id, store_code)
+        QMessageBox.information(
+            self, "確定",
+            f"レシートを確定しました。\nレシートID: {receipt_id_str}\n画像ファイル: {new_image_name}"
+        )
         
         self.refresh_receipt_list()
         self.reset_form()
@@ -366,6 +547,7 @@ class ReceiptWidget(QWidget):
         self.match_result_label.clear()
         self.confirm_btn.setEnabled(False)
         self.match_btn.setEnabled(False)
+        self.view_image_btn.setEnabled(False)
     
     def refresh_receipt_list(self):
         """レシート一覧を更新"""
@@ -374,13 +556,14 @@ class ReceiptWidget(QWidget):
         
         for row, receipt in enumerate(receipts):
             self.receipt_table.setItem(row, 0, QTableWidgetItem(str(receipt.get('id'))))
-            self.receipt_table.setItem(row, 1, QTableWidgetItem(receipt.get('purchase_date') or ""))
-            self.receipt_table.setItem(row, 2, QTableWidgetItem(receipt.get('store_name_raw') or ""))
-            self.receipt_table.setItem(row, 3, QTableWidgetItem(receipt.get('phone_number') or ""))
-            self.receipt_table.setItem(row, 4, QTableWidgetItem(str(receipt.get('total_amount') or "")))
-            self.receipt_table.setItem(row, 5, QTableWidgetItem(str(receipt.get('discount_amount') or "")))
-            self.receipt_table.setItem(row, 6, QTableWidgetItem(str(receipt.get('items_count') or "")))
-            self.receipt_table.setItem(row, 7, QTableWidgetItem(receipt.get('store_code') or ""))
+            self.receipt_table.setItem(row, 1, QTableWidgetItem(receipt.get('receipt_id') or ""))
+            self.receipt_table.setItem(row, 2, QTableWidgetItem(receipt.get('purchase_date') or ""))
+            self.receipt_table.setItem(row, 3, QTableWidgetItem(receipt.get('store_name_raw') or ""))
+            self.receipt_table.setItem(row, 4, QTableWidgetItem(receipt.get('phone_number') or ""))
+            self.receipt_table.setItem(row, 5, QTableWidgetItem(str(receipt.get('total_amount') or "")))
+            self.receipt_table.setItem(row, 6, QTableWidgetItem(str(receipt.get('discount_amount') or "")))
+            self.receipt_table.setItem(row, 7, QTableWidgetItem(str(receipt.get('items_count') or "")))
+            self.receipt_table.setItem(row, 8, QTableWidgetItem(receipt.get('store_code') or ""))
     
     def load_receipt(self, item: QTableWidgetItem):
         """レシートを読み込み"""
@@ -412,5 +595,102 @@ class ReceiptWidget(QWidget):
                 if idx >= 0:
                     self.store_code_combo.setCurrentIndex(idx)
             
+            # 仕入DBから自動検索・入力（店舗コードが未設定の場合）
+            if not receipt.get('store_code'):
+                self.search_from_purchase_db()
+            
             self.match_btn.setEnabled(True)
+            self.view_image_btn.setEnabled(True)
+    
+    def view_receipt_image(self):
+        """レシート画像を別画面で表示"""
+        if not self.current_receipt_data:
+            QMessageBox.warning(self, "警告", "レシートデータがありません。")
+            return
+        
+        # 画像パスを取得
+        image_path = None
+        
+        # current_receipt_dataから取得を試みる
+        if self.current_receipt_data:
+            image_path = self.current_receipt_data.get('file_path')
+        
+        # レシートIDがある場合はDBから取得
+        if not image_path and self.current_receipt_id:
+            receipt = self.receipt_db.get_receipt(self.current_receipt_id)
+            if receipt:
+                image_path = receipt.get('file_path')
+        
+        if not image_path:
+            QMessageBox.warning(self, "警告", "画像ファイルが見つかりません。")
+            return
+        
+        # ファイルの存在確認
+        from pathlib import Path
+        image_file = Path(image_path)
+        if not image_file.exists():
+            QMessageBox.warning(self, "警告", f"画像ファイルが存在しません:\n{image_path}")
+            return
+        
+        # 画像表示ダイアログを作成
+        dialog = QDialog(self)
+        dialog.setWindowTitle("レシート画像")
+        
+        # 画像サイズを取得
+        pixmap = QPixmap(str(image_file))
+        original_width = pixmap.width()
+        original_height = pixmap.height()
+        
+        # 画面サイズを取得して、適切なウィンドウサイズを設定
+        screen = dialog.screen().availableGeometry()
+        max_dialog_width = int(screen.width() * 0.9)  # 画面幅の90%
+        max_dialog_height = int(screen.height() * 0.9)  # 画面高さの90%
+        
+        # 画像を画面サイズに合わせて縮小（アスペクト比を保持）
+        if original_width > max_dialog_width or original_height > max_dialog_height:
+            scaled_pixmap = pixmap.scaled(
+                max_dialog_width, max_dialog_height,
+                Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+        else:
+            # 画像が小さい場合は元のサイズで表示
+            scaled_pixmap = pixmap
+        
+        # ダイアログサイズを画像サイズに合わせる（ただし最大サイズは制限）
+        dialog_width = min(scaled_pixmap.width() + 40, max_dialog_width)
+        dialog_height = min(scaled_pixmap.height() + 100, max_dialog_height)  # ボタン分の余白を追加
+        
+        dialog.setMinimumSize(dialog_width, dialog_height)
+        dialog.resize(dialog_width, dialog_height)
+        
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+        
+        # スクロールエリアを作成
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setAlignment(Qt.AlignCenter)
+        scroll_area.setMinimumSize(scaled_pixmap.width(), scaled_pixmap.height())
+        
+        # 画像ラベルを作成
+        image_label = QLabel()
+        image_label.setPixmap(scaled_pixmap)
+        image_label.setAlignment(Qt.AlignCenter)
+        image_label.setMinimumSize(scaled_pixmap.width(), scaled_pixmap.height())
+        
+        scroll_area.setWidget(image_label)
+        layout.addWidget(scroll_area)
+        
+        # 画像情報ラベル（元のサイズを表示）
+        info_label = QLabel(f"画像サイズ: {original_width} x {original_height} px")
+        info_label.setStyleSheet("color: #888888; font-size: 10px;")
+        layout.addWidget(info_label)
+        
+        # 閉じるボタン
+        button_box = QDialogButtonBox(QDialogButtonBox.Close)
+        button_box.rejected.connect(dialog.close)
+        layout.addWidget(button_box)
+        
+        dialog.exec()
 

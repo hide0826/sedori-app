@@ -182,6 +182,8 @@ class MainWindow(QMainWindow):
         
         # レシート管理タブ（仕入管理ウィジェット参照を渡す）
         self.receipt_widget = ReceiptWidget(self.api_client, inventory_widget=self.inventory_widget)
+        # ReceiptWidgetにProductWidgetへの参照を設定
+        self.receipt_widget.set_product_widget(self.product_widget)
         self.tab_widget.addTab(self.receipt_widget, "レシート管理")
         
         # 保証書管理タブ

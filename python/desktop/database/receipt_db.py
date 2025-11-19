@@ -96,6 +96,7 @@ class ReceiptDatabase:
         for name, ctype in (
             ("phone_number", "TEXT"),
             ("items_count", "INTEGER"),
+            ("receipt_id", "TEXT"),  # カスタムレシートID（日付_店舗コード_連番）
         ):
             _ensure_column("receipts", name, ctype)
 
@@ -104,6 +105,7 @@ class ReceiptDatabase:
         fields = [
             "file_path","purchase_date","store_name_raw","phone_number","store_code","subtotal","tax",
             "discount_amount","total_amount","paid_amount","items_count","currency","ocr_provider","ocr_text",
+            "receipt_id",
         ]
         placeholders = ",".join(["?"] * len(fields))
         cur = self.conn.cursor()
@@ -113,6 +115,55 @@ class ReceiptDatabase:
         )
         self.conn.commit()
         return cur.lastrowid
+    
+    def generate_receipt_id(self, purchase_date: str, store_code: str) -> str:
+        """
+        レシートIDを生成（日付_店舗コード_連番形式）
+        例: 20251115_H1-003_01
+        """
+        if not purchase_date or not store_code:
+            return ""
+        
+        # 日付をyyyyMMdd形式に変換
+        date_str = purchase_date.replace("-", "").replace("/", "").replace(".", "")
+        if len(date_str) == 8:
+            date_part = date_str
+        elif len(date_str) == 10:  # yyyy-MM-dd形式
+            date_part = date_str[:4] + date_str[5:7] + date_str[8:10]
+        else:
+            return ""
+        
+        # 既存のレシートIDを検索して連番を決定
+        cur = self.conn.cursor()
+        pattern = f"{date_part}_{store_code}_%"
+        cur.execute(
+            "SELECT receipt_id FROM receipts WHERE receipt_id LIKE ? ORDER BY receipt_id DESC LIMIT 1",
+            (pattern,)
+        )
+        row = cur.fetchone()
+        
+        if row and row[0]:
+            # 既存のレシートIDから連番を取得
+            existing_id = row[0]
+            try:
+                # 最後の連番部分を取得（例: 20251115_H1-003_01 → 01）
+                last_part = existing_id.split("_")[-1]
+                next_number = int(last_part) + 1
+            except (ValueError, IndexError):
+                next_number = 1
+        else:
+            next_number = 1
+        
+        # レシートIDを生成（連番は2桁ゼロ埋め）
+        receipt_id = f"{date_part}_{store_code}_{next_number:02d}"
+        return receipt_id
+    
+    def find_by_receipt_id(self, receipt_id: str) -> Optional[Dict[str, Any]]:
+        """レシートIDでレシートを検索"""
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM receipts WHERE receipt_id = ?", (receipt_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
 
     def update_receipt(self, receipt_id: int, updates: Dict[str, Any]) -> bool:
         if not updates:
