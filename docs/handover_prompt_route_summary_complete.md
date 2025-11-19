@@ -1469,11 +1469,48 @@ Content-Type: application/json
 3. 編集: 時刻を手動で修正可能
 4. 保存: 確定時に時刻もDBに保存される
 
+### レシートID自動入力機能の実装（2025-11-19）
+
+#### 機能概要
+- **機能:** レシート確定時に、仕入DBタブ（データベース管理タブ→商品DBタブ→仕入DBタブ）の該当SKUにレシートIDを自動入力
+- **マッチング条件:**
+  - 日付が一致
+  - 店舗コードが一致
+  - SKUの仕入時刻がレシート時刻より前（同店舗で複数レシートがある場合の対応）
+- **スキップ条件:**
+  - 既にレシートIDが設定されているSKUはスキップ
+
+#### 実装内容
+- **`ReceiptWidget._link_receipt_to_purchase_records`メソッドの実装:**
+  - レシート確定時に自動的に呼び出される
+  - 仕入管理タブ（`inventory_widget`）のデータを優先的に使用
+  - 仕入管理タブのデータが存在しない場合は、仕入DBタブ（`product_widget.purchase_all_records`）を使用
+  - `products`テーブルに既にレシートIDが設定されている場合でも、UI更新は実行
+  - `inventory_data`が`None`でも、`filtered_data`が存在する場合は更新
+  - `inventory_data`も`filtered_data`も`None`の場合、テーブルから直接レシートIDを設定
+
+#### 更新対象
+1. **仕入管理タブ（`inventory_widget`）:**
+   - `inventory_data`と`filtered_data`のDataFrameにレシートIDを設定
+   - `update_table()`でテーブル表示を更新
+
+2. **仕入DBタブ（`product_widget`内）:**
+   - `purchase_all_records`の該当レコードにレシートIDを設定
+   - `populate_purchase_table()`でテーブルを再描画
+
+3. **商品DBテーブル（`products`テーブル）:**
+   - 既存のSKUには`link_receipt()`でレシートIDを設定
+   - 存在しないSKUは`upsert()`で新規登録
+
+#### デバッグログ
+- 詳細なデバッグログを`python/desktop/desktop_error.log`に出力
+- SKUマッチング、日付・時刻フィルタリング、レシートID設定の各ステップを記録
+
 ### Gitコミット（2025-11-19）
 - コミットハッシュ: `a3028b6`
 - コミットメッセージ: "レシート画像ファイル名リネーム機能と時刻抽出機能を追加"
 - 変更ファイル:
   - `python/desktop/database/receipt_db.py` - purchase_timeカラム追加
   - `python/desktop/services/receipt_service.py` - 時刻抽出機能追加、ファイル名リネーム修正
-  - `python/desktop/ui/receipt_widget.py` - 時刻入力欄追加、ファイル名リネーム修正
+  - `python/desktop/ui/receipt_widget.py` - 時刻入力欄追加、ファイル名リネーム修正、レシートID自動入力機能追加
   - `python/scripts/migrate_receipt_filenames.py` - 新規追加（既存ファイル移行スクリプト）

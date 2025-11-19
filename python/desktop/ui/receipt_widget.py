@@ -689,6 +689,16 @@ class ReceiptWidget(QWidget):
         
         # 学習
         self.matching_service.learn_store_correction(self.current_receipt_id, store_code)
+        
+        # 仕入DBの該当SKUにレシートIDを自動入力
+        self._link_receipt_to_purchase_records(
+            purchase_date=purchase_date,
+            purchase_time=purchase_time,
+            store_code=store_code,
+            receipt_id_str=receipt_id_str,
+            db_receipt_id=db_receipt_id
+        )
+        
         QMessageBox.information(
             self, "確定",
             f"レシートを確定しました。\nレシートID: {receipt_id_str}\n画像ファイル: {new_image_name}"
@@ -696,6 +706,461 @@ class ReceiptWidget(QWidget):
         
         self.refresh_receipt_list()
         self.reset_form()
+    
+    def _link_receipt_to_purchase_records(
+        self,
+        purchase_date: str,
+        purchase_time: Optional[str],
+        store_code: str,
+        receipt_id_str: str,
+        db_receipt_id: int
+    ):
+        """
+        仕入DBの該当SKUにレシートIDを自動入力
+        
+        Args:
+            purchase_date: レシート日付（yyyy-MM-dd形式）
+            purchase_time: レシート時刻（HH:MM形式、Noneの場合は時刻比較なし）
+            store_code: 店舗コード
+            receipt_id_str: レシートID（カスタムID）
+            db_receipt_id: レシートDBのID
+        """
+        from pathlib import Path
+        from datetime import datetime
+        log_path = Path(__file__).resolve().parents[1] / "desktop_error.log"
+        
+        def _write_log(message: str):
+            """デバッグログを書き込む"""
+            try:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] レシートID自動入力処理\n")
+                    f.write(f"{message}\n")
+                    f.write("-" * 80 + "\n")
+            except Exception:
+                pass
+        
+        _write_log(f"開始: 日付={purchase_date}, 時刻={purchase_time}, 店舗コード={store_code}, レシートID={receipt_id_str}, DB ID={db_receipt_id}")
+        
+        # 仕入管理タブのデータを優先的に使用
+        inventory_records = []
+        inventory_data_exists = False
+        if self.inventory_widget and hasattr(self.inventory_widget, 'inventory_data') and self.inventory_widget.inventory_data is not None:
+            inventory_data_exists = True
+            try:
+                import pandas as pd
+                inventory_records = self.inventory_widget.inventory_data.fillna("").to_dict(orient="records")
+                _write_log(f"仕入管理タブから{len(inventory_records)}件のデータを取得")
+            except Exception as e:
+                _write_log(f"仕入管理タブのデータ取得エラー: {e}")
+        else:
+            _write_log(f"仕入管理タブのデータが存在しません: inventory_widget={self.inventory_widget is not None}, hasattr={hasattr(self.inventory_widget, 'inventory_data') if self.inventory_widget else False}, inventory_data={self.inventory_widget.inventory_data is not None if self.inventory_widget and hasattr(self.inventory_widget, 'inventory_data') else None}")
+        
+        # 仕入DBの全データを取得（フォールバック）
+        purchase_records = []
+        if self.product_widget:
+            purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
+            _write_log(f"仕入DBから{len(purchase_records)}件のデータを取得")
+        
+        # 仕入管理タブのデータを優先、なければ仕入DBを使用
+        if inventory_records:
+            target_records = inventory_records
+            _write_log("仕入管理タブのデータを使用")
+        elif purchase_records:
+            target_records = purchase_records
+            _write_log("仕入DBのデータを使用")
+        else:
+            _write_log("データが見つかりません")
+            return
+        
+        # 日付を正規化（yyyy-MM-dd形式）
+        normalized_date = purchase_date.replace('/', '-')
+        if ' ' in normalized_date:
+            normalized_date = normalized_date.split(' ')[0]
+        
+        # レシート時刻をdatetimeに変換（比較用）
+        receipt_datetime = None
+        if purchase_time:
+            try:
+                from datetime import datetime
+                time_parts = purchase_time.split(':')
+                if len(time_parts) == 2:
+                    hour = int(time_parts[0])
+                    minute = int(time_parts[1])
+                    receipt_datetime = datetime.strptime(f"{normalized_date} {hour:02d}:{minute:02d}:00", "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pass
+        
+        # ProductDatabaseを取得
+        from database.product_db import ProductDatabase
+        product_db = ProductDatabase()
+        
+        matched_count = 0
+        updated_count = 0
+        
+        # 仕入DBから該当するSKUを検索
+        matched_skus = []
+        for record in target_records:
+            # SKUを取得
+            sku = record.get('SKU') or record.get('sku') or ''
+            if not sku or sku == '未実装':
+                continue
+            
+            # 店舗コードでフィルタリング
+            record_store_code = record.get('仕入先') or record.get('store_code') or ''
+            if record_store_code != store_code:
+                continue
+            
+            # 日付でフィルタリング
+            record_date = record.get('仕入れ日') or record.get('purchase_date') or ''
+            if not record_date:
+                continue
+            
+            # 日付の正規化（時刻が含まれている場合も対応）
+            normalized_record_date = str(record_date).replace('/', '-')
+            record_date_only = normalized_record_date
+            if ' ' in normalized_record_date:
+                record_date_only = normalized_record_date.split(' ')[0]
+            
+            # 日付が一致しない場合はスキップ
+            if not record_date_only.startswith(normalized_date):
+                continue
+            
+            _write_log(f"マッチ候補: SKU={sku}, 日付={record_date}, 店舗コード={record_store_code}")
+            
+            # レシート時刻より前のSKUのみを対象
+            if receipt_datetime:
+                try:
+                    # 仕入データの時刻を取得
+                    record_datetime_str = str(record.get('仕入れ日') or record.get('purchase_date') or '')
+                    record_datetime = None
+                    
+                    if ' ' in record_datetime_str:
+                        # 時刻が含まれている場合
+                        # フォーマットを正規化（/を-に変換）
+                        normalized_datetime_str = record_datetime_str.replace('/', '-')
+                        # 複数のフォーマットに対応
+                        datetime_formats = [
+                            "%Y-%m-%d %H:%M:%S",
+                            "%Y-%m-%d %H:%M",
+                            "%Y/%m/%d %H:%M:%S",
+                            "%Y/%m/%d %H:%M",
+                        ]
+                        for fmt in datetime_formats:
+                            try:
+                                record_datetime = datetime.strptime(normalized_datetime_str, fmt)
+                                break
+                            except ValueError:
+                                continue
+                    else:
+                        # 時刻が含まれていない場合は00:00:00として扱う
+                        record_datetime = datetime.strptime(f"{record_date_only} 00:00:00", "%Y-%m-%d %H:%M:%S")
+                    
+                    if record_datetime is None:
+                        # パースに失敗した場合は00:00:00として扱う
+                        record_datetime = datetime.strptime(f"{record_date_only} 00:00:00", "%Y-%m-%d %H:%M:%S")
+                    
+                    # レシート時刻より後の場合はスキップ
+                    if record_datetime >= receipt_datetime:
+                        _write_log(f"時刻フィルタ: SKU={sku} はレシート時刻より後（{record_datetime} >= {receipt_datetime}）")
+                        continue
+                except Exception as e:
+                    # 時刻の比較に失敗した場合はスキップ
+                    _write_log(f"時刻比較エラー: SKU={sku}, エラー={e}, record_datetime_str={record_datetime_str}")
+                    continue
+            
+            # 既にレシートIDが設定されているか確認
+            # 仕入管理タブのデータに既にレシートIDがある場合はスキップ
+            if inventory_records:
+                existing_receipt_id = record.get('レシートID') or record.get('receipt_id') or ''
+                if existing_receipt_id:
+                    _write_log(f"スキップ: SKU={sku} は既にレシートID={existing_receipt_id}が設定されています")
+                    continue
+            
+            # ProductDatabaseから現在のレシートIDを確認
+            product = product_db.get_by_sku(sku)
+            product_already_has_receipt_id = False
+            if product:
+                # productsテーブルに存在する場合
+                if product.get('receipt_id'):
+                    # 既にレシートIDが設定されている場合でも、UI更新は実行する
+                    product_already_has_receipt_id = True
+                    matched_count += 1
+                    matched_skus.append(sku)
+                    _write_log(f"情報: SKU={sku} はproductsテーブルに既にレシートID={product.get('receipt_id')}が設定されています（UI更新のみ実行）")
+                else:
+                    # レシートIDを設定
+                    try:
+                        # ProductDatabaseのlink_receiptメソッドを使用
+                        # receipt_idは整数（DBのID）を使用
+                        if product_db.link_receipt(sku, db_receipt_id):
+                            updated_count += 1
+                            matched_count += 1
+                            matched_skus.append(sku)
+                            _write_log(f"更新成功: SKU={sku} にレシートID={db_receipt_id}を設定")
+                    except Exception as e:
+                        # エラーはログに記録して続行
+                        _write_log(f"エラー: SKU={sku}, エラー={e}")
+            else:
+                # productsテーブルに存在しない場合は、仕入DBのデータからproductsテーブルに登録
+                try:
+                    # 仕入DBのデータから商品情報を構築
+                    product_data = {
+                        "sku": sku,
+                        "jan": record.get('JAN') or record.get('jan') or None,
+                        "asin": record.get('ASIN') or record.get('asin') or None,
+                        "product_name": record.get('商品名') or record.get('product_name') or None,
+                        "purchase_date": record_date_only,
+                        "purchase_price": record.get('仕入れ価格') or record.get('purchase_price') or None,
+                        "quantity": record.get('仕入れ個数') or record.get('quantity') or None,
+                        "store_code": store_code,
+                        "store_name": record.get('店舗名') or record.get('store_name') or None,
+                        "receipt_id": db_receipt_id,
+                    }
+                    # 数値型の変換
+                    if product_data.get("purchase_price"):
+                        try:
+                            product_data["purchase_price"] = int(product_data["purchase_price"])
+                        except (ValueError, TypeError):
+                            product_data["purchase_price"] = None
+                    if product_data.get("quantity"):
+                        try:
+                            product_data["quantity"] = int(product_data["quantity"])
+                        except (ValueError, TypeError):
+                            product_data["quantity"] = None
+                    
+                    # productsテーブルに登録
+                    product_db.upsert(product_data)
+                    updated_count += 1
+                    matched_count += 1
+                    matched_skus.append(sku)
+                    _write_log(f"新規登録成功: SKU={sku} をproductsテーブルに登録（レシートID={db_receipt_id}）")
+                except Exception as e:
+                    # エラーはログに記録して続行
+                    _write_log(f"新規登録エラー: SKU={sku}, エラー={e}")
+            
+            # 仕入管理タブのデータにもレシートIDを設定
+            # inventory_dataが存在する場合はinventory_dataを更新
+            # inventory_dataがNoneでも、filtered_dataが存在する場合はfiltered_dataを更新
+            _write_log(f"デバッグ: inventory_data_exists={inventory_data_exists}, inventory_widget={self.inventory_widget is not None}, hasattr={hasattr(self.inventory_widget, 'inventory_data') if self.inventory_widget else False}, inventory_data={self.inventory_widget.inventory_data is not None if self.inventory_widget and hasattr(self.inventory_widget, 'inventory_data') else None}, filtered_data={self.inventory_widget.filtered_data is not None if self.inventory_widget and hasattr(self.inventory_widget, 'filtered_data') else None}")
+            
+            # inventory_dataが存在する場合
+            if inventory_data_exists and self.inventory_widget and hasattr(self.inventory_widget, 'inventory_data') and self.inventory_widget.inventory_data is not None:
+                try:
+                    import pandas as pd
+                    _write_log(f"仕入管理タブ更新開始: SKU={sku}, inventory_data存在={self.inventory_widget.inventory_data is not None}")
+                    
+                    # レシートID列が存在しない場合は追加
+                    if 'レシートID' not in self.inventory_widget.inventory_data.columns:
+                        self.inventory_widget.inventory_data['レシートID'] = ''
+                        _write_log("レシートID列を追加しました")
+                    
+                    # inventory_dataから該当SKUの行を検索
+                    matched_in_inventory = False
+                    target_sku_normalized = str(sku).strip().lower()
+                    _write_log(f"SKU検索開始: target_sku='{sku}', normalized='{target_sku_normalized}'")
+                    _write_log(f"inventory_data行数: {len(self.inventory_widget.inventory_data)}")
+                    
+                    for idx, row in self.inventory_widget.inventory_data.iterrows():
+                        row_sku = str(row.get('SKU') or '').strip()
+                        row_sku_normalized = row_sku.lower()
+                        is_match = (row_sku == sku or 
+                                   row_sku == str(sku).strip() or 
+                                   row_sku_normalized == target_sku_normalized)
+                        
+                        if idx < 5:  # 最初の5行だけログ出力（デバッグ用）
+                            _write_log(f"SKU比較[{idx}]: row_sku='{row_sku}', target_sku='{sku}', 一致={is_match}")
+                        
+                        if is_match:
+                            # レシートIDを設定（カスタムIDを使用）
+                            self.inventory_widget.inventory_data.at[idx, 'レシートID'] = receipt_id_str
+                            matched_in_inventory = True
+                            _write_log(f"仕入管理タブ更新成功: SKU={sku} (idx={idx}) にレシートID={receipt_id_str}を設定")
+                            # 確認のため、設定後の値をログ出力
+                            updated_value = self.inventory_widget.inventory_data.at[idx, 'レシートID']
+                            _write_log(f"設定確認: idx={idx}のレシートID={updated_value}")
+                            break
+                    
+                    if not matched_in_inventory:
+                        _write_log(f"警告: SKU={sku} がinventory_dataに見つかりませんでした（全{len(self.inventory_widget.inventory_data)}行を検索）")
+                    
+                    # filtered_dataも更新（表示用）
+                    if hasattr(self.inventory_widget, 'filtered_data') and self.inventory_widget.filtered_data is not None:
+                        if 'レシートID' not in self.inventory_widget.filtered_data.columns:
+                            self.inventory_widget.filtered_data['レシートID'] = ''
+                        # filtered_dataからも該当SKUの行を検索して更新
+                        matched_in_filtered = False
+                        _write_log(f"filtered_data検索開始: target_sku='{sku}', filtered_data行数={len(self.inventory_widget.filtered_data)}")
+                        for idx, row in self.inventory_widget.filtered_data.iterrows():
+                            row_sku = str(row.get('SKU') or '').strip()
+                            row_sku_normalized = row_sku.lower()
+                            is_match = (row_sku == sku or 
+                                       row_sku == str(sku).strip() or 
+                                       row_sku_normalized == target_sku_normalized)
+                            if is_match:
+                                self.inventory_widget.filtered_data.at[idx, 'レシートID'] = receipt_id_str
+                                matched_in_filtered = True
+                                _write_log(f"filtered_data更新成功: SKU={sku} (idx={idx}) にレシートID={receipt_id_str}を設定")
+                                # 確認のため、設定後の値をログ出力
+                                updated_value = self.inventory_widget.filtered_data.at[idx, 'レシートID']
+                                _write_log(f"filtered_data設定確認: idx={idx}のレシートID={updated_value}")
+                                break
+                        
+                        if not matched_in_filtered:
+                            _write_log(f"警告: SKU={sku} がfiltered_dataに見つかりませんでした（全{len(self.inventory_widget.filtered_data)}行を検索）")
+                except Exception as e:
+                    import traceback
+                    _write_log(f"仕入管理タブ更新エラー: SKU={sku}, エラー={e}\n{traceback.format_exc()}")
+            
+            # inventory_dataがNoneでも、filtered_dataが存在する場合はfiltered_dataを更新
+            elif self.inventory_widget and hasattr(self.inventory_widget, 'filtered_data') and self.inventory_widget.filtered_data is not None:
+                try:
+                    import pandas as pd
+                    _write_log(f"filtered_dataのみ更新開始: SKU={sku}, filtered_data存在={self.inventory_widget.filtered_data is not None}")
+                    
+                    # レシートID列が存在しない場合は追加
+                    if 'レシートID' not in self.inventory_widget.filtered_data.columns:
+                        self.inventory_widget.filtered_data['レシートID'] = ''
+                        _write_log("filtered_dataにレシートID列を追加しました")
+                    
+                    # filtered_dataから該当SKUの行を検索して更新
+                    matched_in_filtered = False
+                    target_sku_normalized = str(sku).strip().lower()
+                    _write_log(f"filtered_data検索開始: target_sku='{sku}', normalized='{target_sku_normalized}'")
+                    _write_log(f"filtered_data行数: {len(self.inventory_widget.filtered_data)}")
+                    
+                    for idx, row in self.inventory_widget.filtered_data.iterrows():
+                        row_sku = str(row.get('SKU') or '').strip()
+                        row_sku_normalized = row_sku.lower()
+                        is_match = (row_sku == sku or 
+                                   row_sku == str(sku).strip() or 
+                                   row_sku_normalized == target_sku_normalized)
+                        
+                        if is_match:
+                            self.inventory_widget.filtered_data.at[idx, 'レシートID'] = receipt_id_str
+                            matched_in_filtered = True
+                            _write_log(f"filtered_data更新成功: SKU={sku} (idx={idx}) にレシートID={receipt_id_str}を設定")
+                            # 確認のため、設定後の値をログ出力
+                            updated_value = self.inventory_widget.filtered_data.at[idx, 'レシートID']
+                            _write_log(f"filtered_data設定確認: idx={idx}のレシートID={updated_value}")
+                            break
+                    
+                    if not matched_in_filtered:
+                        _write_log(f"警告: SKU={sku} がfiltered_dataに見つかりませんでした（全{len(self.inventory_widget.filtered_data)}行を検索）")
+                except Exception as e:
+                    import traceback
+                    _write_log(f"filtered_data更新エラー: SKU={sku}, エラー={e}\n{traceback.format_exc()}")
+        
+        # 結果をログに記録
+        _write_log(f"完了: マッチ={matched_count}件, 更新={updated_count}件, レシートID={receipt_id_str}, 対象SKU={matched_skus}")
+        
+        # 仕入管理タブのテーブル表示を更新（ループの外で一度だけ）
+        # inventory_dataが存在する場合、またはfiltered_dataが存在する場合は更新する
+        has_filtered_data = self.inventory_widget and hasattr(self.inventory_widget, 'filtered_data') and self.inventory_widget.filtered_data is not None
+        _write_log(f"テーブル更新チェック: matched_count={matched_count}, inventory_data_exists={inventory_data_exists}, has_filtered_data={has_filtered_data}, inventory_widget={self.inventory_widget is not None}, has_update_table={hasattr(self.inventory_widget, 'update_table') if self.inventory_widget else False}")
+        if matched_count > 0 and self.inventory_widget and hasattr(self.inventory_widget, 'update_table') and (inventory_data_exists or has_filtered_data):
+            try:
+                _write_log("仕入管理タブのテーブル表示を更新します")
+                # 更新前のレシートID値を確認
+                sample_skus = matched_skus[:3] if len(matched_skus) > 0 else []
+                for sample_sku in sample_skus:
+                    if hasattr(self.inventory_widget, 'inventory_data') and self.inventory_widget.inventory_data is not None:
+                        for idx, row in self.inventory_widget.inventory_data.iterrows():
+                            if str(row.get('SKU') or '').strip() == sample_sku:
+                                receipt_id_value = row.get('レシートID', '')
+                                _write_log(f"更新前確認(inventory_data): SKU={sample_sku}, レシートID={receipt_id_value}")
+                                break
+                    elif hasattr(self.inventory_widget, 'filtered_data') and self.inventory_widget.filtered_data is not None:
+                        for idx, row in self.inventory_widget.filtered_data.iterrows():
+                            if str(row.get('SKU') or '').strip() == sample_sku:
+                                receipt_id_value = row.get('レシートID', '')
+                                _write_log(f"更新前確認(filtered_data): SKU={sample_sku}, レシートID={receipt_id_value}")
+                                break
+                self.inventory_widget.update_table()
+                _write_log("仕入管理タブのテーブル表示を更新しました")
+            except Exception as e:
+                import traceback
+                _write_log(f"テーブル更新エラー: {e}\n{traceback.format_exc()}")
+        else:
+            _write_log("テーブル更新をスキップしました（条件を満たしていません）")
+            # inventory_dataもfiltered_dataもNoneの場合、テーブルから直接レシートIDを設定
+            if matched_count > 0 and self.inventory_widget and hasattr(self.inventory_widget, 'data_table'):
+                try:
+                    from PySide6.QtWidgets import QTableWidgetItem
+                    _write_log("テーブルから直接レシートIDを設定します")
+                    data_table = self.inventory_widget.data_table
+                    row_count = data_table.rowCount()
+                    _write_log(f"テーブル行数: {row_count}")
+                    
+                    # カラムヘッダーからSKUとレシートIDのインデックスを取得
+                    column_headers = []
+                    if hasattr(self.inventory_widget, 'column_headers'):
+                        column_headers = self.inventory_widget.column_headers
+                    else:
+                        # カラムヘッダーが取得できない場合は、デフォルトの順序を使用
+                        column_headers = [
+                            "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
+                            "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "コメント",
+                            "発送方法", "仕入先", "コンディション説明", "保証期間", "レシートID"
+                        ]
+                    
+                    sku_column_idx = column_headers.index("SKU") if "SKU" in column_headers else 2
+                    receipt_id_column_idx = column_headers.index("レシートID") if "レシートID" in column_headers else 16
+                    _write_log(f"SKU列インデックス: {sku_column_idx}, レシートID列インデックス: {receipt_id_column_idx}")
+                    
+                    # テーブルの各行を検索して、該当するSKUの行にレシートIDを設定
+                    updated_rows = 0
+                    for row_idx in range(row_count):
+                        sku_item = data_table.item(row_idx, sku_column_idx)
+                        if sku_item:
+                            row_sku = str(sku_item.text()).strip()
+                            # SKUが「未実装」の場合はスキップ
+                            if row_sku == "未実装" or not row_sku:
+                                continue
+                            
+                            # マッチしたSKUか確認
+                            if row_sku in matched_skus:
+                                # レシートIDを設定
+                                receipt_id_item = data_table.item(row_idx, receipt_id_column_idx)
+                                if receipt_id_item:
+                                    receipt_id_item.setText(receipt_id_str)
+                                else:
+                                    receipt_id_item = QTableWidgetItem(receipt_id_str)
+                                    data_table.setItem(row_idx, receipt_id_column_idx, receipt_id_item)
+                                updated_rows += 1
+                                _write_log(f"テーブル直接更新: 行={row_idx}, SKU={row_sku}, レシートID={receipt_id_str}")
+                    
+                    _write_log(f"テーブル直接更新完了: {updated_rows}行を更新しました")
+                except Exception as e:
+                    import traceback
+                    _write_log(f"テーブル直接更新エラー: {e}\n{traceback.format_exc()}")
+        
+        if matched_count > 0 or updated_count > 0:
+            # 商品DBタブの表示を更新（メソッドが存在する場合）
+            if self.product_widget and hasattr(self.product_widget, 'load_products'):
+                try:
+                    self.product_widget.load_products()
+                except Exception:
+                    pass
+            
+            # 仕入DBタブ（ProductWidget内）のレシートIDを更新
+            if self.product_widget and hasattr(self.product_widget, 'purchase_all_records'):
+                try:
+                    _write_log("仕入DBタブ（ProductWidget）のレシートIDを更新します")
+                    updated_purchase_records = 0
+                    for record in self.product_widget.purchase_all_records:
+                        sku = record.get('SKU') or record.get('sku') or ''
+                        if sku in matched_skus:
+                            record['レシートID'] = receipt_id_str
+                            updated_purchase_records += 1
+                            _write_log(f"仕入DBタブ更新: SKU={sku}, レシートID={receipt_id_str}")
+                    
+                    # テーブルを再描画
+                    if hasattr(self.product_widget, 'populate_purchase_table'):
+                        self.product_widget.populate_purchase_table(self.product_widget.purchase_all_records)
+                        _write_log(f"仕入DBタブテーブル再描画完了: {updated_purchase_records}件のレシートIDを更新しました")
+                except Exception as e:
+                    import traceback
+                    _write_log(f"仕入DBタブ更新エラー: {e}\n{traceback.format_exc()}")
     
     def reset_form(self):
         """フォームをリセット"""
