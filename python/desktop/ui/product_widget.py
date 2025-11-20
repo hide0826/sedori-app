@@ -11,14 +11,16 @@ import re
 import unicodedata
 import calendar
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QMimeData, QUrl
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QGroupBox, QFormLayout, QLineEdit, QDialog, QDialogButtonBox,
     QMessageBox, QLabel, QTabWidget, QHeaderView
 )
+from PySide6.QtGui import QDrag, QPixmap, QDesktopServices, QCursor, QCursor
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -26,6 +28,53 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 from database.product_db import ProductDatabase
 from database.warranty_db import WarrantyDatabase
 from database.product_purchase_db import ProductPurchaseDatabase
+
+
+class DraggableTableWidget(QTableWidget):
+    """ドラッグアンドドロップ対応のQTableWidget"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # マウストラッキングを有効化（カーソル変更用）
+        self.setMouseTracking(True)
+    
+    def mouseMoveEvent(self, event):
+        """マウス移動時の処理（カーソル変更用）"""
+        item = self.itemAt(event.position().toPoint())
+        if item:
+            col = self.column(item)
+            header = self.horizontalHeaderItem(col)
+            if header and header.text() == "レシートID" and item.text().strip():
+                self.setCursor(QCursor(Qt.PointingHandCursor))
+            else:
+                self.setCursor(QCursor(Qt.ArrowCursor))
+        else:
+            self.setCursor(QCursor(Qt.ArrowCursor))
+        super().mouseMoveEvent(event)
+    
+    def startDrag(self, supportedActions):
+        """ドラッグ開始時の処理"""
+        item = self.currentItem()
+        if item is None:
+            return super().startDrag(supportedActions)
+        
+        # レシートID列かどうかを確認
+        col = self.currentColumn()
+        header = self.horizontalHeaderItem(col)
+        if header and header.text() == "レシートID":
+            receipt_id = item.text().strip()
+            if receipt_id:
+                # ドラッグデータを作成
+                drag = QDrag(self)
+                mime_data = QMimeData()
+                # テキストデータとしてレシートIDを設定
+                mime_data.setText(receipt_id)
+                drag.setMimeData(mime_data)
+                # ドラッグを開始
+                drag.exec_(Qt.CopyAction)
+                return
+        # レシートID列以外は通常のドラッグ処理
+        super().startDrag(supportedActions)
 
 
 class ProductEditDialog(QDialog):
@@ -142,6 +191,8 @@ class ProductWidget(QWidget):
         self.db = ProductDatabase()
         self.warranty_db = WarrantyDatabase()
         self.purchase_db = ProductPurchaseDatabase()
+        from database.receipt_db import ReceiptDatabase
+        self.receipt_db = ReceiptDatabase()
         self.inventory_widget = inventory_widget
         self.inventory_columns = self._resolve_inventory_columns()
         self.purchase_columns: List[str] = list(self.inventory_columns)
@@ -294,7 +345,7 @@ class ProductWidget(QWidget):
         controls.addStretch()
         layout.addLayout(controls)
 
-        self.purchase_table = QTableWidget()
+        self.purchase_table = DraggableTableWidget()
         self.purchase_table.setColumnCount(len(self.purchase_columns))
         self.purchase_table.setHorizontalHeaderLabels(self.purchase_columns)
         self.purchase_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -302,6 +353,8 @@ class ProductWidget(QWidget):
         self.purchase_table.setSelectionMode(QTableWidget.SingleSelection)
         self.purchase_table.verticalHeader().setVisible(False)
         self._apply_purchase_column_resize(self.purchase_columns)
+        # セルクリックイベントを接続（レシートID列のクリック処理用）
+        self.purchase_table.cellClicked.connect(self.on_purchase_table_cell_clicked)
         layout.addWidget(self.purchase_table)
         
         # 全データを保持（検索用）
@@ -764,10 +817,58 @@ class ProductWidget(QWidget):
                     if full_text:
                         item.setToolTip(full_text)
                     item.setData(Qt.UserRole, full_text)
+                elif header == "レシートID":
+                    # レシートID列の特別処理
+                    receipt_id_str = "" if value is None else str(value)
+                    item = QTableWidgetItem(receipt_id_str)
+                    if receipt_id_str:
+                        # クリック可能にする（カーソルをポインターに変更）
+                        item.setFlags(item.flags() | Qt.ItemIsEnabled)
+                        # ツールチップに画像ファイルパスを表示
+                        receipt_info = self.receipt_db.find_by_receipt_id(receipt_id_str)
+                        if receipt_info and receipt_info.get('file_path'):
+                            file_path = receipt_info.get('file_path')
+                            item.setToolTip(f"クリックで画像を開く\n{file_path}")
+                            # レシートIDをUserRoleに保存（画像ファイルパス取得用）
+                            item.setData(Qt.UserRole, file_path)
+                        else:
+                            item.setToolTip("レシートID: " + receipt_id_str)
+                        # ドラッグ可能にする
+                        item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
                 else:
                     item = QTableWidgetItem("" if value is None else str(value))
                 self.purchase_table.setItem(row, col, item)
 
+    def on_purchase_table_cell_clicked(self, row: int, col: int):
+        """仕入DBテーブルのセルクリックイベントハンドラ"""
+        item = self.purchase_table.item(row, col)
+        if item is None:
+            return
+        
+        header = self.purchase_columns[col] if col < len(self.purchase_columns) else ""
+        if header == "レシートID":
+            receipt_id = item.text().strip()
+            if not receipt_id:
+                return
+            
+            # レシートIDから画像ファイルパスを取得
+            receipt_info = self.receipt_db.find_by_receipt_id(receipt_id)
+            if receipt_info and receipt_info.get('file_path'):
+                file_path = Path(receipt_info.get('file_path'))
+                if file_path.exists():
+                    # 画像ファイルを開く
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(file_path)))
+                else:
+                    QMessageBox.warning(
+                        self, "エラー",
+                        f"レシート画像ファイルが見つかりません:\n{file_path}"
+                    )
+            else:
+                QMessageBox.information(
+                    self, "情報",
+                    f"レシートID '{receipt_id}' に対応するレシート情報が見つかりません。"
+                )
+    
     @staticmethod
     def _truncate_text(text: str, limit: int) -> str:
         if len(text) <= limit:
