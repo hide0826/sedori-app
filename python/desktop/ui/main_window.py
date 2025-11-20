@@ -37,6 +37,8 @@ from ui.receipt_widget import ReceiptWidget
 from ui.warranty_widget import WarrantyWidget
 from ui.product_widget import ProductWidget
 from ui.condition_template_widget import ConditionTemplateWidget
+from ui.barcode_checker_widget import BarcodeCheckerWidget
+from ui.image_manager_widget import ImageManagerWidget
 
 
 class APIServerThread(QThread):
@@ -189,6 +191,14 @@ class MainWindow(QMainWindow):
         # 保証書管理タブ
         self.warranty_widget = WarrantyWidget(self.api_client)
         self.tab_widget.addTab(self.warranty_widget, "保証書管理")
+        
+        # バーコードチェッカータブ
+        self.barcode_checker_widget = BarcodeCheckerWidget()
+        self.tab_widget.addTab(self.barcode_checker_widget, "バーコードチェッカー")
+        
+        # 画像管理タブ
+        self.image_manager_widget = ImageManagerWidget(api_client=self.api_client)
+        self.tab_widget.addTab(self.image_manager_widget, "画像管理")
         
         # 設定タブ
         self.settings_widget = SettingsWidget(self.api_client)

@@ -39,11 +39,13 @@
   - `python/desktop/database/product_purchase_db.py`（商品DBタブの仕入DB）⭐ 拡張
   - `python/desktop/database/route_visit_db.py`（ルート訪問DB）⭐ 拡張
   - `python/desktop/database/condition_template_db.py`（コンディション説明テンプレート）⭐ 新規
+  - `python/desktop/database/image_db.py`（画像管理DB）⭐ 新規（2025-01-26）
 - サービス:
   - `python/desktop/services/route_matching_service.py`（照合処理）
   - `python/desktop/services/calculation_service.py`（計算）
   - `python/services/inventory_service.py`（仕入CSV処理、SKU生成、出品CSV生成）
   - `python/services/sku_template.py`（SKUテンプレートレンダラ）⭐ 新規
+  - `python/desktop/services/image_service.py`（画像管理、バーコード読み取り）⭐ 新規（2025-01-26）
 - API クライアント:
   - `python/desktop/api/client.py`
 - バックエンド API:
@@ -430,7 +432,7 @@ Content-Type: application/json
 
 ## メインタブ構成（2025-02-XX 更新）
 
-### 最終的なメインタブ構成
+### 最終的なメインタブ構成（2025-01-26 更新）
 1. **価格改定**（サブタブ：改定実行、改定ルール）
 2. 仕入管理
 3. 古物台帳
@@ -439,7 +441,9 @@ Content-Type: application/json
 6. 分析
 7. レシート管理
 8. 保証書管理
-9. 設定
+9. **バーコードチェッカー** ⭐ 新規（2025-01-26）
+10. **画像管理** ⭐ 新規（2025-01-26）
+11. 設定
 
 ### タブ統合の詳細
 - **価格改定タブ:** 価格改定と価格改定ルールを統合
@@ -1546,3 +1550,76 @@ Content-Type: application/json
   - `python/desktop/ui/receipt_widget.py` - 時刻入力欄追加、ファイル名リネーム修正、レシートID自動入力機能追加
   - `python/scripts/migrate_receipt_filenames.py` - 新規追加（既存ファイル移行スクリプト）
   - `python/desktop/ui/product_widget.py` - レシートID列のクリック・ドラッグアンドドロップ機能追加
+
+## 追加作業記録（2025-01-26 最新：バーコードチェッカー・画像管理機能追加）
+
+### バーコードチェッカータブの実装（2025-01-26）
+- **新規タブ:** バーコードチェッカー
+- **機能:**
+  - JANコード入力欄（バーコードリーダー対応、自動検知）
+  - JANコード検証（チェックデジット計算・検証）
+  - 商品DBとの自動照合（JANコードで検索）
+  - 検索結果の表示（テーブル形式、詳細情報）
+- **実装ファイル:**
+  - `python/desktop/ui/barcode_checker_widget.py`（新規）
+  - `python/desktop/database/product_db.py`（find_by_janメソッド追加）
+- **メインタブ構成に追加:**
+  - 保証書管理タブの後に「バーコードチェッカー」タブを追加
+
+### 画像管理タブの実装（2025-01-26）
+- **新規タブ:** 画像管理
+- **UI構成:**
+  - QSplitterで三分割レイアウト
+    - 左: JANグループツリー（QTreeWidget）
+    - 中央: 画像一覧（QListWidget、アイコン表示、撮影時間順）
+    - 右: 詳細パネル（プレビュー、JAN編集、回転ボタン）
+- **機能:**
+  - フォルダ選択・スキャン実行
+  - EXIFから撮影日時を自動取得
+  - ファイル名または画像内のバーコードからJANコードを抽出
+  - JANコードでグルーピング
+  - 画像回転（左回転/右回転、90度単位）
+  - JANコード編集・保存
+  - 最後に開いたフォルダパスを`config/inventory_settings.json`に保存
+- **実装ファイル:**
+  - `python/desktop/ui/image_manager_widget.py`（新規）
+  - `python/desktop/services/image_service.py`（新規）
+  - `python/desktop/database/image_db.py`（新規）
+- **大量画像対応:**
+  - QThreadで非同期読み込み（256pxサムネイル）
+  - フリーズ防止
+
+### バーコードリーダー実装（ZXingベース）（2025-01-26）
+- **実装方針変更:**
+  - 当初はpyzbar（ZBarベース）を使用予定
+  - Windowsでの依存関係（libiconv.dll、intl.dll）の問題により、ZXingベースに変更
+- **実装内容:**
+  - pyzxing（ZXingのPythonラッパー）を使用
+  - 優先順位: ZXing > pyzbar（フォールバック）
+  - 遅延インポート機能でpyzbarの依存関係エラーを回避
+- **依存関係:**
+  - Java JRE 8以上が必要
+  - `pip install pyzxing`
+- **機能:**
+  - 画像からバーコード（JANコード）を読み取り
+  - EAN-13、EAN-8、UPC-A、UPC-Eに対応
+  - 8桁または13桁のJANコードを抽出
+- **実装ファイル:**
+  - `python/desktop/services/image_service.py`（read_barcode_from_imageメソッド、遅延インポート機能）
+  - `requirements.txt`（pyzxing追加）
+- **テストスクリプト:**
+  - `python/desktop/scripts/test_pyzxing.py`（pyzxing動作確認）
+  - `python/desktop/scripts/test_image_service_barcode.py`（ImageService統合テスト）
+  - `python/desktop/scripts/test_barcode_reader.py`（バーコードリーダー動作確認）
+
+### Gitコミット（2025-01-26）
+- コミット予定: バーコードチェッカー・画像管理機能追加
+- 変更ファイル:
+  - `python/desktop/ui/barcode_checker_widget.py`（新規）
+  - `python/desktop/ui/image_manager_widget.py`（新規）
+  - `python/desktop/services/image_service.py`（新規）
+  - `python/desktop/database/image_db.py`（新規）
+  - `python/desktop/database/product_db.py`（find_by_janメソッド追加）
+  - `python/desktop/ui/main_window.py`（バーコードチェッカー・画像管理タブ追加）
+  - `requirements.txt`（pyzxing追加）
+  - `config/inventory_settings.json`（画像管理用設定追加）

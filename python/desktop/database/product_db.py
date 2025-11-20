@@ -223,6 +223,33 @@ class ProductDatabase:
         row = cur.fetchone()
         return dict(row) if row else None
 
+    def find_by_jan(self, jan: str) -> List[Dict[str, Any]]:
+        """
+        JANコードで商品を検索する
+        
+        Args:
+            jan: JANコード（13桁）
+        
+        Returns:
+            マッチした商品情報のリスト（複数件の可能性がある）
+        """
+        if not jan:
+            return []
+        
+        # JANコードを正規化（数字のみ抽出）
+        normalized_jan = ''.join(c for c in jan if c.isdigit())
+        
+        if not normalized_jan:
+            return []
+        
+        cur = self.conn.cursor()
+        # JANコードで検索（部分一致も考慮）
+        cur.execute(
+            "SELECT * FROM products WHERE jan LIKE ? ORDER BY updated_at DESC",
+            (f"%{normalized_jan}%",)
+        )
+        return [dict(r) for r in cur.fetchall()]
+
     def delete(self, sku: str) -> bool:
         cur = self.conn.cursor()
         cur.execute("DELETE FROM products WHERE sku = ?", (sku,))

@@ -7,4 +7,6 @@ openpyxl
 matplotlib
 Pillow
 pytesseract
+pyzbar  # For barcode reading (requires zbar library) - オプション: 依存関係の問題がある場合は無効化
+pyzxing  # Alternative barcode reader (ZXing-based, requires Java JRE)
 google-cloud-vision  # Optional: For OCR fallback (requires API key)
