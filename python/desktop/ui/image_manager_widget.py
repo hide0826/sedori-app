@@ -594,18 +594,22 @@ class ImageManagerWidget(QWidget):
                 QMessageBox.warning(self, "エラー", "画像レコードが見つかりませんでした。")
                 return
             
-            # 選択された画像の撮影日時を取得
-            if not selected_record.capture_dt:
-                QMessageBox.warning(self, "エラー", "撮影日時が取得できませんでした。")
-                return
+            # 選択された画像のEXIFから撮影日時を取得（正確な撮影日時を使用）
+            selected_capture_dt = self.image_service.get_exif_datetime(self.selected_image_path)
+            if not selected_capture_dt:
+                # EXIFが取得できない場合は、既存の撮影日時を使用（フォールバック）
+                selected_capture_dt = selected_record.capture_dt
+                if not selected_capture_dt:
+                    QMessageBox.warning(self, "エラー", "撮影日時が取得できませんでした。")
+                    return
             
             # DBを更新
             self.image_db.update_jan(self.selected_image_path, jan if jan else None)
             
-            # 選択された画像のJANコードを更新
+            # 選択された画像のJANコードを更新（EXIFから取得した撮影日時を使用）
             selected_record = ImageRecord(
                 path=selected_record.path,
-                capture_dt=selected_record.capture_dt,
+                capture_dt=selected_capture_dt,
                 jan_candidate=jan,
                 width=selected_record.width,
                 height=selected_record.height
@@ -613,7 +617,7 @@ class ImageManagerWidget(QWidget):
             
             # 4分以内に撮影された画像を検索して同じJANコードを付与
             time_window = 4 * 60  # 4分 = 240秒
-            selected_time = selected_record.capture_dt
+            selected_time = selected_capture_dt
             
             updated_count = 0
             updated_records = []
@@ -624,13 +628,19 @@ class ImageManagerWidget(QWidget):
                     continue
                 
                 # 撮影日時が4分以内の画像を同じJANグループに追加
-                if record.capture_dt:
-                    time_diff = abs((record.capture_dt - selected_time).total_seconds())
+                # 各画像のEXIFから撮影日時を取得（正確な撮影日時を使用）
+                record_capture_dt = self.image_service.get_exif_datetime(record.path)
+                if not record_capture_dt:
+                    # EXIFが取得できない場合は、既存の撮影日時を使用（フォールバック）
+                    record_capture_dt = record.capture_dt
+                
+                if record_capture_dt:
+                    time_diff = abs((record_capture_dt - selected_time).total_seconds())
                     if time_diff <= time_window:
-                        # この画像も同じJANコードを付与
+                        # この画像も同じJANコードを付与（EXIFから取得した撮影日時を使用）
                         updated_record = ImageRecord(
                             path=record.path,
-                            capture_dt=record.capture_dt,
+                            capture_dt=record_capture_dt,  # EXIFから取得した撮影日時を使用
                             jan_candidate=jan,
                             width=record.width,
                             height=record.height
