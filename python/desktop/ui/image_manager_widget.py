@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+import logging
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize
 from PySide6.QtWidgets import (
@@ -35,6 +36,8 @@ except Exception:
     from desktop.services.image_service import ImageService, ImageRecord, JanGroup
 
 from database.image_db import ImageDatabase
+
+logger = logging.getLogger(__name__)
 
 
 class ImageLoadThread(QThread):
@@ -78,6 +81,7 @@ class ImageManagerWidget(QWidget):
         self.api_client = api_client
         self.image_service = ImageService()
         self.image_db = ImageDatabase()
+        self.product_widget = None  # ProductWidgetへの参照
         
         # データ
         self.current_directory = ""
@@ -96,21 +100,29 @@ class ImageManagerWidget(QWidget):
         self.setup_ui()
         self.load_last_directory()
     
+    def set_product_widget(self, product_widget):
+        """ProductWidgetへの参照を設定"""
+        self.product_widget = product_widget
+    
     def setup_ui(self):
         """UIのセットアップ"""
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
         layout.setContentsMargins(10, 10, 10, 10)
         
-        # 上部：フォルダ選択エリア
+        # 上部：フォルダ選択エリア（最小サイズ）
         folder_group = QGroupBox("フォルダ選択")
+        folder_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)  # 高さを最小限に
         folder_layout = QHBoxLayout(folder_group)
+        folder_layout.setSpacing(5)
+        folder_layout.setContentsMargins(5, 5, 5, 5)  # マージンを小さく
         
         folder_label = QLabel("フォルダ:")
         self.folder_path_label = QLabel("（未選択）")
-        self.folder_path_label.setMinimumHeight(30)
-        self.folder_path_label.setStyleSheet("border: 1px solid gray; padding: 5px;")
-        self.folder_path_label.setWordWrap(True)
+        self.folder_path_label.setMinimumHeight(20)  # 高さを小さく
+        self.folder_path_label.setMaximumHeight(20)  # 最大高さも制限
+        self.folder_path_label.setStyleSheet("border: 1px solid gray; padding: 2px;")  # パディングを小さく
+        self.folder_path_label.setWordWrap(False)  # 折り返しを無効化（1行に）
         
         self.select_folder_btn = QPushButton("フォルダ選択")
         self.select_folder_btn.clicked.connect(self.select_directory)
@@ -283,15 +295,20 @@ class ImageManagerWidget(QWidget):
             self.progress_dialog.setWindowModality(Qt.WindowModal)
             self.progress_dialog.show()
             
-            # スキャン実行
-            self.image_records = self.image_service.scan_directory(self.current_directory)
+            # スキャン実行（高速化のためEXIF・画像サイズ・バーコード読み取りをスキップ）
+            self.image_records = self.image_service.scan_directory(
+                self.current_directory, 
+                skip_barcode_reading=True,
+                skip_exif=True,  # EXIF読み取りをスキップ（ファイル更新日時を使用）
+                skip_image_size=True  # 画像サイズ取得をスキップ（後で必要に応じて取得）
+            )
             
             if not self.image_records:
                 QMessageBox.information(self, "結果", "画像ファイルが見つかりませんでした。")
                 self.progress_dialog.close()
                 return
             
-            # JANでグルーピング
+            # JANでグルーピング（JANコードなしも含む）
             self.jan_groups = self.image_service.group_by_jan(self.image_records)
             
             # DBに保存
@@ -309,11 +326,16 @@ class ImageManagerWidget(QWidget):
             self.update_tree_widget()
             self.progress_dialog.close()
             
+            # 全画像を一覧表示（遅延読み込み：スキャン完了後に非同期で実行）
+            # 画像読み込みは重いので、まずスキャン完了を通知してから実行
             QMessageBox.information(
                 self, "スキャン完了",
                 f"{len(self.image_records)}件の画像をスキャンしました。\n"
                 f"JANグループ数: {len(self.jan_groups)}"
             )
+            
+            # スキャン完了後、バックグラウンドで画像一覧を更新（ユーザーが待たない）
+            self.update_image_list(self.image_records)
         except Exception as e:
             self.progress_dialog.close()
             QMessageBox.critical(self, "エラー", f"スキャン中にエラーが発生しました:\n{str(e)}")
@@ -349,9 +371,14 @@ class ImageManagerWidget(QWidget):
         group = item.data(0, Qt.UserRole)
         
         if isinstance(group, JanGroup):
-            # JANグループが選択された
+            # JANグループが選択された（該当グループの画像のみ表示）
             self.selected_group = group
-            self.update_image_list(group.images)
+            if group.jan != "unknown":
+                # JANコードがあるグループの場合、そのグループの画像のみ表示
+                self.update_image_list(group.images, show_progress=True)
+            else:
+                # JAN不明グループの場合は全画像を表示
+                self.update_image_list(self.image_records, show_progress=True)
         else:
             # 個別の画像が選択された
             image_path = item.data(0, Qt.UserRole)
@@ -371,8 +398,13 @@ class ImageManagerWidget(QWidget):
                                 self.on_image_clicked(list_item)
                                 break
     
-    def update_image_list(self, records: List[ImageRecord]):
-        """画像リストを更新"""
+    def update_image_list(self, records: List[ImageRecord], show_progress: bool = False):
+        """画像リストを更新
+        
+        Args:
+            records: 画像レコードのリスト
+            show_progress: Trueの場合、プログレスダイアログを表示（デフォルト: False）
+        """
         self.image_list.clear()
         
         if not records:
@@ -381,31 +413,44 @@ class ImageManagerWidget(QWidget):
         # 画像読み込みをスレッドで実行
         image_paths = [r.path for r in records]
         
+        # 既存のスレッドがあれば終了を待つ
         if self.load_thread:
-            self.load_thread.terminate()
-            self.load_thread.wait()
+            if self.load_thread.isRunning():
+                self.load_thread.terminate()
+                self.load_thread.wait(3000)  # 最大3秒待つ
+            self.load_thread = None
         
-        self.progress_dialog = QProgressDialog(
-            "画像を読み込み中...", "キャンセル", 0, len(image_paths), self
-        )
-        self.progress_dialog.setWindowModality(Qt.WindowModal)
-        self.progress_dialog.show()
+        # プログレスダイアログは必要に応じて表示（通常は非表示で高速化）
+        if show_progress:
+            if self.progress_dialog:
+                self.progress_dialog.close()
+            self.progress_dialog = QProgressDialog(
+                "画像を読み込み中...", "キャンセル", 0, len(image_paths), self
+            )
+            self.progress_dialog.setWindowModality(Qt.WindowModal)
+            self.progress_dialog.show()
+        else:
+            # プログレスダイアログなしでバックグラウンド読み込み
+            self.progress_dialog = None
         
         self.load_thread = ImageLoadThread(image_paths, max_size=256)
-        self.load_thread.progress.connect(self.on_load_progress)
+        if show_progress:
+            self.load_thread.progress.connect(self.on_load_progress)
         self.load_thread.finished.connect(self.on_load_finished)
         self.load_thread.start()
     
     def on_load_progress(self, current: int, total: int):
         """画像読み込み進捗更新"""
-        if self.progress_dialog:
+        if self.progress_dialog and self.progress_dialog.isVisible():
             self.progress_dialog.setValue(current)
     
     def on_load_finished(self, results: List[tuple]):
         """画像読み込み完了"""
         if self.progress_dialog:
             self.progress_dialog.close()
+            self.progress_dialog = None
         
+        # 結果を画像一覧に追加
         for path, pixmap in results:
             item = QListWidgetItem(Path(path).name)
             item.setIcon(pixmap)
@@ -531,7 +576,7 @@ class ImageManagerWidget(QWidget):
             QMessageBox.critical(self, "エラー", f"バーコード読み取り中にエラーが発生しました:\n{str(e)}")
     
     def save_jan(self):
-        """JANコードを保存"""
+        """JANコードを保存し、4分以内に撮影された画像を同じグループにまとめる"""
         if not self.selected_image_path:
             return
         
@@ -543,10 +588,115 @@ class ImageManagerWidget(QWidget):
             return
         
         try:
+            # 選択された画像のレコードを取得
+            selected_record = next((r for r in self.image_records if r.path == self.selected_image_path), None)
+            if not selected_record:
+                QMessageBox.warning(self, "エラー", "画像レコードが見つかりませんでした。")
+                return
+            
+            # 選択された画像の撮影日時を取得
+            if not selected_record.capture_dt:
+                QMessageBox.warning(self, "エラー", "撮影日時が取得できませんでした。")
+                return
+            
             # DBを更新
             self.image_db.update_jan(self.selected_image_path, jan if jan else None)
             
-            QMessageBox.information(self, "完了", "JANコードを保存しました。")
+            # 選択された画像のJANコードを更新
+            selected_record = ImageRecord(
+                path=selected_record.path,
+                capture_dt=selected_record.capture_dt,
+                jan_candidate=jan,
+                width=selected_record.width,
+                height=selected_record.height
+            )
+            
+            # 4分以内に撮影された画像を検索して同じJANコードを付与
+            time_window = 4 * 60  # 4分 = 240秒
+            selected_time = selected_record.capture_dt
+            
+            updated_count = 0
+            updated_records = []
+            for record in self.image_records:
+                if record.path == self.selected_image_path:
+                    # 選択された画像を更新
+                    updated_records.append(selected_record)
+                    continue
+                
+                # 撮影日時が4分以内の画像を同じJANグループに追加
+                if record.capture_dt:
+                    time_diff = abs((record.capture_dt - selected_time).total_seconds())
+                    if time_diff <= time_window:
+                        # この画像も同じJANコードを付与
+                        updated_record = ImageRecord(
+                            path=record.path,
+                            capture_dt=record.capture_dt,
+                            jan_candidate=jan,
+                            width=record.width,
+                            height=record.height
+                        )
+                        updated_records.append(updated_record)
+                        # DBも更新
+                        self.image_db.update_jan(record.path, jan)
+                        updated_count += 1
+                    else:
+                        updated_records.append(record)
+                else:
+                    updated_records.append(record)
+            
+            # image_recordsを更新（撮影日時順にソート）
+            self.image_records = sorted(
+                updated_records, 
+                key=lambda r: r.capture_dt if r.capture_dt else datetime.min
+            )
+            
+            # JANグループを再構築
+            self.jan_groups = self.image_service.group_by_jan(self.image_records)
+            
+            # UIを更新
+            self.update_tree_widget()
+            
+            # JANコードでSKU候補を検索して提示
+            sku_candidates = []
+            if jan and self.product_widget:
+                sku_candidates = self._search_sku_candidates_by_jan(jan)
+            
+            # メッセージ表示
+            message = f"JANコードを保存しました。\n"
+            if updated_count > 0:
+                message += f"4分以内に撮影された{updated_count}件の画像を同じグループに追加しました。\n"
+            
+            if sku_candidates:
+                message += f"\n仕入DBから{len(sku_candidates)}件のSKU候補が見つかりました:\n"
+                for i, candidate in enumerate(sku_candidates[:5], 1):  # 最大5件表示
+                    sku = candidate.get("SKU") or candidate.get("sku") or "（SKUなし）"
+                    product_name = candidate.get("商品名") or candidate.get("product_name") or "（商品名なし）"
+                    message += f"{i}. {sku} - {product_name}\n"
+                if len(sku_candidates) > 5:
+                    message += f"... 他{len(sku_candidates) - 5}件"
+            
+            QMessageBox.information(self, "完了", message)
+            
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"保存中にエラーが発生しました:\n{str(e)}")
+    
+    def _search_sku_candidates_by_jan(self, jan: str) -> List[Dict[str, Any]]:
+        """仕入DBからJANコードでSKU候補を検索"""
+        if not self.product_widget or not jan:
+            return []
+        
+        try:
+            # purchase_all_recordsからJANコードで検索
+            candidates = []
+            purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
+            
+            for record in purchase_records:
+                record_jan = str(record.get("JAN") or record.get("jan") or "").strip()
+                if record_jan.upper() == jan.upper():
+                    candidates.append(record)
+            
+            return candidates
+        except Exception as e:
+            logger.warning(f"SKU候補検索エラー: {e}")
+            return []
 

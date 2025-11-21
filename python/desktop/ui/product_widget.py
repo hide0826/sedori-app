@@ -18,7 +18,7 @@ from PySide6.QtCore import Qt, QMimeData, QUrl
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QGroupBox, QFormLayout, QLineEdit, QDialog, QDialogButtonBox,
-    QMessageBox, QLabel, QTabWidget, QHeaderView
+    QMessageBox, QLabel, QTabWidget, QHeaderView, QFileDialog
 )
 from PySide6.QtGui import QDrag, QPixmap, QDesktopServices, QCursor, QCursor
 
@@ -84,6 +84,7 @@ class ProductEditDialog(QDialog):
         super().__init__(parent)
         self.product = product or {}
         self.db = ProductDatabase()
+        self.image_edits = []  # 初期化
         self.setWindowTitle("商品編集" if product else "商品追加")
         self.setup_ui()
         if product:
@@ -133,11 +134,73 @@ class ProductEditDialog(QDialog):
         form_layout.addRow("保証満了日:", self.warranty_until_edit)
 
         layout.addWidget(form_group)
+        
+        # 画像グループ（画像1〜6）
+        image_group = QGroupBox("画像")
+        image_layout = QVBoxLayout(image_group)
+        
+        self.image_edits = []
+        for i in range(1, 7):
+            row_layout = QHBoxLayout()
+            label = QLabel(f"画像{i}:")
+            image_edit = QLineEdit()
+            image_edit.setPlaceholderText("画像ファイルパスを選択してください")
+            select_btn = QPushButton("選択")
+            select_btn.clicked.connect(lambda checked, idx=i: self.select_image(idx))
+            clear_btn = QPushButton("クリア")
+            clear_btn.clicked.connect(lambda checked, idx=i: self.clear_image(idx))
+            preview_btn = QPushButton("プレビュー")
+            preview_btn.clicked.connect(lambda checked, idx=i: self.preview_image(idx))
+            
+            row_layout.addWidget(label)
+            row_layout.addWidget(image_edit, stretch=1)
+            row_layout.addWidget(select_btn)
+            row_layout.addWidget(clear_btn)
+            row_layout.addWidget(preview_btn)
+            image_layout.addLayout(row_layout)
+            
+            self.image_edits.append(image_edit)
+        
+        layout.addWidget(image_group)
 
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
+    
+    def select_image(self, index: int):
+        """画像ファイルを選択"""
+        current_path = self.image_edits[index - 1].text().strip()
+        initial_dir = str(Path(current_path).parent) if current_path and Path(current_path).parent.exists() else ""
+        
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            f"画像{index}を選択",
+            initial_dir,
+            "画像ファイル (*.jpg *.jpeg *.png *.gif *.bmp);;すべてのファイル (*)"
+        )
+        
+        if file_path:
+            self.image_edits[index - 1].setText(file_path)
+    
+    def clear_image(self, index: int):
+        """画像をクリア"""
+        self.image_edits[index - 1].clear()
+    
+    def preview_image(self, index: int):
+        """画像をプレビュー"""
+        image_path = self.image_edits[index - 1].text().strip()
+        if not image_path:
+            QMessageBox.information(self, "情報", f"画像{index}が設定されていません。")
+            return
+        
+        file_path = Path(image_path)
+        if not file_path.exists():
+            QMessageBox.warning(self, "エラー", f"画像ファイルが見つかりません:\n{image_path}")
+            return
+        
+        # 画像ファイルを開く
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(file_path)))
 
     def load_data(self):
         self.sku_edit.setText(self.product.get("sku") or "")
@@ -152,6 +215,12 @@ class ProductEditDialog(QDialog):
         self.store_name_edit.setText(self.product.get("store_name") or "")
         self.warranty_days_edit.setText(str(self.product.get("warranty_period_days") or ""))
         self.warranty_until_edit.setText(self.product.get("warranty_until") or "")
+        
+        # 画像1〜6を読み込み
+        for i in range(1, 7):
+            image_key = f"image_{i}"
+            image_path = self.product.get(image_key) or ""
+            self.image_edits[i - 1].setText(image_path)
 
     def get_data(self) -> dict:
         sku = self.sku_edit.text().strip()
@@ -168,7 +237,7 @@ class ProductEditDialog(QDialog):
             except ValueError:
                 return None
 
-        return {
+        result = {
             "sku": sku,
             "jan": self.jan_edit.text().strip() or None,
             "asin": self.asin_edit.text().strip() or None,
@@ -181,6 +250,14 @@ class ProductEditDialog(QDialog):
             "warranty_period_days": _to_int(self.warranty_days_edit.text()),
             "warranty_until": self.warranty_until_edit.text().strip() or None,
         }
+        
+        # 画像1〜6を追加
+        for i in range(1, 7):
+            image_key = f"image_{i}"
+            image_path = self.image_edits[i - 1].text().strip() or None
+            result[image_key] = image_path
+        
+        return result
 
 
 class ProductWidget(QWidget):
@@ -214,11 +291,17 @@ class ProductWidget(QWidget):
                 for extra in ["保証期間", "レシートID", "保証書ID"]:
                     if extra not in base:
                         base.append(extra)
+                # 画像1〜6を追加（既に存在しない場合のみ）
+                for i in range(1, 7):
+                    image_col = f"画像{i}"
+                    if image_col not in base:
+                        base.append(image_col)
                 return base
         return [
             "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
             "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "コメント",
-            "発送方法", "仕入先", "コンディション説明", "保証期間", "レシートID", "保証書ID"
+            "発送方法", "仕入先", "コンディション説明", "保証期間", "レシートID", "保証書ID",
+            "画像1", "画像2", "画像3", "画像4", "画像5", "画像6"
         ]
 
     def setup_ui(self):
@@ -275,16 +358,19 @@ class ProductWidget(QWidget):
         layout.addLayout(controls_layout)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(11)
+        self.table.setColumnCount(17)  # 11 + 6 (画像1〜6)
         self.table.setHorizontalHeaderLabels([
             "SKU", "商品名", "JAN", "ASIN", "仕入日", "仕入価格",
-            "数量", "店舗コード", "店舗名", "保証期間(日)", "保証満了日"
+            "数量", "店舗コード", "店舗名", "保証期間(日)", "保証満了日",
+            "画像1", "画像2", "画像3", "画像4", "画像5", "画像6"
         ])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.verticalHeader().setVisible(False)
+        # セルクリックイベントを接続（画像列のクリック処理用）
+        self.table.cellClicked.connect(self.on_product_table_cell_clicked)
         layout.addWidget(self.table)
 
     # --- 仕入DBタブ ---
@@ -407,6 +493,45 @@ class ProductWidget(QWidget):
             _set(8, product.get("store_name"))
             _set(9, product.get("warranty_period_days"))
             _set(10, product.get("warranty_until"))
+            
+            # 画像1〜6の表示（ファイル名のみ表示）
+            for i in range(1, 7):
+                image_key = f"image_{i}"
+                image_path = product.get(image_key) or ""
+                if image_path:
+                    # ファイル名のみ表示
+                    image_name = Path(image_path).name
+                    item = QTableWidgetItem(image_name)
+                    item.setData(Qt.UserRole, image_path)  # フルパスをUserRoleに保存
+                    item.setToolTip(f"クリックで画像を開く\n{image_path}")
+                    item.setFlags(item.flags() | Qt.ItemIsEnabled)
+                    self.table.setItem(row, 10 + i, item)
+                else:
+                    item = QTableWidgetItem("")
+                    self.table.setItem(row, 10 + i, item)
+    
+    def on_product_table_cell_clicked(self, row: int, col: int):
+        """商品DBテーブルのセルクリックイベントハンドラ"""
+        if col < 11:
+            return  # 通常の列は処理しない
+        
+        item = self.table.item(row, col)
+        if item is None:
+            return
+        
+        # 画像列（11〜16列目）の場合
+        if 11 <= col <= 16:
+            image_path = item.data(Qt.UserRole)
+            if image_path:
+                file_path = Path(image_path)
+                if file_path.exists():
+                    # 画像ファイルを開く
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(file_path)))
+                else:
+                    QMessageBox.warning(
+                        self, "エラー",
+                        f"画像ファイルが見つかりません:\n{file_path}"
+                    )
 
     def load_purchase_data(self, records: Optional[List[Dict[str, Any]]] = None):
         """仕入DBテーブルを更新（recordsがNoneの場合は空で初期化）"""
@@ -769,6 +894,14 @@ class ProductWidget(QWidget):
                         row["保証期間"] = product.get("warranty_until")
                     if "レシートID" not in row and product.get("receipt_id") is not None:
                         row["レシートID"] = product.get("receipt_id")
+                    # 画像1〜6を追加
+                    for i in range(1, 7):
+                        image_key = f"image_{i}"
+                        image_col = f"画像{i}"
+                        if image_col not in row or not row.get(image_col):
+                            image_path = product.get(image_key)
+                            if image_path:
+                                row[image_col] = image_path
                 # 保証書情報は warranties テーブルを参照
                 try:
                     warranties = self.warranty_db.list_by_sku(sku)
@@ -809,7 +942,17 @@ class ProductWidget(QWidget):
 
         for row, record in enumerate(records):
             for col, header in enumerate(columns):
-                value = record.get(header, "")
+                # レコードから値を取得（大文字小文字を無視して検索）
+                value = record.get(header)
+                if value is None or (isinstance(value, str) and not value.strip()):
+                    # 大文字小文字を無視して検索
+                    for key in record.keys():
+                        if key.upper() == header.upper():
+                            value = record.get(key)
+                            break
+                    if value is None:
+                        value = ""
+                
                 if header == "商品名":
                     full_text = "" if value is None else str(value)
                     display_text = self._truncate_text(full_text, 50)
@@ -835,6 +978,18 @@ class ProductWidget(QWidget):
                             item.setToolTip("レシートID: " + receipt_id_str)
                         # ドラッグ可能にする
                         item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
+                elif header and header.startswith("画像") and header[2:].isdigit():
+                    # 画像1〜6列の特別処理
+                    image_path = value or ""
+                    if image_path:
+                        # ファイル名のみ表示
+                        image_name = Path(image_path).name
+                        item = QTableWidgetItem(image_name)
+                        item.setData(Qt.UserRole, image_path)  # フルパスをUserRoleに保存
+                        item.setToolTip(f"クリックで画像を開く\n{image_path}")
+                        item.setFlags(item.flags() | Qt.ItemIsEnabled)
+                    else:
+                        item = QTableWidgetItem("")
                 else:
                     item = QTableWidgetItem("" if value is None else str(value))
                 self.purchase_table.setItem(row, col, item)
@@ -846,6 +1001,23 @@ class ProductWidget(QWidget):
             return
         
         header = self.purchase_columns[col] if col < len(self.purchase_columns) else ""
+        
+        # 画像1〜6の列をクリックした場合
+        if header and header.startswith("画像") and header[2:].isdigit():
+            image_path = item.data(Qt.UserRole)
+            if image_path:
+                file_path = Path(image_path)
+                if file_path.exists():
+                    # 画像ファイルを開く
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(file_path)))
+                else:
+                    QMessageBox.warning(
+                        self, "エラー",
+                        f"画像ファイルが見つかりません:\n{file_path}"
+                    )
+            return
+        
+        # レシートID列をクリックした場合
         if header == "レシートID":
             receipt_id = item.text().strip()
             if not receipt_id:

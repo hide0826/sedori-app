@@ -88,6 +88,12 @@ class ProductDatabase:
             ("warranty_product_name", "TEXT"),
             ("warranty_image_path", "TEXT"),
             ("receipt_id", "INTEGER"),
+            ("image_1", "TEXT"),
+            ("image_2", "TEXT"),
+            ("image_3", "TEXT"),
+            ("image_4", "TEXT"),
+            ("image_5", "TEXT"),
+            ("image_6", "TEXT"),
         ):
             _ensure_column("products", name, ctype)
 

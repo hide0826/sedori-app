@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import List, Dict, Any, Optional, NamedTuple
 from datetime import datetime
-from PIL import Image, ExifTags
+from PIL import Image, ExifTags, ImageEnhance
 import logging
 
 # バーコード読み取りライブラリ（オプション）
@@ -106,12 +107,56 @@ class ImageService:
         
         return None
     
-    def read_barcode_from_image(self, image_path: str) -> Optional[str]:
+    def _preprocess_image_for_barcode(self, image_path: str, max_size: int = 1200) -> Optional[str]:
+        """
+        バーコード読み取り用に画像を前処理（リサイズ・グレースケール化・中央クロップ）
+        
+        Args:
+            image_path: 元の画像ファイルのパス
+            max_size: リサイズ後の最大幅/高さ（デフォルト: 1200px）
+        
+        Returns:
+            前処理済み画像の一時ファイルパス、エラー時はNone
+        """
+        try:
+            with Image.open(image_path) as img:
+                # 画像のオリジナルサイズ
+                orig_width, orig_height = img.size
+                
+                # リサイズ（大きな画像のみ縮小）
+                if orig_width > max_size or orig_height > max_size:
+                    if orig_width > orig_height:
+                        new_width = max_size
+                        new_height = int(orig_height * (max_size / orig_width))
+                    else:
+                        new_height = max_size
+                        new_width = int(orig_width * (max_size / orig_height))
+                    img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                
+                # グレースケール化（カラー情報を減らして処理を軽くする）
+                if img.mode != 'L':
+                    img = img.convert('L')
+                
+                # コントラストを少し上げる（バーコードの読み取り精度向上）
+                enhancer = ImageEnhance.Contrast(img)
+                img = enhancer.enhance(1.2)
+                
+                # 一時ファイルに保存
+                temp_fd, temp_path = tempfile.mkstemp(suffix='.jpg')
+                os.close(temp_fd)  # ファイルディスクリプタを閉じる（PILが開くため）
+                img.save(temp_path, 'JPEG', quality=85)
+                return temp_path
+        except Exception as e:
+            logger.warning(f"Image preprocessing failed for {image_path}: {e}")
+            return None
+    
+    def read_barcode_from_image(self, image_path: str, use_preprocessing: bool = True) -> Optional[str]:
         """
         画像からバーコード（JANコード）を読み取る
         
         Args:
             image_path: 画像ファイルのパス
+            use_preprocessing: Trueの場合、画像を前処理してから読み取る（高速化）
         
         Returns:
             読み取ったJANコード（8桁または13桁）、見つからない場合はNone
@@ -121,80 +166,125 @@ class ImageService:
             - pyzxing: Java JREが必要
             - pyzbar: zbarライブラリが必要（Windowsでは依存関係の問題がある場合あり）
         """
-        # まずpyzxingを試す（ZXingベース、より確実）
-        _try_import_pyzxing()
-        if PYZXING_AVAILABLE:
-            try:
-                reader = BarCodeReader()
-                results = reader.decode(image_path)
-                
-                if results:
-                    for result in results:
-                        barcode_data = result.get('raw', '')
-                        barcode_format = result.get('format', '')
-                        
-                        # 数字のみを抽出（8桁または13桁）
-                        digits = ''.join(c for c in barcode_data if c.isdigit())
-                        if len(digits) in [8, 13]:
-                            logger.info(f"Found barcode (ZXing): {digits} (type: {barcode_format}) from {image_path}")
-                            return digits
-                        
-                        # バーコードデータがそのままJANコードの可能性
-                        if len(barcode_data) in [8, 13] and barcode_data.isdigit():
-                            logger.info(f"Found barcode (ZXing): {barcode_data} (type: {barcode_format}) from {image_path}")
-                            return barcode_data
-                
-                logger.debug(f"No valid JAN barcode found in {image_path} (ZXing)")
-            except Exception as e:
-                logger.warning(f"ZXing barcode reading failed for {image_path}: {e}")
+        # 前処理済み画像の一時ファイル（使用後は削除）
+        temp_image_path = None
         
-        # pyzbarをフォールバックとして試す
-        _try_import_pyzbar()
-        if PYZBAR_AVAILABLE:
-            try:
-                # 画像を開く
-                with Image.open(image_path) as img:
-                    # RGBモードに変換（必要に応じて）
-                    if img.mode != 'RGB':
-                        img = img.convert('RGB')
+        try:
+            # 画像の前処理（高速化のためリサイズ・グレースケール化）
+            if use_preprocessing:
+                temp_image_path = self._preprocess_image_for_barcode(image_path)
+                if temp_image_path:
+                    image_to_decode = temp_image_path
+                else:
+                    image_to_decode = image_path  # 前処理失敗時は元の画像を使用
+            else:
+                image_to_decode = image_path
+            
+            # まずpyzxingを試す（ZXingベース、より確実）
+            _try_import_pyzxing()
+            if PYZXING_AVAILABLE:
+                try:
+                    reader = BarCodeReader()
+                    results = reader.decode(image_to_decode)
                     
-                    # バーコードを読み取る
-                    barcodes = pyzbar.decode(img)
-                    
-                    if not barcodes:
-                        return None
-                    
-                    # 最初のバーコードを返す
-                    # EAN-13, EAN-8, UPC-A, UPC-Eなどを検出
-                    for barcode in barcodes:
-                        barcode_data = barcode.data.decode('utf-8')
-                        barcode_type = barcode.type
-                        
-                        # JANコード（EAN-13, EAN-8, UPC-A, UPC-E）の場合
-                        if barcode_type in ['EAN13', 'EAN8', 'UPCA', 'UPCE']:
+                    if results:
+                        for result in results:
+                            # pyzxingのrawフィールドは整数または文字列の可能性があるため、文字列に変換
+                            raw_value = result.get('raw', '')
+                            barcode_data = str(raw_value) if raw_value is not None else ''
+                            barcode_format = result.get('format', '')
+                            
                             # 数字のみを抽出（8桁または13桁）
                             digits = ''.join(c for c in barcode_data if c.isdigit())
                             if len(digits) in [8, 13]:
-                                logger.info(f"Found barcode (ZBar): {digits} (type: {barcode_type}) from {image_path}")
+                                logger.info(f"Found barcode (ZXing): {digits} (type: {barcode_format}) from {image_path}")
                                 return digits
-                        
-                        # その他のバーコードでも数字が8桁または13桁ならJANコードとして扱う
-                        digits = ''.join(c for c in barcode_data if c.isdigit())
-                        if len(digits) in [8, 13]:
-                            logger.info(f"Found barcode (as JAN, ZBar): {digits} (type: {barcode_type}) from {image_path}")
-                            return digits
+                            
+                            # バーコードデータがそのままJANコードの可能性
+                            if len(barcode_data) in [8, 13] and barcode_data.isdigit():
+                                logger.info(f"Found barcode (ZXing): {barcode_data} (type: {barcode_format}) from {image_path}")
+                                return barcode_data
                     
-                    # マッチするバーコードが見つからなかった
-                    logger.debug(f"No valid JAN barcode found in {image_path} (ZBar)")
-                    return None
-            except Exception as e:
-                logger.warning(f"Failed to read barcode with pyzbar from {image_path}: {e}")
+                    logger.debug(f"No valid JAN barcode found in {image_path} (ZXing)")
+                except Exception as e:
+                    logger.warning(f"ZXing barcode reading failed for {image_path}: {e}")
+                
+                # ZXingで見つからなかった場合、前処理なしで再試行
+                if temp_image_path:
+                    try:
+                        reader = BarCodeReader()
+                        results = reader.decode(image_path)  # 元の画像で再試行
+                        if results:
+                            for result in results:
+                                raw_value = result.get('raw', '')
+                                barcode_data = str(raw_value) if raw_value is not None else ''
+                                barcode_format = result.get('format', '')
+                                digits = ''.join(c for c in barcode_data if c.isdigit())
+                                if len(digits) in [8, 13]:
+                                    logger.info(f"Found barcode (ZXing, original): {digits} (type: {barcode_format}) from {image_path}")
+                                    return digits
+                                if len(barcode_data) in [8, 13] and barcode_data.isdigit():
+                                    logger.info(f"Found barcode (ZXing, original): {barcode_data} (type: {barcode_format}) from {image_path}")
+                                    return barcode_data
+                    except Exception:
+                        pass  # 再試行失敗は無視
+            
+            # pyzbarをフォールバックとして試す
+            _try_import_pyzbar()
+            if PYZBAR_AVAILABLE:
+                try:
+                    # 前処理済み画像があれば使用、なければ元の画像を使用
+                    image_to_open = temp_image_path if temp_image_path and os.path.exists(temp_image_path) else image_path
+                    
+                    # 画像を開く
+                    with Image.open(image_to_open) as img:
+                        # グレースケール化（pyzbarはグレースケールで精度が高い）
+                        if img.mode != 'L':
+                            img = img.convert('L')
+                        
+                        # バーコードを読み取る
+                        barcodes = pyzbar.decode(img)
+                        
+                        if not barcodes:
+                            pass  # 次の処理へ
+                        else:
+                            # 最初のバーコードを返す
+                            # EAN-13, EAN-8, UPC-A, UPC-Eなどを検出
+                            for barcode in barcodes:
+                                barcode_data = barcode.data.decode('utf-8')
+                                barcode_type = barcode.type
+                                
+                                # JANコード（EAN-13, EAN-8, UPC-A, UPC-E）の場合
+                                if barcode_type in ['EAN13', 'EAN8', 'UPCA', 'UPCE']:
+                                    # 数字のみを抽出（8桁または13桁）
+                                    digits = ''.join(c for c in barcode_data if c.isdigit())
+                                    if len(digits) in [8, 13]:
+                                        logger.info(f"Found barcode (ZBar): {digits} (type: {barcode_type}) from {image_path}")
+                                        return digits
+                                
+                                # その他のバーコードでも数字が8桁または13桁ならJANコードとして扱う
+                                digits = ''.join(c for c in barcode_data if c.isdigit())
+                                if len(digits) in [8, 13]:
+                                    logger.info(f"Found barcode (as JAN, ZBar): {digits} (type: {barcode_type}) from {image_path}")
+                                    return digits
+                            
+                            logger.debug(f"No valid JAN barcode found in {image_path} (ZBar)")
+                except Exception as e:
+                    logger.warning(f"Failed to read barcode with pyzbar from {image_path}: {e}")
+            
+            # どちらも利用できない場合
+            if not PYZXING_AVAILABLE and not PYZBAR_AVAILABLE:
+                logger.warning("Neither pyzxing nor pyzbar is available. Install one of them to read barcodes from images.")
+            
+            return None
         
-        # どちらも利用できない場合
-        if not PYZXING_AVAILABLE and not PYZBAR_AVAILABLE:
-            logger.warning("Neither pyzxing nor pyzbar is available. Install one of them to read barcodes from images.")
-        
-        return None
+        finally:
+            # 一時ファイルを削除
+            if temp_image_path and os.path.exists(temp_image_path):
+                try:
+                    os.unlink(temp_image_path)
+                except Exception as e:
+                    logger.debug(f"Failed to delete temp image file {temp_image_path}: {e}")
     
     def get_exif_datetime(self, image_path: str) -> Optional[datetime]:
         """
@@ -229,12 +319,16 @@ class ImageService:
         
         return None
     
-    def scan_directory(self, directory_path: str) -> List[ImageRecord]:
+    def scan_directory(self, directory_path: str, skip_barcode_reading: bool = True, 
+                       skip_exif: bool = True, skip_image_size: bool = True) -> List[ImageRecord]:
         """
         ディレクトリをスキャンして画像ファイルを取得
         
         Args:
             directory_path: スキャン対象のディレクトリパス
+            skip_barcode_reading: Trueの場合、バーコード読み取りをスキップ（ファイル名のみチェック）
+            skip_exif: Trueの場合、EXIF読み取りをスキップ（ファイル更新日時を使用、高速化）
+            skip_image_size: Trueの場合、画像サイズ取得をスキップ（0,0で登録、高速化）
         
         Returns:
             画像レコードのリスト（撮影日時順）
@@ -246,51 +340,60 @@ class ImageService:
             logger.warning(f"Directory does not exist or is not a directory: {directory_path}")
             return records
         
-        # 画像ファイルを再帰的に取得
+        # 画像ファイルを再帰的に取得（高速化のため先に全ファイルリストを作成）
+        image_paths = []
         for ext in self.SUPPORTED_EXTENSIONS:
-            for img_path in directory.rglob(f"*{ext}"):
-                try:
-                    # EXIFから撮影日時を取得
+            image_paths.extend(directory.rglob(f"*{ext}"))
+        
+        # 各画像を処理
+        for img_path in image_paths:
+            try:
+                # EXIFから撮影日時を取得（スキップ可能）
+                capture_dt = None
+                if not skip_exif:
                     capture_dt = self.get_exif_datetime(str(img_path))
-                    
-                    # JANコードを抽出（優先順位: 画像内のバーコード > ファイル名）
-                    jan_candidate = None
-                    
-                    # まず画像内のバーコードを読み取る（pyzxing優先、pyzbarはフォールバック）
+                
+                # JANコードを抽出（優先順位: 画像内のバーコード > ファイル名）
+                jan_candidate = None
+                
+                # ファイル名からまず抽出（高速）
+                jan_candidate = self.extract_jan_from_text(img_path.name)
+                
+                # バーコード読み取りが有効な場合のみ画像内のバーコードを読み取る（低速）
+                if not jan_candidate and not skip_barcode_reading:
                     _try_import_pyzxing()
                     _try_import_pyzbar()
                     if PYZXING_AVAILABLE or PYZBAR_AVAILABLE:
                         jan_candidate = self.read_barcode_from_image(str(img_path))
-                    
-                    # バーコードが見つからない場合はファイル名から抽出
-                    if not jan_candidate:
-                        jan_candidate = self.extract_jan_from_text(img_path.name)
-                    
-                    # 画像サイズを取得
+                
+                # 画像サイズを取得（スキップ可能）
+                width, height = 0, 0
+                if not skip_image_size:
                     try:
                         with Image.open(img_path) as img:
                             width, height = img.size
                     except Exception:
                         width, height = 0, 0
-                    
-                    # 撮影日時が取得できない場合はファイル更新日時を使用
-                    if capture_dt is None:
-                        try:
-                            mtime = os.path.getmtime(img_path)
-                            capture_dt = datetime.fromtimestamp(mtime)
-                        except Exception:
-                            capture_dt = None
-                    
-                    records.append(ImageRecord(
-                        path=str(img_path),
-                        capture_dt=capture_dt,
-                        jan_candidate=jan_candidate,
-                        width=width,
-                        height=height
-                    ))
-                except Exception as e:
-                    logger.warning(f"Failed to process image {img_path}: {e}")
-                    continue
+                
+                # 撮影日時が取得できない場合はファイル更新日時を使用（高速）
+                if capture_dt is None:
+                    try:
+                        mtime = os.path.getmtime(img_path)
+                        capture_dt = datetime.fromtimestamp(mtime)
+                    except Exception:
+                        capture_dt = None
+                
+                # 全画像を追加（JANコードなしも含む）
+                records.append(ImageRecord(
+                    path=str(img_path),
+                    capture_dt=capture_dt,
+                    jan_candidate=jan_candidate,
+                    width=width,
+                    height=height
+                ))
+            except Exception as e:
+                logger.warning(f"Failed to process image {img_path}: {e}")
+                continue
         
         # 撮影日時順にソート
         records.sort(key=lambda r: r.capture_dt if r.capture_dt else datetime.min)

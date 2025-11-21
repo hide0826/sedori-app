@@ -197,7 +197,9 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(self.barcode_checker_widget, "バーコードチェッカー")
         
         # 画像管理タブ
-        self.image_manager_widget = ImageManagerWidget(api_client=self.api_client)
+        self.image_manager_widget = ImageManagerWidget(self.api_client)
+        # ImageManagerWidgetにProductWidgetへの参照を設定
+        self.image_manager_widget.set_product_widget(self.product_widget)
         self.tab_widget.addTab(self.image_manager_widget, "画像管理")
         
         # 設定タブ
