@@ -11,19 +11,21 @@ import sys
 import os
 import json
 import re
+import concurrent.futures
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import logging
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QMimeData
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QTreeWidget, QTreeWidgetItem, QListWidget,
     QListWidgetItem, QSplitter, QGroupBox, QFormLayout,
-    QFileDialog, QMessageBox, QSizePolicy, QTextEdit, QProgressDialog
+    QFileDialog, QMessageBox, QSizePolicy, QTextEdit, QProgressDialog,
+    QInputDialog, QMenu, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox
 )
-from PySide6.QtGui import QPixmap, QFont
+from PySide6.QtGui import QPixmap, QFont, QDrag, QDropEvent, QImageReader, QImage
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -31,46 +33,267 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 # デスクトップ側servicesを優先して読み込む
 try:
     from services.image_service import ImageService, ImageRecord, JanGroup  # python/desktop/services
+    from services.ocr_service import OCRService
 except Exception:
     # 明示的パス指定のフォールバック
     from desktop.services.image_service import ImageService, ImageRecord, JanGroup
+    from desktop.services.ocr_service import OCRService
 
 from database.image_db import ImageDatabase
 
 logger = logging.getLogger(__name__)
 
 
+class ScanCancelledError(Exception):
+    """スキャン処理がユーザーによりキャンセルされたことを示す例外"""
+
+
+class CandidateSelectionDialog(QDialog):
+    """OCR候補選択ダイアログ"""
+    
+    def __init__(self, candidates_map, parent=None):
+        """
+        Args:
+            candidates_map: {image_path: [{"jan": str, "title": str, "score": float}, ...]}
+        """
+        super().__init__(parent)
+        self.candidates_map = candidates_map
+        self.selected_results = {}  # {image_path: jan}
+        self.setup_ui()
+        
+    def setup_ui(self):
+        self.setWindowTitle("JAN不明画像のOCR検索結果")
+        self.resize(800, 600)
+        
+        layout = QVBoxLayout(self)
+        
+        info_label = QLabel("以下の画像に対してOCR検索により候補が見つかりました。\n割り当てるJANコードを選択してください。")
+        layout.addWidget(info_label)
+        
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["画像", "OCRテキスト", "候補商品", "選択"])
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        
+        layout.addWidget(self.table)
+        
+        self.populate_table()
+        
+        btn_layout = QHBoxLayout()
+        apply_btn = QPushButton("選択した項目を適用")
+        apply_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("キャンセル")
+        cancel_btn.clicked.connect(self.reject)
+        
+        btn_layout.addStretch()
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addWidget(apply_btn)
+        
+        layout.addLayout(btn_layout)
+        
+    def populate_table(self):
+        self.table.setRowCount(0)
+        row = 0
+        
+        for image_path, data in self.candidates_map.items():
+            ocr_text = data.get("ocr_text", "")
+            candidates = data.get("candidates", [])
+            
+            if not candidates:
+                continue
+                
+            # 画像ごとに候補の数だけ行を追加するか、コンボボックスにするか
+            # ここではコンボボックスを使う
+            
+            self.table.insertRow(row)
+            
+            # 画像名
+            file_name = Path(image_path).name
+            self.table.setItem(row, 0, QTableWidgetItem(file_name))
+            self.table.item(row, 0).setToolTip(image_path)
+            
+            # OCRテキスト（先頭部分のみ表示）
+            short_text = ocr_text[:20] + "..." if len(ocr_text) > 20 else ocr_text
+            self.table.setItem(row, 1, QTableWidgetItem(short_text))
+            self.table.item(row, 1).setToolTip(ocr_text)
+            
+            # 候補商品コンボボックス
+            from PySide6.QtWidgets import QComboBox
+            combo = QComboBox()
+            combo.addItem("（選択しない）", None)
+            
+            # スコア順などでソートされている前提
+            for cand in candidates:
+                jan = cand["jan"]
+                title = cand["title"]
+                score = cand["score"]
+                label = f"[{score}pt] {title} ({jan})"
+                combo.addItem(label, jan)
+            
+            # デフォルトでトップ候補を選択
+            if candidates:
+                combo.setCurrentIndex(1)
+                
+            self.table.setCellWidget(row, 2, combo)
+            
+            # 適用チェックボックス
+            chk = QCheckBox()
+            chk.setChecked(True)
+            self.table.setCellWidget(row, 3, chk)
+            
+            # データ保存用に行番号とパスを紐付け（行番号は変わる可能性があるので注意だが、今回は再構築しない）
+            self.table.item(row, 0).setData(Qt.UserRole, image_path)
+            
+            row += 1
+            
+    def accept(self):
+        # 選択結果を収集
+        self.selected_results = {}
+        for row in range(self.table.rowCount()):
+            # チェックボックス
+            chk = self.table.cellWidget(row, 3)
+            if not chk.isChecked():
+                continue
+                
+            # コンボボックス
+            combo = self.table.cellWidget(row, 2)
+            jan = combo.currentData()
+            if not jan:
+                continue
+                
+            # 画像パス
+            image_path = self.table.item(row, 0).data(Qt.UserRole)
+            self.selected_results[image_path] = jan
+            
+        super().accept()
+
+
+class JanGroupTreeWidget(QTreeWidget):
+    """JANグループツリーウィジェット（ドロップ対応）"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_widget = parent  # ImageManagerWidgetへの参照
+    
+    def dragEnterEvent(self, event):
+        """ドラッグエンターイベント"""
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+    
+    def dragMoveEvent(self, event):
+        """ドラッグムーブイベント"""
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+    
+    def dropEvent(self, event):
+        """ドロップイベント"""
+        if event.mimeData().hasText():
+            image_path = event.mimeData().text()
+            # ドロップされた位置のアイテムを取得
+            item = self.itemAt(event.pos())
+            if item and self.parent_widget:
+                # 親ウィジェットのメソッドを呼び出し
+                self.parent_widget.add_image_to_group(image_path, item)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+
+class ImageListWidget(QListWidget):
+    """画像リストウィジェット（ドラッグ対応）"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_widget = parent  # ImageManagerWidgetへの参照
+    
+    def startDrag(self, supportedActions):
+        """ドラッグ開始時の処理"""
+        items = self.selectedItems()
+        if not items:
+            return
+        
+        # 最初に選択されたアイテムの画像パスを取得
+        item = items[0]
+        image_path = item.data(Qt.UserRole)
+        if not image_path:
+            return
+        
+        # MIMEデータを作成
+        mime_data = QMimeData()
+        mime_data.setText(image_path)
+        
+        # ドラッグを開始
+        drag = QDrag(self)
+        drag.setMimeData(mime_data)
+        drag.exec_(supportedActions)
+
+
 class ImageLoadThread(QThread):
-    """画像読み込みスレッド（大量画像対応）"""
+    """画像読み込みスレッド（大量画像対応・並列化）"""
     progress = Signal(int, int)  # 現在の進捗、総数
     finished = Signal(list)  # 読み込み完了
     
-    def __init__(self, image_paths: List[str], max_size: int = 256):
+    def __init__(self, image_paths: List[str], max_size: int = 192):
         super().__init__()
         self.image_paths = image_paths
         self.max_size = max_size
         self.results = []
     
     def run(self):
-        """画像を読み込んでサムネイルを生成"""
+        """画像を読み込んでサムネイルを生成（並列処理）"""
         total = len(self.image_paths)
-        for i, path in enumerate(self.image_paths):
-            try:
-                pixmap = QPixmap(path)
-                if not pixmap.isNull():
-                    # サイズ調整（最大256px）
-                    if pixmap.width() > self.max_size or pixmap.height() > self.max_size:
-                        pixmap = pixmap.scaled(
-                            self.max_size, self.max_size,
-                            Qt.KeepAspectRatio, Qt.SmoothTransformation
-                        )
-                    self.results.append((path, pixmap))
-            except Exception:
-                pass
-            
-            self.progress.emit(i + 1, total)
+        sorted_results = [None] * total
+        completed_count = 0
         
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            # 各タスクにインデックスを紐付ける
+            futures = {
+                executor.submit(self._load_image, path): i 
+                for i, path in enumerate(self.image_paths)
+            }
+            
+            for future in concurrent.futures.as_completed(futures):
+                index = futures[future]
+                try:
+                    img = future.result()
+                    if img and not img.isNull():
+                        sorted_results[index] = (self.image_paths[index], img)
+                except Exception:
+                    pass
+                
+                completed_count += 1
+                self.progress.emit(completed_count, total)
+        
+        # Noneを除去
+        self.results = [r for r in sorted_results if r is not None]
         self.finished.emit(self.results)
+
+    def _load_image(self, path: str) -> Optional[QImage]:
+        """QImageReaderで縮小読み込みし、QImageを返す（スレッドセーフ）"""
+        try:
+            reader = QImageReader(path)
+            # 自動回転に対応
+            reader.setAutoTransform(True)
+            
+            if self.max_size:
+                original_size = reader.size()
+                if original_size.isValid():
+                    max_dim = max(original_size.width(), original_size.height())
+                    if max_dim > self.max_size:
+                        scale = self.max_size / float(max_dim)
+                        new_width = max(1, int(original_size.width() * scale))
+                        new_height = max(1, int(original_size.height() * scale))
+                        reader.setScaledSize(QSize(new_width, new_height))
+            
+            image = reader.read()
+            return image
+        except Exception:
+            return None
 
 
 class ImageManagerWidget(QWidget):
@@ -80,6 +303,7 @@ class ImageManagerWidget(QWidget):
         super().__init__(parent)
         self.api_client = api_client
         self.image_service = ImageService()
+        self.ocr_service = OCRService()
         self.image_db = ImageDatabase()
         self.product_widget = None  # ProductWidgetへの参照
         
@@ -89,6 +313,8 @@ class ImageManagerWidget(QWidget):
         self.jan_groups: List[JanGroup] = []
         self.selected_group: Optional[JanGroup] = None
         self.selected_image_path: Optional[str] = None
+        self._scan_cancelled = False
+        self._jan_title_cache: Dict[str, str] = {}
         
         # 設定ファイルのパス
         self.config_path = Path(__file__).parent.parent.parent.parent / "config" / "inventory_settings.json"
@@ -129,11 +355,16 @@ class ImageManagerWidget(QWidget):
         self.scan_btn = QPushButton("スキャン実行")
         self.scan_btn.clicked.connect(self.scan_directory)
         self.scan_btn.setEnabled(False)
+
+        self.scan_unknown_btn = QPushButton("JAN不明検索")
+        self.scan_unknown_btn.clicked.connect(self.scan_unknown_jan_images)
+        self.scan_unknown_btn.setEnabled(False)
         
         folder_layout.addWidget(folder_label)
         folder_layout.addWidget(self.folder_path_label, stretch=1)
         folder_layout.addWidget(self.select_folder_btn)
         folder_layout.addWidget(self.scan_btn)
+        folder_layout.addWidget(self.scan_unknown_btn)
         
         layout.addWidget(folder_group)
         
@@ -143,21 +374,46 @@ class ImageManagerWidget(QWidget):
         # 左：JANグループツリー
         left_group = QGroupBox("JANグループ")
         left_layout = QVBoxLayout(left_group)
-        self.tree_widget = QTreeWidget()
+        
+        # JANグループ追加ボタン
+        add_group_btn = QPushButton("JANグループ追加")
+        add_group_btn.clicked.connect(self.add_jan_group_manually)
+        left_layout.addWidget(add_group_btn)
+        
+        self.tree_widget = JanGroupTreeWidget(self)
         self.tree_widget.setHeaderLabel("JANグループ")
         self.tree_widget.itemSelectionChanged.connect(self.on_tree_selection_changed)
+        self.tree_widget.setAcceptDrops(True)  # ドロップを受け入れる
+        self.tree_widget.setDragDropMode(QTreeWidget.DropOnly)  # ドロップのみ許可
+        self.tree_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree_widget.customContextMenuRequested.connect(self.on_tree_context_menu)
         left_layout.addWidget(self.tree_widget)
+
+        # グループ操作ボタン
+        group_action_layout = QHBoxLayout()
+        self.rename_btn = QPushButton("全画像リネーム")
+        self.rename_btn.clicked.connect(self.rename_all_images)
+        self.confirm_btn = QPushButton("確定処理")
+        self.confirm_btn.clicked.connect(self.confirm_image_links)
+        group_action_layout.addWidget(self.rename_btn)
+        group_action_layout.addWidget(self.confirm_btn)
+        left_layout.addLayout(group_action_layout)
+
         splitter.addWidget(left_group)
         
         # 中央：画像リスト
         center_group = QGroupBox("画像一覧（撮影時間順）")
         center_layout = QVBoxLayout(center_group)
-        self.image_list = QListWidget()
+        self.image_list = ImageListWidget(self)
         self.image_list.setViewMode(QListWidget.IconMode)
         self.image_list.setResizeMode(QListWidget.Adjust)
-        self.image_list.setIconSize(QSize(256, 256))
+        self.image_list.setIconSize(QSize(192, 192))
         self.image_list.setSpacing(10)
         self.image_list.itemClicked.connect(self.on_image_clicked)
+        self.image_list.setDragDropMode(QListWidget.DragOnly)  # ドラッグのみ許可
+        self.image_list.setDefaultDropAction(Qt.MoveAction)  # ドラッグ時の動作
+        self.image_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.image_list.customContextMenuRequested.connect(self.on_image_list_context_menu)
         center_layout.addWidget(self.image_list)
         splitter.addWidget(center_group)
         
@@ -227,6 +483,8 @@ class ImageManagerWidget(QWidget):
         self.rotate_right_btn.setEnabled(False)
         self.read_barcode_btn.setEnabled(False)
         self.save_jan_btn.setEnabled(False)
+        self.rename_btn.setEnabled(False)
+        self.confirm_btn.setEnabled(False)
         
         # バーコードリーダーの利用可能性を確認
         if not self.image_service.is_barcode_reader_available():
@@ -250,6 +508,7 @@ class ImageManagerWidget(QWidget):
                             self.current_directory = last_dir
                             self.folder_path_label.setText(last_dir)
                             self.scan_btn.setEnabled(True)
+                            self.scan_unknown_btn.setEnabled(True)
         except Exception as e:
             print(f"Failed to load last directory: {e}")
     
@@ -281,6 +540,7 @@ class ImageManagerWidget(QWidget):
             self.current_directory = directory
             self.folder_path_label.setText(directory)
             self.scan_btn.setEnabled(True)
+            self.scan_unknown_btn.setEnabled(True)
             self.save_last_directory()
     
     def scan_directory(self):
@@ -289,23 +549,133 @@ class ImageManagerWidget(QWidget):
             QMessageBox.warning(self, "エラー", "フォルダを選択してください。")
             return
         
+        self._scan_cancelled = False
+        
         try:
-            # プログレスダイアログを表示
-            self.progress_dialog = QProgressDialog("画像をスキャン中...", "キャンセル", 0, 0, self)
+            # プログレスダイアログを表示（％表示対応）
+            self.progress_dialog = QProgressDialog("画像をスキャン中...", "キャンセル", 0, 1, self)
             self.progress_dialog.setWindowModality(Qt.WindowModal)
+            self.progress_dialog.setAutoClose(False)
+            self.progress_dialog.setAutoReset(False)
+            self.progress_dialog.setValue(0)
             self.progress_dialog.show()
             
+            def handle_cancel():
+                self._scan_cancelled = True
+            
+            self.progress_dialog.canceled.connect(handle_cancel)
+            
+            def progress_callback(current: int, total: int):
+                if self._scan_cancelled:
+                    raise ScanCancelledError()
+                
+                if not self.progress_dialog:
+                    return
+                
+                if total <= 0:
+                    self.progress_dialog.setMaximum(1)
+                    self.progress_dialog.setValue(1)
+                    self.progress_dialog.setLabelText("画像をスキャン中... 対象画像が見つかりません")
+                else:
+                    if self.progress_dialog.maximum() != total:
+                        self.progress_dialog.setMaximum(total)
+                    self.progress_dialog.setValue(current)
+                    percent = (current / total) * 100 if total else 0
+                    self.progress_dialog.setLabelText(
+                        f"画像をスキャン中... {current}/{total}枚（{percent:.1f}%）"
+                    )
+                QApplication.processEvents()
+            
             # スキャン実行（高速化のためEXIF・画像サイズ・バーコード読み取りをスキップ）
+            # DBキャッシュを構築（スマートスキャン）
+            db_records = self.image_db.list_all()
+            file_cache = {}
+            for r in db_records:
+                path = r['file_path']
+                # mtimeはDBにないので含めない（無条件ヒットさせる）
+                # ただしファイルが存在しない場合はキャッシュに含めない方が安全だが、
+                # Service側でファイル存在チェックをしているのでここでは単純に構築する
+                rec = ImageRecord(
+                    path=path,
+                    capture_dt=datetime.fromisoformat(r['capture_time']) if r['capture_time'] else None,
+                    jan_candidate=r['jan'],
+                    width=0,  # DBにないので0（表示時にロードされる）
+                    height=0
+                )
+                file_cache[path] = {"record": rec}
+
             self.image_records = self.image_service.scan_directory(
                 self.current_directory, 
-                skip_barcode_reading=True,
-                skip_exif=True,  # EXIF読み取りをスキップ（ファイル更新日時を使用）
-                skip_image_size=True  # 画像サイズ取得をスキップ（後で必要に応じて取得）
+                skip_barcode_reading=False,  # JANを自動判別
+                skip_exif=False,             # EXIF撮影日時を取得
+                skip_image_size=False,       # 画像サイズも取得
+                progress_callback=progress_callback,
+                file_cache=file_cache        # キャッシュを渡す
             )
+            self._jan_title_cache = {}
+            
+            # DBに保存済みのJANがある場合は反映（過去の割当てを復元）
+            enriched_records: List[ImageRecord] = []
+            for record in self.image_records:
+                db_record = self.image_db.get_by_file_path(record.path)
+                jan_from_db = db_record.get("jan") if db_record else None
+                if jan_from_db:
+                    enriched_records.append(ImageRecord(
+                        path=record.path,
+                        capture_dt=record.capture_dt,
+                        jan_candidate=jan_from_db,
+                        width=record.width,
+                        height=record.height
+                    ))
+                else:
+                    enriched_records.append(record)
+            self.image_records = enriched_records
+
+            # タイムスタンプに基づく自動紐付け（JAN画像から3分以内の画像を自動追加）
+            time_window = 3 * 60  # 3分
+            current_jan = None
+            current_jan_time = None
+            
+            auto_linked_records: List[ImageRecord] = []
+            
+            for record in self.image_records:
+                # JANコードを持っている画像（数字のみ）
+                if record.jan_candidate and record.jan_candidate.isdigit():
+                    current_jan = record.jan_candidate
+                    current_jan_time = record.capture_dt
+                    auto_linked_records.append(record)
+                
+                # JANコードがない画像
+                elif current_jan and current_jan_time and record.capture_dt:
+                    time_diff = (record.capture_dt - current_jan_time).total_seconds()
+                    # 0 < diff <= 3分
+                    if 0 < time_diff <= time_window:
+                        # 自動紐付け
+                        new_record = ImageRecord(
+                            path=record.path,
+                            capture_dt=record.capture_dt,
+                            jan_candidate=current_jan,
+                            width=record.width,
+                            height=record.height
+                        )
+                        auto_linked_records.append(new_record)
+                    else:
+                        # 時間外なら紐付けない
+                        auto_linked_records.append(record)
+                        # 時間外になったらカレントJANの効果を切るべきか？
+                        # 要望は「JAN画像の後3分以内」なので、3分経過したら紐付け終了で良いはず。
+                        if time_diff > time_window:
+                            current_jan = None
+                            current_jan_time = None
+                else:
+                    auto_linked_records.append(record)
+            
+            self.image_records = auto_linked_records
+            
+            self._close_progress_dialog()
             
             if not self.image_records:
                 QMessageBox.information(self, "結果", "画像ファイルが見つかりませんでした。")
-                self.progress_dialog.close()
                 return
             
             # JANでグルーピング（JANコードなしも含む）
@@ -324,7 +694,6 @@ class ImageManagerWidget(QWidget):
             
             # UI更新
             self.update_tree_widget()
-            self.progress_dialog.close()
             
             # 全画像を一覧表示（遅延読み込み：スキャン完了後に非同期で実行）
             # 画像読み込みは重いので、まずスキャン完了を通知してから実行
@@ -336,9 +705,12 @@ class ImageManagerWidget(QWidget):
             
             # スキャン完了後、バックグラウンドで画像一覧を更新（ユーザーが待たない）
             self.update_image_list(self.image_records)
+        except ScanCancelledError:
+            QMessageBox.information(self, "キャンセル", "画像スキャンを中止しました。")
         except Exception as e:
-            self.progress_dialog.close()
             QMessageBox.critical(self, "エラー", f"スキャン中にエラーが発生しました:\n{str(e)}")
+        finally:
+            self._close_progress_dialog()
     
     def update_tree_widget(self):
         """ツリービジェットを更新"""
@@ -347,7 +719,9 @@ class ImageManagerWidget(QWidget):
         for group in self.jan_groups:
             # 親ノード（JANグループ）
             jan_text = group.jan if group.jan != "unknown" else "（JAN不明）"
-            parent_item = QTreeWidgetItem([f"{jan_text} ({len(group.images)}枚)"])
+            title = self._get_product_title_by_jan(group.jan) if group.jan != "unknown" else ""
+            title_text = f" - {title}" if title else ""
+            parent_item = QTreeWidgetItem([f"{jan_text}{title_text} ({len(group.images)}枚)"])
             parent_item.setData(0, Qt.UserRole, group)
             self.tree_widget.addTopLevelItem(parent_item)
             
@@ -360,6 +734,8 @@ class ImageManagerWidget(QWidget):
                 parent_item.addChild(child_item)
         
         self.tree_widget.expandAll()
+        has_valid_groups = any(g.jan != "unknown" for g in self.jan_groups)
+        self.rename_btn.setEnabled(has_valid_groups)
     
     def on_tree_selection_changed(self):
         """ツリー選択変更時の処理"""
@@ -370,6 +746,9 @@ class ImageManagerWidget(QWidget):
         item = selected_items[0]
         group = item.data(0, Qt.UserRole)
         
+        is_valid_group = isinstance(group, JanGroup) and group.jan != "unknown"
+        self.confirm_btn.setEnabled(is_valid_group)
+
         if isinstance(group, JanGroup):
             # JANグループが選択された（該当グループの画像のみ表示）
             self.selected_group = group
@@ -433,7 +812,7 @@ class ImageManagerWidget(QWidget):
             # プログレスダイアログなしでバックグラウンド読み込み
             self.progress_dialog = None
         
-        self.load_thread = ImageLoadThread(image_paths, max_size=256)
+        self.load_thread = ImageLoadThread(image_paths, max_size=192)
         if show_progress:
             self.load_thread.progress.connect(self.on_load_progress)
         self.load_thread.finished.connect(self.on_load_finished)
@@ -451,8 +830,9 @@ class ImageManagerWidget(QWidget):
             self.progress_dialog = None
         
         # 結果を画像一覧に追加
-        for path, pixmap in results:
+        for path, image in results:
             item = QListWidgetItem(Path(path).name)
+            pixmap = QPixmap.fromImage(image)
             item.setIcon(pixmap)
             item.setData(Qt.UserRole, path)
             item.setToolTip(path)
@@ -615,8 +995,8 @@ class ImageManagerWidget(QWidget):
                 height=selected_record.height
             )
             
-            # 4分以内に撮影された画像を検索して同じJANコードを付与
-            time_window = 4 * 60  # 4分 = 240秒
+            # JAN画像の撮影時間の後3分以内に撮影された画像を検索して同じJANコードを付与
+            time_window = 3 * 60  # 3分 = 180秒
             selected_time = selected_capture_dt
             
             updated_count = 0
@@ -627,7 +1007,7 @@ class ImageManagerWidget(QWidget):
                     updated_records.append(selected_record)
                     continue
                 
-                # 撮影日時が4分以内の画像を同じJANグループに追加
+                # 撮影日時がJAN画像の後3分以内の画像を同じJANグループに追加（前は含めない）
                 # 各画像のEXIFから撮影日時を取得（正確な撮影日時を使用）
                 record_capture_dt = self.image_service.get_exif_datetime(record.path)
                 if not record_capture_dt:
@@ -635,8 +1015,13 @@ class ImageManagerWidget(QWidget):
                     record_capture_dt = record.capture_dt
                 
                 if record_capture_dt:
-                    time_diff = abs((record_capture_dt - selected_time).total_seconds())
-                    if time_diff <= time_window:
+                    time_diff = (record_capture_dt - selected_time).total_seconds()
+                    if 0 < time_diff <= time_window:
+                        db_record = self.image_db.get_by_file_path(record.path)
+                        assigned_jan = db_record.get("jan") if db_record else None
+                        if assigned_jan:
+                            updated_records.append(record)
+                            continue
                         # この画像も同じJANコードを付与（EXIFから取得した撮影日時を使用）
                         updated_record = ImageRecord(
                             path=record.path,
@@ -662,6 +1047,7 @@ class ImageManagerWidget(QWidget):
             
             # JANグループを再構築
             self.jan_groups = self.image_service.group_by_jan(self.image_records)
+            self._jan_title_cache.pop(jan, None)
             
             # UIを更新
             self.update_tree_widget()
@@ -674,7 +1060,7 @@ class ImageManagerWidget(QWidget):
             # メッセージ表示
             message = f"JANコードを保存しました。\n"
             if updated_count > 0:
-                message += f"4分以内に撮影された{updated_count}件の画像を同じグループに追加しました。\n"
+                message += f"JAN画像の後3分以内に撮影された{updated_count}件の画像を同じグループに追加しました。\n"
             
             if sku_candidates:
                 message += f"\n仕入DBから{len(sku_candidates)}件のSKU候補が見つかりました:\n"
@@ -709,4 +1095,653 @@ class ImageManagerWidget(QWidget):
         except Exception as e:
             logger.warning(f"SKU候補検索エラー: {e}")
             return []
+    
+    def _get_product_title_by_jan(self, jan: str) -> str:
+        """JANコードに紐づく候補商品タイトルを取得"""
+        if not jan or jan == "unknown":
+            return ""
+        
+        if jan in self._jan_title_cache:
+            return self._jan_title_cache[jan]
+        
+        title = ""
+        try:
+            if self.product_widget:
+                purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
+                for record in purchase_records:
+                    record_jan = str(record.get("JAN") or record.get("jan") or "").strip()
+                    if record_jan.upper() == jan.upper():
+                        title = (
+                            record.get("商品名") or
+                            record.get("product_name") or
+                            record.get("title") or
+                            ""
+                        )
+                        if title:
+                            break
+        except Exception as e:
+            logger.warning(f"商品タイトル取得エラー: {e}")
+            title = ""
+        
+        self._jan_title_cache[jan] = title
+        return title
+    
+    def add_jan_group_manually(self):
+        """JANグループを手動で追加"""
+        jan, ok = QInputDialog.getText(
+            self, 
+            "JANグループ追加", 
+            "JANコードを入力してください（8桁または13桁）:"
+        )
+        
+        if not ok or not jan:
+            return
+        
+        jan = jan.strip()
+        
+        # JANコードの検証
+        if not re.match(r'^\d{8}$|^\d{13}$', jan):
+            QMessageBox.warning(self, "エラー", "JANコードは8桁または13桁の数字である必要があります。")
+            return
+        
+        # 新しいJANグループを作成（画像なし）
+        new_group = JanGroup(jan=jan, images=[])
+        
+        # 既存のグループに同じJANコードがあるか確認
+        existing_group = next((g for g in self.jan_groups if g.jan == jan), None)
+        if existing_group:
+            QMessageBox.information(self, "情報", f"JANコード {jan} のグループは既に存在します。")
+            return
+        
+        # グループを追加
+        self.jan_groups.append(new_group)
+        self._jan_title_cache.pop(jan, None)
+        
+        # UIを更新
+        self.update_tree_widget()
+        
+        QMessageBox.information(self, "完了", f"JANグループ {jan} を追加しました。")
+    
+    def add_image_to_group(self, image_path: str, target_item: QTreeWidgetItem):
+        """画像をJANグループに追加（ドラッグアンドドロップ時）"""
+        if not image_path or not target_item:
+            return
+        
+        # 画像レコードを取得
+        image_record = next((r for r in self.image_records if r.path == image_path), None)
+        if not image_record:
+            QMessageBox.warning(self, "エラー", "画像レコードが見つかりませんでした。")
+            return
+        
+        # ターゲットアイテムからJANグループを取得
+        group = target_item.data(0, Qt.UserRole)
+        
+        if isinstance(group, JanGroup):
+            # JANグループが選択された
+            jan = group.jan
+        else:
+            # 子ノード（個別画像）が選択された場合、親グループを取得
+            parent = target_item.parent()
+            if parent:
+                group = parent.data(0, Qt.UserRole)
+                if isinstance(group, JanGroup):
+                    jan = group.jan
+                else:
+                    QMessageBox.warning(self, "エラー", "JANグループが見つかりませんでした。")
+                    return
+            else:
+                QMessageBox.warning(self, "エラー", "JANグループが見つかりませんでした。")
+                return
+        
+        if jan == "unknown":
+            QMessageBox.warning(self, "エラー", "JAN不明グループには画像を追加できません。")
+            return
+        
+        # 画像のJANコードを更新
+        if self.assign_image_to_jan(image_path, jan):
+            QMessageBox.information(self, "完了", f"画像をJANグループ {jan} に追加しました。")
+    
+    def assign_image_to_jan(self, image_path: str, jan: str, capture_dt: Optional[datetime] = None, show_message: bool = False) -> bool:
+        """画像に指定JANを割り当て"""
+        record = next((r for r in self.image_records if r.path == image_path), None)
+        if not record:
+            if show_message:
+                QMessageBox.warning(self, "エラー", "画像レコードが見つかりませんでした。")
+            return False
+        
+        updated_record = ImageRecord(
+            path=record.path,
+            capture_dt=capture_dt or record.capture_dt,
+            jan_candidate=jan,
+            width=record.width,
+            height=record.height
+        )
+        
+        for i, r in enumerate(self.image_records):
+            if r.path == image_path:
+                self.image_records[i] = updated_record
+                break
+        
+        self.image_db.update_jan(image_path, jan)
+        self.jan_groups = self.image_service.group_by_jan(self.image_records)
+        if jan:
+            self._jan_title_cache.pop(jan, None)
+        self.update_tree_widget()
+        
+        if show_message:
+            QMessageBox.information(self, "完了", f"画像をJANグループ {jan} に登録しました。")
+        
+        return True
+    
+    def rename_all_images(self):
+        """すべてのJANグループの画像をSKUベースで一括リネームする"""
+        if not any(g for g in self.jan_groups if g.jan != "unknown"):
+            QMessageBox.information(self, "情報", "リネーム対象のJANグループがありません。")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "リネーム確認",
+            "すべてのJANグループの画像をSKUベースでリネームしますか？\n（既にリネーム済みのファイルはスキップされます）",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # 1. リネーム計画を作成
+        rename_operations = []  # List of (old_record, new_path_str)
+        failed_skus = set()
+
+        for group in self.jan_groups:
+            if group.jan == "unknown":
+                continue
+
+            sku_candidates = self._search_sku_candidates_by_jan(group.jan)
+            if not sku_candidates or not (sku_candidates[0].get("SKU") or sku_candidates[0].get("sku")):
+                failed_skus.add(group.jan)
+                continue
+            
+            sku = sku_candidates[0].get("SKU") or sku_candidates[0].get("sku")
+
+            # 撮影日時順にソートしてからリネーム
+            sorted_images = sorted(group.images, key=lambda r: r.capture_dt if r.capture_dt else datetime.min)
+
+            for i, record in enumerate(sorted_images):
+                original_path = Path(record.path)
+                extension = original_path.suffix
+                
+                # 既にリネーム済みかチェック
+                if re.match(f"^{re.escape(sku)}_\\d+{re.escape(extension)}$", original_path.name):
+                    continue
+                
+                new_name = f"{sku}_{i+1}{extension}"
+                new_path = original_path.parent / new_name
+                
+                if str(original_path) != str(new_path):
+                    rename_operations.append((record, str(new_path)))
+
+        if not rename_operations:
+            QMessageBox.information(self, "情報", "リネーム対象のファイルはありませんでした。")
+            return
+
+        # 2. リネーム処理の実行
+        progress = QProgressDialog("リネーム処理中...", "キャンセル", 0, len(rename_operations), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        renamed_count = 0
+        new_records_map = {}  # old_path -> new_record
+
+        for i, (record, new_path_str) in enumerate(rename_operations):
+            progress.setValue(i)
+            if progress.wasCanceled():
+                break
+            
+            old_path_str = record.path
+            try:
+                os.rename(old_path_str, new_path_str)
+                
+                # DBレコードを更新
+                db_record = self.image_db.get_by_file_path(old_path_str)
+                if db_record:
+                    self.image_db.delete_by_file_path(old_path_str)
+                    db_record['file_path'] = new_path_str
+                    self.image_db.upsert(db_record)
+
+                # メモリ更新用のマップを作成
+                new_record_data = record._asdict()
+                new_record_data['path'] = new_path_str
+                new_records_map[old_path_str] = ImageRecord(**new_record_data)
+                
+                renamed_count += 1
+            except Exception as e:
+                logger.error(f"リネームエラー: {old_path_str} -> {new_path_str}: {e}")
+                # エラーが出ても続行
+        
+        progress.close()
+
+        # 3. メモリ上の`image_records`を更新
+        if new_records_map:
+            updated_image_records = []
+            for record in self.image_records:
+                if record.path in new_records_map:
+                    updated_image_records.append(new_records_map[record.path])
+                else:
+                    updated_image_records.append(record)
+            self.image_records = updated_image_records
+        
+        # 4. UIの全体更新と結果報告
+        self.jan_groups = self.image_service.group_by_jan(self.image_records)
+        self.update_tree_widget()
+        self.update_image_list(self.image_records)
+
+        message = f"{renamed_count}件の画像をリネームしました。"
+        if failed_skus:
+            message += f"\n\n以下のJANコードに対応するSKUが見つからず、関連するグループはスキップされました:\n" + ", ".join(failed_skus)
+        QMessageBox.information(self, "完了", message)
+
+    def confirm_image_links(self):
+        """JANグループエリアに登録されている全てのJANグループの画像パスを仕入DBに登録（既に登録済みはスキップ）"""
+        if not self.product_widget:
+            QMessageBox.warning(self, "エラー", "データベース管理タブが見つかりません。")
+            return
+
+        # 有効なJANグループを抽出（JAN不明グループは除外）
+        valid_groups = [g for g in self.jan_groups if g.jan != "unknown" and g.images]
+
+        if not valid_groups:
+            QMessageBox.information(self, "情報", "確定処理対象のJANグループがありません。")
+            return
+
+        # 常に最新のレコードリストを取得
+        all_records = self.product_widget.get_all_purchase_records()
+
+        # プログレスダイアログを表示
+        progress = QProgressDialog("確定処理中...", "キャンセル", 0, len(valid_groups), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        success_count = 0
+        skipped_count = 0
+        failed_groups = []
+
+        try:
+            for i, group in enumerate(valid_groups):
+                if progress.wasCanceled():
+                    break
+
+                progress.setValue(i)
+                progress.setLabelText(f"確定処理中... ({i+1}/{len(valid_groups)}) - JAN: {group.jan}")
+                QApplication.processEvents()
+
+                jan = group.jan
+                image_paths = [img.path for img in group.images]
+
+                if not image_paths:
+                    continue
+
+                try:
+                    # 更新処理を実行（既存画像はスキップ）
+                    success, added_count = self.product_widget.update_image_paths_for_jan(
+                        jan, image_paths, all_records, skip_existing=True
+                    )
+
+                    if success:
+                        if added_count > 0:
+                            success_count += 1
+                            skipped = len(image_paths) - added_count
+                            if skipped > 0:
+                                skipped_count += skipped
+                        else:
+                            # 全て既に登録済み
+                            skipped_count += len(image_paths)
+                    else:
+                        failed_groups.append(jan)
+
+                except Exception as e:
+                    logger.error(f"JAN '{jan}' の確定処理中にエラー: {e}")
+                    failed_groups.append(jan)
+
+            progress.close()
+
+            # 結果メッセージを表示
+            message_parts = []
+            if success_count > 0:
+                message_parts.append(f"{success_count}件のJANグループを確定処理しました。")
+            if skipped_count > 0:
+                message_parts.append(f"{skipped_count}件の画像は既に登録済みのためスキップしました。")
+            if failed_groups:
+                message_parts.append(f"\n以下のJANグループの処理に失敗しました:\n{', '.join(failed_groups)}")
+
+            if message_parts:
+                QMessageBox.information(self, "確定処理完了", "\n".join(message_parts))
+            else:
+                QMessageBox.information(self, "確定処理完了", "処理が完了しました。")
+
+        except Exception as e:
+            progress.close()
+            QMessageBox.critical(self, "エラー", f"確定処理中にエラーが発生しました:\n{e}")
+
+    def on_tree_context_menu(self, position):
+        """ツリーのコンテキストメニュー"""
+        item = self.tree_widget.itemAt(position)
+        if not item:
+            return
+        
+        menu = QMenu(self)
+        
+        group = item.data(0, Qt.UserRole)
+        if isinstance(group, JanGroup):
+            # JANグループが選択された
+            delete_action = menu.addAction("JANグループを削除")
+            delete_action.triggered.connect(lambda: self.delete_jan_group(group))
+        else:
+            # 個別画像が選択された
+            remove_action = menu.addAction("グループから削除")
+            remove_action.triggered.connect(lambda: self.remove_image_from_group(item))
+        
+        menu.exec_(self.tree_widget.mapToGlobal(position))
+    
+    def on_image_list_context_menu(self, position):
+        """画像リストのコンテキストメニュー"""
+        item = self.image_list.itemAt(position)
+        if not item:
+            return
+        
+        menu = QMenu(self)
+        
+        delete_action = menu.addAction("画像を削除")
+        delete_action.triggered.connect(lambda: self.delete_image_from_list(item))
+        
+        assign_menu = menu.addMenu("JANグループに追加")
+        has_assignable = False
+        image_path = item.data(Qt.UserRole)
+        for group in self.jan_groups:
+            if group.jan == "unknown":
+                continue
+            has_assignable = True
+            title = self._get_product_title_by_jan(group.jan)
+            label = f"{group.jan}"
+            if title:
+                label += f" - {title}"
+            action = assign_menu.addAction(label)
+            jan_value = group.jan
+            action.triggered.connect(lambda _, j=jan_value, path=image_path: self.assign_image_to_jan(path, j, show_message=True))
+        if not has_assignable:
+            assign_menu.setEnabled(False)
+        
+        menu.exec_(self.image_list.mapToGlobal(position))
+    
+    def delete_jan_group(self, group: JanGroup):
+        """JANグループを削除"""
+        if group.jan == "unknown":
+            QMessageBox.warning(self, "エラー", "JAN不明グループは削除できません。")
+            return
+        
+        reply = QMessageBox.question(
+            self,
+            "確認",
+            f"JANグループ {group.jan} を削除しますか？\n（画像は削除されず、JAN不明グループに移動します）",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # グループ内の画像のJANコードをクリア
+            jan_value = group.jan
+            for record in group.images:
+                # image_recordsを更新
+                for i, r in enumerate(self.image_records):
+                    if r.path == record.path:
+                        updated_record = ImageRecord(
+                            path=r.path,
+                            capture_dt=r.capture_dt,
+                            jan_candidate=None,
+                            width=r.width,
+                            height=r.height
+                        )
+                        self.image_records[i] = updated_record
+                        break
+                
+                # DBを更新
+                self.image_db.update_jan(record.path, None)
+            
+            # JANグループを再構築
+            self.jan_groups = self.image_service.group_by_jan(self.image_records)
+            if jan_value:
+                self._jan_title_cache.pop(jan_value, None)
+            
+            # UIを更新
+            self.update_tree_widget()
+            
+            QMessageBox.information(self, "完了", f"JANグループ {group.jan} を削除しました。")
+    
+    def remove_image_from_group(self, item: QTreeWidgetItem):
+        """画像をグループから削除"""
+        image_path = item.data(0, Qt.UserRole)
+        if not image_path:
+            return
+        
+        # 画像レコードを取得
+        image_record = next((r for r in self.image_records if r.path == image_path), None)
+        if not image_record:
+            return
+        
+        # JANコードをクリア
+        original_jan = image_record.jan_candidate
+        updated_record = ImageRecord(
+            path=image_record.path,
+            capture_dt=image_record.capture_dt,
+            jan_candidate=None,
+            width=image_record.width,
+            height=image_record.height
+        )
+        
+        # image_recordsを更新
+        for i, record in enumerate(self.image_records):
+            if record.path == image_path:
+                self.image_records[i] = updated_record
+                break
+        
+        # DBを更新
+        self.image_db.update_jan(image_path, None)
+        
+        # JANグループを再構築
+        self.jan_groups = self.image_service.group_by_jan(self.image_records)
+        if original_jan:
+            self._jan_title_cache.pop(original_jan, None)
+        
+        # UIを更新
+        self.update_tree_widget()
+        
+        QMessageBox.information(self, "完了", "画像をグループから削除しました。")
+    
+    def delete_image_from_list(self, item: QListWidgetItem):
+        """画像一覧から画像を削除（ファイルも削除）"""
+        image_path = item.data(Qt.UserRole)
+        if not image_path:
+            return
+
+        file_name = Path(image_path).name
+        reply = QMessageBox.question(
+            self,
+            "削除の確認",
+            f"画像ファイル '{file_name}' を完全に削除しますか？\n\nこの操作は元に戻せません。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+
+        if reply == QMessageBox.Yes:
+            try:
+                # 1. ファイルを物理的に削除
+                if os.path.exists(image_path):
+                    os.remove(image_path)
+
+                # 2. データベースから削除
+                self.image_db.delete_by_file_path(image_path)
+
+                # 3. メモリ上のデータから削除
+                record = next((r for r in self.image_records if r.path == image_path), None)
+                original_jan = record.jan_candidate if record and record.jan_candidate else None
+                self.image_records = [r for r in self.image_records if r.path != image_path]
+
+                # 4. UIを更新
+                self.jan_groups = self.image_service.group_by_jan(self.image_records)
+                if original_jan:
+                    self._jan_title_cache.pop(original_jan, None)
+
+                self.update_tree_widget()
+                self.update_image_list(self.image_records)
+
+                # 5. 詳細パネルをクリア
+                if self.selected_image_path == image_path:
+                    self.selected_image_path = None
+                    self.preview_label.setText("画像を選択してください")
+                    self.jan_edit.clear()
+                    self.capture_time_label.setText("-")
+                    self.file_name_label.setText("-")
+                    self.file_size_label.setText("-")
+                    self.rotate_left_btn.setEnabled(False)
+                    self.rotate_right_btn.setEnabled(False)
+                    self.read_barcode_btn.setEnabled(False)
+                    self.save_jan_btn.setEnabled(False)
+                
+                QMessageBox.information(self, "完了", f"画像 '{file_name}' を削除しました。")
+
+            except Exception as e:
+                QMessageBox.critical(self, "エラー", f"画像の削除中にエラーが発生しました:\n{str(e)}")
+
+    def scan_unknown_jan_images(self):
+        """JAN不明画像に対してOCRを実行し、候補を検索"""
+        # JAN不明画像を抽出
+        unknown_images = [
+            r for r in self.image_records 
+            if not r.jan_candidate or r.jan_candidate == "unknown" or not r.jan_candidate.isdigit()
+        ]
+        
+        if not unknown_images:
+            QMessageBox.information(self, "情報", "JAN不明な画像はありません。")
+            return
+        
+        # OCRサービスの利用可能性チェック
+        if not self.ocr_service.is_tesseract_available() and not self.ocr_service.is_gcv_available():
+            QMessageBox.warning(
+                self, 
+                "OCR利用不可", 
+                "OCR機能を使用するには、Tesseract OCRのインストールまたはGoogle Cloud Vision APIの設定が必要です。"
+            )
+            return
+
+        # 仕入データの準備
+        purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
+        if not purchase_records:
+            QMessageBox.warning(self, "情報", "照合対象の仕入データがありません。")
+            return
+
+        # 簡易インデックス作成（商品名をトークン化）
+        product_index = []
+        for p in purchase_records:
+            jan = str(p.get("JAN") or p.get("jan") or "").strip()
+            title = str(p.get("商品名") or p.get("product_name") or "").strip()
+            if not jan or not title:
+                continue
+            
+            # トークン化（簡易的）
+            tokens = set(re.split(r'\s+', title.lower()))
+            tokens = {t for t in tokens if len(t) > 1} # 1文字は除外
+            product_index.append({
+                "jan": jan,
+                "title": title,
+                "tokens": tokens
+            })
+
+        # プログレスダイアログ
+        progress = QProgressDialog("JAN不明画像をOCR解析中...", "キャンセル", 0, len(unknown_images), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+        
+        candidates_map = {} # {image_path: {"ocr_text": str, "candidates": [...]}}
+        
+        for i, record in enumerate(unknown_images):
+            if progress.wasCanceled():
+                break
+                
+            progress.setValue(i)
+            progress.setLabelText(f"OCR解析中... ({i+1}/{len(unknown_images)})")
+            QApplication.processEvents()
+            
+            try:
+                # OCR実行
+                ocr_result = self.ocr_service.extract_text(record.path)
+                text = ocr_result.get("text", "")
+                
+                if not text:
+                    continue
+                    
+                # マッチング処理
+                text_lower = text.lower()
+                # OCRテキストからトークン抽出
+                ocr_tokens = set(re.split(r'\s+|[^\w]+', text_lower))
+                ocr_tokens = {t for t in ocr_tokens if len(t) > 2} # 2文字以下は除外（ノイズ対策）
+                
+                matches = []
+                for prod in product_index:
+                    # スコア計算: 共通トークン数
+                    common = ocr_tokens.intersection(prod["tokens"])
+                    if common:
+                        # マッチしたトークンの数や割合でスコア化
+                        score = len(common) * 10 # 基本点
+                        # さらに、OCRテキスト全体に商品名が含まれているか（完全一致ボーナス）
+                        # if prod["title"].lower() in text_lower:
+                        #    score += 50
+                        matches.append({
+                            "jan": prod["jan"],
+                            "title": prod["title"],
+                            "score": score
+                        })
+                
+                # スコア順にソートして上位を抽出
+                matches.sort(key=lambda x: x["score"], reverse=True)
+                top_matches = matches[:5] # 上位5件
+                
+                if top_matches and top_matches[0]["score"] >= 10: # 最低スコア閾値
+                    candidates_map[record.path] = {
+                        "ocr_text": text,
+                        "candidates": top_matches
+                    }
+                    
+            except Exception as e:
+                logger.warning(f"OCR processing failed for {record.path}: {e}")
+                continue
+        
+        progress.close()
+        
+        if not candidates_map:
+            QMessageBox.information(self, "結果", "OCR解析を行いましたが、商品名と一致する候補は見つかりませんでした。")
+            return
+            
+        # 結果表示ダイアログ
+        dialog = CandidateSelectionDialog(candidates_map, self)
+        if dialog.exec_() == QDialog.Accepted:
+            selected = dialog.selected_results
+            if not selected:
+                return
+                
+            count = 0
+            for image_path, jan in selected.items():
+                if self.assign_image_to_jan(image_path, jan):
+                    count += 1
+            
+            QMessageBox.information(self, "完了", f"{count}件の画像にJANコードを割り当てました。")
+
+    def _close_progress_dialog(self):
+        """プログレスダイアログを安全に閉じる"""
+        if self.progress_dialog:
+            try:
+                self.progress_dialog.reset()
+            except Exception:
+                pass
+            self.progress_dialog.close()
+            self.progress_dialog = None
 

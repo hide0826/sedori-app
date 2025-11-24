@@ -12,7 +12,7 @@ import unicodedata
 import calendar
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 from PySide6.QtCore import Qt, QMimeData, QUrl
 from PySide6.QtWidgets import (
@@ -25,6 +25,8 @@ from PySide6.QtGui import QDrag, QPixmap, QDesktopServices, QCursor, QCursor
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
+import json
+import logging
 from database.product_db import ProductDatabase
 from database.warranty_db import WarrantyDatabase
 from database.product_purchase_db import ProductPurchaseDatabase
@@ -330,6 +332,10 @@ class ProductWidget(QWidget):
         self.sales_tab = QWidget()
         self.setup_sales_tab()
         self.tab_widget.addTab(self.sales_tab, "販売DB")
+
+    def get_all_purchase_records(self) -> List[Dict[str, Any]]:
+        """現在のすべての仕入レコードを返す"""
+        return self.purchase_all_records
 
     # --- 商品タブ ---
     def setup_product_tab(self):
@@ -1138,4 +1144,100 @@ class ProductWidget(QWidget):
         month = month % 12 + 1
         day = min(base_date.day, calendar.monthrange(year, month)[1])
         return datetime(year, month, day)
+
+    def update_image_paths_for_jan(self, jan: str, image_paths: List[str], all_records: List[Dict[str, Any]], skip_existing: bool = True) -> Tuple[bool, int]:
+        """指定されたJANコードを持つ仕入DBレコードの画像パスを更新する
+        
+        Args:
+            jan: JANコード
+            image_paths: 追加する画像パスのリスト
+            all_records: 全仕入レコードのリスト
+            skip_existing: Trueの場合、既に登録されている画像はスキップ
+        
+        Returns:
+            (成功フラグ, 追加された画像数)
+        """
+        if not jan or not image_paths:
+            return False, 0
+
+        # JANコードを正規化（文字列化して空白を除去）
+        jan_normalized = str(jan).strip()
+
+        # purchase_all_recordsからJANでレコードを検索（大文字小文字を無視、Noneチェック付き）
+        target_record = None
+        for r in all_records:
+            record_jan = r.get("JAN") or r.get("jan")
+            if record_jan:
+                record_jan_normalized = str(record_jan).strip()
+                if record_jan_normalized == jan_normalized:
+                    target_record = r
+                    break
+
+        if not target_record:
+            logging.warning(f"No purchase record found for JAN: {jan}")
+            return False, 0
+
+        # 既存の画像パスを取得
+        existing_paths = set()
+        if skip_existing:
+            for i in range(1, 7):
+                image_col = f"画像{i}"
+                existing_path = target_record.get(image_col)
+                if existing_path and str(existing_path).strip():
+                    existing_paths.add(str(existing_path).strip())
+
+        # 未登録の画像パスのみを抽出
+        new_image_paths = []
+        for path in image_paths:
+            path_normalized = str(path).strip()
+            if path_normalized and path_normalized not in existing_paths:
+                new_image_paths.append(path_normalized)
+
+        if not new_image_paths:
+            # 全て既に登録済み
+            return True, 0
+
+        # 既存の画像パスをリストに変換（空欄をスキップ）
+        current_images = []
+        for i in range(1, 7):
+            image_col = f"画像{i}"
+            existing_path = target_record.get(image_col)
+            if existing_path and str(existing_path).strip():
+                current_images.append(str(existing_path).strip())
+
+        # 新しい画像パスを追加（最大6枚まで）
+        for path in new_image_paths:
+            if len(current_images) >= 6:
+                break
+            current_images.append(path)
+
+        # 更新するデータを準備（画像1から最大6まで）
+        # カラム名は「画像1」「画像2」など
+        for i in range(6):
+            image_col = f"画像{i+1}"
+            if i < len(current_images):
+                target_record[image_col] = current_images[i]
+            else:
+                # 不要な画像列をクリア
+                target_record[image_col] = None
+            
+        try:
+            # メモリ上のデータを更新（target_recordはall_recordsの参照なので、直接変更で反映される）
+            # purchase_all_recordsも更新（同じ参照）
+            # UI更新
+            self.populate_purchase_table(self.purchase_records)
+            
+            # スナップショットも更新（変更を永続化）
+            try:
+                self.purchase_db.save_snapshot("自動保存(画像紐付け)", self.purchase_all_records)
+            except Exception as e:
+                logging.error(f"仕入DBスナップショット保存失敗: {e}")
+            
+            return True, len(new_image_paths)
+        except Exception as e:
+            logging.error(f"Failed to update image paths in memory: {e}")
+            return False, 0
+            
+    def set_font(self, font):
+        self.product_table.setFont(font)
 
