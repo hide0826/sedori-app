@@ -18,7 +18,8 @@ from PySide6.QtCore import Qt, QMimeData, QUrl
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QGroupBox, QFormLayout, QLineEdit, QDialog, QDialogButtonBox,
-    QMessageBox, QLabel, QTabWidget, QHeaderView, QFileDialog
+    QMessageBox, QLabel, QTabWidget, QHeaderView, QFileDialog, QMenu, QApplication,
+    QAbstractItemView
 )
 from PySide6.QtGui import QDrag, QPixmap, QDesktopServices, QCursor, QCursor
 
@@ -262,6 +263,9 @@ class ProductEditDialog(QDialog):
         return result
 
 
+PRODUCT_NAME_DISPLAY_LIMIT = 50
+
+
 class ProductWidget(QWidget):
     """商品データ＋仕入/販売DBタブ"""
 
@@ -444,9 +448,13 @@ class ProductWidget(QWidget):
         self.purchase_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.purchase_table.setSelectionMode(QTableWidget.SingleSelection)
         self.purchase_table.verticalHeader().setVisible(False)
+        self.purchase_table.setTextElideMode(Qt.ElideNone)
+        self.purchase_table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         self._apply_purchase_column_resize(self.purchase_columns)
         # セルクリックイベントを接続（レシートID列のクリック処理用）
         self.purchase_table.cellClicked.connect(self.on_purchase_table_cell_clicked)
+        self.purchase_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.purchase_table.customContextMenuRequested.connect(self.on_purchase_table_context_menu)
         layout.addWidget(self.purchase_table)
         
         # 全データを保持（検索用）
@@ -924,7 +932,8 @@ class ProductWidget(QWidget):
         header = self.purchase_table.horizontalHeader()
         for idx, name in enumerate(columns):
             if name == "商品名":
-                header.setSectionResizeMode(idx, QHeaderView.Stretch)
+                header.setSectionResizeMode(idx, QHeaderView.Fixed)
+                header.resizeSection(idx, self._calculate_product_name_width())
             else:
                 header.setSectionResizeMode(idx, QHeaderView.ResizeToContents)
 
@@ -934,11 +943,12 @@ class ProductWidget(QWidget):
         if not base_columns:
             base_columns = self._resolve_inventory_columns()
         columns = list(base_columns)
-        seen = set(columns)
+        seen = set(col.upper() for col in columns)
         for record in records:
             for key in record.keys():
-                if key not in seen:
-                    seen.add(key)
+                upper_key = key.upper()
+                if upper_key not in seen:
+                    seen.add(upper_key)
                     columns.append(key)
         self.purchase_columns = columns
         self.purchase_table.setRowCount(len(records))
@@ -949,19 +959,13 @@ class ProductWidget(QWidget):
         for row, record in enumerate(records):
             for col, header in enumerate(columns):
                 # レコードから値を取得（大文字小文字を無視して検索）
-                value = record.get(header)
-                if value is None or (isinstance(value, str) and not value.strip()):
-                    # 大文字小文字を無視して検索
-                    for key in record.keys():
-                        if key.upper() == header.upper():
-                            value = record.get(key)
-                            break
-                    if value is None:
-                        value = ""
+                value = self._get_record_value(record, [header])
+                if value is None:
+                    value = ""
                 
                 if header == "商品名":
                     full_text = "" if value is None else str(value)
-                    display_text = self._truncate_text(full_text, 50)
+                    display_text = self._truncate_text(full_text, PRODUCT_NAME_DISPLAY_LIMIT)
                     item = QTableWidgetItem(display_text)
                     if full_text:
                         item.setToolTip(full_text)
@@ -1046,12 +1050,105 @@ class ProductWidget(QWidget):
                     self, "情報",
                     f"レシートID '{receipt_id}' に対応するレシート情報が見つかりません。"
                 )
+
+    def on_purchase_table_context_menu(self, pos):
+        """仕入DBテーブルのコンテキストメニュー"""
+        row = self.purchase_table.rowAt(pos.y())
+        if row < 0:
+            return
+        record = self._get_purchase_record_by_row(row)
+        if not record:
+            return
+
+        asin = self._get_record_value(record, ["ASIN", "asin"])
+        sku = self._get_record_value(record, ["SKU", "sku"])
+
+        menu = QMenu(self)
+
+        copy_selection_action = menu.addAction("選択範囲をコピー")
+        copy_selection_action.triggered.connect(self.copy_purchase_selection)
+
+        menu.addSeparator()
+
+        if asin:
+            amazon_url = f"https://www.amazon.co.jp/dp/{asin}"
+            keepa_url = f"https://keepa.com/#!product/5-{asin}"
+            amazon_action = menu.addAction("Amazonで確認")
+            amazon_action.triggered.connect(
+                lambda checked=False, url=amazon_url: QDesktopServices.openUrl(QUrl(url))
+            )
+            keepa_action = menu.addAction("Keepaで確認")
+            keepa_action.triggered.connect(
+                lambda checked=False, url=keepa_url: QDesktopServices.openUrl(QUrl(url))
+            )
+        else:
+            disabled = menu.addAction("ASINが設定されていません")
+            disabled.setEnabled(False)
+
+        if sku:
+            copy_sku = menu.addAction(f"SKUをコピー ({sku})")
+            copy_sku.triggered.connect(lambda text=sku: QApplication.clipboard().setText(text))
+
+        menu.exec(self.purchase_table.viewport().mapToGlobal(pos))
+
+    def copy_purchase_selection(self):
+        """仕入DBテーブルの選択範囲をコピー"""
+        selection_model = self.purchase_table.selectionModel()
+        if not selection_model:
+            return
+        indexes = selection_model.selectedIndexes()
+        if not indexes:
+            return
+
+        rows: Dict[int, Dict[int, str]] = {}
+        min_col = min(index.column() for index in indexes)
+        max_col = max(index.column() for index in indexes)
+
+        for index in indexes:
+            item = self.purchase_table.item(index.row(), index.column())
+            value = item.text() if item else ""
+            rows.setdefault(index.row(), {})[index.column()] = value
+
+        lines = []
+        for row in sorted(rows.keys()):
+            row_data = []
+            for col in range(min_col, max_col + 1):
+                row_data.append(rows[row].get(col, ""))
+            lines.append("\t".join(row_data))
+
+        QApplication.clipboard().setText("\n".join(lines))
     
     @staticmethod
     def _truncate_text(text: str, limit: int) -> str:
+        if not text:
+            return ""
         if len(text) <= limit:
             return text
-        return text[:limit] + "..."
+        return text[:limit]
+
+    def _get_purchase_record_by_row(self, row: int) -> Optional[Dict[str, Any]]:
+        if 0 <= row < len(self.purchase_records):
+            return self.purchase_records[row]
+        return None
+
+    def _calculate_product_name_width(self) -> int:
+        """商品名列で50文字を表示するための列幅を算出"""
+        metrics = self.purchase_table.fontMetrics()
+        sample_text = "W" * PRODUCT_NAME_DISPLAY_LIMIT
+        width = metrics.horizontalAdvance(sample_text)
+        return width + 40  # 余白ぶんを加算
+
+    @staticmethod
+    def _get_record_value(record: Dict[str, Any], keys: List[str]) -> str:
+        for key in keys:
+            value = record.get(key)
+            if value not in (None, ""):
+                return str(value)
+            upper_key = key.upper()
+            for actual_key, actual_value in record.items():
+                if actual_key.upper() == upper_key and actual_value not in (None, ""):
+                    return str(actual_value)
+        return ""
 
     def _infer_warranty_from_comment(self, row: Dict[str, Any]) -> Optional[str]:
         """コメント欄から保証期間（月）を推定し、仕入日からの満了日を返す"""
@@ -1145,7 +1242,7 @@ class ProductWidget(QWidget):
         day = min(base_date.day, calendar.monthrange(year, month)[1])
         return datetime(year, month, day)
 
-    def update_image_paths_for_jan(self, jan: str, image_paths: List[str], all_records: List[Dict[str, Any]], skip_existing: bool = True) -> Tuple[bool, int]:
+    def update_image_paths_for_jan(self, jan: str, image_paths: List[str], all_records: List[Dict[str, Any]], skip_existing: bool = True) -> Tuple[bool, int, Optional[Dict[str, Any]]]:
         """指定されたJANコードを持つ仕入DBレコードの画像パスを更新する
         
         Args:
@@ -1155,10 +1252,10 @@ class ProductWidget(QWidget):
             skip_existing: Trueの場合、既に登録されている画像はスキップ
         
         Returns:
-            (成功フラグ, 追加された画像数)
+            (成功フラグ, 追加された画像数, 更新後の仕入レコードのスナップショット)
         """
         if not jan or not image_paths:
-            return False, 0
+            return False, 0, None
 
         # JANコードを正規化（文字列化して空白を除去）
         jan_normalized = str(jan).strip()
@@ -1175,7 +1272,7 @@ class ProductWidget(QWidget):
 
         if not target_record:
             logging.warning(f"No purchase record found for JAN: {jan}")
-            return False, 0
+            return False, 0, None
 
         # 既存の画像パスを取得
         existing_paths = set()
@@ -1195,7 +1292,7 @@ class ProductWidget(QWidget):
 
         if not new_image_paths:
             # 全て既に登録済み
-            return True, 0
+            return True, 0, dict(target_record)
 
         # 既存の画像パスをリストに変換（空欄をスキップ）
         current_images = []
@@ -1233,10 +1330,10 @@ class ProductWidget(QWidget):
             except Exception as e:
                 logging.error(f"仕入DBスナップショット保存失敗: {e}")
             
-            return True, len(new_image_paths)
+            return True, len(new_image_paths), dict(target_record)
         except Exception as e:
             logging.error(f"Failed to update image paths in memory: {e}")
-            return False, 0
+            return False, 0, None
             
     def set_font(self, font):
         self.product_table.setFont(font)

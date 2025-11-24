@@ -92,10 +92,16 @@ class HIRIOApplication:
         except Exception as e:
             _log_error("MainWindow import error:\n" + "".join(traceback.format_exception(type(e), e, e.__traceback__)))
             raise
+        try:
+            from ui.utils.copy_context_menu import install_copy_context_menu
+        except Exception as e:
+            _log_error("copy_context_menu import error:\n" + "".join(traceback.format_exception(type(e), e, e.__traceback__)))
+            raise
         
         self.api_client = APIClient()
         self.main_window = MainWindow(self.api_client)
         self.main_window.show()
+        install_copy_context_menu(self.app)
         
         # スタイルシートの適用
         self.load_styles()
