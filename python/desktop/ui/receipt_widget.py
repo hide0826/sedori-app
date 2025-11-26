@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView,
     QGroupBox, QMessageBox, QFileDialog, QDialog,
     QDialogButtonBox, QTextEdit, QDateEdit, QSpinBox,
-    QScrollArea
+    QScrollArea, QSizePolicy
 )
 from PySide6.QtCore import Qt, QDate, QThread, Signal
 from PySide6.QtGui import QPixmap
@@ -61,6 +61,7 @@ class ReceiptOCRThread(QThread):
 
 class ReceiptWidget(QWidget):
     """レシート管理ウィジェット"""
+    receipt_processed = Signal(dict)
     
     def __init__(self, api_client=None, inventory_widget=None):
         super().__init__()
@@ -73,6 +74,7 @@ class ReceiptWidget(QWidget):
         self.inventory_db = InventoryDatabase()
         self.current_receipt_id = None
         self.current_receipt_data = None
+        self.notifications_enabled = True
         
         self.setup_ui()
     
@@ -89,8 +91,10 @@ class ReceiptWidget(QWidget):
         # 上部：画像アップロード
         self.setup_upload_section()
         
-        # 中央：OCR結果・マッチング候補
+        # 中央：OCR結果・マッチング候補（内部用。画面からは非表示にする）
         self.setup_result_section()
+        if hasattr(self, "result_group"):
+            self.result_group.setVisible(False)
         
         # 下部：レシート一覧
         self.setup_receipt_list()
@@ -99,6 +103,7 @@ class ReceiptWidget(QWidget):
         """画像アップロードセクション"""
         upload_group = QGroupBox("レシート画像アップロード")
         upload_layout = QVBoxLayout(upload_group)
+        self.upload_group = upload_group
         
         btn_layout = QHBoxLayout()
         self.upload_btn = QPushButton("画像を選択")
@@ -126,9 +131,9 @@ class ReceiptWidget(QWidget):
         self.layout.addWidget(upload_group)
     
     def setup_result_section(self):
-        """OCR結果・マッチング候補セクション"""
-        result_group = QGroupBox("OCR結果・マッチング候補")
-        result_layout = QVBoxLayout(result_group)
+        """OCR結果・マッチング候補セクション（内部ロジック用、画面では非表示にできる）"""
+        self.result_group = QGroupBox("OCR結果・マッチング候補")
+        result_layout = QVBoxLayout(self.result_group)
         
         # OCR結果表示
         ocr_layout = QHBoxLayout()
@@ -210,23 +215,80 @@ class ReceiptWidget(QWidget):
         btn_layout.addStretch()
         result_layout.addLayout(btn_layout)
         
-        self.layout.addWidget(result_group)
+        self.layout.addWidget(self.result_group)
     
     def setup_receipt_list(self):
         """レシート一覧セクション"""
         list_group = QGroupBox("レシート一覧")
         list_layout = QVBoxLayout(list_group)
-        
+
+        # 一括操作ボタンバー
+        controls_layout = QHBoxLayout()
+        self.bulk_match_btn = QPushButton("一括マッチング")
+        self.bulk_match_btn.clicked.connect(self.bulk_match_receipts)
+        controls_layout.addWidget(self.bulk_match_btn)
+
+        self.bulk_rename_btn = QPushButton("一括リネーム")
+        self.bulk_rename_btn.clicked.connect(self.bulk_rename_receipts)
+        controls_layout.addWidget(self.bulk_rename_btn)
+
+        controls_layout.addStretch()
+        list_layout.addLayout(controls_layout)
+
         self.receipt_table = QTableWidget()
-        self.receipt_table.setColumnCount(9)
+        # 0列目のIDは非表示（内部用）、1列目に種別、2列目に画像ファイル名
+        self.receipt_table.setColumnCount(11)
         self.receipt_table.setHorizontalHeaderLabels([
-            "ID", "レシートID", "日付", "店舗名", "電話番号", "合計", "値引", "点数", "店舗コード"
+            "ID(内部)", "種別", "画像ファイル名", "レシートID", "日付",
+            "店舗名", "電話番号", "合計", "値引", "点数", "店舗コード"
         ])
         self.receipt_table.horizontalHeader().setStretchLastSection(True)
-        self.receipt_table.itemDoubleClicked.connect(self.load_receipt)
+        self.receipt_table.itemDoubleClicked.connect(self.on_receipt_double_clicked)
+        self.receipt_table.itemSelectionChanged.connect(self.on_receipt_selection_changed)
         list_layout.addWidget(self.receipt_table)
+
+        # ID列はユーザーには見せない
+        self.receipt_table.setColumnHidden(0, True)
+
+        btn_layout = QHBoxLayout()
+        self.delete_row_btn = QPushButton("選択行削除")
+        self.delete_row_btn.setEnabled(False)
+        self.delete_row_btn.clicked.connect(self.delete_selected_receipts)
+        btn_layout.addWidget(self.delete_row_btn)
+
+        self.delete_all_btn = QPushButton("全件削除")
+        self.delete_all_btn.clicked.connect(self.delete_all_receipts)
+        btn_layout.addWidget(self.delete_all_btn)
+
+        btn_layout.addStretch()
+        list_layout.addLayout(btn_layout)
         
         self.layout.addWidget(list_group)
+
+        # 保証書一覧エリア
+        warranty_group = QGroupBox("保証書一覧")
+        warranty_layout = QVBoxLayout(warranty_group)
+
+        self.warranty_table = QTableWidget()
+        # 0列目は内部ID、ユーザーには非表示
+        self.warranty_table.setColumnCount(12)
+        self.warranty_table.setHorizontalHeaderLabels([
+            "ID(内部)", "種別", "画像ファイル名", "レシートID", "日付",
+            "店舗名", "電話番号", "店舗コード", "SKU", "商品名", "保証期間(日)", "保証最終日"
+        ])
+        self.warranty_table.horizontalHeader().setStretchLastSection(True)
+        self.warranty_table.setColumnHidden(0, True)
+        # 保証期間編集時の処理
+        self.warranty_table.cellChanged.connect(self.on_warranty_cell_changed)
+        # 画像名ダブルクリックで拡大表示
+        self.warranty_table.itemDoubleClicked.connect(self.on_warranty_item_double_clicked)
+        warranty_layout.addWidget(self.warranty_table)
+
+        # 保証書一覧は高さを抑えめに
+        warranty_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        warranty_group.setMaximumHeight(220)
+        self.layout.addWidget(warranty_group)
+
         self.refresh_receipt_list()
     
     def select_image(self):
@@ -286,16 +348,57 @@ class ReceiptWidget(QWidget):
         
         # 仕入DBから自動検索・入力
         self.search_from_purchase_db()
-        
+
+        # 仕入データから自動マッチング候補を推定してDBにも反映
+        try:
+            purchase_records = getattr(self.product_widget, 'purchase_all_records', []) if self.product_widget else []
+            if purchase_records:
+                candidates = self.matching_service.find_match_candidates(
+                    self.current_receipt_data or result,
+                    purchase_records,
+                    preferred_store_code=self.store_code_combo.currentData(),
+                )
+                if candidates:
+                    cand = candidates[0]
+                    updates = {}
+                    if cand.store_code:
+                        # 店舗コードをコンボにも反映
+                        idx = self.store_code_combo.findData(cand.store_code)
+                        if idx >= 0:
+                            self.store_code_combo.setCurrentIndex(idx)
+                        updates["store_code"] = cand.store_code
+                    if cand.items_count and cand.items_count > 0:
+                        self.items_count_edit.setText(str(cand.items_count))
+                        if self.current_receipt_data is not None:
+                            self.current_receipt_data["items_count"] = cand.items_count
+                        updates["items_count"] = cand.items_count
+                    if updates and self.current_receipt_id:
+                        self.receipt_db.update_receipt(self.current_receipt_id, updates)
+        except Exception as e:
+            # 自動マッチング失敗は致命的ではないのでログのみにする
+            try:
+                from pathlib import Path
+                log_path = Path(__file__).resolve().parents[1] / "desktop_error.log"
+                with open(log_path, "a", encoding="utf-8") as f:
+                    from datetime import datetime
+                    f.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ReceiptWidget auto-match error: {e}\n")
+            except Exception:
+                pass
+
         self.match_btn.setEnabled(True)
         self.view_image_btn.setEnabled(True)
-        QMessageBox.information(self, "OCR完了", "レシート情報を抽出しました。")
+        if self.notifications_enabled:
+            QMessageBox.information(self, "OCR完了", "レシート情報を抽出しました。")
+        self.receipt_processed.emit(result)
+        # レシート一覧にも即反映
+        self.refresh_receipt_list()
     
     def on_ocr_error(self, error_msg: str):
         """OCRエラー時の処理"""
         self.upload_btn.setEnabled(True)
         self.upload_btn.setText("画像を選択")
-        QMessageBox.critical(self, "OCRエラー", f"OCR処理に失敗しました:\n{error_msg}")
+        if self.notifications_enabled:
+            QMessageBox.critical(self, "OCRエラー", f"OCR処理に失敗しました:\n{error_msg}")
     
     def load_store_codes(self):
         """店舗コード候補を読み込み"""
@@ -392,6 +495,10 @@ class ReceiptWidget(QWidget):
             # 点数欄に入力
             if total_items > 0:
                 self.items_count_edit.setText(str(total_items))
+
+    def set_notifications_enabled(self, enabled: bool):
+        """OCR完了・エラー時のメッセージ表示を制御"""
+        self.notifications_enabled = enabled
     
     def run_matching(self):
         """マッチングを実行"""
@@ -1182,19 +1289,368 @@ class ReceiptWidget(QWidget):
     def refresh_receipt_list(self):
         """レシート一覧を更新"""
         receipts = self.receipt_db.find_by_date_and_store(None)
-        self.receipt_table.setRowCount(len(receipts))
-        
-        for row, receipt in enumerate(receipts):
-            self.receipt_table.setItem(row, 0, QTableWidgetItem(str(receipt.get('id'))))
-            self.receipt_table.setItem(row, 1, QTableWidgetItem(receipt.get('receipt_id') or ""))
-            self.receipt_table.setItem(row, 2, QTableWidgetItem(receipt.get('purchase_date') or ""))
-            self.receipt_table.setItem(row, 3, QTableWidgetItem(receipt.get('store_name_raw') or ""))
-            self.receipt_table.setItem(row, 4, QTableWidgetItem(receipt.get('phone_number') or ""))
-            self.receipt_table.setItem(row, 5, QTableWidgetItem(str(receipt.get('total_amount') or "")))
-            self.receipt_table.setItem(row, 6, QTableWidgetItem(str(receipt.get('discount_amount') or "")))
-            self.receipt_table.setItem(row, 7, QTableWidgetItem(str(receipt.get('items_count') or "")))
-            self.receipt_table.setItem(row, 8, QTableWidgetItem(receipt.get('store_code') or ""))
-    
+        self.receipt_table.setRowCount(0)
+        if hasattr(self, "warranty_table"):
+            self.warranty_table.blockSignals(True)
+            self.warranty_table.setRowCount(0)
+            self.warranty_table.blockSignals(False)
+
+        from pathlib import Path
+        receipt_row = 0
+        warranty_row = 0
+        for receipt in receipts:
+            # 種別判定（OCRテキストから簡易判定）
+            doc_type = "レシート"
+            ocr_text = receipt.get('ocr_text') or ""
+            if "保証書" in ocr_text or "保証期間" in ocr_text or "保証規定" in ocr_text:
+                doc_type = "保証書"
+
+            file_path = receipt.get('original_file_path') or receipt.get('file_path') or ""
+            file_name = ""
+            if file_path:
+                try:
+                    file_name = Path(file_path).name
+                except Exception:
+                    file_name = file_path
+
+            # レシート用テーブル: 種別=レシートのみ
+            if doc_type == "レシート":
+                row = receipt_row
+                self.receipt_table.insertRow(row)
+                self.receipt_table.setItem(row, 0, QTableWidgetItem(str(receipt.get('id'))))
+                self.receipt_table.setItem(row, 1, QTableWidgetItem(doc_type))
+                self.receipt_table.setItem(row, 2, QTableWidgetItem(file_name))
+                self.receipt_table.setItem(row, 3, QTableWidgetItem(receipt.get('receipt_id') or ""))
+                self.receipt_table.setItem(row, 4, QTableWidgetItem(receipt.get('purchase_date') or ""))
+                self.receipt_table.setItem(row, 5, QTableWidgetItem(receipt.get('store_name_raw') or ""))
+                self.receipt_table.setItem(row, 6, QTableWidgetItem(receipt.get('phone_number') or ""))
+                self.receipt_table.setItem(row, 7, QTableWidgetItem(str(receipt.get('total_amount') or "")))
+                self.receipt_table.setItem(row, 8, QTableWidgetItem(str(receipt.get('discount_amount') or "")))
+                self.receipt_table.setItem(row, 9, QTableWidgetItem(str(receipt.get('items_count') or "")))
+                self.receipt_table.setItem(row, 10, QTableWidgetItem(receipt.get('store_code') or ""))
+                receipt_row += 1
+
+            # 保証書用テーブル: 種別=保証書のみ
+            if doc_type == "保証書" and hasattr(self, "warranty_table"):
+                self.warranty_table.blockSignals(True)
+                row = warranty_row
+                self.warranty_table.insertRow(row)
+                self.warranty_table.setItem(row, 0, QTableWidgetItem(str(receipt.get('id'))))
+                self.warranty_table.setItem(row, 1, QTableWidgetItem(doc_type))
+                self.warranty_table.setItem(row, 2, QTableWidgetItem(file_name))
+                self.warranty_table.setItem(row, 3, QTableWidgetItem(receipt.get('receipt_id') or ""))
+                self.warranty_table.setItem(row, 4, QTableWidgetItem(receipt.get('purchase_date') or ""))
+                self.warranty_table.setItem(row, 5, QTableWidgetItem(receipt.get('store_name_raw') or ""))
+                self.warranty_table.setItem(row, 6, QTableWidgetItem(receipt.get('phone_number') or ""))
+                self.warranty_table.setItem(row, 7, QTableWidgetItem(receipt.get('store_code') or ""))
+                # SKU・商品名はプルダウンで候補をセット
+                sku = receipt.get('sku') or ""
+                product_name = receipt.get('product_name') or ""
+                self._populate_warranty_product_cell(row, receipt, sku, product_name)
+                self.warranty_table.setItem(row, 10, QTableWidgetItem(str(receipt.get('warranty_days') or "")))
+                self.warranty_table.setItem(row, 11, QTableWidgetItem(receipt.get('warranty_until') or ""))
+                self.warranty_table.blockSignals(False)
+                warranty_row += 1
+
+        self.on_receipt_selection_changed()
+
+    def on_receipt_selection_changed(self):
+        """レシート表の選択変更を監視"""
+        if not hasattr(self, 'delete_row_btn'):
+            return
+        selection_model = self.receipt_table.selectionModel()
+        has_selection = bool(selection_model and selection_model.selectedRows())
+        self.delete_row_btn.setEnabled(has_selection)
+
+    def delete_selected_receipts(self):
+        """選択したレシートを削除（テスト用途）"""
+        selection_model = self.receipt_table.selectionModel()
+        if not selection_model:
+            return
+        rows = selection_model.selectedRows()
+        if not rows:
+            QMessageBox.information(self, "情報", "削除するレシートを選択してください。")
+            return
+        receipt_ids = []
+        for idx in rows:
+            item = self.receipt_table.item(idx.row(), 0)
+            if item:
+                try:
+                    receipt_ids.append(int(item.text()))
+                except ValueError:
+                    continue
+        if not receipt_ids:
+            QMessageBox.warning(self, "警告", "選択された行に有効なIDがありません。")
+            return
+        if QMessageBox.question(
+            self,
+            "確認",
+            f"選択された {len(receipt_ids)} 件のレシートを削除します。よろしいですか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        ) != QMessageBox.Yes:
+            return
+        deleted = 0
+        for rid in receipt_ids:
+            if self.receipt_db.delete_receipt_by_id(rid):
+                deleted += 1
+                if self.current_receipt_id == rid:
+                    self.reset_form()
+        self.refresh_receipt_list()
+        QMessageBox.information(self, "削除完了", f"{deleted} 件のレシートを削除しました。")
+
+    def delete_all_receipts(self):
+        """レシートを全件削除（テスト用途）"""
+        if QMessageBox.warning(
+            self,
+            "確認",
+            "レシート情報をすべて削除します。テスト用途以外では実行しないでください。\n続行しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        ) != QMessageBox.Yes:
+            return
+        deleted = self.receipt_db.delete_all_receipts()
+        self.reset_form()
+        self.refresh_receipt_list()
+        QMessageBox.information(self, "削除完了", f"{deleted} 件のレシートを削除しました。")
+
+    # ===== 一括処理 =====
+    def bulk_match_receipts(self):
+        """一覧に表示されている全レシートに対してマッチング候補を一括適用"""
+        if not self.product_widget:
+            QMessageBox.warning(self, "警告", "仕入DBへの参照がありません。")
+            return
+        purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
+        if not purchase_records:
+            QMessageBox.warning(self, "警告", "仕入DBにデータがありません。")
+            return
+        receipts = self.receipt_db.find_by_date_and_store(None)
+        updated = 0
+        for receipt in receipts:
+            try:
+                candidates = self.matching_service.find_match_candidates(
+                    receipt,
+                    purchase_records,
+                    preferred_store_code=receipt.get('store_code'),
+                )
+                if not candidates:
+                    continue
+                cand = candidates[0]
+                updates = {}
+                # 店舗コード
+                if cand.store_code and cand.store_code != receipt.get('store_code'):
+                    updates["store_code"] = cand.store_code
+                # 点数
+                if cand.items_count and cand.items_count > 0 and cand.items_count != receipt.get('items_count'):
+                    updates["items_count"] = cand.items_count
+                # レシートID（未付与の場合のみ発番）
+                if not receipt.get('receipt_id'):
+                    purchase_date = receipt.get('purchase_date')
+                    store_code_for_id = updates.get("store_code") or receipt.get('store_code')
+                    if purchase_date and store_code_for_id:
+                        new_receipt_id = self.receipt_db.generate_receipt_id(purchase_date, store_code_for_id)
+                        if new_receipt_id:
+                            updates["receipt_id"] = new_receipt_id
+                if updates:
+                    self.receipt_db.update_receipt(receipt.get('id'), updates)
+                    updated += 1
+            except Exception:
+                continue
+        self.refresh_receipt_list()
+        QMessageBox.information(self, "一括マッチング", f"{updated} 件のレシートにマッチング候補を適用しました。")
+
+    def bulk_rename_receipts(self):
+        """一括リネーム（簡易版・今後拡張予定）"""
+        QMessageBox.information(
+            self,
+            "一括リネーム",
+            "一括リネームは今後のバージョンで、既存の確定処理（レシートID＋画像リネーム）を\n自動で回す形で実装予定です。\n現在は個別の「確定」ボタンでリネームしてください。"
+        )
+
+    # ===== ダブルクリック挙動 =====
+    def on_receipt_double_clicked(self, item: QTableWidgetItem):
+        """レシート一覧のダブルクリック動作を制御"""
+        row = item.row()
+        col = item.column()
+        # 画像ファイル名列なら拡大画像を表示
+        if col == 2:
+            id_item = self.receipt_table.item(row, 0)
+            if not id_item:
+                return
+            try:
+                receipt_id = int(id_item.text())
+            except ValueError:
+                return
+            receipt = self.receipt_db.get_receipt(receipt_id)
+            if not receipt:
+                return
+            image_path = receipt.get('file_path') or receipt.get('original_file_path')
+            if not image_path:
+                QMessageBox.warning(self, "警告", "画像ファイルパスが登録されていません。")
+                return
+            self._show_image_popup(image_path)
+        else:
+            # それ以外の列は従来どおり読み込み
+            self.load_receipt(item)
+
+    def on_warranty_item_double_clicked(self, item: QTableWidgetItem):
+        """保証書一覧のダブルクリック動作（画像ファイル名は拡大表示）"""
+        row = item.row()
+        col = item.column()
+        # 画像ファイル名列のみ対象
+        if col != 2:
+            return
+        id_item = self.warranty_table.item(row, 0)
+        if not id_item:
+            return
+        try:
+            receipt_id = int(id_item.text())
+        except ValueError:
+            return
+        receipt = self.receipt_db.get_receipt(receipt_id)
+        if not receipt:
+            return
+        image_path = receipt.get('file_path') or receipt.get('original_file_path')
+        if not image_path:
+            QMessageBox.warning(self, "警告", "画像ファイルパスが登録されていません。")
+            return
+        self._show_image_popup(image_path)
+
+    # ===== 保証書テーブルの編集 =====
+    def on_warranty_cell_changed(self, row: int, column: int):
+        """保証期間入力時に保証最終日を自動計算してDBに保存"""
+        # 列インデックス: 0=ID,1=種別,2=画像,3=レシートID,4=日付,5=店舗名,6=電話,7=店舗コード,8=SKU,9=商品名,10=保証期間,11=保証最終日
+        # 店舗コード変更時は商品候補を更新
+        if column == 7:
+            id_item = self.warranty_table.item(row, 0)
+            if not id_item:
+                return
+            try:
+                receipt_id = int(id_item.text())
+            except ValueError:
+                return
+            receipt = self.receipt_db.get_receipt(receipt_id)
+            if not receipt:
+                return
+            # テーブル上の店舗コードを優先
+            store_code_item = self.warranty_table.item(row, 7)
+            if store_code_item:
+                receipt = dict(receipt)
+                receipt["store_code"] = store_code_item.text().strip()
+            sku_item = self.warranty_table.item(row, 8)
+            name_item = self.warranty_table.item(row, 9)
+            current_sku = sku_item.text() if sku_item else ""
+            current_name = name_item.text() if name_item else ""
+            self._populate_warranty_product_cell(row, receipt, current_sku, current_name)
+            return
+
+        # 保証期間(日)列でなければ何もしない
+        if column != 10:
+            return
+        if not hasattr(self, "warranty_table"):
+            return
+        id_item = self.warranty_table.item(row, 0)
+        date_item = self.warranty_table.item(row, 4)
+        days_item = self.warranty_table.item(row, 10)
+        if not id_item or not date_item or not days_item:
+            return
+        try:
+            receipt_id = int(id_item.text())
+        except ValueError:
+            return
+        purchase_date = date_item.text().strip()
+        try:
+            days = int(days_item.text().strip())
+        except (ValueError, TypeError):
+            return
+
+        # 日付計算
+        from datetime import datetime, timedelta
+        try:
+            base_date = datetime.strptime(purchase_date, "%Y-%m-%d")
+        except ValueError:
+            # 日付形式不正の場合は何もしない
+            return
+        final_date = base_date + timedelta(days=days)
+        final_str = final_date.strftime("%Y-%m-%d")
+
+        # テーブル更新（再帰呼び出し防止のためシグナル一時停止）
+        self.warranty_table.blockSignals(True)
+        self.warranty_table.setItem(row, 11, QTableWidgetItem(final_str))
+        self.warranty_table.blockSignals(False)
+
+        # DB更新
+        updates = {"warranty_days": days, "warranty_until": final_str}
+        self.receipt_db.update_receipt(receipt_id, updates)
+
+    def _populate_warranty_product_cell(self, row: int, receipt: Dict[str, Any], sku: str, product_name: str):
+        """
+        保証書一覧の SKU / 商品名セルにプルダウンを設定し、選択した商品からSKUを自動入力
+        """
+        # 既存テキストをいったん設定（編集途中の値も保持）
+        self.warranty_table.setItem(row, 8, QTableWidgetItem(sku))
+        self.warranty_table.setItem(row, 9, QTableWidgetItem(product_name))
+
+        # 候補取得：仕入DBの全レコードから、日付＋店舗コードが一致する商品を抽出
+        candidates = []
+        if self.product_widget and hasattr(self.product_widget, "purchase_all_records"):
+            purchase_date = receipt.get("purchase_date")
+            # 店舗コードはテーブル上の値を優先
+            store_code_item = self.warranty_table.item(row, 7)
+            store_code = store_code_item.text().strip() if store_code_item else receipt.get("store_code")
+            for rec in self.product_widget.purchase_all_records:
+                rec_date = rec.get("仕入れ日") or rec.get("purchase_date")
+                rec_store = rec.get("仕入先") or rec.get("store_code")
+                if not purchase_date or not store_code:
+                    continue
+                if rec_date == purchase_date and rec_store == store_code:
+                    cand_sku = rec.get("SKU") or rec.get("sku") or ""
+                    cand_name = rec.get("商品名") or rec.get("title") or ""
+                    if cand_name:
+                        candidates.append((cand_sku, cand_name))
+
+        # プルダウン(商品名)を作成
+        combo = QComboBox()
+        combo.addItem("（選択してください）", userData=None)
+        # 重複除去
+        seen = set()
+        for cand_sku, cand_name in candidates:
+            key = (cand_sku, cand_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            label = f"{cand_name} ({cand_sku})" if cand_sku else cand_name
+            combo.addItem(label, userData={"sku": cand_sku, "name": cand_name})
+
+        # 既存値があれば先頭に反映
+        if product_name and not candidates:
+            combo.addItem(f"{product_name} ({sku})" if sku else product_name, userData={"sku": sku, "name": product_name})
+
+        # 選択変更時の処理
+        def on_combo_changed(index: int, table_row=row):
+            data = combo.itemData(index)
+            if not data:
+                return
+            new_sku = data.get("sku") or ""
+            new_name = data.get("name") or ""
+            id_item = self.warranty_table.item(table_row, 0)
+            if not id_item:
+                return
+            try:
+                rec_id = int(id_item.text())
+            except ValueError:
+                return
+            # テーブル更新
+            self.warranty_table.blockSignals(True)
+            self.warranty_table.setItem(table_row, 8, QTableWidgetItem(new_sku))
+            self.warranty_table.setItem(table_row, 9, QTableWidgetItem(new_name))
+            self.warranty_table.blockSignals(False)
+            # DB更新
+            self.receipt_db.update_receipt(rec_id, {"sku": new_sku, "product_name": new_name})
+
+        combo.currentIndexChanged.connect(on_combo_changed)
+        self.warranty_table.setCellWidget(row, 8, combo)
+
     def load_receipt(self, item: QTableWidgetItem):
         """レシートを読み込み"""
         row = item.row()
@@ -1244,87 +1700,75 @@ class ReceiptWidget(QWidget):
         
         # 画像パスを取得
         image_path = None
-        
-        # current_receipt_dataから取得を試みる
         if self.current_receipt_data:
-            image_path = self.current_receipt_data.get('file_path')
-        
-        # レシートIDがある場合はDBから取得
+            image_path = self.current_receipt_data.get('file_path') or self.current_receipt_data.get('original_file_path')
         if not image_path and self.current_receipt_id:
             receipt = self.receipt_db.get_receipt(self.current_receipt_id)
             if receipt:
-                image_path = receipt.get('file_path')
-        
+                image_path = receipt.get('file_path') or receipt.get('original_file_path')
+
         if not image_path:
             QMessageBox.warning(self, "警告", "画像ファイルが見つかりません。")
             return
-        
-        # ファイルの存在確認
+
+        self._show_image_popup(image_path)
+
+    def _show_image_popup(self, image_path: str):
+        """指定パスの画像をポップアップ表示"""
         from pathlib import Path
         image_file = Path(image_path)
         if not image_file.exists():
             QMessageBox.warning(self, "警告", f"画像ファイルが存在しません:\n{image_path}")
             return
-        
-        # 画像表示ダイアログを作成
-        dialog = QDialog(self)
-        dialog.setWindowTitle("レシート画像")
-        
-        # 画像サイズを取得
+
         pixmap = QPixmap(str(image_file))
         original_width = pixmap.width()
         original_height = pixmap.height()
-        
-        # 画面サイズを取得して、適切なウィンドウサイズを設定
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(str(image_file.name))
+
         screen = dialog.screen().availableGeometry()
-        max_dialog_width = int(screen.width() * 0.9)  # 画面幅の90%
-        max_dialog_height = int(screen.height() * 0.9)  # 画面高さの90%
-        
-        # 画像を画面サイズに合わせて縮小（アスペクト比を保持）
+        max_dialog_width = int(screen.width() * 0.9)
+        max_dialog_height = int(screen.height() * 0.9)
+
         if original_width > max_dialog_width or original_height > max_dialog_height:
             scaled_pixmap = pixmap.scaled(
                 max_dialog_width, max_dialog_height,
                 Qt.KeepAspectRatio, Qt.SmoothTransformation
             )
         else:
-            # 画像が小さい場合は元のサイズで表示
             scaled_pixmap = pixmap
-        
-        # ダイアログサイズを画像サイズに合わせる（ただし最大サイズは制限）
+
         dialog_width = min(scaled_pixmap.width() + 40, max_dialog_width)
-        dialog_height = min(scaled_pixmap.height() + 100, max_dialog_height)  # ボタン分の余白を追加
-        
+        dialog_height = min(scaled_pixmap.height() + 100, max_dialog_height)
+
         dialog.setMinimumSize(dialog_width, dialog_height)
         dialog.resize(dialog_width, dialog_height)
-        
+
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
-        
-        # スクロールエリアを作成
+
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setAlignment(Qt.AlignCenter)
-        scroll_area.setMinimumSize(scaled_pixmap.width(), scaled_pixmap.height())
-        
-        # 画像ラベルを作成
+
         image_label = QLabel()
         image_label.setPixmap(scaled_pixmap)
         image_label.setAlignment(Qt.AlignCenter)
-        image_label.setMinimumSize(scaled_pixmap.width(), scaled_pixmap.height())
-        
         scroll_area.setWidget(image_label)
         layout.addWidget(scroll_area)
-        
-        # 画像情報ラベル（元のサイズを表示）
+
         info_label = QLabel(f"画像サイズ: {original_width} x {original_height} px")
         info_label.setStyleSheet("color: #888888; font-size: 10px;")
         layout.addWidget(info_label)
-        
-        # 閉じるボタン
+
         button_box = QDialogButtonBox(QDialogButtonBox.Close)
         button_box.rejected.connect(dialog.close)
         layout.addWidget(button_box)
-        
-        dialog.exec()
+
+        # モーダルではなくモデルレスで表示（アプリ操作をブロックしない）
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.show()
 

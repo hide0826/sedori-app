@@ -322,10 +322,10 @@ class ProductWidget(QWidget):
         self.tab_widget = QTabWidget()
         layout.addWidget(self.tab_widget)
 
-        # 商品DBタブ
+        # 商品一覧タブはUIには追加しないが、既存処理のため初期化だけ行う
         self.product_tab = QWidget()
         self.setup_product_tab()
-        self.tab_widget.addTab(self.product_tab, "商品一覧")
+        self.product_tab.hide()
 
         # 仕入DBタブ
         self.purchase_tab = QWidget()
@@ -1335,6 +1335,3 @@ class ProductWidget(QWidget):
             logging.error(f"Failed to update image paths in memory: {e}")
             return False, 0, None
             
-    def set_font(self, font):
-        self.product_table.setFont(font)
-

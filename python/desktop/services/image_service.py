@@ -11,7 +11,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import List, Dict, Any, Optional, NamedTuple
+from typing import List, Dict, Any, Optional, NamedTuple, Callable
 from datetime import datetime
 from PIL import Image, ExifTags, ImageEnhance
 import logging
@@ -107,13 +107,13 @@ class ImageService:
         
         return None
     
-    def _preprocess_image_for_barcode(self, image_path: str, max_size: int = 1200) -> Optional[str]:
+    def _preprocess_image_for_barcode(self, image_path: str, max_size: int = 1024) -> Optional[str]:
         """
         バーコード読み取り用に画像を前処理（リサイズ・グレースケール化・中央クロップ）
         
         Args:
             image_path: 元の画像ファイルのパス
-            max_size: リサイズ後の最大幅/高さ（デフォルト: 1200px）
+            max_size: リサイズ後の最大幅/高さ（デフォルト: 1024px）
         
         Returns:
             前処理済み画像の一時ファイルパス、エラー時はNone
@@ -319,8 +319,15 @@ class ImageService:
         
         return None
     
-    def scan_directory(self, directory_path: str, skip_barcode_reading: bool = True, 
-                       skip_exif: bool = True, skip_image_size: bool = True) -> List[ImageRecord]:
+    def scan_directory(
+        self,
+        directory_path: str,
+        skip_barcode_reading: bool = True,
+        skip_exif: bool = True,
+        skip_image_size: bool = True,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        file_cache: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> List[ImageRecord]:
         """
         ディレクトリをスキャンして画像ファイルを取得
         
@@ -329,6 +336,8 @@ class ImageService:
             skip_barcode_reading: Trueの場合、バーコード読み取りをスキップ（ファイル名のみチェック）
             skip_exif: Trueの場合、EXIF読み取りをスキップ（ファイル更新日時を使用、高速化）
             skip_image_size: Trueの場合、画像サイズ取得をスキップ（0,0で登録、高速化）
+            progress_callback: 進捗コールバック
+            file_cache: ファイルパスをキーとするキャッシュ情報（mtime, recordを含む）
         
         Returns:
             画像レコードのリスト（撮影日時順）
@@ -345,13 +354,50 @@ class ImageService:
         for ext in self.SUPPORTED_EXTENSIONS:
             image_paths.extend(directory.rglob(f"*{ext}"))
         
+        total_images = len(image_paths)
+        if progress_callback:
+            progress_callback(0, total_images)
+        
         # 各画像を処理
-        for img_path in image_paths:
+        for index, img_path in enumerate(image_paths, start=1):
             try:
+                path_str = str(img_path)
+                current_mtime = 0.0
+                try:
+                    current_mtime = os.path.getmtime(path_str)
+                except Exception:
+                    pass
+
+                # キャッシュヒット判定
+                cached_data = file_cache.get(path_str) if file_cache else None
+                if cached_data:
+                    cached_mtime = cached_data.get("mtime")
+                    # mtimeが指定されていない(None)、または一致すればキャッシュを利用
+                    if cached_mtime is None or abs(current_mtime - cached_mtime) < 0.001:
+                        # キャッシュからレコードを復元
+                        cached_record = cached_data.get("record")
+                        if cached_record:
+                            records.append(cached_record)
+                            continue
+                        
+                        # レコードそのものがなければdictから復元を試みる
+                        db_row = cached_data.get("db_row")
+                        if db_row:
+                            capture_time_str = db_row.get("capture_time")
+                            capture_dt = datetime.fromisoformat(capture_time_str) if capture_time_str else None
+                            
+                            # DBにはwidth/heightがない場合があるので注意（必要なら追加スキャン）
+                            # ここでは高速化優先で0を入れるか、キャッシュにあればそれを使う
+                            # ImageRecordはNamedTupleなので後から変更不可。
+                            # DBスキーマにwidth/heightがないため、キャッシュデータに含める必要がある
+                            # 呼び出し元が `record` オブジェクトを渡してくれることを期待する
+                            pass
+
+                # キャッシュミスまたは更新あり：通常スキャン
                 # EXIFから撮影日時を取得（スキップ可能）
                 capture_dt = None
                 if not skip_exif:
-                    capture_dt = self.get_exif_datetime(str(img_path))
+                    capture_dt = self.get_exif_datetime(path_str)
                 
                 # JANコードを抽出（優先順位: 画像内のバーコード > ファイル名）
                 jan_candidate = None
@@ -364,7 +410,7 @@ class ImageService:
                     _try_import_pyzxing()
                     _try_import_pyzbar()
                     if PYZXING_AVAILABLE or PYZBAR_AVAILABLE:
-                        jan_candidate = self.read_barcode_from_image(str(img_path))
+                        jan_candidate = self.read_barcode_from_image(path_str)
                 
                 # 画像サイズを取得（スキップ可能）
                 width, height = 0, 0
@@ -377,15 +423,14 @@ class ImageService:
                 
                 # 撮影日時が取得できない場合はファイル更新日時を使用（高速）
                 if capture_dt is None:
-                    try:
-                        mtime = os.path.getmtime(img_path)
-                        capture_dt = datetime.fromtimestamp(mtime)
-                    except Exception:
+                    if current_mtime > 0:
+                        capture_dt = datetime.fromtimestamp(current_mtime)
+                    else:
                         capture_dt = None
                 
                 # 全画像を追加（JANコードなしも含む）
                 records.append(ImageRecord(
-                    path=str(img_path),
+                    path=path_str,
                     capture_dt=capture_dt,
                     jan_candidate=jan_candidate,
                     width=width,
@@ -394,6 +439,9 @@ class ImageService:
             except Exception as e:
                 logger.warning(f"Failed to process image {img_path}: {e}")
                 continue
+            finally:
+                if progress_callback:
+                    progress_callback(index, total_images)
         
         # 撮影日時順にソート
         records.sort(key=lambda r: r.capture_dt if r.capture_dt else datetime.min)

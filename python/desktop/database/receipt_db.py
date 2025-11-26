@@ -99,6 +99,10 @@ class ReceiptDatabase:
             ("receipt_id", "TEXT"),  # カスタムレシートID（日付_店舗コード_連番）
             ("original_file_path", "TEXT"),  # 元のファイルパス（リネーム用）
             ("purchase_time", "TEXT"),  # 購入時刻（HH:MM形式）
+            ("sku", "TEXT"),                # 保証書連携用SKU
+            ("product_name", "TEXT"),       # 保証書連携用商品名
+            ("warranty_days", "INTEGER"),   # 保証期間（日数）
+            ("warranty_until", "TEXT"),     # 保証終了日（yyyy-MM-dd）
         ):
             _ensure_column("receipts", name, ctype)
 
@@ -242,6 +246,22 @@ class ReceiptDatabase:
         if row:
             return (row[0], row[1])
         return None
+
+    # ==== 削除系 ====
+    def delete_receipt_by_id(self, receipt_id: int) -> bool:
+        """IDを指定してレシートを削除"""
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM receipts WHERE id = ?", (receipt_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def delete_all_receipts(self) -> int:
+        """レシートを全削除（テスト用）"""
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM receipts")
+        deleted = cur.rowcount
+        self.conn.commit()
+        return deleted or 0
 
     def close(self) -> None:
         if self.conn:

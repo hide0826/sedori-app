@@ -33,12 +33,11 @@ from ui.route_summary_widget import RouteSummaryWidget
 from ui.route_list_widget import RouteListWidget
 from ui.route_visit_widget import RouteVisitLogWidget
 from ui.analysis_widget import AnalysisWidget
-from ui.receipt_widget import ReceiptWidget
-from ui.warranty_widget import WarrantyWidget
 from ui.product_widget import ProductWidget
 from ui.condition_template_widget import ConditionTemplateWidget
 from ui.barcode_checker_widget import BarcodeCheckerWidget
 from ui.image_manager_widget import ImageManagerWidget
+from ui.evidence_manager_widget import EvidenceManagerWidget
 
 
 class APIServerThread(QThread):
@@ -182,15 +181,13 @@ class MainWindow(QMainWindow):
         self.analysis_widget = AnalysisWidget()
         self.tab_widget.addTab(self.analysis_widget, "分析")
         
-        # レシート管理タブ（仕入管理ウィジェット参照を渡す）
-        self.receipt_widget = ReceiptWidget(self.api_client, inventory_widget=self.inventory_widget)
-        # ReceiptWidgetにProductWidgetへの参照を設定
-        self.receipt_widget.set_product_widget(self.product_widget)
-        self.tab_widget.addTab(self.receipt_widget, "レシート管理")
-        
-        # 保証書管理タブ
-        self.warranty_widget = WarrantyWidget(self.api_client)
-        self.tab_widget.addTab(self.warranty_widget, "保証書管理")
+        # 証憑管理タブ（レシート + 保証書統合）
+        self.evidence_widget = EvidenceManagerWidget(
+            self.api_client,
+            inventory_widget=self.inventory_widget,
+            product_widget=self.product_widget
+        )
+        self.tab_widget.addTab(self.evidence_widget, "証憑管理")
         
         # バーコードチェッカータブ
         self.barcode_checker_widget = BarcodeCheckerWidget()

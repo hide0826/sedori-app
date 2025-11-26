@@ -17,15 +17,16 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 import logging
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QMimeData
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QMimeData, QUrl
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QTreeWidget, QTreeWidgetItem, QListWidget,
     QListWidgetItem, QSplitter, QGroupBox, QFormLayout,
     QFileDialog, QMessageBox, QSizePolicy, QTextEdit, QProgressDialog,
-    QInputDialog, QMenu, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox
+    QInputDialog, QMenu, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
+    QTabWidget
 )
-from PySide6.QtGui import QPixmap, QFont, QDrag, QDropEvent, QImageReader, QImage
+from PySide6.QtGui import QPixmap, QFont, QDrag, QDropEvent, QImageReader, QImage, QDesktopServices, QCursor
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -233,6 +234,30 @@ class ImageListWidget(QListWidget):
         drag.exec_(supportedActions)
 
 
+class RegistrationTableWidget(QTableWidget):
+    """画像登録タブ用テーブル（ドラッグ＆ドロップ対応）"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+
+    def startDrag(self, supportedActions):
+        item = self.currentItem()
+        if not item:
+            return super().startDrag(supportedActions)
+        image_path = item.data(Qt.UserRole)
+        if not image_path:
+            return super().startDrag(supportedActions)
+
+        mime_data = QMimeData()
+        mime_data.setUrls([QUrl.fromLocalFile(image_path)])
+        mime_data.setText(image_path)
+
+        drag = QDrag(self)
+        drag.setMimeData(mime_data)
+        drag.exec_(supportedActions)
+
+
 class ImageLoadThread(QThread):
     """画像読み込みスレッド（大量画像対応・並列化）"""
     progress = Signal(int, int)  # 現在の進捗、総数
@@ -315,6 +340,7 @@ class ImageManagerWidget(QWidget):
         self.selected_image_path: Optional[str] = None
         self._scan_cancelled = False
         self._jan_title_cache: Dict[str, str] = {}
+        self.registration_records: List[Dict[str, Any]] = []
         
         # 設定ファイルのパス
         self.config_path = Path(__file__).parent.parent.parent.parent / "config" / "inventory_settings.json"
@@ -332,7 +358,15 @@ class ImageManagerWidget(QWidget):
     
     def setup_ui(self):
         """UIのセットアップ"""
-        layout = QVBoxLayout(self)
+        root_layout = QVBoxLayout(self)
+        root_layout.setSpacing(10)
+        root_layout.setContentsMargins(10, 10, 10, 10)
+
+        self.tab_widget = QTabWidget()
+        root_layout.addWidget(self.tab_widget)
+
+        self.main_tab = QWidget()
+        layout = QVBoxLayout(self.main_tab)
         layout.setSpacing(10)
         layout.setContentsMargins(10, 10, 10, 10)
         
@@ -477,6 +511,10 @@ class ImageManagerWidget(QWidget):
         splitter.setSizes([250, 500, 250])
         
         layout.addWidget(splitter)
+
+        self.tab_widget.addTab(self.main_tab, "画像管理")
+        self.setup_registration_tab()
+        self.tab_widget.addTab(self.registration_tab, "画像登録")
         
         # 初期状態でボタンを無効化
         self.rotate_left_btn.setEnabled(False)
@@ -1383,7 +1421,7 @@ class ImageManagerWidget(QWidget):
 
                 try:
                     # 更新処理を実行（既存画像はスキップ）
-                    success, added_count = self.product_widget.update_image_paths_for_jan(
+                    success, added_count, record_snapshot = self.product_widget.update_image_paths_for_jan(
                         jan, image_paths, all_records, skip_existing=True
                     )
 
@@ -1394,8 +1432,9 @@ class ImageManagerWidget(QWidget):
                             if skipped > 0:
                                 skipped_count += skipped
                         else:
-                            # 全て既に登録済み
                             skipped_count += len(image_paths)
+                        if record_snapshot:
+                            self.add_registration_entry(record_snapshot)
                     else:
                         failed_groups.append(jan)
 
@@ -1422,6 +1461,184 @@ class ImageManagerWidget(QWidget):
         except Exception as e:
             progress.close()
             QMessageBox.critical(self, "エラー", f"確定処理中にエラーが発生しました:\n{e}")
+
+    def setup_registration_tab(self):
+        """画像登録タブのセットアップ"""
+        self.registration_tab = QWidget()
+        layout = QVBoxLayout(self.registration_tab)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        description = QLabel(
+            "確定処理で仕入DBに登録した商品の情報を表示します。\n"
+            "アプリ再起動時に自動でクリアされる一時的なリストです。"
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        self.registration_table = RegistrationTableWidget()
+        self.registration_columns = [
+            "コンディション", "SKU", "ASIN", "商品名",
+            "画像1", "画像2", "画像3", "画像4", "画像5", "画像6"
+        ]
+        self.registration_table.setColumnCount(len(self.registration_columns))
+        self.registration_table.setHorizontalHeaderLabels(self.registration_columns)
+        self.registration_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.registration_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.registration_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.registration_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.registration_table.verticalHeader().setVisible(False)
+        self.registration_table.setDragEnabled(True)
+        self.registration_table.cellDoubleClicked.connect(self.on_registration_cell_double_clicked)
+        self.registration_table.cellClicked.connect(self.on_registration_cell_clicked)
+        layout.addWidget(self.registration_table)
+
+        preview_group = QGroupBox("プレビュー")
+        preview_layout = QVBoxLayout(preview_group)
+        self.registration_preview_label = QLabel("画像を選択してください")
+        self.registration_preview_label.setAlignment(Qt.AlignCenter)
+        self.registration_preview_label.setMinimumHeight(200)
+        self.registration_preview_label.setStyleSheet("border: 1px solid gray; background-color: #f8f8f8;")
+        self.registration_preview_label.setScaledContents(False)
+        preview_layout.addWidget(self.registration_preview_label)
+        layout.addWidget(preview_group)
+
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        self.clear_registration_btn = QPushButton("一覧をクリア")
+        self.clear_registration_btn.clicked.connect(self.clear_registration_records)
+        button_layout.addWidget(self.clear_registration_btn)
+        layout.addLayout(button_layout)
+
+    def _get_record_value(self, record: Dict[str, Any], keys: List[str]) -> str:
+        """複数の候補キーから値を取得"""
+        for key in keys:
+            value = record.get(key)
+            if value not in (None, ""):
+                return str(value)
+        return ""
+
+    def add_registration_entry(self, record: Dict[str, Any]):
+        """仕入DBレコード情報を画像登録タブに追加"""
+        entry = {
+            "condition": self._get_record_value(record, ["コンディション", "condition"]),
+            "sku": self._get_record_value(record, ["SKU", "sku"]),
+            "asin": self._get_record_value(record, ["ASIN", "asin"]),
+            "product_name": self._get_record_value(record, ["商品名", "product_name", "title"]),
+            "images": []
+        }
+        for i in range(1, 7):
+            entry["images"].append(
+                self._get_record_value(
+                    record,
+                    [f"画像{i}", f"image_{i}", f"画像 {i}"]
+                )
+            )
+
+        self.registration_records.append(entry)
+        self.update_registration_table()
+
+    def update_registration_table(self):
+        """画像登録タブのテーブルを更新"""
+        self.registration_table.setRowCount(len(self.registration_records))
+
+        for row, entry in enumerate(self.registration_records):
+            values = [
+                entry["condition"],
+                entry["sku"],
+                entry["asin"],
+                entry["product_name"]
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                self.registration_table.setItem(row, col, item)
+
+            for idx, image_path in enumerate(entry["images"]):
+                col = 4 + idx
+                display_text = Path(image_path).name if image_path else ""
+                item = QTableWidgetItem(display_text)
+                if image_path:
+                    item.setData(Qt.UserRole, image_path)
+                    item.setToolTip(image_path)
+                    item.setFlags(item.flags() | Qt.ItemIsDragEnabled | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                else:
+                    item.setFlags(item.flags() & ~Qt.ItemIsDragEnabled)
+                self.registration_table.setItem(row, col, item)
+
+    def clear_registration_records(self):
+        """画像登録リストをクリア"""
+        if not self.registration_records:
+            return
+        reply = QMessageBox.question(
+            self,
+            "確認",
+            "画像登録リストをクリアしますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.registration_records = []
+            self.registration_table.setRowCount(0)
+            self._set_registration_preview(None)
+
+    def on_registration_cell_double_clicked(self, row: int, column: int):
+        """画像列ダブルクリックでファイルを開く"""
+        if column < 4:
+            return
+        item = self.registration_table.item(row, column)
+        if not item:
+            return
+        image_path = item.data(Qt.UserRole)
+        if not image_path:
+            return
+        file_path = Path(image_path)
+        if not file_path.exists():
+            QMessageBox.warning(self, "エラー", f"画像ファイルが見つかりません:\n{image_path}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(file_path)))
+
+    def on_registration_cell_clicked(self, row: int, column: int):
+        """画像選択時にプレビュー表示"""
+        if column < 4:
+            self._set_registration_preview(None)
+            return
+        item = self.registration_table.item(row, column)
+        if not item:
+            self._set_registration_preview(None)
+            return
+        image_path = item.data(Qt.UserRole)
+        self._set_registration_preview(image_path)
+
+    def _set_registration_preview(self, image_path: Optional[str]):
+        """プレビュー画像の更新"""
+        if not image_path:
+            self.registration_preview_label.setText("画像を選択してください")
+            self.registration_preview_label.setPixmap(QPixmap())
+            return
+
+        file_path = Path(image_path)
+        if not file_path.exists():
+            self.registration_preview_label.setText("画像ファイルが見つかりません")
+            self.registration_preview_label.setPixmap(QPixmap())
+            return
+
+        pixmap = QPixmap(str(file_path))
+        if pixmap.isNull():
+            self.registration_preview_label.setText("画像を読み込めませんでした")
+            self.registration_preview_label.setPixmap(QPixmap())
+            return
+
+        max_width = self.registration_preview_label.width() - 20
+        max_height = self.registration_preview_label.height() - 20
+        scaled = pixmap.scaled(
+            max_width,
+            max_height,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
+        )
+        self.registration_preview_label.setPixmap(scaled)
+        self.registration_preview_label.setAlignment(Qt.AlignCenter)
+        self.registration_preview_label.setText("")
 
     def on_tree_context_menu(self, position):
         """ツリーのコンテキストメニュー"""

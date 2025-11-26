@@ -33,16 +33,33 @@ def test_gcv_ocr(image_path: str):
     try:
         # パスを正規化（クォートを除去）
         image_path_str = str(image_path).strip().strip('"').strip("'")
-        image_path = Path(image_path_str)
         
-        if not image_path.exists():
-            print(f"[ERROR] 画像ファイルが見つかりません")
+        # パスをPathオブジェクトに変換（日本語パス対応）
+        try:
+            image_path = Path(image_path_str)
+        except Exception as path_error:
+            print(f"[ERROR] パス変換エラー: {path_error}")
             print(f"        入力パス: {image_path_str}")
-            try:
-                abs_path = image_path.resolve()
-                print(f"        絶対パス: {abs_path}")
-            except Exception:
-                pass
+            import traceback
+            traceback.print_exc()
+            return 1
+        
+        # ファイルの存在確認（日本語パス対応）
+        try:
+            if not image_path.exists():
+                print(f"[ERROR] 画像ファイルが見つかりません")
+                print(f"        入力パス: {image_path_str}")
+                try:
+                    abs_path = image_path.resolve()
+                    print(f"        絶対パス: {abs_path}")
+                except Exception as resolve_error:
+                    print(f"        パス解決エラー: {resolve_error}")
+                return 1
+        except Exception as exists_error:
+            print(f"[ERROR] ファイル存在確認エラー: {exists_error}")
+            print(f"        入力パス: {image_path_str}")
+            import traceback
+            traceback.print_exc()
             return 1
     except Exception as e:
         print(f"[ERROR] パス解析エラー: {e}")

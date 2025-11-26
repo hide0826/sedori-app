@@ -203,23 +203,23 @@ class ProductDatabase:
     def find_by_date_and_asin(self, purchase_date: str, asin: str) -> Optional[Dict[str, Any]]:
         """
         仕入れ日とASINで商品を検索する
-        
+
         Args:
             purchase_date: 仕入れ日（yyyy-MM-dd または yyyy/MM/dd 形式）
             asin: ASINコード
-        
+
         Returns:
             マッチした商品情報（最初の1件）、見つからない場合はNone
         """
         if not purchase_date or not asin:
             return None
-        
+
         # 日付形式を正規化（yyyy-MM-dd または yyyy/MM/dd を yyyy-MM-dd に統一）
         normalized_date = purchase_date.replace('/', '-')
         # 時刻部分がある場合は日付部分のみ抽出
         if ' ' in normalized_date:
             normalized_date = normalized_date.split(' ')[0]
-        
+
         cur = self.conn.cursor()
         # 仕入れ日とASINで検索（ASINは大文字小文字を区別しない）
         cur.execute(
@@ -232,22 +232,22 @@ class ProductDatabase:
     def find_by_jan(self, jan: str) -> List[Dict[str, Any]]:
         """
         JANコードで商品を検索する
-        
+
         Args:
             jan: JANコード（13桁）
-        
+
         Returns:
             マッチした商品情報のリスト（複数件の可能性がある）
         """
         if not jan:
             return []
-        
+
         # JANコードを正規化（数字のみ抽出）
         normalized_jan = ''.join(c for c in jan if c.isdigit())
-        
+
         if not normalized_jan:
             return []
-        
+
         cur = self.conn.cursor()
         # JANコードで検索（部分一致も考慮）
         cur.execute(
