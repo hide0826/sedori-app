@@ -576,10 +576,20 @@ class RepricerWidget(QWidget):
         # 結果テーブルの更新
         self.update_result_table(result)
         
+        auto_save_message = ""
+        try:
+            saved_path = self.auto_save_results_to_source_dir()
+            if saved_path:
+                auto_save_message = f"\n自動保存先: {saved_path}"
+            else:
+                auto_save_message = "\n自動保存に失敗しました。「結果をCSV保存」から手動保存してください。"
+        except Exception as e:
+            auto_save_message = f"\n自動保存に失敗しました（{e}）。「結果をCSV保存」から手動保存してください。"
+        
         QMessageBox.information(
             self, 
             "価格改定完了", 
-            f"価格改定が完了しました\n更新行数: {result['summary']['updated_rows']}"
+            f"価格改定が完了しました\n更新行数: {result['summary']['updated_rows']}{auto_save_message}"
         )
         
     def on_repricing_error(self, error_message):
@@ -713,6 +723,17 @@ class RepricerWidget(QWidget):
             if counter > 999:
                 return file_path
     
+    def auto_save_results_to_source_dir(self):
+        """元CSVと同じフォルダに自動保存"""
+        if not self.repricing_result or not self.csv_path:
+            return None
+        
+        source_path = Path(self.csv_path)
+        source_dir = str(source_path.parent)
+        auto_filename = f"{source_path.stem}_repriced.csv"
+        target_path = self._get_unique_file_path(source_dir, auto_filename)
+        return self._write_results_to_csv(target_path)
+    
     def save_results(self):
         """結果のCSV保存"""
         if not self.repricing_result:
@@ -751,194 +772,196 @@ class RepricerWidget(QWidget):
         
         if file_path:
             try:
-                # 結果をCSVファイルに保存
-                items = self.repricing_result['items']
-                print(f"[DEBUG CSV保存] 保存開始: {len(items)}件のアイテム")
-                
-                # 元ファイルのデータを読み込んで、priceとpriceTraceのみを変更
-                from utils.csv_io import csv_io
-                original_df = csv_io.read_csv(self.csv_path)
-                
-                if original_df is None:
-                    QMessageBox.warning(self, "エラー", "元のCSVファイルを読み込めませんでした")
-                    return
-                
-                # 価格改定結果を辞書に変換（SKUをキーとして）
-                repricing_dict = {}
-                for item in items:
-                    sku = self.clean_excel_formula(str(item.get('sku', '')))
-                    
-                    # 安全な型変換
-                    try:
-                        new_price = float(item.get('new_price', 0)) if item.get('new_price') is not None else 0
-                        new_price = int(new_price) if new_price > 0 else 0
-                    except (ValueError, TypeError):
-                        new_price = 0
-                    
-                    try:
-                        trace_value = item.get('priceTraceChange', item.get('price_trace_change', 0))
-                        if trace_value is not None and str(trace_value).strip():
-                            # 数値文字列の場合のみint変換
-                            if str(trace_value).replace('.', '').replace('-', '').isdigit():
-                                price_trace = int(float(trace_value))
-                            else:
-                                # 文字列の場合は0として扱う
-                                price_trace = 0
-                        else:
-                            price_trace = 0
-                    except (ValueError, TypeError):
-                        price_trace = 0
-                    
-                    repricing_dict[sku] = {
-                        'new_price': new_price,
-                        'price_trace': price_trace
-                    }
-                
-                # 元ファイルのデータをコピーして、該当する行のみpriceとpriceTraceを更新
-                # 価格やpriceTraceに変更がない場合は除外する
-                data = []
-                for _, row in original_df.iterrows():
-                    sku = self.clean_excel_formula(str(row.get('SKU', '')))
-                    
-                    # 元の価格とpriceTraceを取得
-                    original_price = float(row.get('price', 0)) if pd.notna(row.get('price')) else 0
-                    original_price_trace = float(row.get('priceTrace', 0)) if pd.notna(row.get('priceTrace')) else 0
-                    
-                    # 価格改定対象の場合はpriceとpriceTraceを更新
-                    if sku in repricing_dict:
-                        new_price = repricing_dict[sku]['new_price']
-                        new_price_trace = repricing_dict[sku]['price_trace']
-                        
-                        # 価格とpriceTraceの両方が変更されていない場合はスキップ（CSVに保存しない）
-                        if new_price == original_price and new_price_trace == original_price_trace:
-                            print(f"[DEBUG CSV保存] スキップ: {sku} (変更なし)")
-                            continue
-                        
-                        row_data = row.to_dict()
-                        row_data['price'] = new_price
-                        row_data['priceTrace'] = new_price_trace
-                        # conditionNoteは空にする
-                        row_data['conditionNote'] = ""
-                        data.append(row_data)
-                    else:
-                        # 対象外の場合は元のデータをそのまま使用
-                        row_data = row.to_dict()
-                        data.append(row_data)
-                
-                df = pd.DataFrame(data)
-                
-                # 元ファイルの書式に完全に合わせるための処理
-                # 0. 空の値を保持（nanを空文字に変換）
-                df = df.fillna('')  # 全てのnan値を空文字に変換
-                # 1. 数値列を文字列として出力（クォート付き）
-                numeric_columns = ['number', 'price', 'cost', 'akaji', 'takane', 'condition', 'priceTrace', 'amazon-fee', 'shipping-price', 'profit']
-                for col in numeric_columns:
-                    if col in df.columns:
-                        df[col] = df[col].astype(str)
-                        # 文字列変換後もnan値を空文字に変換
-                        df[col] = df[col].replace('nan', '')
-                
-                # 2. Excel数式記法の修正（プライスター対応）
-                text_columns = ['SKU', 'ASIN', 'title', 'conditionNote', 'leadtime', 'add-delete']
-                for col in text_columns:
-                    if col in df.columns:
-                        try:
-                            # 文字列型に変換
-                            df[col] = df[col].astype(str)
-                            # nan値を空文字に変換
-                            df[col] = df[col].replace('nan', '')
-                            # Excel数式記法をプライスター形式に変換
-                            df[col] = df[col].str.replace(r'^"(.+)"$', r'=\1', regex=True)  # "値" → =値
-                        except Exception as e:
-                            print(f"[WARNING CSV保存] 列 {col} の処理でエラー: {e}")
-                            # エラーが発生した場合は文字列型に変換するだけ
-                            df[col] = df[col].astype(str)
-                            df[col] = df[col].replace('nan', '')
-                
-                # 3. Shift-JISでエンコードできない文字の置換処理
-                def clean_for_shift_jis(text):
-                    """Shift-JISでエンコードできない文字を置換"""
-                    if pd.isna(text) or text == '':
-                        return text
-                    
-                    # 文字列に変換
-                    text = str(text)
-                    
-                    # Shift-JISでエンコードできない文字の置換
-                    replacements = {
-                        '\uff5e': '~',  # 全角チルダ → 半角チルダ
-                        '\uff0d': '-',  # 全角ハイフン → 半角ハイフン
-                        '\uff0c': ',',  # 全角カンマ → 半角カンマ
-                        '\uff1a': ':',  # 全角コロン → 半角コロン
-                        '\uff1b': ';',  # 全角セミコロン → 半角セミコロン
-                        '\uff01': '!',  # 全角エクスクラメーション → 半角
-                        '\uff1f': '?',  # 全角クエスチョン → 半角
-                        '\uff08': '(',  # 全角括弧 → 半角括弧
-                        '\uff09': ')',  # 全角括弧 → 半角括弧
-                        '\uff3b': '[',  # 全角角括弧 → 半角角括弧
-                        '\uff3d': ']',  # 全角角括弧 → 半角角括弧
-                        '\uff5b': '{',  # 全角波括弧 → 半角波括弧
-                        '\uff5d': '}',  # 全角波括弧 → 半角波括弧
-                        '\uff0a': '\n',  # 全角改行 → 半角改行
-                        '\uff20': '@',  # 全角アットマーク → 半角アットマーク
-                        '\uff23': '#',  # 全角シャープ → 半角シャープ
-                        '\uff24': '$',  # 全角ドル → 半角ドル
-                        '\uff25': '%',  # 全角パーセント → 半角パーセント
-                        '\uff26': '&',  # 全角アンパサンド → 半角アンパサンド
-                        '\uff2a': '*',  # 全角アスタリスク → 半角アスタリスク
-                        '\uff2b': '+',  # 全角プラス → 半角プラス
-                        '\uff2e': '.',  # 全角ピリオド → 半角ピリオド
-                        '\uff2f': '/',  # 全角スラッシュ → 半角スラッシュ
-                        '\uff3c': '<',  # 全角小なり → 半角小なり
-                        '\uff3e': '>',  # 全角大なり → 半角大なり
-                        '\uff3f': '_',  # 全角アンダースコア → 半角アンダースコア
-                        '\uff40': '`',  # 全角バッククォート → 半角バッククォート
-                        '\uff5c': '|',  # 全角パイプ → 半角パイプ
-                    }
-                    
-                    for full_width, half_width in replacements.items():
-                        text = text.replace(full_width, half_width)
-                    
-                    return text
-                
-                # テキスト列の文字置換処理
-                text_columns = ['SKU', 'ASIN', 'title', 'conditionNote', 'leadtime', 'add-delete']
-                for col in text_columns:
-                    if col in df.columns:
-                        df[col] = df[col].apply(clean_for_shift_jis)
-                
-                # 4. 元ファイルと同じ形式でCSV保存（プライスター対応）
-                try:
-                    from pathlib import Path
-                    from desktop.utils.file_naming import resolve_unique_path
-                    target = resolve_unique_path(Path(file_path))
-                    df.to_csv(str(target), index=False, encoding='shift_jis', quoting=0)  # Shift-JIS、クォートなし
-                except UnicodeEncodeError as e:
-                    # Shift-JISでエンコードできない文字が残っている場合の追加処理
-                    print(f"[WARNING CSV保存] Shift-JISエンコードエラー: {e}")
-                    print(f"[WARNING CSV保存] エラー文字を除去して再試行...")
-                    
-                    # エラーが発生した列を特定して処理
-                    for col in df.columns:
-                        try:
-                            # 各列をShift-JISでエンコードテスト
-                            df[col].astype(str).str.encode('shift_jis')
-                        except UnicodeEncodeError:
-                            # エラーが発生した列の文字を安全な文字に置換
-                            df[col] = df[col].astype(str).str.encode('shift_jis', errors='replace').str.decode('shift_jis')
-                    
-                    # 再試行（連番解決後のパスで）
-                    from pathlib import Path
-                    from desktop.utils.file_naming import resolve_unique_path
-                    target = resolve_unique_path(Path(file_path))
-                    df.to_csv(str(target), index=False, encoding='shift_jis', quoting=0)
-                
-                print(f"[DEBUG CSV保存] 保存完了: {file_path}")
-                QMessageBox.information(self, "保存完了", f"結果を保存しました:\n{file_path}")
-                
+                saved_path = self._write_results_to_csv(file_path)
+                print(f"[DEBUG CSV保存] 保存完了: {saved_path}")
+                QMessageBox.information(self, "保存完了", f"結果を保存しました:\n{saved_path}")
             except Exception as e:
                 print(f"[ERROR CSV保存] 保存エラー: {str(e)}")
                 print(f"[ERROR CSV保存] エラータイプ: {type(e).__name__}")
                 import traceback
                 print(f"[ERROR CSV保存] トレースバック: {traceback.format_exc()}")
                 QMessageBox.critical(self, "エラー", f"保存に失敗しました:\n{str(e)}")
+
+    def _write_results_to_csv(self, file_path: str) -> str:
+        """価格改定結果を指定パスに保存して保存先パスを返す"""
+        if not self.repricing_result:
+            raise ValueError("保存対象の結果がありません。")
+        
+        items = self.repricing_result['items']
+        print(f"[DEBUG CSV保存] 保存開始: {len(items)}件のアイテム")
+        
+        # 元ファイルのデータを読み込んで、priceとpriceTraceのみを変更
+        from utils.csv_io import csv_io
+        original_df = csv_io.read_csv(self.csv_path)
+        
+        if original_df is None:
+            raise RuntimeError("元のCSVファイルを読み込めませんでした")
+        
+        # 価格改定結果を辞書に変換（SKUをキーとして）
+        repricing_dict = {}
+        for item in items:
+            sku = self.clean_excel_formula(str(item.get('sku', '')))
+            
+            # 安全な型変換
+            try:
+                new_price = float(item.get('new_price', 0)) if item.get('new_price') is not None else 0
+                new_price = int(new_price) if new_price > 0 else 0
+            except (ValueError, TypeError):
+                new_price = 0
+            
+            try:
+                trace_value = item.get('priceTraceChange', item.get('price_trace_change', 0))
+                if trace_value is not None and str(trace_value).strip():
+                    # 数値文字列の場合のみint変換
+                    if str(trace_value).replace('.', '').replace('-', '').isdigit():
+                        price_trace = int(float(trace_value))
+                    else:
+                        # 文字列の場合は0として扱う
+                        price_trace = 0
+                else:
+                    price_trace = 0
+            except (ValueError, TypeError):
+                price_trace = 0
+            
+            repricing_dict[sku] = {
+                'new_price': new_price,
+                'price_trace': price_trace
+            }
+        
+        # 元ファイルのデータをコピーして、該当する行のみpriceとpriceTraceを更新
+        # 価格やpriceTraceに変更がない場合は除外する
+        data = []
+        for _, row in original_df.iterrows():
+            sku = self.clean_excel_formula(str(row.get('SKU', '')))
+            
+            # 元の価格とpriceTraceを取得
+            original_price = float(row.get('price', 0)) if pd.notna(row.get('price')) else 0
+            original_price_trace = float(row.get('priceTrace', 0)) if pd.notna(row.get('priceTrace')) else 0
+            
+            # 価格改定対象の場合はpriceとpriceTraceを更新
+            if sku in repricing_dict:
+                new_price = repricing_dict[sku]['new_price']
+                new_price_trace = repricing_dict[sku]['price_trace']
+                
+                # 価格とpriceTraceの両方が変更されていない場合はスキップ（CSVに保存しない）
+                if new_price == original_price and new_price_trace == original_price_trace:
+                    print(f"[DEBUG CSV保存] スキップ: {sku} (変更なし)")
+                    continue
+                
+                row_data = row.to_dict()
+                row_data['price'] = new_price
+                row_data['priceTrace'] = new_price_trace
+                # conditionNoteは空にする
+                row_data['conditionNote'] = ""
+                data.append(row_data)
+            else:
+                # 対象外の場合は元のデータをそのまま使用
+                row_data = row.to_dict()
+                data.append(row_data)
+        
+        df = pd.DataFrame(data)
+        
+        # 元ファイルの書式に完全に合わせるための処理
+        # 0. 空の値を保持（nanを空文字に変換）
+        df = df.fillna('')  # 全てのnan値を空文字に変換
+        # 1. 数値列を文字列として出力（クォート付き）
+        numeric_columns = ['number', 'price', 'cost', 'akaji', 'takane', 'condition', 'priceTrace', 'amazon-fee', 'shipping-price', 'profit']
+        for col in numeric_columns:
+            if col in df.columns:
+                df[col] = df[col].astype(str)
+                # 文字列変換後もnan値を空文字に変換
+                df[col] = df[col].replace('nan', '')
+        
+        # 2. Excel数式記法の修正（プライスター対応）
+        text_columns = ['SKU', 'ASIN', 'title', 'conditionNote', 'leadtime', 'add-delete']
+        for col in text_columns:
+            if col in df.columns:
+                try:
+                    # 文字列型に変換
+                    df[col] = df[col].astype(str)
+                    # nan値を空文字に変換
+                    df[col] = df[col].replace('nan', '')
+                    # Excel数式記法をプライスター形式に変換
+                    df[col] = df[col].str.replace(r'^"(.+)"$', r'=\1', regex=True)  # "値" → =値
+                except Exception as e:
+                    print(f"[WARNING CSV保存] 列 {col} の処理でエラー: {e}")
+                    # エラーが発生した場合は文字列型に変換するだけ
+                    df[col] = df[col].astype(str)
+                    df[col] = df[col].replace('nan', '')
+        
+        # 3. Shift-JISでエンコードできない文字の置換処理
+        def clean_for_shift_jis(text):
+            """Shift-JISでエンコードできない文字を置換"""
+            if pd.isna(text) or text == '':
+                return text
+            
+            # 文字列に変換
+            text = str(text)
+            
+            # Shift-JISでエンコードできない文字の置換
+            replacements = {
+                '\uff5e': '~',  # 全角チルダ → 半角チルダ
+                '\uff0d': '-',  # 全角ハイフン → 半角ハイフン
+                '\uff0c': ',',  # 全角カンマ → 半角カンマ
+                '\uff1a': ':',  # 全角コロン → 半角コロン
+                '\uff1b': ';',  # 全角セミコロン → 半角セミコロン
+                '\uff01': '!',  # 全角エクスクラメーション → 半角
+                '\uff1f': '?',  # 全角クエスチョン → 半角
+                '\uff08': '(',  # 全角括弧 → 半角括弧
+                '\uff09': ')',  # 全角括弧 → 半角括弧
+                '\uff3b': '[',  # 全角角括弧 → 半角角括弧
+                '\uff3d': ']',  # 全角角括弧 → 半角角括弧
+                '\uff5b': '{',  # 全角波括弧 → 半角波括弧
+                '\uff5d': '}',  # 全角波括弧 → 半角波括弧
+                '\uff0a': '\n',  # 全角改行 → 半角改行
+                '\uff20': '@',  # 全角アットマーク → 半角アットマーク
+                '\uff23': '#',  # 全角シャープ → 半角シャープ
+                '\uff24': '$',  # 全角ドル → 半角ドル
+                '\uff25': '%',  # 全角パーセント → 半角パーセント
+                '\uff26': '&',  # 全角アンパサンド → 半角アンパサンド
+                '\uff2a': '*',  # 全角アスタリスク → 半角アスタリスク
+                '\uff2b': '+',  # 全角プラス → 半角プラス
+                '\uff2e': '.',  # 全角ピリオド → 半角ピリオド
+                '\uff2f': '/',  # 全角スラッシュ → 半角スラッシュ
+                '\uff3c': '<',  # 全角小なり → 半角小なり
+                '\uff3e': '>',  # 全角大なり → 半角大なり
+                '\uff3f': '_',  # 全角アンダースコア → 半角アンダースコア
+                '\uff40': '`',  # 全角バッククォート → 半角バッククォート
+                '\uff5c': '|',  # 全角パイプ → 半角パイプ
+            }
+            
+            for full_width, half_width in replacements.items():
+                text = text.replace(full_width, half_width)
+            
+            return text
+        
+        # テキスト列の文字置換処理
+        text_columns = ['SKU', 'ASIN', 'title', 'conditionNote', 'leadtime', 'add-delete']
+        for col in text_columns:
+            if col in df.columns:
+                df[col] = df[col].apply(clean_for_shift_jis)
+        
+        # 4. 元ファイルと同じ形式でCSV保存（プライスター対応）
+        from desktop.utils.file_naming import resolve_unique_path
+        target = resolve_unique_path(Path(file_path))
+        try:
+            df.to_csv(str(target), index=False, encoding='shift_jis', quoting=0)  # Shift-JIS、クォートなし
+        except UnicodeEncodeError as e:
+            # Shift-JISでエンコードできない文字が残っている場合の追加処理
+            print(f"[WARNING CSV保存] Shift-JISエンコードエラー: {e}")
+            print(f"[WARNING CSV保存] エラー文字を除去して再試行...")
+            
+            # エラーが発生した列を特定して処理
+            for col in df.columns:
+                try:
+                    # 各列をShift-JISでエンコードテスト
+                    df[col].astype(str).str.encode('shift_jis')
+                except UnicodeEncodeError:
+                    # エラーが発生した列の文字を安全な文字に置換
+                    df[col] = df[col].astype(str).str.encode('shift_jis', errors='replace').str.decode('shift_jis')
+            
+            # 再試行（連番解決後のパスで）
+            target = resolve_unique_path(Path(file_path))
+            df.to_csv(str(target), index=False, encoding='shift_jis', quoting=0)
+        
+        return str(target)
