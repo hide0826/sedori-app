@@ -288,11 +288,14 @@ class TemplateGenerator:
                         cell.value = value
                     cell.border = border
             
-            # 下部追加情報（17行目以降）
-            info_row = 17
+            # 店舗データの直後に追加情報を配置（店舗データの最後の行の次から）
+            # 店舗データは4行目から始まるので、最後の行番号は 3 + len(visit_data_rows)
+            # その次の行（4 + len(visit_data_rows)）から追加情報を配置
+            info_start_row = 4 + len(visit_data_rows)
             info_labels = ['出発時刻', '帰宅時刻', '往路高速代', '復路高速代']
-            for i, label in enumerate(info_labels, start=info_row):
-                label_cell = visit_sheet.cell(row=i, column=1)
+            for i, label in enumerate(info_labels):
+                row_num = info_start_row + i
+                label_cell = visit_sheet.cell(row=row_num, column=1)
                 label_cell.value = label
                 label_cell.fill = header_fill
                 label_cell.font = header_font
@@ -300,7 +303,7 @@ class TemplateGenerator:
                 label_cell.alignment = Alignment(horizontal='left', vertical='center')
                 
                 # 値セル（B列に配置）
-                value_cell = visit_sheet.cell(row=i, column=2)
+                value_cell = visit_sheet.cell(row=row_num, column=2)
                 value_cell.value = ''
                 value_cell.border = border
                 

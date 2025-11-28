@@ -1186,12 +1186,14 @@ class RouteSummaryWidget(QWidget):
 
                 # 下部情報の読み込み
                 try:
-                    # A列を1行目から順にチェックして出発時刻・帰宅時刻を探す
+                    # A列を1行目から順にチェックして各項目を探す（文字列検索で確実に取得）
                     dep_row = None
                     ret_row = None
+                    toll_out_row = None
+                    toll_ret_row = None
                     
-                    # 1行目から100行目までチェック（十分な範囲を確保）
-                    for row_num in range(1, 101):
+                    # 1行目から200行目までチェック（十分な範囲を確保）
+                    for row_num in range(1, 201):
                         a_cell_value = ws[f'A{row_num}'].value
                         if a_cell_value is None:
                             continue
@@ -1206,8 +1208,16 @@ class RouteSummaryWidget(QWidget):
                         if ret_row is None and a_key in ('帰宅時刻', '帰宅時間'):
                             ret_row = row_num
                         
-                        # 両方見つかったら終了
-                        if dep_row is not None and ret_row is not None:
+                        # 往路高速代を探す
+                        if toll_out_row is None and a_key == '往路高速代':
+                            toll_out_row = row_num
+                        
+                        # 復路高速代を探す
+                        if toll_ret_row is None and a_key == '復路高速代':
+                            toll_ret_row = row_num
+                        
+                        # 全て見つかったら終了
+                        if dep_row is not None and ret_row is not None and toll_out_row is not None and toll_ret_row is not None:
                             break
                     
                     # 出発時刻を読み込み
@@ -1224,7 +1234,25 @@ class RouteSummaryWidget(QWidget):
                         if ret_str:
                             self.return_time_edit.setText(ret_str)
                     
-                    # その他の下部情報（15行目以降、出発時刻・帰宅時刻以外）
+                    # 往路高速代を読み込み
+                    if toll_out_row is not None:
+                        try:
+                            toll_out_raw = ws[f'B{toll_out_row}'].value
+                            toll_out_val = float(str(toll_out_raw or '0').replace(',', ''))
+                            self.toll_fee_outbound_spin.setValue(toll_out_val)
+                        except Exception:
+                            pass
+                    
+                    # 復路高速代を読み込み
+                    if toll_ret_row is not None:
+                        try:
+                            toll_ret_raw = ws[f'B{toll_ret_row}'].value
+                            toll_ret_val = float(str(toll_ret_raw or '0').replace(',', ''))
+                            self.toll_fee_return_spin.setValue(toll_ret_val)
+                        except Exception:
+                            pass
+                    
+                    # 旧コード（削除予定）: その他の下部情報（15行目以降、出発時刻・帰宅時刻以外）
                     bottom_map = {}
                     for rr in range(15, 15 + 20):  # 15行目から35行目まで
                         key = ws[f'A{rr}'].value
@@ -1261,15 +1289,7 @@ class RouteSummaryWidget(QWidget):
                         if ret_str:
                             self.return_time_edit.setText(ret_str)
 
-                    # 高速代
-                    try:
-                        self.toll_fee_outbound_spin.setValue(float(str(bottom_map.get('往路高速代') or '0').replace(',', '')))
-                    except Exception:
-                        pass
-                    try:
-                        self.toll_fee_return_spin.setValue(float(str(bottom_map.get('復路高速代') or '0').replace(',', '')))
-                    except Exception:
-                        pass
+                    # 高速代は既に文字列検索で読み込み済み（上記のtoll_out_row/toll_ret_rowで処理）
                 except Exception as _:
                     pass
             except Exception:
