@@ -265,11 +265,43 @@ class SettingsWidget(QWidget):
         gcv_browse_btn = QPushButton("参照")
         gcv_browse_btn.clicked.connect(lambda: self.browse_file(self.gcv_credentials_edit, "GCV認証情報", "JSONファイル (*.json)"))
         ocr_layout.addWidget(gcv_browse_btn, 2, 2)
+
+        # Gemini API設定
+        ocr_layout.addWidget(QLabel("Gemini APIキー:"), 3, 0)
+        self.gemini_api_key_edit = QLineEdit()
+        self.gemini_api_key_edit.setPlaceholderText("（オプション）Gemini APIキー")
+        self.gemini_api_key_edit.setEchoMode(QLineEdit.Password)
+        self.gemini_api_key_edit.setClearButtonEnabled(True)
+        ocr_layout.addWidget(self.gemini_api_key_edit, 3, 1)
+
+        api_toggle_btn = QPushButton("表示")
+        api_toggle_btn.setCheckable(True)
+        api_toggle_btn.setMaximumWidth(60)
+
+        def _toggle_api_visibility(checked: bool) -> None:
+            self.gemini_api_key_edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
+            api_toggle_btn.setText("非表示" if checked else "表示")
+
+        api_toggle_btn.toggled.connect(_toggle_api_visibility)
+        ocr_layout.addWidget(api_toggle_btn, 3, 2)
+
+        ocr_layout.addWidget(QLabel("Geminiモデル:"), 4, 0)
+        self.gemini_model_combo = QComboBox()
+        self.gemini_model_combo.addItems([
+            "gemini-flash-latest",
+            "gemini-pro-latest",
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-2.0-pro",
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+        ])
+        ocr_layout.addWidget(self.gemini_model_combo, 4, 1, 1, 2)
         
         # OCRテストボタン
         self.test_ocr_btn = QPushButton("OCR設定テスト")
         self.test_ocr_btn.clicked.connect(self.test_ocr_settings)
-        ocr_layout.addWidget(self.test_ocr_btn, 3, 0, 1, 3)
+        ocr_layout.addWidget(self.test_ocr_btn, 5, 0, 1, 3)
         
         layout.addWidget(ocr_group)
         
@@ -520,6 +552,11 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.tesseract_cmd_edit.setText(self.settings.value("ocr/tesseract_cmd", ""))
         self.tessdata_dir_edit.setText(self.settings.value("ocr/tessdata_dir", ""))
         self.gcv_credentials_edit.setText(self.settings.value("ocr/gcv_credentials", ""))
+        self.gemini_api_key_edit.setText(self.settings.value("ocr/gemini_api_key", ""))
+        gemini_model = self.settings.value("ocr/gemini_model", "gemini-flash-latest")
+        if gemini_model not in [self.gemini_model_combo.itemText(i) for i in range(self.gemini_model_combo.count())]:
+            self.gemini_model_combo.addItem(gemini_model)
+        self.gemini_model_combo.setCurrentText(gemini_model)
         
     def save_settings(self):
         """設定の保存"""
@@ -555,6 +592,8 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             self.settings.setValue("ocr/tesseract_cmd", self.tesseract_cmd_edit.text())
             self.settings.setValue("ocr/tessdata_dir", self.tessdata_dir_edit.text())
             self.settings.setValue("ocr/gcv_credentials", self.gcv_credentials_edit.text())
+            self.settings.setValue("ocr/gemini_api_key", self.gemini_api_key_edit.text())
+            self.settings.setValue("ocr/gemini_model", self.gemini_model_combo.currentText())
             
             # 設定変更シグナルを発火
             settings_dict = self.get_current_settings()
@@ -603,6 +642,8 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.tesseract_cmd_edit.setText("")
         self.tessdata_dir_edit.setText("")
         self.gcv_credentials_edit.setText("")
+        self.gemini_api_key_edit.setText("")
+        self.gemini_model_combo.setCurrentText("gemini-flash-latest")
         
     def get_current_settings(self):
         """現在の設定を辞書で取得"""
@@ -637,6 +678,8 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             "ocr": {
                 "tesseract_cmd": self.tesseract_cmd_edit.text(),
                 "tessdata_dir": self.tessdata_dir_edit.text(),
-                "gcv_credentials": self.gcv_credentials_edit.text()
+                "gcv_credentials": self.gcv_credentials_edit.text(),
+                "gemini_api_key": self.gemini_api_key_edit.text(),
+                "gemini_model": self.gemini_model_combo.currentText()
             }
         }

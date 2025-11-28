@@ -10,8 +10,9 @@
 """
 from __future__ import annotations
 
-import sys
 import os
+import re
+import sys
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -39,6 +40,7 @@ except Exception:
     from desktop.services.receipt_matching_service import ReceiptMatchingService
 from database.receipt_db import ReceiptDatabase
 from database.inventory_db import InventoryDatabase
+from database.store_db import StoreDatabase
 
 
 class ReceiptOCRThread(QThread):
@@ -72,6 +74,8 @@ class ReceiptWidget(QWidget):
         self.matching_service = ReceiptMatchingService()
         self.receipt_db = ReceiptDatabase()
         self.inventory_db = InventoryDatabase()
+        self.store_db = StoreDatabase()
+        self._store_name_cache: dict[str, str] = {}
         self.current_receipt_id = None
         self.current_receipt_data = None
         self.notifications_enabled = True
@@ -323,12 +327,17 @@ class ReceiptWidget(QWidget):
         self.current_receipt_id = result.get('id')
         self.current_receipt_data = result
         
-        # OCR結果を表示
+        # OCR結果を表示（purchase_dateは yyyy/MM/dd で保存される想定だが、後方互換で両方対応）
         purchase_date = result.get('purchase_date')
         if purchase_date:
             try:
-                date = QDate.fromString(purchase_date, "yyyy-MM-dd")
-                self.date_edit.setDate(date)
+                # まず yyyy/MM/dd を試す
+                date = QDate.fromString(purchase_date, "yyyy/MM/dd")
+                if not date.isValid():
+                    # 古いデータなど yyyy-MM-dd の場合も考慮
+                    date = QDate.fromString(purchase_date.replace("/", "-"), "yyyy-MM-dd")
+                if date.isValid():
+                    self.date_edit.setDate(date)
             except Exception:
                 pass
         
@@ -403,10 +412,7 @@ class ReceiptWidget(QWidget):
     def load_store_codes(self):
         """店舗コード候補を読み込み"""
         self.store_code_combo.clear()
-        # 店舗マスタから読み込み（簡易実装）
-        from database.store_db import StoreDatabase
-        store_db = StoreDatabase()
-        stores = store_db.list_stores()
+        stores = self.store_db.list_stores()
         for store in stores:
             code = store.get('supplier_code')
             name = store.get('store_name')
@@ -419,7 +425,12 @@ class ReceiptWidget(QWidget):
             return
         
         # OCR結果から日付・店舗名・電話番号を取得
-        purchase_date = self.date_edit.date().toString("yyyy-MM-dd")
+        # 日付は current_receipt_data を優先し、なければ date_edit から取得
+        purchase_date = ""
+        if self.current_receipt_data and self.current_receipt_data.get("purchase_date"):
+            purchase_date = str(self.current_receipt_data.get("purchase_date")).strip()
+        else:
+            purchase_date = self.date_edit.date().toString("yyyy-MM-dd")
         store_name_raw = self.store_name_edit.text().strip()
         phone_number = self.phone_edit.text().strip()
         
@@ -432,9 +443,7 @@ class ReceiptWidget(QWidget):
             return
         
         # 店舗マスタから電話番号で店舗を検索
-        from database.store_db import StoreDatabase
-        store_db = StoreDatabase()
-        stores = store_db.list_stores()
+        stores = self.store_db.list_stores()
         
         # 電話番号で店舗を検索（部分一致）
         matched_store_code = None
@@ -457,7 +466,7 @@ class ReceiptWidget(QWidget):
         if not matched_store_code:
             return
         
-        # 日付を正規化（yyyy-MM-dd形式）
+        # 日付を正規化（yyyy-MM-dd形式に揃えて比較）
         normalized_date = purchase_date.replace('/', '-')
         if ' ' in normalized_date:
             normalized_date = normalized_date.split(' ')[0]
@@ -1285,6 +1294,54 @@ class ReceiptWidget(QWidget):
         self.confirm_btn.setEnabled(False)
         self.match_btn.setEnabled(False)
         self.view_image_btn.setEnabled(False)
+
+    def _format_store_code_label(self, store_code: Optional[str], fallback_name: str = "") -> str:
+        """店舗コードの表示ラベルを生成（コード + 店舗名）"""
+        code = (store_code or "").strip()
+        name = ""
+        if code:
+            if code not in self._store_name_cache:
+                try:
+                    store = self.store_db.get_store_by_supplier_code(code)
+                    self._store_name_cache[code] = (store.get("store_name") if store else "") or ""
+                except Exception:
+                    self._store_name_cache[code] = ""
+            name = self._store_name_cache.get(code) or ""
+        if not name:
+            name = (fallback_name or "").strip()
+        if code and name:
+            return f"{code} {name}"
+        return code or name
+
+    @staticmethod
+    def _normalize_purchase_date_text(value: Any) -> Optional[str]:
+        """仕入日を yyyy/MM/dd 形式に正規化"""
+        if not value:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        text = text.replace("年", "/").replace("月", "/").replace("日", "")
+        text = text.replace(".", "/").replace("-", "/")
+        if "T" in text:
+            text = text.split("T", 1)[0]
+        if " " in text:
+            text = text.split(" ", 1)[0]
+        match = re.search(r"(20\d{2})\D*(\d{1,2})\D*(\d{1,2})", text)
+        if match:
+            y, m, d = match.groups()
+            return f"{int(y):04d}/{int(m):02d}/{int(d):02d}"
+        return None
+
+    def _store_code_from_item(self, item: Optional[QTableWidgetItem]) -> str:
+        """店舗コードセルから実際のコードのみを取得"""
+        if not item:
+            return ""
+        data = item.data(Qt.UserRole)
+        if data:
+            return str(data).strip()
+        text = item.text().strip()
+        return text.split(" ")[0] if text else ""
     
     def refresh_receipt_list(self):
         """レシート一覧を更新"""
@@ -1327,7 +1384,11 @@ class ReceiptWidget(QWidget):
                 self.receipt_table.setItem(row, 7, QTableWidgetItem(str(receipt.get('total_amount') or "")))
                 self.receipt_table.setItem(row, 8, QTableWidgetItem(str(receipt.get('discount_amount') or "")))
                 self.receipt_table.setItem(row, 9, QTableWidgetItem(str(receipt.get('items_count') or "")))
-                self.receipt_table.setItem(row, 10, QTableWidgetItem(receipt.get('store_code') or ""))
+                store_code = receipt.get('store_code') or ""
+                store_label = self._format_store_code_label(store_code, receipt.get('store_name_raw') or "")
+                store_item = QTableWidgetItem(store_label)
+                store_item.setData(Qt.UserRole, store_code)
+                self.receipt_table.setItem(row, 10, store_item)
                 receipt_row += 1
 
             # 保証書用テーブル: 種別=保証書のみ
@@ -1342,7 +1403,11 @@ class ReceiptWidget(QWidget):
                 self.warranty_table.setItem(row, 4, QTableWidgetItem(receipt.get('purchase_date') or ""))
                 self.warranty_table.setItem(row, 5, QTableWidgetItem(receipt.get('store_name_raw') or ""))
                 self.warranty_table.setItem(row, 6, QTableWidgetItem(receipt.get('phone_number') or ""))
-                self.warranty_table.setItem(row, 7, QTableWidgetItem(receipt.get('store_code') or ""))
+                store_code = receipt.get('store_code') or ""
+                store_label = self._format_store_code_label(store_code, receipt.get('store_name_raw') or "")
+                store_item = QTableWidgetItem(store_label)
+                store_item.setData(Qt.UserRole, store_code)
+                self.warranty_table.setItem(row, 7, store_item)
                 # SKU・商品名はプルダウンで候補をセット
                 sku = receipt.get('sku') or ""
                 product_name = receipt.get('product_name') or ""
@@ -1535,8 +1600,15 @@ class ReceiptWidget(QWidget):
             # テーブル上の店舗コードを優先
             store_code_item = self.warranty_table.item(row, 7)
             if store_code_item:
+                new_code = self._store_code_from_item(store_code_item)
                 receipt = dict(receipt)
-                receipt["store_code"] = store_code_item.text().strip()
+                receipt["store_code"] = new_code
+                # 表示をコード+名称に整える
+                display_label = self._format_store_code_label(new_code, receipt.get("store_name_raw") or "")
+                self.warranty_table.blockSignals(True)
+                store_code_item.setText(display_label)
+                store_code_item.setData(Qt.UserRole, new_code)
+                self.warranty_table.blockSignals(False)
             sku_item = self.warranty_table.item(row, 8)
             name_item = self.warranty_table.item(row, 9)
             current_sku = sku_item.text() if sku_item else ""
@@ -1593,25 +1665,39 @@ class ReceiptWidget(QWidget):
 
         # 候補取得：仕入DBの全レコードから、日付＋店舗コードが一致する商品を抽出
         candidates = []
-        if self.product_widget and hasattr(self.product_widget, "purchase_all_records"):
-            purchase_date = receipt.get("purchase_date")
-            # 店舗コードはテーブル上の値を優先
-            store_code_item = self.warranty_table.item(row, 7)
-            store_code = store_code_item.text().strip() if store_code_item else receipt.get("store_code")
+        purchase_date_norm = self._normalize_purchase_date_text(receipt.get("purchase_date"))
+        store_code_item = self.warranty_table.item(row, 7)
+        store_code = (self._store_code_from_item(store_code_item) or receipt.get("store_code") or "").strip()
+        if self.product_widget and hasattr(self.product_widget, "purchase_all_records") and purchase_date_norm and store_code:
             for rec in self.product_widget.purchase_all_records:
-                rec_date = rec.get("仕入れ日") or rec.get("purchase_date")
-                rec_store = rec.get("仕入先") or rec.get("store_code")
-                if not purchase_date or not store_code:
+                rec_date = (
+                    rec.get("仕入れ日")
+                    or rec.get("purchase_date")
+                    or rec.get("purchaseDate")
+                    or rec.get("date")
+                )
+                rec_date_norm = self._normalize_purchase_date_text(rec_date)
+                if not rec_date_norm or rec_date_norm != purchase_date_norm:
                     continue
-                if rec_date == purchase_date and rec_store == store_code:
-                    cand_sku = rec.get("SKU") or rec.get("sku") or ""
-                    cand_name = rec.get("商品名") or rec.get("title") or ""
-                    if cand_name:
-                        candidates.append((cand_sku, cand_name))
+                rec_store = (
+                    rec.get("仕入先コード")
+                    or rec.get("仕入先")
+                    or rec.get("store_code")
+                    or rec.get("店舗コード")
+                    or rec.get("supplier_code")
+                )
+                rec_store = str(rec_store).strip() if rec_store else ""
+                if rec_store != store_code:
+                    continue
+                cand_sku = rec.get("SKU") or rec.get("sku") or ""
+                cand_name = rec.get("商品名") or rec.get("title") or ""
+                if cand_name:
+                    candidates.append((cand_sku, cand_name))
 
         # プルダウン(商品名)を作成
         combo = QComboBox()
         combo.addItem("（選択してください）", userData=None)
+        combo.setMinimumWidth(180)
         # 重複除去
         seen = set()
         for cand_sku, cand_name in candidates:
@@ -1619,12 +1705,20 @@ class ReceiptWidget(QWidget):
             if key in seen:
                 continue
             seen.add(key)
-            label = f"{cand_name} ({cand_sku})" if cand_sku else cand_name
-            combo.addItem(label, userData={"sku": cand_sku, "name": cand_name})
+            combo.addItem(cand_name, userData={"sku": cand_sku, "name": cand_name})
 
-        # 既存値があれば先頭に反映
-        if product_name and not candidates:
-            combo.addItem(f"{product_name} ({sku})" if sku else product_name, userData={"sku": sku, "name": product_name})
+        # 既存値があれば選択状態にする／候補にない場合は末尾に追加
+        selected_index = 0
+        if product_name:
+            for idx in range(1, combo.count()):
+                data = combo.itemData(idx)
+                if data and data.get("name") == product_name:
+                    selected_index = idx
+                    break
+            else:
+                combo.addItem(product_name, userData={"sku": sku, "name": product_name})
+                selected_index = combo.count() - 1
+        combo.setCurrentIndex(selected_index)
 
         # 選択変更時の処理
         def on_combo_changed(index: int, table_row=row):
@@ -1642,14 +1736,22 @@ class ReceiptWidget(QWidget):
                 return
             # テーブル更新
             self.warranty_table.blockSignals(True)
-            self.warranty_table.setItem(table_row, 8, QTableWidgetItem(new_sku))
-            self.warranty_table.setItem(table_row, 9, QTableWidgetItem(new_name))
+            sku_item = self.warranty_table.item(table_row, 8)
+            if sku_item:
+                sku_item.setText(new_sku)
+            else:
+                self.warranty_table.setItem(table_row, 8, QTableWidgetItem(new_sku))
+            name_item = self.warranty_table.item(table_row, 9)
+            if name_item:
+                name_item.setText(new_name)
+            else:
+                self.warranty_table.setItem(table_row, 9, QTableWidgetItem(new_name))
             self.warranty_table.blockSignals(False)
             # DB更新
             self.receipt_db.update_receipt(rec_id, {"sku": new_sku, "product_name": new_name})
 
         combo.currentIndexChanged.connect(on_combo_changed)
-        self.warranty_table.setCellWidget(row, 8, combo)
+        self.warranty_table.setCellWidget(row, 9, combo)
 
     def load_receipt(self, item: QTableWidgetItem):
         """レシートを読み込み"""
@@ -1663,8 +1765,12 @@ class ReceiptWidget(QWidget):
             purchase_date = receipt.get('purchase_date')
             if purchase_date:
                 try:
-                    date = QDate.fromString(purchase_date, "yyyy-MM-dd")
-                    self.date_edit.setDate(date)
+                    # 新形式（yyyy/MM/dd）と旧形式（yyyy-MM-dd）の両方に対応
+                    date = QDate.fromString(purchase_date, "yyyy/MM/dd")
+                    if not date.isValid():
+                        date = QDate.fromString(str(purchase_date).replace("/", "-"), "yyyy-MM-dd")
+                    if date.isValid():
+                        self.date_edit.setDate(date)
                 except Exception:
                     pass
             
