@@ -243,10 +243,28 @@ class AntiqueWidget(QWidget):
         from PySide6.QtWidgets import QSizePolicy
         self.grp_store_list = QGroupBox("店舗リスト（取込プレビュー）")
         vl_store_list = QVBoxLayout(self.grp_store_list)
+        
+        # 削除ボタンエリア
+        btn_store_list_layout = QHBoxLayout()
+        self.btn_delete_selected_store = QPushButton("選択行削除")
+        self.btn_delete_selected_store.setEnabled(False)
+        self.btn_delete_selected_store.clicked.connect(self._delete_selected_store_rows)
+        btn_store_list_layout.addWidget(self.btn_delete_selected_store)
+        
+        self.btn_delete_all_store = QPushButton("リスト全削除")
+        self.btn_delete_all_store.setEnabled(False)
+        self.btn_delete_all_store.clicked.connect(self._delete_all_store_rows)
+        btn_store_list_layout.addWidget(self.btn_delete_all_store)
+        
+        btn_store_list_layout.addStretch()
+        vl_store_list.addLayout(btn_store_list_layout)
+        
         self.table_store_list = QTableWidget()
         self.table_store_list.setAlternatingRowColors(True)
         self.table_store_list.setSelectionBehavior(QTableWidget.SelectRows)
         self.table_store_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # 選択変更時に削除ボタンの有効/無効を切り替え
+        self.table_store_list.itemSelectionChanged.connect(self._on_store_list_selection_changed)
         # プレビュー列は『共通列+店舗列』（閲覧・出力タブと同じ並び）
         self.preview_columns = self.COMMON_COLUMNS + self.STORE_COLUMNS
         self.preview_headers = [label for _, label in self.preview_columns]
@@ -614,6 +632,7 @@ class AntiqueWidget(QWidget):
             unit_s = pick_series("仕入れ価格")
             asin_s = pick_series("ASIN")
             jan_s = pick_series("JAN")
+            sku_s = pick_series("SKU")
             notes_s = pick_series("コメント")
             name_s = pick_series("仕入先")
 
@@ -781,6 +800,7 @@ class AntiqueWidget(QWidget):
             unit_s = pick_series("仕入れ価格")
             asin_s = pick_series("ASIN")
             jan_s = pick_series("JAN")
+            sku_s = pick_series("SKU")
             notes_s = pick_series("コメント")
             name_s = pick_series("仕入先")
             
@@ -908,6 +928,7 @@ class AntiqueWidget(QWidget):
                     "counterparty_address": address,
                     "contact": phone,
                     "receipt_no": "",
+                    "sku": str(sku_s.iloc[i] or '') if 'SKU' in df.columns else "",
                 })
             
             # 相手区分を「店舗」に設定
@@ -922,10 +943,98 @@ class AntiqueWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"データの取込でエラーが発生しました:\n{e}")
 
+    def _on_store_list_selection_changed(self):
+        """店舗リストの選択変更時に削除ボタンの有効/無効を切り替え"""
+        try:
+            selection_model = self.table_store_list.selectionModel()
+            has_selection = bool(selection_model and selection_model.selectedRows())
+            self.btn_delete_selected_store.setEnabled(has_selection)
+            
+            # リストにデータがある場合は全削除ボタンを有効化
+            rows = getattr(self, "_imported_store_rows", [])
+            self.btn_delete_all_store.setEnabled(len(rows) > 0)
+        except Exception:
+            pass
+    
+    def _delete_selected_store_rows(self):
+        """選択された店舗リストの行を削除"""
+        try:
+            selection_model = self.table_store_list.selectionModel()
+            if not selection_model:
+                return
+            
+            selected_rows = selection_model.selectedRows()
+            if not selected_rows:
+                QMessageBox.information(self, "情報", "削除する行を選択してください。")
+                return
+            
+            # 選択された行インデックスを降順でソート（後ろから削除することでインデックスがずれないようにする）
+            row_indices = sorted([idx.row() for idx in selected_rows], reverse=True)
+            
+            # 確認ダイアログ
+            reply = QMessageBox.question(
+                self,
+                "確認",
+                f"選択された {len(row_indices)} 行を削除しますか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply != QMessageBox.Yes:
+                return
+            
+            # データから削除
+            rows = getattr(self, "_imported_store_rows", [])
+            for idx in row_indices:
+                if 0 <= idx < len(rows):
+                    rows.pop(idx)
+            
+            # テーブルを再描画
+            self._refresh_store_list_table()
+            
+            QMessageBox.information(self, "削除完了", f"{len(row_indices)} 行を削除しました。")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"削除中にエラーが発生しました:\n{e}")
+    
+    def _delete_all_store_rows(self):
+        """店舗リストの全行を削除"""
+        try:
+            rows = getattr(self, "_imported_store_rows", [])
+            if not rows:
+                QMessageBox.information(self, "情報", "削除するデータがありません。")
+                return
+            
+            # 確認ダイアログ
+            reply = QMessageBox.question(
+                self,
+                "確認",
+                f"リストの全 {len(rows)} 行を削除しますか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply != QMessageBox.Yes:
+                return
+            
+            # データをクリア
+            self._imported_store_rows = []
+            
+            # テーブルを再描画
+            self._refresh_store_list_table()
+            
+            QMessageBox.information(self, "削除完了", "リストの全データを削除しました。")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"削除中にエラーが発生しました:\n{e}")
+    
     def _refresh_store_list_table(self) -> None:
         try:
             rows = getattr(self, "_imported_store_rows", [])
             self.table_store_list.setRowCount(len(rows))
+            
+            # 削除ボタンの有効/無効を更新
+            self.btn_delete_all_store.setEnabled(len(rows) > 0)
+            self.btn_delete_selected_store.setEnabled(False)
+            
             for i, r in enumerate(rows):
                 for j, key in enumerate(self.preview_keys):
                     val = "" if r.get(key) is None else str(r.get(key))
@@ -1049,6 +1158,7 @@ class AntiqueWidget(QWidget):
                     'transaction_method': '買受',
                     'notes': str(r.get('notes', '')).strip() or None,
                     'correction_of': None,
+                    'sku': r.get('sku', ''),
                 }
                 to_insert.append(row)
             
@@ -1066,6 +1176,32 @@ class AntiqueWidget(QWidget):
             from desktop.database.ledger_db import LedgerDatabase
             db = LedgerDatabase()
             n = db.insert_ledger_rows(to_insert)
+            
+            # 2. 仕入DB (purchases) の古物台帳情報も更新（統合対応）
+            try:
+                from desktop.database.purchase_db import PurchaseDatabase
+                pdb = PurchaseDatabase()
+                updated_purchases = 0
+                for row in to_insert:
+                    sku = row.get('sku')
+                    if sku:
+                        # 古物台帳情報を抽出
+                        ledger_info = {
+                            'kobutsu_kind': row.get('kobutsu_kind'),
+                            'hinmoku': row.get('hinmoku'),
+                            'hinmei': row.get('hinmei'),
+                            'person_name': row.get('person_name'),
+                            'id_type': row.get('id_type'),
+                            'id_number': row.get('id_number'),
+                            'id_checked_on': row.get('id_checked_on'),
+                            'id_checked_by': row.get('id_checked_by'),
+                        }
+                        if pdb.update_ledger_info(sku, ledger_info):
+                            updated_purchases += 1
+                # print(f"仕入DB同期: {updated_purchases}件")
+            except Exception as e:
+                print(f"仕入DB同期エラー: {e}")
+            
             self._imported_store_rows = []
             self._refresh_store_list_table()
             # 閲覧・出力タブを即時更新

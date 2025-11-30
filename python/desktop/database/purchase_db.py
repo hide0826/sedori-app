@@ -9,6 +9,7 @@ SQLite データベース `python/desktop/data/hirio.db` 内に `purchases` テ�
 主な用途:
 - 仕入情報の管理（いつ・どこで・いくらで買ったか）
 - 商品マスタ(products)への参照
+- 古物台帳情報の統合管理
 """
 from __future__ import annotations
 
@@ -40,6 +41,7 @@ class PurchaseDatabase:
         cur = self.conn.cursor()
         
         # purchases テーブル（仕入履歴）
+        # 古物台帳カラムを追加
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS purchases (
@@ -56,6 +58,18 @@ class PurchaseDatabase:
               receipt_id INTEGER,
               comment TEXT,
               other_cost INTEGER DEFAULT 0,
+              
+              /* 古物台帳用カラム */
+              kobutsu_kind TEXT,
+              hinmoku TEXT,
+              hinmei TEXT,
+              person_name TEXT,
+              id_type TEXT,
+              id_number TEXT,
+              id_checked_on TEXT,
+              id_checked_by TEXT,
+              ledger_registered INTEGER DEFAULT 0,
+              
               created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
               updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
               FOREIGN KEY (product_id) REFERENCES products(id)
@@ -68,7 +82,40 @@ class PurchaseDatabase:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_purchases_purchase_date ON purchases(purchase_date)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_purchases_store_code ON purchases(store_code)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_purchases_product_id ON purchases(product_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_purchases_ledger_registered ON purchases(ledger_registered)")
 
+        self.conn.commit()
+
+        # 既存DBへのカラム追加（マイグレーション）
+        self._migrate_columns(cur)
+
+    def _migrate_columns(self, cur: sqlite3.Cursor) -> None:
+        """不足しているカラムを追加する"""
+        # テーブル情報を取得
+        cur.execute("PRAGMA table_info(purchases)")
+        existing_cols = {row["name"] for row in cur.fetchall()}
+
+        # 追加すべきカラム定義 (name, type)
+        new_columns = [
+            ("kobutsu_kind", "TEXT"),
+            ("hinmoku", "TEXT"),
+            ("hinmei", "TEXT"),
+            ("person_name", "TEXT"),
+            ("id_type", "TEXT"),
+            ("id_number", "TEXT"),
+            ("id_checked_on", "TEXT"),
+            ("id_checked_by", "TEXT"),
+            ("ledger_registered", "INTEGER DEFAULT 0"),
+        ]
+
+        for col_name, col_def in new_columns:
+            if col_name not in existing_cols:
+                try:
+                    cur.execute(f"ALTER TABLE purchases ADD COLUMN {col_name} {col_def}")
+                    # print(f"Added column {col_name} to purchases table")
+                except Exception as e:
+                    print(f"Error adding column {col_name}: {e}")
+        
         self.conn.commit()
 
     # ========= 基本操作 =========
@@ -93,6 +140,9 @@ class PurchaseDatabase:
             "store_code", "store_name", "condition_code", "condition_note",
             "receipt_id", "comment", "other_cost"
         ]
+        # purchase辞書に含まれるキーのみを対象とする（古物台帳カラムも更新対象に含めるか検討）
+        # ここでは基本的な仕入情報の更新のみ行う
+        
         values = [purchase.get(k) for k in fields]
 
         cur = self.conn.cursor()
@@ -113,6 +163,59 @@ class PurchaseDatabase:
         
         self.conn.commit()
         return purchase_id
+
+    def update_ledger_info(self, sku: str, ledger_info: Dict[str, Any]) -> bool:
+        """
+        古物台帳情報を更新する
+        
+        Args:
+            sku: SKU
+            ledger_info: 古物台帳情報の辞書
+                kobutsu_kind, hinmoku, hinmei, person_name, 
+                id_type, id_number, id_checked_on, id_checked_by
+        
+        Returns:
+            更新成功ならTrue
+        """
+        if not sku:
+            return False
+            
+        cur = self.conn.cursor()
+        
+        # 更新対象のカラム
+        target_cols = [
+            "kobutsu_kind", "hinmoku", "hinmei",
+            "person_name", "id_type", "id_number",
+            "id_checked_on", "id_checked_by"
+        ]
+        
+        # 値の準備
+        update_cols = []
+        values = []
+        
+        for col in target_cols:
+            if col in ledger_info:
+                update_cols.append(f"{col}=?")
+                values.append(ledger_info[col])
+        
+        if not update_cols:
+            return False
+            
+        # 登録済みフラグを立てる
+        update_cols.append("ledger_registered=1")
+        update_cols.append("updated_at=CURRENT_TIMESTAMP")
+        
+        values.append(sku)
+        
+        sql = f"UPDATE purchases SET {', '.join(update_cols)} WHERE sku=?"
+        
+        try:
+            cur.execute(sql, values)
+            self.conn.commit()
+            return cur.rowcount > 0
+        except Exception as e:
+            print(f"Error updating ledger info for SKU {sku}: {e}")
+            return False
 
     def get_by_sku(self, sku: str) -> Optional[Dict[str, Any]]:
         """SKUで仕入情報を取得"""
@@ -163,6 +266,24 @@ class PurchaseDatabase:
         )
         return [dict(r) for r in cur.fetchall()]
 
+    def list_ledger_registered(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> List[Dict[str, Any]]:
+        """古物台帳登録済みのデータを取得"""
+        cur = self.conn.cursor()
+        where = ["ledger_registered = 1"]
+        params: List[Any] = []
+        
+        if start_date:
+            where.append("purchase_date >= ?")
+            params.append(start_date)
+        if end_date:
+            where.append("purchase_date <= ?")
+            params.append(end_date)
+            
+        sql = "SELECT * FROM purchases WHERE " + " AND ".join(where) + " ORDER BY purchase_date DESC, sku DESC"
+        
+        cur.execute(sql, tuple(params))
+        return [dict(r) for r in cur.fetchall()]
+
     def delete(self, sku: str) -> bool:
         """SKUで仕入情報を削除"""
         cur = self.conn.cursor()
@@ -174,4 +295,3 @@ class PurchaseDatabase:
         if self.conn:
             self.conn.close()
             self.conn = None
-
