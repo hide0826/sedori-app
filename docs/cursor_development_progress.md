@@ -1,3 +1,29 @@
+## 2025-01-XX 仕入DBと古物台帳の統合機能実装
+
+- 変更: `python/desktop/database/purchase_db.py`
+  - 仕入DB (`purchases`テーブル) に古物台帳用カラムを追加
+    - `kobutsu_kind` (品目), `hinmoku` (品目), `hinmei` (品名)
+    - `person_name`, `id_type`, `id_number`, `id_checked_on`, `id_checked_by` (本人確認情報)
+    - `ledger_registered` (台帳登録済みフラグ)
+  - 既存DBへの自動マイグレーション機能を追加
+  - `update_ledger_info()` メソッドを追加（古物台帳情報の更新用）
+  - `list_ledger_registered()` メソッドを追加（台帳登録済みデータの取得用）
+- 変更: `python/desktop/ui/antique_widget.py`
+  - `_commit_imported_store_rows()` メソッドを拡張
+  - 古物台帳DB (`ledger_entries`) への登録に加えて、仕入DB (`purchases`) も同時更新
+  - SKUをキーに仕入DBの古物台帳カラムを更新する処理を追加
+- 変更: `python/desktop/ui/product_widget.py`
+  - `_resolve_inventory_columns()` に古物台帳関連カラムを追加
+    - 「品目」「品名」「氏名(個人)」「本人確認書類」「確認番号」「確認日」「確認者」「台帳登録済」
+  - `_augment_purchase_records()` メソッドを拡張
+    - 仕入DBから古物台帳情報を取得して表示用レコードに追加
+  - `PurchaseDatabase` をインポートして `purchase_history_db` として使用
+- 動作確認:
+  - 古物台帳タブで「一括登録」を実行すると、仕入DBにも古物台帳情報が保存されることを確認
+  - 仕入DBタブで古物台帳カラムが表示され、データが正しく表示されることを確認
+- Git:
+  - feat: 仕入DBと古物台帳の統合機能を実装
+
 ## 2025-11-24 画像管理タブ 確定処理＆仕入DB連携改善
 
 - 変更: `python/desktop/ui/image_manager_widget.py`
@@ -430,4 +456,27 @@
 
 ---  
 **最終更新**: 2025-11-26  
+**更新者**: Agentモード（実装）
+
+### 2025-11-27
+- **チャット**: Agentモード（実装）
+- **内容**: レシート読取りにGemini AIを導入し、設定UIにAPIキー管理を追加
+- **実装完了**:
+  - **Geminiレシート解析サービス**
+    - services/gemini_receipt_service.py: google-generativeaiを利用したレシート構造化サービスを新規実装
+    - QSettingsからAPIキー/モデル名を取得し、未設定時は自動で無効化
+  - **ReceiptServiceのAI統合**
+    - services/receipt_service.py: Gemini解析を優先し、失敗時は既存OCR（GCV/Tesseract）へフォールバック
+    - 解析結果を直接ReceiptParseResultにマッピングし、DBへ`ocr_provider=gemini`で保存
+  - **設定ウィジェット拡張**
+    - ui/settings_widget.py: OCR設定タブにGemini APIキー入力欄・モデル選択コンボを追加（表示/非表示トグル付き）
+    - 設定保存/読み込み/デフォルトリセットに新項目を連携
+  - **依存関係更新**
+    - requirements.txt: `google-generativeai` を追加
+- **動作確認**:
+  - Gemini APIキー未設定時に従来OCRが自動利用されることを確認
+  - サンプルレシートでGeminiのJSON出力がDBに保存され、日付フォーマットが`YYYY/MM/DD`で維持されることを確認
+
+---  
+**最終更新**: 2025-11-27  
 **更新者**: Agentモード（実装）
