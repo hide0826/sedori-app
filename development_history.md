@@ -1,3 +1,31 @@
+## 2025-11-30: GCS画像アップローダー実装
+
+- **タスク:** Google Cloud Storage (GCS) に画像をアップロードし、公開URLを取得するユーティリティを作成
+- **状況:** 完了
+- **作業時間:** 約30分
+- **詳細:**
+    - `python/utils/gcs_uploader.py`
+        - `upload_image_to_gcs()` 関数を実装
+        - バケット名: `hirio-images-main`
+        - サービスアカウントキー: `python/desktop/data/credentials/service_account_key.json`
+        - アップロード先パス: `used_items/{YYYYMMDD_HHMMSS}_{元のファイル名}` 形式で自動生成
+        - Content-Typeを拡張子から自動判定（JPEG, PNG, GIF, BMP, WebP, TIFF対応）
+        - エラーハンドリング（ファイル未存在、認証エラー等）を実装
+        - 公開URL（`https://storage.googleapis.com/{BUCKET_NAME}/{destination_blob_name}`）を返却
+    - `requirements.txt`
+        - `google-cloud-storage` を依存関係に追加
+- **動作確認:**
+    - テスト画像（`python/scripts/test_image.jpg`）のアップロードに成功
+    - 公開URLが正しく生成されることを確認
+    - ファイル名に日付プレフィックスと `used_items/` プレフィックスが付与されることを確認
+- **使用例:**
+    ```python
+    from utils.gcs_uploader import upload_image_to_gcs
+    public_url = upload_image_to_gcs("path/to/image.jpg")
+    # 結果: https://storage.googleapis.com/hirio-images-main/used_items/20251130_170322_image.jpg
+    ```
+
+---
 
 ## 2025-11-28: ルートサマリーテンプレート生成・読み込みの改善
 
