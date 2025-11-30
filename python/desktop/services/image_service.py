@@ -540,4 +540,55 @@ class ImageService:
         _try_import_pyzxing()
         _try_import_pyzbar()
         return PYZXING_AVAILABLE or PYZBAR_AVAILABLE
+    
+    def is_barcode_only_image(self, image_path: str) -> bool:
+        """
+        画像がJANコード（バーコード）のみか判定
+        
+        判定基準:
+        1. バーコードが検出される
+        2. OCRテキストが数字・記号のみ、または商品名らしい文字列がない
+        
+        Args:
+            image_path: 画像ファイルのパス
+            
+        Returns:
+            True: バーコードのみの画像（除外対象）
+            False: 商品写真など（アップロード対象）
+        """
+        import re
+        
+        # 1. バーコード検出
+        jan = self.read_barcode_from_image(image_path)
+        if not jan:
+            return False  # バーコードなし = 商品写真
+        
+        # 2. OCR実行（商品名などのテキスト検出）
+        try:
+            from services.ocr_service import OCRService
+            ocr_service = OCRService()
+            ocr_result = ocr_service.extract_text(image_path, use_preprocessing=True)
+            ocr_text = ocr_result.get("text", "").strip()
+            
+            # 3. テキスト分析
+            # 数字・記号・空白のみの場合はバーコードのみと判定
+            text_without_digits = re.sub(r'[0-9\s\-・]', '', ocr_text)
+            
+            # 商品名らしい文字列（ひらがな、カタカナ、漢字、英字）が少ない
+            if len(text_without_digits) < 10:  # 意味のある文字が10文字未満
+                return True  # バーコードのみ
+            
+            # 商品名らしいキーワードがない場合も除外
+            product_keywords = ['商品', '品名', 'タイトル', 'title', 'name', '商品名']
+            has_product_info = any(kw in ocr_text.lower() for kw in product_keywords)
+            if not has_product_info and len(text_without_digits) < 20:
+                return True
+            
+        except Exception as e:
+            # OCR失敗時はバーコード検出のみで判定
+            # バーコードが検出された = バーコードのみの可能性が高い
+            logger.debug(f"OCR failed for barcode detection: {e}, assuming barcode-only image")
+            return True
+        
+        return False  # 商品写真
 

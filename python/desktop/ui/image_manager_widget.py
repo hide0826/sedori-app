@@ -1479,18 +1479,23 @@ class ImageManagerWidget(QWidget):
         self.registration_table = RegistrationTableWidget()
         self.registration_columns = [
             "コンディション", "SKU", "ASIN", "商品名",
-            "画像1", "画像2", "画像3", "画像4", "画像5", "画像6"
+            "画像1", "画像2", "画像3", "画像4", "画像5", "画像6",
+            # Amazon Lファイル用追加列
+            "JAN", "販売価格", "在庫数", "コンディション番号", "コンディション説明",
+            "画像URL1", "画像URL2", "画像URL3", "画像URL4", "画像URL5"
         ]
         self.registration_table.setColumnCount(len(self.registration_columns))
         self.registration_table.setHorizontalHeaderLabels(self.registration_columns)
         self.registration_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
-        self.registration_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        # 編集可能なカラムを設定（Amazon Lファイル用カラムのみ編集可能）
+        self.registration_table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.SelectedClicked)
         self.registration_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.registration_table.setSelectionMode(QTableWidget.SingleSelection)
         self.registration_table.verticalHeader().setVisible(False)
         self.registration_table.setDragEnabled(True)
         self.registration_table.cellDoubleClicked.connect(self.on_registration_cell_double_clicked)
         self.registration_table.cellClicked.connect(self.on_registration_cell_clicked)
+        self.registration_table.cellChanged.connect(self.on_registration_cell_changed)
         layout.addWidget(self.registration_table)
 
         preview_group = QGroupBox("プレビュー")
@@ -1508,32 +1513,90 @@ class ImageManagerWidget(QWidget):
         self.clear_registration_btn = QPushButton("一覧をクリア")
         self.clear_registration_btn.clicked.connect(self.clear_registration_records)
         button_layout.addWidget(self.clear_registration_btn)
+        self.upload_to_gcs_btn = QPushButton("GCSアップロード")
+        self.upload_to_gcs_btn.clicked.connect(self.upload_images_to_gcs)
+        button_layout.addWidget(self.upload_to_gcs_btn)
+        self.generate_amazon_l_btn = QPushButton("Amazon Lファイル生成")
+        self.generate_amazon_l_btn.clicked.connect(self.generate_amazon_l_file)
+        button_layout.addWidget(self.generate_amazon_l_btn)
         layout.addLayout(button_layout)
 
-    def _get_record_value(self, record: Dict[str, Any], keys: List[str]) -> str:
+    def _get_record_value(self, record: Dict[str, Any], keys: List[str], default: str = "") -> str:
         """複数の候補キーから値を取得"""
         for key in keys:
             value = record.get(key)
             if value not in (None, ""):
                 return str(value)
-        return ""
+        return default
 
     def add_registration_entry(self, record: Dict[str, Any]):
-        """仕入DBレコード情報を画像登録タブに追加"""
+        """仕入DBレコード情報を画像登録タブに追加（画像を商品画像とバーコード画像に分類）"""
         entry = {
             "condition": self._get_record_value(record, ["コンディション", "condition"]),
             "sku": self._get_record_value(record, ["SKU", "sku"]),
             "asin": self._get_record_value(record, ["ASIN", "asin"]),
+            "jan": self._get_record_value(record, ["JAN", "jan"]),
             "product_name": self._get_record_value(record, ["商品名", "product_name", "title"]),
-            "images": []
+            "images": [],  # 元の画像パス（表示用）
+            "product_images": [],  # 商品画像（Amazon Lファイル用、最大5枚）
+            "barcode_image": None,  # バーコード画像（識別用）
+            # Amazon Lファイル用フィールド
+            "price": self._get_record_value(record, ["販売価格", "price", "plannedPrice"]),
+            "quantity": self._get_record_value(record, ["在庫数", "quantity", "add_number"], default="0"),
+            "condition_type": self._get_record_value(record, ["コンディション番号", "condition_type", "condition-type"]),
+            "condition_note": self._get_record_value(record, ["コンディション説明", "condition_note", "conditionNote"]),
+            "image_urls": []  # GCSアップロード後のURL（最大5枚）
         }
+        
+        # 元の画像パスを取得
         for i in range(1, 7):
-            entry["images"].append(
-                self._get_record_value(
-                    record,
-                    [f"画像{i}", f"image_{i}", f"画像 {i}"]
-                )
+            img_path = self._get_record_value(
+                record,
+                [f"画像{i}", f"image_{i}", f"画像 {i}"]
             )
+            if img_path:
+                entry["images"].append(img_path)
+        
+        # 画像を商品画像とバーコード画像に分類
+        product_images = []
+        barcode_image = None
+        
+        for img_path in entry["images"]:
+            if not img_path:
+                continue
+            
+            # バーコード画像判定
+            try:
+                if self.image_service.is_barcode_only_image(img_path):
+                    # バーコード画像（最初の1枚のみ保存）
+                    if not barcode_image:
+                        barcode_image = img_path
+                else:
+                    # 商品画像（最大5枚）
+                    if len(product_images) < 5:
+                        product_images.append(img_path)
+            except Exception as e:
+                logger.warning(f"Failed to check if image is barcode-only: {e}, treating as product image")
+                # エラー時は商品画像として扱う
+                if len(product_images) < 5:
+                    product_images.append(img_path)
+        
+        entry["product_images"] = product_images
+        entry["barcode_image"] = barcode_image
+        
+        # 仕入DBから画像URLを取得（既にアップロード済みの場合）
+        if entry["sku"]:
+            try:
+                from database.purchase_db import PurchaseDatabase
+                purchase_db = PurchaseDatabase()
+                purchase_record = purchase_db.get_by_sku(entry["sku"])
+                if purchase_record:
+                    for i in range(1, 6):
+                        img_url = purchase_record.get(f"image_url_{i}")
+                        if img_url:
+                            entry["image_urls"].append(img_url)
+            except Exception as e:
+                logger.debug(f"Failed to get image URLs from purchase DB: {e}")
 
         self.registration_records.append(entry)
         self.update_registration_table()
@@ -1543,18 +1606,22 @@ class ImageManagerWidget(QWidget):
         self.registration_table.setRowCount(len(self.registration_records))
 
         for row, entry in enumerate(self.registration_records):
+            # 基本情報（既存カラム）
             values = [
-                entry["condition"],
-                entry["sku"],
-                entry["asin"],
-                entry["product_name"]
+                entry.get("condition", ""),
+                entry.get("sku", ""),
+                entry.get("asin", ""),
+                entry.get("product_name", "")
             ]
             for col, value in enumerate(values):
-                item = QTableWidgetItem(value)
+                item = QTableWidgetItem(str(value))
                 self.registration_table.setItem(row, col, item)
 
-            for idx, image_path in enumerate(entry["images"]):
+            # 元の画像パス（既存カラム、表示用）
+            for idx, image_path in enumerate(entry.get("images", [])):
                 col = 4 + idx
+                if col >= len(self.registration_columns):
+                    break
                 display_text = Path(image_path).name if image_path else ""
                 item = QTableWidgetItem(display_text)
                 if image_path:
@@ -1563,6 +1630,40 @@ class ImageManagerWidget(QWidget):
                     item.setFlags(item.flags() | Qt.ItemIsDragEnabled | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 else:
                     item.setFlags(item.flags() & ~Qt.ItemIsDragEnabled)
+                self.registration_table.setItem(row, col, item)
+            
+            # Amazon Lファイル用追加カラム
+            col_offset = 10  # 既存カラム数（コンディション、SKU、ASIN、商品名、画像1～6）
+            # JAN
+            col = col_offset
+            item = QTableWidgetItem(entry.get("jan", ""))
+            self.registration_table.setItem(row, col, item)
+            # 販売価格（編集可能）
+            col = col_offset + 1
+            item = QTableWidgetItem(entry.get("price", ""))
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
+            self.registration_table.setItem(row, col, item)
+            # 在庫数（編集可能）
+            col = col_offset + 2
+            item = QTableWidgetItem(entry.get("quantity", "0"))
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
+            self.registration_table.setItem(row, col, item)
+            # コンディション番号（編集可能）
+            col = col_offset + 3
+            item = QTableWidgetItem(entry.get("condition_type", ""))
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
+            self.registration_table.setItem(row, col, item)
+            # コンディション説明（編集可能）
+            col = col_offset + 4
+            item = QTableWidgetItem(entry.get("condition_note", ""))
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
+            self.registration_table.setItem(row, col, item)
+            # 画像URL1～5（編集可能、GCSアップロード後のURL）
+            for idx in range(5):
+                col = col_offset + 5 + idx
+                img_url = entry.get("image_urls", [])[idx] if idx < len(entry.get("image_urls", [])) else ""
+                item = QTableWidgetItem(img_url)
+                item.setFlags(item.flags() | Qt.ItemIsEditable)
                 self.registration_table.setItem(row, col, item)
 
     def clear_registration_records(self):
@@ -1608,6 +1709,37 @@ class ImageManagerWidget(QWidget):
             return
         image_path = item.data(Qt.UserRole)
         self._set_registration_preview(image_path)
+    
+    def on_registration_cell_changed(self, row: int, column: int):
+        """テーブルセル編集時にregistration_recordsを更新"""
+        if row >= len(self.registration_records):
+            return
+        
+        entry = self.registration_records[row]
+        item = self.registration_table.item(row, column)
+        if not item:
+            return
+        
+        col_offset = 10  # 既存カラム数
+        
+        # 編集可能なカラムのみ更新
+        if column == col_offset:  # JAN
+            entry["jan"] = item.text()
+        elif column == col_offset + 1:  # 販売価格
+            entry["price"] = item.text()
+        elif column == col_offset + 2:  # 在庫数
+            entry["quantity"] = item.text()
+        elif column == col_offset + 3:  # コンディション番号
+            entry["condition_type"] = item.text()
+        elif column == col_offset + 4:  # コンディション説明
+            entry["condition_note"] = item.text()
+        elif col_offset + 5 <= column <= col_offset + 9:  # 画像URL1～5
+            idx = column - (col_offset + 5)
+            if "image_urls" not in entry:
+                entry["image_urls"] = [""] * 5
+            while len(entry["image_urls"]) <= idx:
+                entry["image_urls"].append("")
+            entry["image_urls"][idx] = item.text()
 
     def _set_registration_preview(self, image_path: Optional[str]):
         """プレビュー画像の更新"""
@@ -1639,6 +1771,348 @@ class ImageManagerWidget(QWidget):
         self.registration_preview_label.setPixmap(scaled)
         self.registration_preview_label.setAlignment(Qt.AlignCenter)
         self.registration_preview_label.setText("")
+    
+    def upload_images_to_gcs(self):
+        """選択行の商品画像をGCSにアップロード"""
+        if not self.registration_records:
+            QMessageBox.warning(self, "警告", "登録されている商品がありません。")
+            return
+        
+        # 選択行を取得（選択がない場合は全行）
+        selected_rows = set()
+        for item in self.registration_table.selectedItems():
+            selected_rows.add(item.row())
+        
+        if not selected_rows:
+            # 選択がない場合は全行を対象
+            reply = QMessageBox.question(
+                self,
+                "確認",
+                "選択された行がありません。全行の画像をアップロードしますか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                return
+            selected_rows = set(range(len(self.registration_records)))
+        
+        # GCSアップロードユーティリティのインポート
+        try:
+            import sys
+            import os
+            # python/utils/gcs_uploader.py へのパスを追加
+            python_dir = os.path.join(os.path.dirname(__file__), '..', '..', '..')
+            sys.path.insert(0, python_dir)
+            from utils.gcs_uploader import upload_image_to_gcs, GCS_AVAILABLE, check_gcs_authentication
+            
+            if not GCS_AVAILABLE:
+                QMessageBox.critical(
+                    self, "エラー",
+                    "google-cloud-storageがインストールされていません。\n"
+                    "pip install google-cloud-storage を実行してください。"
+                )
+                return
+            
+            # 認証確認
+            auth_success, auth_error = check_gcs_authentication()
+            if not auth_success:
+                QMessageBox.critical(
+                    self, "認証エラー",
+                    f"GCSへの認証に失敗しました。\n\n{auth_error}\n\n"
+                    f"サービスアカウントキーの設定を確認してください。"
+                )
+                return
+        except ImportError as e:
+            QMessageBox.critical(
+                self, "エラー",
+                f"GCSアップロード機能の読み込みに失敗しました:\n{str(e)}"
+            )
+            return
+        
+        # 進捗ダイアログ
+        total_images = 0
+        upload_tasks = []  # (row, entry, image_index, image_path)
+        
+        for row in selected_rows:
+            if row >= len(self.registration_records):
+                continue
+            entry = self.registration_records[row]
+            product_images = entry.get("product_images", [])
+            
+            for idx, image_path in enumerate(product_images):
+                if image_path and Path(image_path).exists():
+                    # 既にURLが設定されている場合はスキップ
+                    existing_urls = entry.get("image_urls", [])
+                    if idx < len(existing_urls) and existing_urls[idx]:
+                        continue
+                    upload_tasks.append((row, entry, idx, image_path))
+                    total_images += 1
+        
+        if not upload_tasks:
+            QMessageBox.information(
+                self, "情報",
+                "アップロード対象の画像がありません。\n"
+                "（既にアップロード済み、または画像ファイルが見つかりません）"
+            )
+            return
+        
+        # 進捗ダイアログ
+        progress = QProgressDialog("GCSに画像をアップロード中...", "キャンセル", 0, total_images, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        
+        uploaded_count = 0
+        failed_count = 0
+        errors = []
+        
+        try:
+            for row, entry, image_idx, image_path in upload_tasks:
+                if progress.wasCanceled():
+                    break
+                
+                progress.setValue(uploaded_count + failed_count)
+                progress.setLabelText(f"アップロード中: {Path(image_path).name}")
+                QApplication.processEvents()
+                
+                try:
+                    # GCSにアップロード
+                    public_url = upload_image_to_gcs(image_path)
+                    
+                    # entryのimage_urlsを更新
+                    if "image_urls" not in entry:
+                        entry["image_urls"] = [""] * 5
+                    while len(entry["image_urls"]) <= image_idx:
+                        entry["image_urls"].append("")
+                    entry["image_urls"][image_idx] = public_url
+                    
+                    # テーブルに反映
+                    col_offset = 10
+                    col = col_offset + 5 + image_idx
+                    if col < self.registration_table.columnCount():
+                        item = self.registration_table.item(row, col)
+                        if item:
+                            item.setText(public_url)
+                        else:
+                            item = QTableWidgetItem(public_url)
+                            item.setFlags(item.flags() | Qt.ItemIsEditable)
+                            self.registration_table.setItem(row, col, item)
+                    
+                    uploaded_count += 1
+                    logger.info(f"Uploaded {image_path} -> {public_url}")
+                
+                except (ValueError, FileNotFoundError) as e:
+                    # 認証エラーやファイルエラーの場合は処理を停止
+                    failed_count += 1
+                    error_msg = str(e)
+                    errors.append(error_msg)
+                    logger.error(f"Critical error during upload: {e}", exc_info=True)
+                    
+                    # 認証エラーの場合は即座に停止
+                    if "認証エラー" in error_msg or "権限エラー" in error_msg or "authentication" in error_msg.lower():
+                        progress.close()
+                        QMessageBox.critical(
+                            self, "認証エラー",
+                            f"GCSへの認証に失敗しました。\n\n{error_msg}\n\n"
+                            f"処理を中断しました。"
+                        )
+                        return
+                
+                except Exception as e:
+                    failed_count += 1
+                    error_msg = f"SKU {entry.get('sku', 'N/A')}: {str(e)}"
+                    errors.append(error_msg)
+                    logger.error(f"Failed to upload {image_path}: {e}", exc_info=True)
+            
+            progress.setValue(total_images)
+            
+            # 仕入DBに保存
+            try:
+                from database.purchase_db import PurchaseDatabase
+                purchase_db = PurchaseDatabase()
+                
+                for row in selected_rows:
+                    if row >= len(self.registration_records):
+                        continue
+                    entry = self.registration_records[row]
+                    sku = entry.get("sku")
+                    if not sku:
+                        continue
+                    
+                    # 仕入DBのレコードを取得
+                    purchase_record = purchase_db.get_by_sku(sku)
+                    if purchase_record:
+                        # 画像URLを更新
+                        update_data = {}
+                        image_urls = entry.get("image_urls", [])
+                        for i in range(5):
+                            if i < len(image_urls) and image_urls[i]:
+                                update_data[f"image_url_{i + 1}"] = image_urls[i]
+                        
+                        # バーコード画像URLも保存
+                        if entry.get("barcode_image"):
+                            # バーコード画像はアップロードしない（識別用のみ）
+                            # 必要に応じてここでアップロードも可能
+                            pass
+                        
+                        if update_data:
+                            update_data["sku"] = sku
+                            purchase_db.upsert(update_data)
+                            logger.info(f"Updated purchase DB for SKU {sku} with image URLs")
+            
+            except Exception as e:
+                logger.warning(f"Failed to save image URLs to purchase DB: {e}")
+            
+            # 結果表示
+            result_msg = f"アップロード完了\n\n"
+            result_msg += f"成功: {uploaded_count}件\n"
+            if failed_count > 0:
+                result_msg += f"失敗: {failed_count}件\n"
+                if errors:
+                    result_msg += "\nエラー詳細:\n" + "\n".join(errors[:5])
+                    if len(errors) > 5:
+                        result_msg += f"\n... 他 {len(errors) - 5}件"
+            
+            if failed_count > 0:
+                QMessageBox.warning(self, "アップロード完了", result_msg)
+            else:
+                QMessageBox.information(self, "アップロード完了", result_msg)
+        
+        finally:
+            progress.close()
+    
+    def generate_amazon_l_file(self):
+        """Amazon Lファイル（TSV）を生成・保存"""
+        if not self.registration_records:
+            QMessageBox.warning(self, "警告", "登録されている商品がありません。")
+            return
+        
+        # テーブルから最新のデータを取得
+        products = []
+        for row in range(self.registration_table.rowCount()):
+            if row >= len(self.registration_records):
+                continue
+            
+            entry = self.registration_records[row]
+            
+            # テーブルから編集された値を取得
+            col_offset = 10  # 既存カラム数
+            jan = self.registration_table.item(row, col_offset).text() if self.registration_table.item(row, col_offset) else entry.get("jan", "")
+            price = self.registration_table.item(row, col_offset + 1).text() if self.registration_table.item(row, col_offset + 1) else entry.get("price", "")
+            quantity = self.registration_table.item(row, col_offset + 2).text() if self.registration_table.item(row, col_offset + 2) else entry.get("quantity", "0")
+            condition_type = self.registration_table.item(row, col_offset + 3).text() if self.registration_table.item(row, col_offset + 3) else entry.get("condition_type", "")
+            condition_note = self.registration_table.item(row, col_offset + 4).text() if self.registration_table.item(row, col_offset + 4) else entry.get("condition_note", "")
+            
+            # 画像URLを取得
+            image_urls = []
+            for idx in range(5):
+                col = col_offset + 5 + idx
+                item = self.registration_table.item(row, col)
+                if item and item.text():
+                    image_urls.append(item.text())
+            
+            # 必須フィールドチェック
+            sku = entry.get("sku", "")
+            asin = entry.get("asin", "")
+            
+            if not sku:
+                continue
+            
+            if not asin and not jan:
+                QMessageBox.warning(
+                    self, "警告",
+                    f"SKU {sku} にはASINまたはJANが必要です。"
+                )
+                continue
+            
+            if not price:
+                QMessageBox.warning(
+                    self, "警告",
+                    f"SKU {sku} には販売価格が必要です。"
+                )
+                continue
+            
+            if not condition_type:
+                # コンディション文字列から変換を試みる
+                condition_str = entry.get("condition", "")
+                condition_map = {
+                    "中古(ほぼ新品)": "1",
+                    "中古(非常に良い)": "2",
+                    "中古(良い)": "3",
+                    "中古(可)": "4",
+                    "新品(新品)": "11",
+                    "新品": "11",
+                }
+                condition_type = condition_map.get(condition_str, "")
+            
+            if not condition_type:
+                QMessageBox.warning(
+                    self, "警告",
+                    f"SKU {sku} にはコンディション番号が必要です。"
+                )
+                continue
+            
+            # 商品データを作成
+            product = {
+                "sku": sku,
+                "asin": asin,
+                "jan": jan,
+                "price": price,
+                "quantity": quantity,
+                "condition_type": condition_type,
+                "condition_note": condition_note,
+            }
+            
+            # 画像URLを追加
+            for idx, img_url in enumerate(image_urls):
+                if img_url:
+                    product[f"image_url_{idx + 1}"] = img_url
+            
+            products.append(product)
+        
+        if not products:
+            QMessageBox.warning(self, "警告", "有効な商品データがありません。")
+            return
+        
+        # TSV生成
+        try:
+            import sys
+            import os
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+            from services.amazon_inventory_loader_service import AmazonInventoryLoaderService
+            
+            tsv_bytes = AmazonInventoryLoaderService.generate_inventory_loader_tsv(products)
+            
+            if not tsv_bytes:
+                QMessageBox.warning(self, "エラー", "TSVファイルの生成に失敗しました。")
+                return
+            
+            # ファイル保存ダイアログ
+            from datetime import datetime
+            default_filename = f"amazon_inventory_loader_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Amazon Lファイルを保存",
+                default_filename,
+                "TSVファイル (*.tsv);;すべてのファイル (*)"
+            )
+            
+            if file_path:
+                with open(file_path, 'wb') as f:
+                    f.write(tsv_bytes)
+                
+                QMessageBox.information(
+                    self, "完了",
+                    f"Amazon Lファイルを保存しました:\n{file_path}\n\n"
+                    f"商品数: {len(products)}件"
+                )
+        
+        except Exception as e:
+            logger.error(f"Failed to generate Amazon L file: {e}", exc_info=True)
+            QMessageBox.critical(
+                self, "エラー",
+                f"Amazon Lファイルの生成中にエラーが発生しました:\n{str(e)}"
+            )
 
     def on_tree_context_menu(self, position):
         """ツリーのコンテキストメニュー"""

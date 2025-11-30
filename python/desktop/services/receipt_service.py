@@ -10,12 +10,14 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 from ..database.receipt_db import ReceiptDatabase
+from ..services.gemini_receipt_service import GeminiReceiptService
 from ..services.ocr_service import OCRService
 
 
@@ -33,12 +35,20 @@ class ReceiptParseResult:
     items_count: Optional[int]
 
 
+logger = logging.getLogger(__name__)
+
+
 class ReceiptService:
     def __init__(self, base_dir: Optional[str | Path] = None, tesseract_cmd: Optional[str] = None, gcv_credentials_path: Optional[str] = None, tessdata_dir: Optional[str] = None):
         self.base_dir = Path(base_dir) if base_dir else Path(__file__).resolve().parents[2] / "python" / "desktop" / "data" / "receipts"
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.db = ReceiptDatabase()
         self.ocr = OCRService(tesseract_cmd=tesseract_cmd, gcv_credentials_path=gcv_credentials_path, tessdata_dir=tessdata_dir)
+        try:
+            self.ai_service = GeminiReceiptService()
+        except Exception as exc:  # pragma: no cover - 外部依存
+            logger.debug("GeminiReceiptService initialization failed: %s", exc)
+            self.ai_service = None
 
     def save_image(self, src_path: str | Path) -> Path:
         src_path = Path(src_path)
@@ -61,14 +71,15 @@ class ReceiptService:
         m_date = re.search(r"(20\d{2})[./-](\d{1,2})[./-](\d{1,2})", text)
         if m_date:
             y, mo, d = m_date.groups()
-            purchase_date = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+            # 仕入DBと揃えるため「yyyy/MM/dd」形式に統一
+            purchase_date = f"{int(y):04d}/{int(mo):02d}/{int(d):02d}"
         
         # パターン2: yyyy年mm月dd日 or yyyy年mm月dd
         if not purchase_date:
             m_date = re.search(r"(20\d{2})年(\d{1,2})月(\d{1,2})日?", text)
             if m_date:
                 y, mo, d = m_date.groups()
-                purchase_date = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+                purchase_date = f"{int(y):04d}/{int(mo):02d}/{int(d):02d}"
         
         # パターン3: 令和X年mm月dd日 (令和7年 = 2025年)
         if not purchase_date:
@@ -77,7 +88,7 @@ class ReceiptService:
                 reiwa_year, mo, d = m_date.groups()
                 # 令和年を西暦に変換（令和1年 = 2019年）
                 y = 2018 + int(reiwa_year)
-                purchase_date = f"{y:04d}-{int(mo):02d}-{int(d):02d}"
+                purchase_date = f"{y:04d}/{int(mo):02d}/{int(d):02d}"
         
         # パターン4: R7年mm月dd日 (R7年 = 2025年)
         if not purchase_date:
@@ -86,7 +97,7 @@ class ReceiptService:
                 reiwa_year, mo, d = m_date.groups()
                 # 令和年を西暦に変換（令和1年 = 2019年）
                 y = 2018 + int(reiwa_year)
-                purchase_date = f"{y:04d}-{int(mo):02d}-{int(d):02d}"
+                purchase_date = f"{y:04d}/{int(mo):02d}/{int(d):02d}"
 
         # 時刻抽出（日付の近くを優先的に検索）
         purchase_time = None
@@ -94,8 +105,11 @@ class ReceiptService:
             # 日付が見つかった行の近くを検索
             lines = text.splitlines()
             date_line_idx = None
+            # 数字だけ取り出して比較（区切り文字の違いを吸収）
+            def _digits_only(s: str) -> str:
+                return re.sub(r"\D", "", s)
             for i, line in enumerate(lines):
-                if purchase_date.replace("-", "")[:8] in line.replace("-", "").replace("/", "").replace(".", ""):
+                if _digits_only(purchase_date)[:8] in _digits_only(line):
                     date_line_idx = i
                     break
             
@@ -563,9 +577,38 @@ class ReceiptService:
         # 元のファイルパスを保存（リネーム用）
         original_path = Path(image_path).resolve() if image_path else None
         saved = self.save_image(image_path)
-        ocr = self.ocr.extract_text(saved, use_preprocessing=True)
-        raw_text = ocr.get("text") or ""
-        parsed = self.parse_receipt_text(raw_text)
+        parsed: Optional[ReceiptParseResult] = None
+        raw_text = ""
+        ocr_provider = None
+
+        # Gemini AIによる解析を優先（設定済みの場合）
+        if self.ai_service and self.ai_service.is_available():
+            try:
+                ai_result = self.ai_service.extract_structured_data(saved)
+                if ai_result:
+                    parsed = ReceiptParseResult(
+                        purchase_date=ai_result.get("purchase_date"),
+                        purchase_time=ai_result.get("purchase_time"),
+                        store_name_raw=ai_result.get("store_name_raw"),
+                        phone_number=ai_result.get("phone_number"),
+                        subtotal=ai_result.get("subtotal"),
+                        tax=ai_result.get("tax"),
+                        discount_amount=ai_result.get("discount_amount"),
+                        total_amount=ai_result.get("total_amount"),
+                        paid_amount=ai_result.get("paid_amount"),
+                        items_count=ai_result.get("items_count"),
+                    )
+                    raw_text = ai_result.get("raw_text") or ""
+                    ocr_provider = ai_result.get("provider") or "gemini"
+            except Exception as exc:  # pragma: no cover - 外部依存
+                logger.warning("Gemini receipt parsing failed, falling back to OCR: %s", exc)
+                parsed = None
+
+        if parsed is None:
+            ocr = self.ocr.extract_text(saved, use_preprocessing=True)
+            raw_text = ocr.get("text") or ""
+            parsed = self.parse_receipt_text(raw_text)
+            ocr_provider = ocr.get("provider")
 
         # デバッグ用ログ: OCRテキストと抽出結果を記録（原因調査用）
         try:
@@ -607,7 +650,7 @@ class ReceiptService:
             "paid_amount": parsed.paid_amount,
             "items_count": parsed.items_count,
             "currency": currency,
-            "ocr_provider": ocr.get("provider"),
+            "ocr_provider": ocr_provider,
             "ocr_text": raw_text,
         }
         receipt_id = self.db.insert_receipt(receipt_data)
@@ -615,11 +658,13 @@ class ReceiptService:
         
         # ファイル名を新しい形式にリネーム: receipt_{YYYYMMDD}_{store_code}_{receipt_id}.{拡張子}
         try:
-            # 日付をYYYYMMDD形式に変換
-            date_str = parsed.purchase_date.replace("-", "") if parsed.purchase_date else "UNKNOWN"
-            if len(date_str) == 10:  # yyyy-MM-dd形式
-                date_str = date_str[:4] + date_str[5:7] + date_str[8:10]
-            elif len(date_str) != 8:
+            # 日付をYYYYMMDD形式に変換（区切り文字はすべて除去）
+            if parsed.purchase_date:
+                import re as _re
+                date_str = _re.sub(r"[^0-9]", "", parsed.purchase_date)
+                if len(date_str) != 8:
+                    date_str = "UNKNOWN"
+            else:
                 date_str = "UNKNOWN"
             
             # 店舗コード（未確定時はUNKNOWN）

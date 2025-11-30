@@ -1,3 +1,48 @@
+## 2025-01-XX Amazon Lファイル生成機能とGCSアップロード機能実装
+
+- 追加: `python/services/amazon_inventory_loader_service.py`
+  - Amazon Inventory Loader (Lファイル) TSV生成サービスを実装
+  - TSV形式（タブ区切り、cp932エンコーディング）でAmazon出品用ファイルを生成
+  - 画像URL列（offer-image-url-1～5）に対応
+- 変更: `python/desktop/database/purchase_db.py`
+  - 仕入DB (`purchases`テーブル) に画像カラムを追加
+    - `image_url_1` ～ `image_url_5` (商品画像用、Amazon Lファイルに使用)
+    - `barcode_image_url` (バーコード画像用、識別用、Amazon Lファイルには使用しない)
+  - 既存DBへの自動マイグレーション機能で画像カラムを追加
+  - `upsert()` メソッドで画像URLを保存可能に
+- 変更: `python/desktop/services/image_service.py`
+  - `is_barcode_only_image()` メソッドを追加
+  - バーコード検出 + OCR分析でバーコード画像を自動判定
+  - 商品画像とバーコード画像を自動分類
+- 変更: `python/desktop/ui/image_manager_widget.py`
+  - 画像登録タブを拡張（既存カラムは維持）
+    - Amazon Lファイル用カラムを追加: JAN, 販売価格, 在庫数, コンディション番号, コンディション説明, 画像URL1～5
+  - 画像分類処理を実装
+    - `add_registration_entry()` で商品画像とバーコード画像を自動分類
+    - バーコード画像は識別用として保持（Amazon Lファイルには使用しない）
+  - GCSアップロード機能を実装
+    - 「GCSアップロード」ボタンを追加
+    - 選択行の商品画像をGCSに一括アップロード
+    - アップロード後のURLをテーブルに自動反映
+    - 仕入DBにも自動保存
+    - 進捗表示とエラーハンドリング
+  - Amazon Lファイル生成機能を実装
+    - 「Amazon Lファイル生成」ボタンを追加
+    - テーブルからデータを取得してTSV生成
+    - ファイル保存ダイアログで保存
+- 変更: `python/utils/gcs_uploader.py`
+  - `check_gcs_authentication()` 関数を追加（事前認証確認）
+  - サービスアカウントキーの検証機能を強化
+  - 認証エラー、権限エラー、バケットエラーの詳細なエラーハンドリング
+  - 日本語エラーメッセージ対応
+- 動作確認:
+  - 画像登録タブで商品を登録し、画像が自動分類されることを確認
+  - GCSアップロード機能で画像をアップロードし、URLが自動反映されることを確認
+  - Amazon Lファイル生成でTSVファイルが正しく生成されることを確認
+  - 認証エラーが適切に検出・表示されることを確認
+- Git:
+  - feat: Amazon Lファイル生成機能とGCSアップロード機能を実装
+
 ## 2025-01-XX 仕入DBと古物台帳の統合機能実装
 
 - 変更: `python/desktop/database/purchase_db.py`

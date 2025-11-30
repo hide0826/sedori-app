@@ -53,6 +53,51 @@ def _get_content_type(file_path: str) -> str:
     return content_type_map.get(ext, 'image/jpeg')  # デフォルトはjpeg
 
 
+def check_gcs_authentication() -> tuple:
+    """
+    GCS認証を確認する
+    
+    Returns:
+        (success: bool, error_message: Optional[str])
+        successがTrueの場合、認証は成功
+        successがFalseの場合、error_messageにエラー内容が含まれる
+    """
+    if not GCS_AVAILABLE:
+        return False, "google-cloud-storageがインストールされていません。"
+    
+    key_path = Path(KEY_PATH)
+    if not key_path.exists():
+        return False, f"サービスアカウントキーファイルが見つかりません: {KEY_PATH}"
+    
+    try:
+        import json
+        with open(key_path, 'r', encoding='utf-8') as f:
+            key_data = json.load(f)
+        if 'type' not in key_data or key_data.get('type') != 'service_account':
+            return False, "サービスアカウントキーの形式が無効です。"
+    except json.JSONDecodeError:
+        return False, "サービスアカウントキーファイルが有効なJSONではありません。"
+    except Exception as e:
+        return False, f"サービスアカウントキーファイルの読み込みに失敗: {str(e)}"
+    
+    try:
+        client = storage.Client.from_service_account_json(str(key_path))
+        bucket = client.bucket(BUCKET_NAME)
+        # 軽量な操作で認証を確認
+        bucket.reload()
+        return True, None
+    except Exception as e:
+        error_msg = str(e).lower()
+        if 'invalid' in error_msg or 'credentials' in error_msg or 'authentication' in error_msg:
+            return False, f"認証エラー: サービスアカウントキーが無効です。\n詳細: {str(e)}"
+        elif 'permission' in error_msg or 'access' in error_msg or '403' in error_msg:
+            return False, f"権限エラー: バケット '{BUCKET_NAME}' へのアクセス権限がありません。"
+        elif 'not found' in error_msg or '404' in error_msg:
+            return False, f"バケットが見つかりません: {BUCKET_NAME}"
+        else:
+            return False, f"認証確認に失敗: {str(e)}"
+
+
 def upload_image_to_gcs(
     source_file_path: str,
     destination_blob_name: Optional[str] = None
@@ -91,10 +136,71 @@ def upload_image_to_gcs(
             f"Please ensure the service account key is placed at the specified path."
         )
     
+    # サービスアカウントキーファイルの形式確認
+    try:
+        import json
+        with open(key_path, 'r', encoding='utf-8') as f:
+            key_data = json.load(f)
+        # 必須フィールドの確認
+        if 'type' not in key_data or key_data.get('type') != 'service_account':
+            raise ValueError("Invalid service account key format: 'type' field is missing or incorrect")
+        if 'project_id' not in key_data:
+            raise ValueError("Invalid service account key format: 'project_id' field is missing")
+        if 'private_key' not in key_data:
+            raise ValueError("Invalid service account key format: 'private_key' field is missing")
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Service account key file is not valid JSON: {str(e)}")
+    except Exception as e:
+        if isinstance(e, (ValueError, FileNotFoundError)):
+            raise
+        raise ValueError(f"Failed to read service account key file: {str(e)}")
+    
     try:
         # GCSクライアントの初期化
-        client = storage.Client.from_service_account_json(str(key_path))
-        bucket = client.bucket(BUCKET_NAME)
+        try:
+            client = storage.Client.from_service_account_json(str(key_path))
+        except Exception as e:
+            error_msg = str(e).lower()
+            if 'invalid' in error_msg or 'credentials' in error_msg or 'authentication' in error_msg:
+                raise ValueError(
+                    f"認証エラー: サービスアカウントキーが無効です。\n"
+                    f"キーファイルの内容、有効期限、権限を確認してください。\n"
+                    f"詳細: {str(e)}"
+                )
+            elif 'permission' in error_msg or 'access' in error_msg:
+                raise ValueError(
+                    f"権限エラー: サービスアカウントに必要な権限がありません。\n"
+                    f"Storage Admin または Storage Object Admin の権限が必要です。\n"
+                    f"詳細: {str(e)}"
+                )
+            else:
+                raise ValueError(f"GCSクライアントの初期化に失敗しました: {str(e)}")
+        
+        # バケットへのアクセス確認
+        try:
+            bucket = client.bucket(BUCKET_NAME)
+            # バケットの存在確認（軽量な操作で認証を確認）
+            bucket.reload()
+        except Exception as e:
+            error_msg = str(e).lower()
+            if 'not found' in error_msg or '404' in error_msg:
+                raise ValueError(
+                    f"バケットが見つかりません: {BUCKET_NAME}\n"
+                    f"バケット名が正しいか、プロジェクトが正しいか確認してください。"
+                )
+            elif 'permission' in error_msg or 'access' in error_msg or '403' in error_msg:
+                raise ValueError(
+                    f"権限エラー: バケット '{BUCKET_NAME}' へのアクセス権限がありません。\n"
+                    f"サービスアカウントに Storage Admin または Storage Object Admin の権限が必要です。"
+                )
+            elif 'invalid' in error_msg or 'credentials' in error_msg or 'authentication' in error_msg:
+                raise ValueError(
+                    f"認証エラー: バケットへのアクセスに失敗しました。\n"
+                    f"サービスアカウントキーが有効か確認してください。\n"
+                    f"詳細: {str(e)}"
+                )
+            else:
+                raise ValueError(f"バケットへのアクセスに失敗しました: {str(e)}")
         
         # アップロード先パスの生成
         if destination_blob_name is None:
@@ -120,11 +226,29 @@ def upload_image_to_gcs(
         logger.info(f"Upload successful. Public URL: {public_url}")
         return public_url
         
-    except FileNotFoundError:
+    except (FileNotFoundError, ValueError, ImportError):
+        # これらのエラーはそのまま再スロー（詳細なメッセージが含まれている）
         raise
     except Exception as e:
-        logger.error(f"Failed to upload image to GCS: {e}", exc_info=True)
-        raise Exception(f"GCS upload failed: {str(e)}") from e
+        error_msg = str(e).lower()
+        # 認証関連のエラーを検出
+        if 'invalid' in error_msg or 'credentials' in error_msg or 'authentication' in error_msg:
+            logger.error(f"GCS authentication error: {e}", exc_info=True)
+            raise ValueError(
+                f"認証エラー: GCSへの認証に失敗しました。\n"
+                f"サービスアカウントキーが有効か、権限が正しいか確認してください。\n"
+                f"詳細: {str(e)}"
+            )
+        elif 'permission' in error_msg or 'access' in error_msg or '403' in error_msg:
+            logger.error(f"GCS permission error: {e}", exc_info=True)
+            raise ValueError(
+                f"権限エラー: GCSへのアクセス権限がありません。\n"
+                f"サービスアカウントに Storage Admin または Storage Object Admin の権限が必要です。\n"
+                f"詳細: {str(e)}"
+            )
+        else:
+            logger.error(f"Failed to upload image to GCS: {e}", exc_info=True)
+            raise Exception(f"GCS upload failed: {str(e)}") from e
 
 
 if __name__ == "__main__":

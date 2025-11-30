@@ -106,6 +106,13 @@ class PurchaseDatabase:
             ("id_checked_on", "TEXT"),
             ("id_checked_by", "TEXT"),
             ("ledger_registered", "INTEGER DEFAULT 0"),
+            # 画像カラム（Amazon Lファイル用）
+            ("image_url_1", "TEXT"),
+            ("image_url_2", "TEXT"),
+            ("image_url_3", "TEXT"),
+            ("image_url_4", "TEXT"),
+            ("image_url_5", "TEXT"),
+            ("barcode_image_url", "TEXT"),  # バーコード画像用（識別用、Amazon Lファイルには使用しない）
         ]
 
         for col_name, col_def in new_columns:
@@ -142,6 +149,15 @@ class PurchaseDatabase:
         ]
         # purchase辞書に含まれるキーのみを対象とする（古物台帳カラムも更新対象に含めるか検討）
         # ここでは基本的な仕入情報の更新のみ行う
+        
+        # 画像カラムが含まれている場合は追加
+        image_fields = [
+            "image_url_1", "image_url_2", "image_url_3", "image_url_4", "image_url_5",
+            "barcode_image_url"
+        ]
+        for img_field in image_fields:
+            if img_field in purchase:
+                fields.append(img_field)
         
         values = [purchase.get(k) for k in fields]
 
