@@ -1,4 +1,4 @@
-## 2025-01-XX Amazon Lファイル生成機能とGCSアップロード機能実装
+## 2025-01-XX Amazon TSVファイル生成機能とGCSアップロード機能実装
 
 - 追加: `python/services/amazon_inventory_loader_service.py`
   - Amazon Inventory Loader (Lファイル) TSV生成サービスを実装
@@ -26,8 +26,8 @@
     - アップロード後のURLをテーブルに自動反映
     - 仕入DBにも自動保存
     - 進捗表示とエラーハンドリング
-  - Amazon Lファイル生成機能を実装
-    - 「Amazon Lファイル生成」ボタンを追加
+  - Amazon TSVファイル生成機能を実装
+    - 「Amazon TSVファイル生成」ボタンを追加
     - テーブルからデータを取得してTSV生成
     - ファイル保存ダイアログで保存
 - 変更: `python/utils/gcs_uploader.py`

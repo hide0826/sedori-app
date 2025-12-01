@@ -1516,7 +1516,8 @@ class ImageManagerWidget(QWidget):
         self.upload_to_gcs_btn = QPushButton("GCSアップロード")
         self.upload_to_gcs_btn.clicked.connect(self.upload_images_to_gcs)
         button_layout.addWidget(self.upload_to_gcs_btn)
-        self.generate_amazon_l_btn = QPushButton("Amazon Lファイル生成")
+        # Lファイルではなく「TSVファイル生成」として表示
+        self.generate_amazon_l_btn = QPushButton("Amazon TSVファイル生成")
         self.generate_amazon_l_btn.clicked.connect(self.generate_amazon_l_file)
         button_layout.addWidget(self.generate_amazon_l_btn)
         layout.addLayout(button_layout)
@@ -2024,13 +2025,13 @@ class ImageManagerWidget(QWidget):
                     f"SKU {sku} にはASINまたはJANが必要です。"
                 )
                 continue
-            
+
+            # A案: 価格・在庫は空でもOK（Lファイルは画像だけ更新用途）
+            # 空の場合はそのまま '' を渡し、Amazon側に「価格・在庫は更新しない」挙動を期待する
             if not price:
-                QMessageBox.warning(
-                    self, "警告",
-                    f"SKU {sku} には販売価格が必要です。"
-                )
-                continue
+                price = ""
+            if not quantity:
+                quantity = ""
             
             if not condition_type:
                 # コンディション文字列から変換を試みる
@@ -2092,7 +2093,7 @@ class ImageManagerWidget(QWidget):
             default_filename = f"amazon_inventory_loader_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
-                "Amazon Lファイルを保存",
+                "Amazon TSVファイルを保存",
                 default_filename,
                 "TSVファイル (*.tsv);;すべてのファイル (*)"
             )
@@ -2103,7 +2104,7 @@ class ImageManagerWidget(QWidget):
                 
                 QMessageBox.information(
                     self, "完了",
-                    f"Amazon Lファイルを保存しました:\n{file_path}\n\n"
+                    f"Amazon TSVファイルを保存しました:\n{file_path}\n\n"
                     f"商品数: {len(products)}件"
                 )
         
@@ -2111,7 +2112,7 @@ class ImageManagerWidget(QWidget):
             logger.error(f"Failed to generate Amazon L file: {e}", exc_info=True)
             QMessageBox.critical(
                 self, "エラー",
-                f"Amazon Lファイルの生成中にエラーが発生しました:\n{str(e)}"
+                f"Amazon TSVファイルの生成中にエラーが発生しました:\n{str(e)}"
             )
 
     def on_tree_context_menu(self, position):

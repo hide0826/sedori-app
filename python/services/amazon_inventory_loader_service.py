@@ -80,20 +80,16 @@ class AmazonInventoryLoaderService:
         # データ変換
         records = []
         for product in products:
-            # 必須フィールドのチェック
+            # ===== 必須フィールドのチェック =====
             sku = product.get('sku') or product.get('SKU')
             if not sku:
                 logger.warning(f"Skipping product without SKU: {product}")
                 continue
-            
-            # 価格
-            price = product.get('price') or product.get('販売価格') or product.get('plannedPrice')
-            if price is None:
-                logger.warning(f"Skipping product {sku} without price")
-                continue
-            
-            # 在庫数（デフォルト0）
-            quantity = product.get('quantity') or product.get('在庫数') or product.get('add_number', 0)
+
+            # A案: 画像だけ更新モード
+            # 価格・在庫は常に空欄を送る（Amazon側で価格・在庫を更新しない想定）
+            price_value: Any = ''
+            quantity_value: Any = ''
             
             # product-id と product-id-type
             asin = product.get('asin') or product.get('ASIN') or ''
@@ -109,7 +105,7 @@ class AmazonInventoryLoaderService:
                 logger.warning(f"Skipping product {sku} without ASIN or JAN")
                 continue
             
-            # コンディション
+            # コンディション（ここは必須のまま）
             condition_type = product.get('condition_type') or product.get('condition-type')
             if not condition_type:
                 # コンディション文字列から変換
@@ -134,8 +130,9 @@ class AmazonInventoryLoaderService:
             # レコード作成
             record = {
                 'sku': str(sku),
-                'price': int(float(price)) if price else 0,
-                'quantity': int(quantity) if quantity else 0,
+                # A案: 価格・在庫は空欄を許容（画像だけ更新モード）
+                'price': price_value,
+                'quantity': quantity_value,
                 'product-id': str(product_id),
                 'product-id-type': int(product_id_type),
                 'condition-type': str(condition_type),
