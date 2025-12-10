@@ -2131,17 +2131,9 @@ class InventoryWidget(QWidget):
                     product_name_column = j
                     break
             
-            # 商品名列が見つかった場合、その列にスクロール・ハイライト
+            # 商品名列が見つかった場合、その列をハイライト
             if product_name_column >= 0:
-                # 水平スクロールで商品名列を表示
-                item = self.data_table.item(current_row, product_name_column)
-                if item:
-                    self.data_table.scrollToItem(
-                        item,
-                        QTableWidget.PositionAtCenter
-                    )
-                    
-                    # 商品名列のセルをハイライト
+                # 商品名列のセルをハイライト
                     for j in range(self.data_table.columnCount()):
                         row_item = self.data_table.item(current_row, j)
                         if row_item:
@@ -2937,6 +2929,65 @@ class InventoryWidget(QWidget):
             result = re.sub(r' +', ' ', result).strip()
             return result
     
+    def _normalize_asin_jan(self, value):
+        """
+        ASIN/JANコードの科学的記数法を正規化
+        
+        ASIN: 10桁の数字または10文字の英数字（例: 4048965379, B0085PIHM0）
+        JAN: 13桁の数字（例: 4901234567890）
+        
+        Args:
+            value: ASINまたはJANの値（文字列、数値、科学的記数法など）
+            
+        Returns:
+            正規化されたASIN/JANコード（文字列）
+        """
+        if not value or pd.isna(value):
+            return ''
+        
+        # 文字列に変換
+        str_value = str(value).strip()
+        if not str_value:
+            return ''
+        
+        # 科学的記数法のパターンをチェック（例: 4.05E+09, 4.8E+09）
+        import re
+        scientific_pattern = r'^(\d+\.?\d*)[eE][\+\-]?(\d+)$'
+        match = re.match(scientific_pattern, str_value)
+        
+        if match:
+            try:
+                # 科学的記数法を数値に変換
+                num_value = float(str_value)
+                # 整数に変換
+                int_value = int(num_value)
+                # 文字列に変換（先頭0は保持）
+                normalized = str(int_value)
+                
+                # 桁数でASINかJANかを判定
+                # ASINは10桁、JANは13桁
+                if len(normalized) == 10:
+                    # 10桁の場合はASINとして扱う（そのまま返す）
+                    return normalized
+                elif len(normalized) == 13:
+                    # 13桁の場合はJANとして扱う（そのまま返す）
+                    return normalized
+                elif len(normalized) < 10:
+                    # 10桁未満の場合は、10桁のASINとして先頭0埋め
+                    return normalized.zfill(10)
+                elif len(normalized) < 13:
+                    # 10桁以上13桁未満の場合は、13桁のJANとして先頭0埋め
+                    return normalized.zfill(13)
+                else:
+                    # 13桁を超える場合はそのまま返す
+                    return normalized
+            except (ValueError, OverflowError):
+                # 変換に失敗した場合は元の値を返す
+                return str_value
+        
+        # 科学的記数法でない場合は、そのまま返す（ただし文字列として）
+        return str_value
+    
     def export_listing_csv(self):
         """出品CSV生成（conditionNote統合版）"""
         if self.filtered_data is None:
@@ -2988,10 +3039,14 @@ class InventoryWidget(QWidget):
                     # 連続する空白を1つに
                     condition_note = re.sub(r' +', ' ', condition_note).strip()
                 
+                # ASIN/JANコードの科学的記数法を正規化
+                asin_value = self._normalize_asin_jan(row.get('ASIN', ''))
+                jan_value = self._normalize_asin_jan(row.get('JAN', ''))
+                
                 mapped_row = {
                     'sku': row.get('SKU', ''),
-                    'asin': row.get('ASIN', ''),
-                    'jan': row.get('JAN', ''),
+                    'asin': asin_value,
+                    'jan': jan_value,
                     'product_name': product_name_val,
                     'quantity': row.get('仕入れ個数', 1),
                     'plannedPrice': row.get('販売予定価格', 0),

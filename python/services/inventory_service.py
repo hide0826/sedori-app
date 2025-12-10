@@ -117,6 +117,66 @@ class InventoryService:
         }
 
     @staticmethod
+    def _normalize_asin_jan(value):
+        """
+        ASIN/JANコードの科学的記数法を正規化
+        
+        ASIN: 10桁の数字または10文字の英数字（例: 4048965379, B0085PIHM0）
+        JAN: 13桁の数字（例: 4901234567890）
+        
+        Args:
+            value: ASINまたはJANの値（文字列、数値、科学的記数法など）
+            
+        Returns:
+            正規化されたASIN/JANコード（文字列）
+        """
+        if value is None or pd.isna(value):
+            return ''
+        
+        # 文字列に変換
+        str_value = str(value).strip()
+        if not str_value:
+            return ''
+        
+        # 科学的記数法のパターンをチェック（例: 4.05E+09, 4.8E+09）
+        import re
+        scientific_pattern = r'^(\d+\.?\d*)[eE][\+\-]?(\d+)$'
+        match = re.match(scientific_pattern, str_value)
+        
+        if match:
+            try:
+                # 科学的記数法を数値に変換
+                num_value = float(str_value)
+                # 整数に変換
+                int_value = int(num_value)
+                # 文字列に変換（先頭0は保持）
+                normalized = str(int_value)
+                
+                # 桁数でASINかJANかを判定
+                # ASINは10桁、JANは13桁
+                if len(normalized) == 10:
+                    # 10桁の場合はASINとして扱う（そのまま返す）
+                    return normalized
+                elif len(normalized) == 13:
+                    # 13桁の場合はJANとして扱う（そのまま返す）
+                    return normalized
+                elif len(normalized) < 10:
+                    # 10桁未満の場合は、10桁のASINとして先頭0埋め
+                    return normalized.zfill(10)
+                elif len(normalized) < 13:
+                    # 10桁以上13桁未満の場合は、13桁のJANとして先頭0埋め
+                    return normalized.zfill(13)
+                else:
+                    # 13桁を超える場合はそのまま返す
+                    return normalized
+            except (ValueError, OverflowError):
+                # 変換に失敗した場合は元の値を返す
+                return str_value
+        
+        # 科学的記数法でない場合は、そのまま返す（ただし文字列として）
+        return str_value
+
+    @staticmethod
     def generate_listing_csv_content(products: List[dict]) -> bytes:
         """
         商品リストから出品用CSVコンテンツを生成する（Shift-JISエンコーディング）。
@@ -124,6 +184,13 @@ class InventoryService:
         """
         if not products:
             return b""
+
+        # ASIN/JANコードの科学的記数法を正規化
+        for product in products:
+            if 'asin' in product:
+                product['asin'] = InventoryService._normalize_asin_jan(product['asin'])
+            if 'jan' in product:
+                product['jan'] = InventoryService._normalize_asin_jan(product['jan'])
 
         # DataFrameに変換
         df = pd.DataFrame(products)
@@ -177,6 +244,16 @@ class InventoryService:
         # Create final DataFrame
         df_output = pd.DataFrame(output_data)
 
+        # ASIN/JAN列の科学的記数法を正規化（DataFrame変換後も念のため）
+        if 'ASIN' in df_output.columns:
+            df_output['ASIN'] = df_output['ASIN'].apply(
+                lambda x: InventoryService._normalize_asin_jan(x) if pd.notna(x) else ''
+            )
+        if 'JAN' in df_output.columns:
+            df_output['JAN'] = df_output['JAN'].apply(
+                lambda x: InventoryService._normalize_asin_jan(x) if pd.notna(x) else ''
+            )
+
         # If ASIN exists, JAN should be empty (逆も同様)
         if 'ASIN' in df_output.columns and 'JAN' in df_output.columns:
             df_output['JAN'] = df_output.apply(
@@ -206,6 +283,13 @@ class InventoryService:
         
         # Convert to list of dicts
         records = df_final.to_dict(orient='records')
+        
+        # ASIN/JAN列の科学的記数法を正規化（辞書変換後にも念のため）
+        for record in records:
+            if 'ASIN' in record:
+                record['ASIN'] = InventoryService._normalize_asin_jan(record['ASIN'])
+            if 'JAN' in record:
+                record['JAN'] = InventoryService._normalize_asin_jan(record['JAN'])
         
         # Debug: conditionNoteが含まれているか確認
         if records:
