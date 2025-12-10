@@ -113,6 +113,9 @@ class PurchaseDatabase:
             ("image_url_4", "TEXT"),
             ("image_url_5", "TEXT"),
             ("barcode_image_url", "TEXT"),  # バーコード画像用（識別用、Amazon Lファイルには使用しない）
+            # 利益率とROI
+            ("expected_margin", "REAL"),  # 想定利益率（%）
+            ("expected_roi", "REAL"),     # 想定ROI（%）
         ]
 
         for col_name, col_def in new_columns:
@@ -145,7 +148,7 @@ class PurchaseDatabase:
         fields = [
             "product_id", "sku", "purchase_date", "purchase_price", "quantity",
             "store_code", "store_name", "condition_code", "condition_note",
-            "receipt_id", "comment", "other_cost"
+            "receipt_id", "comment", "other_cost", "expected_margin", "expected_roi"
         ]
         # purchase辞書に含まれるキーのみを対象とする（古物台帳カラムも更新対象に含めるか検討）
         # ここでは基本的な仕入情報の更新のみ行う

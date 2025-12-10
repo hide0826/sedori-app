@@ -2083,7 +2083,16 @@ class RouteSummaryWidget(QWidget):
         visits = []
         route_date = self.route_date_edit.dateTime().toString('yyyy-MM-dd')
         
+        # 出発時刻・帰宅時間・往路高速代・復路高速代を除外する店舗コードリスト
+        exclude_store_codes = ['出発時刻', '帰宅時刻', '往路高速代', '復路高速代']
+        
         for i in range(self.store_visits_table.rowCount()):
+            store_code = self._get_table_item(i, 1)
+            
+            # 出発時刻・帰宅時間・往路高速代・復路高速代は店舗訪問情報として扱わない
+            if store_code in exclude_store_codes:
+                continue
+            
             star_widget = self.store_visits_table.cellWidget(i, 9)
             rating = star_widget.rating() if star_widget else 0
             
@@ -2096,8 +2105,8 @@ class RouteSummaryWidget(QWidget):
             store_out_time = self._combine_datetime(route_date, out_time_str)
             
             visit = {
-                'visit_order': i + 1,
-                'store_code': self._get_table_item(i, 1),
+                'visit_order': len(visits) + 1,  # 除外した行を考慮して訪問順序を再計算
+                'store_code': store_code,
                 'store_name': self._get_table_item(i, 2),
                 'store_in_time': store_in_time,
                 'store_out_time': store_out_time,

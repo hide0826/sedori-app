@@ -159,6 +159,11 @@ class InventoryService:
             if old_col in df.columns:
                 output_data[new_col] = df[old_col]
         
+        # conditionNoteが存在しない場合は空文字列のSeriesを作成
+        if 'conditionNote' not in output_data:
+            # DataFrameの行数に合わせて空文字列のSeriesを作成
+            output_data['conditionNote'] = pd.Series([''] * len(df), index=df.index)
+        
         # Add required columns with default values if missing
         final_columns = [
             'SKU', 'ASIN', 'JAN', 'title', 'add_number', 'price', 'cost', 'akaji', 'takane',
@@ -201,6 +206,15 @@ class InventoryService:
         
         # Convert to list of dicts
         records = df_final.to_dict(orient='records')
+        
+        # Debug: conditionNoteが含まれているか確認
+        if records:
+            first_record = records[0]
+            if 'conditionNote' in first_record:
+                print(f"DEBUG: conditionNote value in first record: {repr(first_record['conditionNote'])}")
+            else:
+                print("DEBUG: conditionNote not found in first record")
+                print(f"DEBUG: Available keys: {list(first_record.keys())}")
         
         # Generate CSV using write_listing_csv
         csv_bytes = write_listing_csv(records, final_columns, excel_formula_cols=None)

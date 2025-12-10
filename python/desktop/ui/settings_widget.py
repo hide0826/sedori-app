@@ -285,6 +285,25 @@ class SettingsWidget(QWidget):
         api_toggle_btn.toggled.connect(_toggle_api_visibility)
         ocr_layout.addWidget(api_toggle_btn, 3, 2)
 
+        # Keepa API設定
+        ocr_layout.addWidget(QLabel("Keepa APIキー:"), 5, 0)
+        self.keepa_api_key_edit = QLineEdit()
+        self.keepa_api_key_edit.setPlaceholderText("（任意）Keepa APIキー（ASINから商品情報を取得）")
+        self.keepa_api_key_edit.setEchoMode(QLineEdit.Password)
+        self.keepa_api_key_edit.setClearButtonEnabled(True)
+        ocr_layout.addWidget(self.keepa_api_key_edit, 5, 1)
+
+        keepa_toggle_btn = QPushButton("表示")
+        keepa_toggle_btn.setCheckable(True)
+        keepa_toggle_btn.setMaximumWidth(60)
+
+        def _toggle_keepa_visibility(checked: bool) -> None:
+            self.keepa_api_key_edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
+            keepa_toggle_btn.setText("非表示" if checked else "表示")
+
+        keepa_toggle_btn.toggled.connect(_toggle_keepa_visibility)
+        ocr_layout.addWidget(keepa_toggle_btn, 5, 2)
+
         ocr_layout.addWidget(QLabel("Geminiモデル:"), 4, 0)
         self.gemini_model_combo = QComboBox()
         self.gemini_model_combo.addItems([
@@ -301,7 +320,7 @@ class SettingsWidget(QWidget):
         # OCRテストボタン
         self.test_ocr_btn = QPushButton("OCR設定テスト")
         self.test_ocr_btn.clicked.connect(self.test_ocr_settings)
-        ocr_layout.addWidget(self.test_ocr_btn, 5, 0, 1, 3)
+        ocr_layout.addWidget(self.test_ocr_btn, 6, 0, 1, 3)
         
         layout.addWidget(ocr_group)
         
@@ -553,6 +572,8 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.tessdata_dir_edit.setText(self.settings.value("ocr/tessdata_dir", ""))
         self.gcv_credentials_edit.setText(self.settings.value("ocr/gcv_credentials", ""))
         self.gemini_api_key_edit.setText(self.settings.value("ocr/gemini_api_key", ""))
+        # Keepa APIキー（新規）
+        self.keepa_api_key_edit.setText(self.settings.value("keepa/api_key", ""))
         gemini_model = self.settings.value("ocr/gemini_model", "gemini-flash-latest")
         if gemini_model not in [self.gemini_model_combo.itemText(i) for i in range(self.gemini_model_combo.count())]:
             self.gemini_model_combo.addItem(gemini_model)
@@ -594,6 +615,8 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             self.settings.setValue("ocr/gcv_credentials", self.gcv_credentials_edit.text())
             self.settings.setValue("ocr/gemini_api_key", self.gemini_api_key_edit.text())
             self.settings.setValue("ocr/gemini_model", self.gemini_model_combo.currentText())
+            # Keepa API設定
+            self.settings.setValue("keepa/api_key", self.keepa_api_key_edit.text())
             
             # 設定変更シグナルを発火
             settings_dict = self.get_current_settings()
@@ -643,6 +666,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.tessdata_dir_edit.setText("")
         self.gcv_credentials_edit.setText("")
         self.gemini_api_key_edit.setText("")
+        self.keepa_api_key_edit.setText("")
         self.gemini_model_combo.setCurrentText("gemini-flash-latest")
         
     def get_current_settings(self):
@@ -681,5 +705,8 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                 "gcv_credentials": self.gcv_credentials_edit.text(),
                 "gemini_api_key": self.gemini_api_key_edit.text(),
                 "gemini_model": self.gemini_model_combo.currentText()
+            },
+            "keepa": {
+                "api_key": self.keepa_api_key_edit.text(),
             }
         }

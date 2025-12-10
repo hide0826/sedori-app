@@ -105,10 +105,10 @@ class ConditionTemplateDatabase:
             # デフォルトコンディション項目を作成
             default_conditions = [
                 {'key': 'new', 'name': '新品', 'order': 1, 'description': ''},
-                {'key': 'like_new', 'name': 'ほぼ新品', 'order': 2, 'description': ''},
-                {'key': 'very_good', 'name': '非常に良い', 'order': 3, 'description': ''},
-                {'key': 'good', 'name': '良い', 'order': 4, 'description': ''},
-                {'key': 'acceptable', 'name': '可', 'order': 5, 'description': ''},
+                {'key': 'like_new', 'name': '中古(ほぼ新品)', 'order': 2, 'description': ''},
+                {'key': 'very_good', 'name': '中古(非常に良い)', 'order': 3, 'description': ''},
+                {'key': 'good', 'name': '中古(良い)', 'order': 4, 'description': ''},
+                {'key': 'acceptable', 'name': '中古(可)', 'order': 5, 'description': ''},
             ]
             
             for cond in default_conditions:
@@ -237,10 +237,10 @@ class ConditionTemplateDatabase:
         # デフォルト項目を作成
         default_conditions = [
             {'key': 'new', 'name': '新品', 'order': 1, 'description': ''},
-            {'key': 'like_new', 'name': 'ほぼ新品', 'order': 2, 'description': ''},
-            {'key': 'very_good', 'name': '非常に良い', 'order': 3, 'description': ''},
-            {'key': 'good', 'name': '良い', 'order': 4, 'description': ''},
-            {'key': 'acceptable', 'name': '可', 'order': 5, 'description': ''},
+            {'key': 'like_new', 'name': '中古(ほぼ新品)', 'order': 2, 'description': ''},
+            {'key': 'very_good', 'name': '中古(非常に良い)', 'order': 3, 'description': ''},
+            {'key': 'good', 'name': '中古(良い)', 'order': 4, 'description': ''},
+            {'key': 'acceptable', 'name': '中古(可)', 'order': 5, 'description': ''},
         ]
         
         for cond in default_conditions:

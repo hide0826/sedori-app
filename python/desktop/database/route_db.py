@@ -83,6 +83,8 @@ class RouteDatabase:
         for column, coltype in (
             ("total_purchase_amount", "REAL"),
             ("total_sales_amount", "REAL"),
+            ("expected_margin", "REAL"),  # 想定利益率（%）
+            ("expected_roi", "REAL"),     # 想定ROI（%）
         ):
             try:
                 cursor.execute(f"ALTER TABLE route_summaries ADD COLUMN {column} {coltype} DEFAULT 0")
@@ -154,6 +156,25 @@ class RouteDatabase:
         conn = self._get_connection()
         cursor = conn.cursor()
         
+        # 利益率とROIを計算
+        total_purchase_amount = route_data.get('total_purchase_amount') or 0
+        total_sales_amount = route_data.get('total_sales_amount') or 0
+        total_gross_profit = route_data.get('total_gross_profit') or 0
+        
+        # 想定利益率 = (総想定粗利 / 総想定販売額) * 100
+        expected_margin = 0.0
+        if total_sales_amount > 0:
+            expected_margin = (total_gross_profit / total_sales_amount) * 100
+        
+        # 想定ROI = (総想定粗利 / 総仕入額) * 100
+        expected_roi = 0.0
+        if total_purchase_amount > 0:
+            expected_roi = (total_gross_profit / total_purchase_amount) * 100
+        
+        # 小数点第2位で四捨五入
+        expected_margin = round(expected_margin, 2)
+        expected_roi = round(expected_roi, 2)
+        
         cursor.execute("""
             INSERT INTO route_summaries (
                 route_date, route_code, departure_time, return_time,
@@ -161,8 +182,9 @@ class RouteDatabase:
                 meal_cost, other_expenses, remarks,
                 total_purchase_amount, total_sales_amount,
                 total_working_hours, estimated_hourly_rate,
-                total_gross_profit, total_item_count, purchase_success_rate, avg_purchase_price
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                total_gross_profit, total_item_count, purchase_success_rate, avg_purchase_price,
+                expected_margin, expected_roi
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             route_data.get('route_date'),
             route_data.get('route_code'),
@@ -181,7 +203,9 @@ class RouteDatabase:
             route_data.get('total_gross_profit'),
             route_data.get('total_item_count'),
             route_data.get('purchase_success_rate'),
-            route_data.get('avg_purchase_price')
+            route_data.get('avg_purchase_price'),
+            expected_margin,
+            expected_roi
         ))
         
         conn.commit()
@@ -191,6 +215,25 @@ class RouteDatabase:
         """ルートサマリーを更新"""
         conn = self._get_connection()
         cursor = conn.cursor()
+        
+        # 利益率とROIを計算
+        total_purchase_amount = route_data.get('total_purchase_amount') or 0
+        total_sales_amount = route_data.get('total_sales_amount') or 0
+        total_gross_profit = route_data.get('total_gross_profit') or 0
+        
+        # 想定利益率 = (総想定粗利 / 総想定販売額) * 100
+        expected_margin = 0.0
+        if total_sales_amount > 0:
+            expected_margin = (total_gross_profit / total_sales_amount) * 100
+        
+        # 想定ROI = (総想定粗利 / 総仕入額) * 100
+        expected_roi = 0.0
+        if total_purchase_amount > 0:
+            expected_roi = (total_gross_profit / total_purchase_amount) * 100
+        
+        # 小数点第2位で四捨五入
+        expected_margin = round(expected_margin, 2)
+        expected_roi = round(expected_roi, 2)
         
         cursor.execute("""
             UPDATE route_summaries SET
@@ -211,7 +254,9 @@ class RouteDatabase:
                 total_gross_profit = ?,
                 total_item_count = ?,
                 purchase_success_rate = ?,
-                avg_purchase_price = ?
+                avg_purchase_price = ?,
+                expected_margin = ?,
+                expected_roi = ?
             WHERE id = ?
         """, (
             route_data.get('route_date'),
@@ -232,6 +277,8 @@ class RouteDatabase:
             route_data.get('total_item_count'),
             route_data.get('purchase_success_rate'),
             route_data.get('avg_purchase_price'),
+            expected_margin,
+            expected_roi,
             route_id
         ))
         
@@ -282,7 +329,8 @@ class RouteDatabase:
             "toll_fee_outbound, toll_fee_return, parking_fee, meal_cost, other_expenses, remarks, "
             "total_purchase_amount, total_sales_amount, "
             "total_working_hours, estimated_hourly_rate, total_gross_profit, total_item_count, "
-            "purchase_success_rate, avg_purchase_price, created_at, updated_at, "
+            "purchase_success_rate, avg_purchase_price, expected_margin, expected_roi, "
+            "created_at, updated_at, "
             "datetime(updated_at, 'localtime') AS updated_at_local "
             "FROM route_summaries WHERE 1=1"
         )
@@ -543,8 +591,8 @@ class RouteDatabase:
                 total_profit = float(result[1]) if result and result[1] else 0
                 
                 # 既存値を取得（NULL/0 の場合のみ上書きしたい項目があるため）
-                cursor.execute("SELECT total_item_count, total_gross_profit, avg_purchase_price, total_working_hours, estimated_hourly_rate, departure_time, return_time FROM route_summaries WHERE id = ?", (route_id,))
-                cur = cursor.fetchone() or [None]*7
+                cursor.execute("SELECT total_item_count, total_gross_profit, avg_purchase_price, total_working_hours, estimated_hourly_rate, departure_time, return_time, total_purchase_amount, total_sales_amount FROM route_summaries WHERE id = ?", (route_id,))
+                cur = cursor.fetchone() or [None]*9
                 cur_total_items = cur[0]
                 cur_total_profit = cur[1]
                 cur_avg_price = cur[2]
@@ -552,6 +600,8 @@ class RouteDatabase:
                 cur_hourly_rate = cur[4]
                 dep_str = cur[5]
                 ret_str = cur[6]
+                cur_total_purchase = cur[7]
+                cur_total_sales = cur[8]
 
                 # 平均仕入価格（分母があれば計算）
                 avg_price = None
@@ -581,6 +631,19 @@ class RouteDatabase:
                 if working_hours is not None and working_hours > 0:
                     hourly_rate = total_profit / working_hours if total_profit is not None else None
 
+                # 利益率とROIを計算
+                # 想定利益率 = (総想定粗利 / 総想定販売額) * 100
+                expected_margin = 0.0
+                if cur_total_sales and cur_total_sales > 0:
+                    expected_margin = (total_profit / cur_total_sales) * 100
+                expected_margin = round(expected_margin, 2)
+                
+                # 想定ROI = (総想定粗利 / 総仕入額) * 100
+                expected_roi = 0.0
+                if cur_total_purchase and cur_total_purchase > 0:
+                    expected_roi = (total_profit / cur_total_purchase) * 100
+                expected_roi = round(expected_roi, 2)
+
                 # 更新値（既存がNULL/0のときのみ埋める）
                 new_total_items = total_items if (cur_total_items is None or cur_total_items == 0) else cur_total_items
                 new_total_profit = total_profit if (cur_total_profit is None or cur_total_profit == 0) else cur_total_profit
@@ -589,30 +652,28 @@ class RouteDatabase:
                 new_hourly_rate = hourly_rate if (cur_hourly_rate is None or cur_hourly_rate == 0) else cur_hourly_rate
 
                 # 変更がある場合のみUPDATE（不要なトリガー発火を防止）
-                if any([
-                    (cur_total_items or 0) != new_total_items,
-                    (cur_total_profit or 0) != new_total_profit,
-                    (cur_avg_price or 0) != (new_avg_price or 0),
-                    (cur_working_hours or 0) != (new_working_hours or 0),
-                    (cur_hourly_rate or 0) != (new_hourly_rate or 0)
-                ]):
-                    cursor.execute("""
-                        UPDATE route_summaries
-                        SET total_item_count = ?,
-                            total_gross_profit = ?,
-                            avg_purchase_price = ?,
-                            total_working_hours = ?,
-                            estimated_hourly_rate = ?
-                        WHERE id = ?
-                    """, (
-                        new_total_items,
-                        new_total_profit,
-                        new_avg_price,
-                        new_working_hours,
-                        new_hourly_rate,
-                        route_id,
-                    ))
-                    updated_count += 1
+                # 利益率とROIは常に再計算して更新
+                cursor.execute("""
+                    UPDATE route_summaries
+                    SET total_item_count = ?,
+                        total_gross_profit = ?,
+                        avg_purchase_price = ?,
+                        total_working_hours = ?,
+                        estimated_hourly_rate = ?,
+                        expected_margin = ?,
+                        expected_roi = ?
+                    WHERE id = ?
+                """, (
+                    new_total_items,
+                    new_total_profit,
+                    new_avg_price,
+                    new_working_hours,
+                    new_hourly_rate,
+                    expected_margin,
+                    expected_roi,
+                    route_id,
+                ))
+                updated_count += 1
             
             conn.commit()
             return updated_count

@@ -154,23 +154,19 @@ def normalize_dataframe_for_cp932(df: pd.DataFrame) -> pd.DataFrame:
     """
     # 1. NaN → 空文字列（"nan"文字列化を防ぐ）
     df = df.fillna("")
-
-    # 2. conditionNote 列は repricer 出力では不要のため削除
-    if 'conditionNote' in df.columns:
-        df = df.drop(columns=['conditionNote'])
-
-    # 3. 全列の Excel数式表記除去（="..." → 純粋な値）
+    
+    # 2. 全列の Excel数式表記除去（="..." → 純粋な値）
     for col in df.columns:
         df[col] = df[col].apply(remove_excel_formula_prefix)
 
-    # 4. 全列を明示的に文字列化してから正規化
+    # 3. 全列を明示的に文字列化してから正規化
     for col in df.columns:
         # 数値列以外は明示的に文字列化
         if col not in ['price', 'akaji', 'priceTrace', 'leadtime']:
             df[col] = df[col].astype(str)
         df[col] = df[col].apply(normalize_string_for_cp932)
 
-    # 5. 数値列を数値型に戻す（price, akaji, priceTrace, leadtime等）
+    # 4. 数値列を数値型に戻す（price, akaji, priceTrace, leadtime等）
     numeric_cols = ['price', 'akaji', 'priceTrace', 'leadtime']
     for col in numeric_cols:
         if col in df.columns:

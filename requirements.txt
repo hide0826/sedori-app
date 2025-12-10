@@ -12,3 +12,5 @@ pyzxing  # Alternative barcode reader (ZXing-based, requires Java JRE)
 google-cloud-vision  # Optional: For OCR fallback (requires API key)
 google-cloud-storage  # Optional: For GCS image upload (requires service account key)
 google-generativeai  # Optional: Gemini-based AI receipt parsing
+requests  # Required for Google Maps Places API (New) - store information retrieval
+# googlemaps  # Deprecated: Legacy API is no longer supported, using Places API (New) instead

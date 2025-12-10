@@ -109,6 +109,9 @@ class InventoryWidget(QWidget):
         # ルートテンプレート読み込みエリア
         self.setup_route_template_panel()
         
+        # スプリッターでエリアの高さを調整可能にする
+        self.setup_splitter()
+        
         # SKUテンプレ設定パネル（既存機能）
         self.setup_settings_panel()
         
@@ -493,10 +496,10 @@ class InventoryWidget(QWidget):
         header.setStretchLastSection(True)
         header.setSectionResizeMode(QHeaderView.Interactive)
         
-        # 列の定義（15列対応・指定順序）
+        # 列の定義（17列対応・指定順序）
         self.column_headers = [
             "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
-            "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "コメント",
+            "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
             "発送方法", "仕入先", "コンディション説明"
         ]
         
@@ -540,68 +543,38 @@ class InventoryWidget(QWidget):
         
         def _on_toggle(checked: bool):
             self.data_group_content.setVisible(checked)
-            # 折りたたみ時にエリアの高さを調整
-            if checked:
-                # 展開時：Expandingで高さを確保
-                self.data_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-                self.data_group.setMaximumHeight(16777215)  # 制限を解除
-                # ルートテンプレートエリアを制限（取り込んだデータ一覧が優先）
-                if hasattr(self, 'route_template_group'):
-                    self.route_template_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-                    self.route_template_group.setMaximumHeight(200)  # 最大高さを制限
-                    # 店舗履歴テーブルを制限
-                    if hasattr(self, 'route_template_table'):
-                        self.route_template_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-                        self.route_template_table.setMaximumHeight(200)  # 最大高さを制限
-                        # テーブルの stretch factor を0に（制限）
-                        if hasattr(self, 'route_template_content'):
-                            content_layout = self.route_template_content.layout()
-                            if isinstance(content_layout, QVBoxLayout):
-                                content_layout.setStretchFactor(self.route_template_table, 0)  # テーブルを制限
-                    # レイアウトの stretch factor を動的に変更
-                    main_layout = self.layout()
-                    if isinstance(main_layout, QVBoxLayout):
-                        # 取り込んだデータ一覧の stretch factor を3に（展開時）
-                        main_layout.setStretchFactor(self.data_group, 3)
-                        # ルートテンプレートの stretch factor を0に（制限）
-                        main_layout.setStretchFactor(self.route_template_group, 0)
+            # スプリッターを使用している場合は、スプリッターが高さを管理する
+            # 折りたたみ時は最小高さに、展開時はスプリッターの設定に従う
+            if hasattr(self, 'area_splitter'):
+                if checked:
+                    # 展開時：スプリッターの設定に従う（制限を解除）
+                    self.data_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+                    self.data_group.setMaximumHeight(16777215)
+                else:
+                    # 折りたたみ時：最小高さに制限
+                    self.data_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+                    header_height = self.data_group.sizeHint().height()
+                    self.data_group.setMaximumHeight(header_height)
+                # スプリッターのサイズを再計算
+                self.area_splitter.updateGeometry()
             else:
-                # 折りたたみ時：Maximumで高さを最小限に
-                self.data_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-                # 折りたたみ時は高さを最小限にする（ヘッダーの高さのみ）
-                header_height = self.data_group.sizeHint().height()
-                self.data_group.setMaximumHeight(header_height)
-                # ルートテンプレートエリアを拡張（空いたスペースを利用）
-                if hasattr(self, 'route_template_group'):
-                    self.route_template_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-                    self.route_template_group.setMaximumHeight(16777215)  # 制限を解除
-                    # 店舗履歴テーブルを拡張（ルート情報ラベルは固定）
-                    if hasattr(self, 'route_template_table'):
-                        self.route_template_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-                        self.route_template_table.setMaximumHeight(16777215)  # 制限を解除
-                        # テーブルの stretch factor を大きく（空いたスペースを利用）
-                        if hasattr(self, 'route_template_content'):
-                            content_layout = self.route_template_content.layout()
-                            if isinstance(content_layout, QVBoxLayout):
-                                content_layout.setStretchFactor(self.route_template_table, 1)  # テーブルを拡張
-                    # レイアウトの stretch factor を動的に変更
-                    main_layout = self.layout()
-                    if isinstance(main_layout, QVBoxLayout):
-                        # 取り込んだデータ一覧の stretch factor を0に（折りたたみ時）
-                        main_layout.setStretchFactor(self.data_group, 0)
-                        # ルートテンプレートの stretch factor を大きく（空いたスペースを利用）
-                        main_layout.setStretchFactor(self.route_template_group, 3)
+                # スプリッターがない場合の従来の処理（後方互換性のため）
+                if checked:
+                    self.data_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+                    self.data_group.setMaximumHeight(16777215)
+                else:
+                    self.data_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+                    header_height = self.data_group.sizeHint().height()
+                    self.data_group.setMaximumHeight(header_height)
             # レイアウトを再計算
             self.data_group.updateGeometry()
-            if hasattr(self, 'route_template_group'):
-                self.route_template_group.updateGeometry()
             if self.data_group.parent():
                 self.data_group.parent().updateGeometry()
         self.data_group.toggled.connect(_on_toggle)
         self.data_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         
-        # レイアウトに追加（stretch factorを大きくして、取り込んだデータ一覧エリアの高さを確保）
-        self.layout().addWidget(self.data_group, 3)  # stretch factor = 3（高さを優先）
+        # スプリッターで管理するため、ここではレイアウトに追加しない
+        # setup_splitter()で追加される
 
     def setup_route_template_panel(self):
         """ルートテンプレート読み込みエリア（レイアウト先行の仮実装）"""
@@ -670,17 +643,28 @@ class InventoryWidget(QWidget):
         
         def _on_toggle(checked: bool):
             self.route_template_content.setVisible(checked)
-            # 折りたたみ時にエリアの高さを調整
-            if checked:
-                # 展開時：Maximumで高さを制限
-                self.route_template_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-                self.route_template_group.setMaximumHeight(16777215)  # 制限を解除
+            # スプリッターを使用している場合は、スプリッターが高さを管理する
+            if hasattr(self, 'area_splitter'):
+                if checked:
+                    # 展開時：スプリッターの設定に従う（制限を解除）
+                    self.route_template_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+                    self.route_template_group.setMaximumHeight(16777215)
+                else:
+                    # 折りたたみ時：最小高さに制限
+                    self.route_template_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+                    header_height = self.route_template_group.sizeHint().height()
+                    self.route_template_group.setMaximumHeight(header_height)
+                # スプリッターのサイズを再計算
+                self.area_splitter.updateGeometry()
             else:
-                # 折りたたみ時：Maximumで高さを最小限に
-                self.route_template_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-                # 折りたたみ時は高さを最小限にする（ヘッダーの高さのみ）
-                header_height = self.route_template_group.sizeHint().height()
-                self.route_template_group.setMaximumHeight(header_height)
+                # スプリッターがない場合の従来の処理（後方互換性のため）
+                if checked:
+                    self.route_template_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+                    self.route_template_group.setMaximumHeight(16777215)
+                else:
+                    self.route_template_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+                    header_height = self.route_template_group.sizeHint().height()
+                    self.route_template_group.setMaximumHeight(header_height)
             # レイアウトを再計算
             self.route_template_group.updateGeometry()
             if self.route_template_group.parent():
@@ -691,9 +675,89 @@ class InventoryWidget(QWidget):
         # ルートテンプレートグループのサイズポリシーを制限（高さを縮小）
         self.route_template_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         
-        # レイアウトに追加（stretch factorを小さくして、取り込んだデータ一覧エリアの高さを確保）
-        self.layout().addWidget(self.route_template_group, 0)  # stretch factor = 0（最小限の高さ）
+        # スプリッターで管理するため、ここではレイアウトに追加しない
+        # setup_splitter()で追加される
         self.refresh_route_template_view()
+
+    def setup_splitter(self):
+        """スプリッターでエリアの高さを調整可能にする"""
+        # スプリッターを作成（縦方向）
+        self.area_splitter = QSplitter(Qt.Vertical)
+        
+        # エリアをスプリッターに追加
+        self.area_splitter.addWidget(self.data_group)
+        self.area_splitter.addWidget(self.route_template_group)
+        
+        # 初期の高さ比率を設定（データエリア: ルートエリア = 3:1）
+        self.area_splitter.setStretchFactor(0, 3)  # データエリア
+        self.area_splitter.setStretchFactor(1, 1)  # ルートエリア
+        
+        # スプリッターの状態変更を監視して保存
+        self.area_splitter.splitterMoved.connect(self.save_splitter_state)
+        
+        # レイアウトに追加
+        self.layout().addWidget(self.area_splitter, 1)  # stretch factor = 1
+        
+        # ウィンドウが表示された後にスプリッターの状態を復元
+        # showEventまたはタイマーで遅延復元
+        from PySide6.QtCore import QTimer
+        restore_timer = QTimer()
+        restore_timer.setSingleShot(True)
+        restore_timer.timeout.connect(self.restore_splitter_state)
+        restore_timer.start(100)  # 100ms後に復元
+    
+    def save_splitter_state(self):
+        """スプリッターの状態を保存（デバウンス処理付き）"""
+        # 頻繁に呼ばれるので、少し遅延させてから保存
+        if not hasattr(self, '_splitter_save_timer'):
+            from PySide6.QtCore import QTimer
+            self._splitter_save_timer = QTimer()
+            self._splitter_save_timer.setSingleShot(True)
+            def _batched_save():
+                try:
+                    s = self._get_qsettings()
+                    # スプリッターの各エリアのサイズを保存
+                    sizes = self.area_splitter.sizes()
+                    if len(sizes) >= 2:
+                        s.setValue("inventory/splitter_data_height", sizes[0])
+                        s.setValue("inventory/splitter_route_height", sizes[1])
+                except Exception as e:
+                    print(f"スプリッター状態保存エラー: {e}")
+            self._splitter_save_timer.timeout.connect(_batched_save)
+        
+        # タイマーをリセット（500ms後に保存）
+        self._splitter_save_timer.stop()
+        self._splitter_save_timer.start(500)
+    
+    def restore_splitter_state(self):
+        """スプリッターの状態を復元"""
+        try:
+            s = self._get_qsettings()
+            data_height = s.value("inventory/splitter_data_height", None, type=int)
+            route_height = s.value("inventory/splitter_route_height", None, type=int)
+            
+            if data_height is not None and route_height is not None and data_height > 0 and route_height > 0:
+                # 保存されたサイズを復元
+                self.area_splitter.setSizes([data_height, route_height])
+            else:
+                # デフォルトの比率を設定（データエリア: ルートエリア = 3:1）
+                # 実際のサイズはウィンドウサイズに応じて自動調整される
+                pass
+        except Exception as e:
+            print(f"スプリッター状態復元エラー: {e}")
+    
+    def save_settings(self):
+        """ウィジェットの設定を保存（スプリッターの状態も含む）"""
+        # スプリッターの状態を即座に保存（タイマーを待たずに）
+        if hasattr(self, 'area_splitter'):
+            try:
+                s = self._get_qsettings()
+                sizes = self.area_splitter.sizes()
+                if len(sizes) >= 2:
+                    s.setValue("inventory/splitter_data_height", sizes[0])
+                    s.setValue("inventory/splitter_route_height", sizes[1])
+            except Exception as e:
+                print(f"スプリッター状態保存エラー: {e}")
 
     def apply_route_template(self):
         """ルートテンプレートの読み込みを実行"""
@@ -766,10 +830,20 @@ class InventoryWidget(QWidget):
                 # ルートIDがない場合はテーブルから取得
                 visits = self.route_summary_widget.get_store_visits_data()
             
-            # メモ欄があれば店舗マスタの備考欄に保存・追記
-            self._save_memos_to_store_master(visits)
+            # 出発時刻・帰宅時間・往路高速代・復路高速代を店舗訪問情報から除外
+            # これらの情報はルート全体の情報であり、個別の店舗訪問情報として扱うべきではない
+            filtered_visits = []
+            exclude_store_codes = ['出発時刻', '帰宅時刻', '往路高速代', '復路高速代']
+            for visit in visits:
+                store_code = visit.get('store_code', '')
+                # 店舗コードが除外対象でない場合のみ追加
+                if store_code not in exclude_store_codes:
+                    filtered_visits.append(visit)
             
-            self.populate_route_template_table(visits)
+            # メモ欄があれば店舗マスタの備考欄に保存・追記
+            self._save_memos_to_store_master(filtered_visits)
+            
+            self.populate_route_template_table(filtered_visits)
             route_code = route_data.get('route_code', '')
             route_date = route_data.get('route_date', '')
             dep = self._format_hm(route_data.get('departure_time'))
@@ -1405,6 +1479,10 @@ class InventoryWidget(QWidget):
                 # SKU自動マッチング処理（商品DBから仕入れ日・ASINで検索）
                 self._auto_match_sku_from_product_db()
                 
+                # コンディション説明を自動入力（コメント欄に欠品情報がある場合）
+                self.inventory_data = self._auto_fill_condition_notes(self.inventory_data)
+                self.filtered_data = self.inventory_data.copy()
+                
                 self.update_table()
                 self.update_data_count()
                 
@@ -1566,6 +1644,15 @@ class InventoryWidget(QWidget):
             try:
                 # CSVファイルの読み込み（複数エンコーディング対応）
                 df = self._read_csv_with_encoding_fallback(file_path)
+                
+                # 選択したフォルダを保存（次回の出品CSV生成時に使用）
+                try:
+                    from pathlib import Path
+                    selected_folder = str(Path(file_path).parent)
+                    s = self._get_qsettings()
+                    s.setValue("inventory/last_csv_folder", selected_folder)
+                except Exception:
+                    pass
                 
                 # 列マッピングと並び替え
                 self.inventory_data = self._map_and_reorder_columns(df)
@@ -1731,7 +1818,59 @@ class InventoryWidget(QWidget):
             # 空の場合は「未実装」に設定
             new_df["SKU"] = new_df["SKU"].apply(lambda x: "未実装" if x == "" or pd.isna(x) else x)
         
+        # 利益率とROIを計算
+        new_df = self._calculate_margin_and_roi(new_df)
+        
+        # コンディション説明を自動入力（コメント欄に欠品情報がある場合）
+        new_df = self._auto_fill_condition_notes(new_df)
+        
         return new_df
+    
+    def _calculate_margin_and_roi(self, df: pd.DataFrame) -> pd.DataFrame:
+        """利益率とROIを計算してDataFrameに追加"""
+        # 数値列を数値型に変換（エラー時はNaN）
+        def safe_float(x):
+            try:
+                if pd.isna(x) or x == "" or str(x).strip() == "":
+                    return 0.0
+                # カンマ区切りを除去
+                x_str = str(x).replace(",", "").strip()
+                return float(x_str)
+            except (ValueError, TypeError):
+                return 0.0
+        
+        # 必要な列を数値型に変換
+        purchase_price = df.get("仕入れ価格", pd.Series([0.0] * len(df))).apply(safe_float)
+        planned_price = df.get("販売予定価格", pd.Series([0.0] * len(df))).apply(safe_float)
+        expected_profit = df.get("見込み利益", pd.Series([0.0] * len(df))).apply(safe_float)
+        
+        # 利益率 = (見込み利益 / 販売予定価格) * 100
+        # ゼロ除算を防ぐ
+        margin = pd.Series([0.0] * len(df), dtype=float)
+        for i in range(len(df)):
+            if planned_price.iloc[i] > 0:
+                margin.iloc[i] = (expected_profit.iloc[i] / planned_price.iloc[i]) * 100
+            else:
+                margin.iloc[i] = 0.0
+        
+        # ROI = (見込み利益 / 仕入れ価格) * 100
+        # ゼロ除算を防ぐ
+        roi = pd.Series([0.0] * len(df), dtype=float)
+        for i in range(len(df)):
+            if purchase_price.iloc[i] > 0:
+                roi.iloc[i] = (expected_profit.iloc[i] / purchase_price.iloc[i]) * 100
+            else:
+                roi.iloc[i] = 0.0
+        
+        # 小数点第2位で四捨五入
+        margin = margin.round(2)
+        roi = roi.round(2)
+        
+        # DataFrameに追加
+        df["想定利益率"] = margin
+        df["想定ROI"] = roi
+        
+        return df
                 
     def update_table(self):
         """テーブルの更新"""
@@ -1787,6 +1926,16 @@ class InventoryWidget(QWidget):
                                 item.setText(str(value))
                         except:
                             item.setText(str(value))
+                    # 利益率とROIの数値フォーマット（小数点第2位まで表示）
+                    elif column in ["想定利益率", "想定ROI"]:
+                        try:
+                            if value and str(value).replace(".", "").replace("-", "").replace(",", "").replace("nan", "").strip():
+                                num_value = float(str(value).replace(",", ""))
+                                item.setText(f"{num_value:.2f}")
+                            else:
+                                item.setText("0.00")
+                        except:
+                            item.setText("0.00")
                     
                     self.data_table.setItem(table_row_idx, j, item)
                 processed_rows = max(processed_rows, table_row_idx + 1)
@@ -2485,6 +2634,16 @@ class InventoryWidget(QWidget):
                         except (ValueError, TypeError) as e:
                             # 変換に失敗した場合は元の値をそのまま使用
                             row_data[column] = value
+                    # 利益率とROIの特別処理（小数点第2位まで）
+                    elif column in ["想定利益率", "想定ROI"]:
+                        try:
+                            value_str = str(value).replace(",", "").strip()
+                            if value_str == "" or value_str == "nan" or pd.isna(value):
+                                row_data[column] = 0.0
+                            else:
+                                row_data[column] = round(float(value_str), 2)
+                        except (ValueError, TypeError):
+                            row_data[column] = 0.0
                     # SKU列の特別処理（「未実装」は空文字に変換）
                     elif column == "SKU":
                         if value == "未実装":
@@ -2538,8 +2697,12 @@ class InventoryWidget(QWidget):
         """
         コメントから欠品情報を抽出・変換
         
+        【付属品】以降の文言を抽出し、欠品キーワード辞書にマッチするものを変換後の文章に置き換え
+        【付属品】がない場合はコメント全体をチェック
+        複数の欠品情報がある場合はカンマ区切りでキーワード順に並べる
+        
         Returns:
-            - 辞書にマッチ: 変換後の文章
+            - 辞書にマッチ（複数可）: カンマ区切りの変換後の文章
             - 辞書にないが「欠品」キーワードあり: 空文字列（見出しのみ用）
             - どちらでもない: None
         """
@@ -2549,33 +2712,145 @@ class InventoryWidget(QWidget):
         comment = comment.strip()
         
         try:
+            # 【付属品】以降の文言を抽出（なければコメント全体を使用）
+            if "【付属品】" in comment:
+                # 【付属品】以降の部分を取得
+                after_attachments = comment.split("【付属品】", 1)[1].strip()
+                if not after_attachments:
+                    return None
+            else:
+                # 【付属品】がない場合はコメント全体を使用
+                after_attachments = comment
+            
             # 欠品キーワード辞書を読み込み
             missing_keywords = self.condition_template_db.load_missing_keywords()
+            keywords_dict = missing_keywords.get('keywords', {})
             
-            # 1. よくある欠品情報の辞書をチェック
-            for keyword, converted_text in missing_keywords.get('keywords', {}).items():
-                if keyword in comment:
-                    return converted_text
+            # マッチした変換後の文章をリストに格納（キーワード順）
+            converted_list = []
+            matched_keywords = []
             
-            # 2. 辞書にないが「欠品」キーワードが含まれているかチェック
+            # 辞書のキーワード順にチェック（辞書の順序を保持）
+            # コメント全体に対してチェック（部分一致でマッチ）
+            for keyword, converted_text in keywords_dict.items():
+                if keyword in after_attachments and keyword not in matched_keywords:
+                    converted_list.append(converted_text)
+                    matched_keywords.append(keyword)
+            
+            # マッチした変換後の文章がある場合
+            if converted_list:
+                # カンマ区切りで結合
+                return ",".join(converted_list)
+            
+            # 辞書にないが「欠品」キーワードが含まれているかチェック
             detection_keywords = missing_keywords.get('detection_keywords', ['欠品', 'なし', '無し', '欠'])
             for keyword in detection_keywords:
-                if keyword in comment:
+                if keyword in after_attachments:
                     # 見出しのみ（内容は空）
                     return ""
             
-            # 3. どちらでもない
+            # どちらでもない
             return None
         except Exception:
             # エラー時はNoneを返す
             return None
+    
+    def _auto_fill_condition_notes(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        コンディション説明を自動入力（コメント欄に欠品情報がある場合）
+        
+        Args:
+            df: 仕入データのDataFrame
+        
+        Returns:
+            コンディション説明が自動入力されたDataFrame
+        """
+        if df is None or len(df) == 0:
+            return df
+        
+        # コンディション説明カラムが存在しない場合は作成
+        if "コンディション説明" not in df.columns:
+            df["コンディション説明"] = ""
+        
+        # 各行に対してコンディション説明を自動生成
+        for idx in df.index:
+            # 既にコンディション説明が入力されている場合はスキップ
+            existing_note = df.at[idx, "コンディション説明"]
+            if existing_note and str(existing_note).strip():
+                continue
+            
+            # コンディションとコメントを取得
+            condition_text = df.at[idx, "コンディション"] if "コンディション" in df.columns else "新品"
+            comment = df.at[idx, "コメント"] if "コメント" in df.columns else ""
+            
+            # コンディションが空の場合はスキップ
+            if not condition_text or pd.isna(condition_text) or str(condition_text).strip() == "":
+                continue
+            
+            # コメントが空の場合はスキップ
+            if not comment or pd.isna(comment) or str(comment).strip() == "":
+                continue
+            
+            # 欠品情報が含まれているかチェック（【付属品】または欠品キーワード）
+            comment_str = str(comment).strip()
+            has_missing_info = False
+            
+            # 【付属品】が含まれているかチェック
+            if "【付属品】" in comment_str:
+                has_missing_info = True
+            else:
+                # 【付属品】がなくても、欠品キーワード辞書にマッチするかチェック
+                try:
+                    missing_keywords = self.condition_template_db.load_missing_keywords()
+                    keywords_dict = missing_keywords.get('keywords', {})
+                    detection_keywords = missing_keywords.get('detection_keywords', ['欠品', 'なし', '無し', '欠'])
+                    
+                    # 辞書のキーワードをチェック
+                    for keyword in keywords_dict.keys():
+                        if keyword in comment_str:
+                            has_missing_info = True
+                            break
+                    
+                    # 検出キーワードをチェック
+                    if not has_missing_info:
+                        for keyword in detection_keywords:
+                            if keyword in comment_str:
+                                has_missing_info = True
+                                break
+                except Exception:
+                    pass
+            
+            # 欠品情報がない場合はスキップ
+            if not has_missing_info:
+                continue
+            
+            try:
+                # コンディションキーを取得
+                condition_key = self._get_condition_key(str(condition_text))
+                
+                # 欠品情報を抽出して確認
+                missing_info = self._extract_missing_info(str(comment))
+                
+                # 欠品情報がある場合のみコンディション説明を生成
+                if missing_info is not None:
+                    # コンディション説明を生成（アプリ内表示用: 改行あり）
+                    condition_note = self._build_condition_note(condition_key, str(comment), for_csv=False)
+                    
+                    # 生成されたコンディション説明を設定
+                    if condition_note:
+                        df.at[idx, "コンディション説明"] = condition_note
+            except Exception as e:
+                # エラー時はスキップ（ログ出力はしない）
+                continue
+        
+        return df
     
     def _get_condition_key(self, condition_text: str) -> str:
         """
         コンディション文字列からキーを取得
         
         Args:
-            condition_text: コンディション文字列（「新品」「ほぼ新品」など）
+            condition_text: コンディション文字列（「新品」「ほぼ新品」「中古(ほぼ新品)」など）
         
         Returns:
             コンディションキー（'new', 'like_new', etc.）
@@ -2583,24 +2858,31 @@ class InventoryWidget(QWidget):
         condition_map = {
             '新品': 'new',
             'ほぼ新品': 'like_new',
+            '中古(ほぼ新品)': 'like_new',
             '非常に良い': 'very_good',
+            '中古(非常に良い)': 'very_good',
             '良い': 'good',
+            '中古(良い)': 'good',
             '可': 'acceptable',
+            '中古(可)': 'acceptable',
         }
         return condition_map.get(condition_text, 'new')  # デフォルトは新品
     
-    def _build_condition_note(self, condition_key: str, comment: str) -> str:
+    def _build_condition_note(self, condition_key: str, comment: str, for_csv: bool = False) -> str:
         """
-        conditionNoteを生成（{欠品}プレースホルダー対応）
+        conditionNoteを生成（【付属品】の後ろを欠品情報に置き換え）
         
         Args:
             condition_key: コンディションキー（'new', 'like_new', etc.）
             comment: 仕入データのコメント欄
+            for_csv: CSV出力用の場合True（改行を削除）
         
         Returns:
-            生成されたconditionNote
+            生成されたconditionNote（改行なし、1行）
         """
         try:
+            import re
+            
             # テンプレート説明文を取得
             template_text = self.condition_template_db.get_condition_description_text(condition_key)
             if not template_text:
@@ -2609,38 +2891,51 @@ class InventoryWidget(QWidget):
             # 欠品情報を抽出
             missing_info = self._extract_missing_info(comment)
             
-            # {欠品}プレースホルダーがテンプレート内にあるかチェック
-            if "{欠品}" in template_text:
-                # プレースホルダー方式
-                if missing_info is not None:
-                    if missing_info:
-                        # 辞書にマッチして変換された文章がある
-                        replacement = f"【欠品情報】\n{missing_info}"
+            # 欠品情報がある場合のみ処理
+            if missing_info is not None and missing_info:
+                # 【付属品】の行を見つけて、その後の部分を欠品情報に置き換え
+                # パターン: 【付属品】で始まる行の【付属品】より後ろを置き換え
+                lines = template_text.split('\n')
+                replaced = False
+                
+                for i, line in enumerate(lines):
+                    if line.strip().startswith('【付属品】'):
+                        # 【付属品】の後ろの部分を欠品情報に置き換え
+                        # 「【付属品】」の部分は残して、その後の部分を削除して欠品情報を追加
+                        lines[i] = f"【付属品】{missing_info}"
+                        replaced = True
+                        break
+                
+                # 【付属品】の行が見つからない場合は、先頭に追加
+                if not replaced:
+                    # テンプレートの先頭に【付属品】行を追加
+                    if template_text.strip():
+                        template_text = f"【付属品】{missing_info}\n{template_text}"
                     else:
-                        # 辞書にないが「欠品」キーワードあり（見出しのみ）
-                        replacement = "【欠品情報】"
-                    # {欠品}を置換
-                    condition_note = template_text.replace("{欠品}", replacement)
+                        template_text = f"【付属品】{missing_info}"
                 else:
-                    # 欠品情報なし → {欠品}を削除（前後の改行も整理）
-                    condition_note = template_text.replace("{欠品}", "").strip()
-                    # 連続する改行を1つに
-                    import re
-                    condition_note = re.sub(r'\n\n+', '\n\n', condition_note)
+                    # 置き換えが成功したので、linesを結合してtemplate_textを更新
+                    template_text = '\n'.join(lines)
             else:
-                # プレースホルダーなし → 従来の動作（先頭に追加）
-                if missing_info is not None:
-                    if missing_info:
-                        condition_note = f"【欠品情報】\n{missing_info}\n\n{template_text}"
-                    else:
-                        condition_note = f"【欠品情報】\n\n{template_text}"
-                else:
-                    condition_note = template_text
+                # 欠品情報がない場合はテンプレートをそのまま使用
+                pass
             
-            return condition_note.strip()
+            # 改行を削除して1行にする
+            result = template_text.strip()
+            # 改行を空白に置換（連続する改行も1つの空白に）
+            result = re.sub(r'\n+', ' ', result)
+            # 連続する空白を1つに
+            result = re.sub(r' +', ' ', result)
+            result = result.strip()
+            
+            return result
         except Exception as e:
-            # エラー時はコメントをそのまま返す
-            return comment if comment else ""
+            # エラー時はコメントをそのまま返す（改行削除）
+            result = comment if comment else ""
+            import re
+            result = re.sub(r'\n+', ' ', result)
+            result = re.sub(r' +', ' ', result).strip()
+            return result
     
     def export_listing_csv(self):
         """出品CSV生成（conditionNote統合版）"""
@@ -2679,16 +2974,20 @@ class InventoryWidget(QWidget):
                 except Exception:
                     pass
 
-                # コンディションキーを取得
+                # コンディション文字列を取得（そのままcondition列に出力）
                 condition_text = row.get('コンディション', '新品')
-                condition_key = self._get_condition_key(condition_text)
-                
-                # コメント欄を取得
-                comment = row.get('コメント', '') or row.get('コンディション説明', '')
-                
-                # conditionNoteを生成
-                condition_note = self._build_condition_note(condition_key, comment)
 
+                # 仕入データ一覧の「コンディション説明」カラムの内容をそのまま使用
+                # ※ユーザーが画面で確認している文章をそのままCSVに出したい要件
+                import re
+                existing_condition_note = row.get('コンディション説明', '')
+                condition_note = str(existing_condition_note or "").strip()
+                # 改行はCSV上では1行にしたいので空白に変換
+                if condition_note:
+                    condition_note = re.sub(r'\r\n|\r|\n', ' ', condition_note)
+                    # 連続する空白を1つに
+                    condition_note = re.sub(r' +', ' ', condition_note).strip()
+                
                 mapped_row = {
                     'sku': row.get('SKU', ''),
                     'asin': row.get('ASIN', ''),
@@ -2698,9 +2997,11 @@ class InventoryWidget(QWidget):
                     'plannedPrice': row.get('販売予定価格', 0),
                     'purchasePrice': row.get('仕入れ価格', 0),
                     'breakEven': row.get('損益分岐点', 0),
+                    'expectedMargin': row.get('想定利益率', 0.0),
+                    'expectedROI': row.get('想定ROI', 0.0),
                     'takane': takane_val,
                     'condition': condition_text,
-                    'conditionNote': condition_note,
+                    'conditionNote': condition_note if condition_note else '',  # 空文字列を明示的に設定
                     'priceTrace': row.get('priceTrace', 0)
                 }
                 mapped_data.append(mapped_row)
@@ -2725,41 +3026,51 @@ class InventoryWidget(QWidget):
                 except Exception:
                     pass
 
-                # 確認・デバッグ用: 保存先を一時的に固定
+                # 保存先フォルダを取得（CSV取込時に選択したフォルダ、なければデフォルト）
+                from pathlib import Path
+                from desktop.utils.file_naming import resolve_unique_path
+                
+                default_dir = None
                 try:
-                    from pathlib import Path
-                    from desktop.utils.file_naming import resolve_unique_path
-                    fixed_dir = Path(r"D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳\20251102つくばルート")
-                    fixed_dir.mkdir(parents=True, exist_ok=True)
-                    target = resolve_unique_path(fixed_dir / default_name)
+                    s = self._get_qsettings()
+                    saved_folder = s.value("inventory/last_csv_folder", None, type=str)
+                    if saved_folder and Path(saved_folder).exists():
+                        default_dir = saved_folder
+                except Exception:
+                    pass
+                
+                # デフォルトフォルダが設定されていない場合は、デフォルトディレクトリを使用
+                if default_dir is None:
+                    default_dir = r"D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳\20251026鎌倉ルート"
+                
+                # ファイル保存ダイアログを表示
+                default_path = str(Path(default_dir) / default_name)
+                file_path, _ = QFileDialog.getSaveFileName(
+                    self,
+                    "出品CSVファイルを保存",
+                    default_path,
+                    "CSVファイル (*.csv)"
+                )
+                
+                if file_path:
+                    target = resolve_unique_path(Path(file_path))
                     csv_content = result['csv_content']
                     with open(str(target), 'wb') as f:
                         f.write(csv_content)
+                    
+                    # 選択したフォルダを保存（次回の初期フォルダとして使用）
+                    try:
+                        selected_folder = str(Path(file_path).parent)
+                        s = self._get_qsettings()
+                        s.setValue("inventory/last_csv_folder", selected_folder)
+                    except Exception:
+                        pass
+                    
                     QMessageBox.information(
                         self,
                         "出品CSV生成完了",
-                        f"出品CSV生成が完了しました\n出力数: {result['exported_count']}件 (除外 {excluded_count}件)\n保存先: {str(target)}\n(一時的に固定保存フォルダを使用)"
+                        f"出品CSV生成が完了しました\n出力数: {result['exported_count']}件 (除外 {excluded_count}件)\n保存先: {str(target)}"
                     )
-                except Exception:
-                    # フォールバック: 通常の保存ダイアログ
-                    file_path, _ = QFileDialog.getSaveFileName(
-                        self,
-                        "出品CSVファイルを保存",
-                        default_name,
-                        "CSVファイル (*.csv)"
-                    )
-                    if file_path:
-                        from pathlib import Path
-                        from desktop.utils.file_naming import resolve_unique_path
-                        target = resolve_unique_path(Path(file_path))
-                        csv_content = result['csv_content']
-                        with open(str(target), 'wb') as f:
-                            f.write(csv_content)
-                        QMessageBox.information(
-                            self,
-                            "出品CSV生成完了",
-                            f"出品CSV生成が完了しました\n出力数: {result['exported_count']}件\n保存先: {str(target)}"
-                        )
             else:
                 QMessageBox.warning(self, "出品CSV生成失敗", "出品CSV生成に失敗しました")
                 

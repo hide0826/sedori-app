@@ -111,6 +111,7 @@ class RouteListWidget(QWidget):
     def load_routes(self):
         """ルート一覧を読み込む"""
         # 既存データの同期（毎回実行して最新化）
+        # これにより既存データにも利益率とROIが計算・適用される
         try:
             self.route_db.sync_total_item_count_from_visits()
         except Exception:
@@ -128,7 +129,7 @@ class RouteListWidget(QWidget):
         columns = [
             "日付", "ルート名", "出発時間", "帰宅時間",
             "総仕入点数", "総仕入額", "総想定販売額",
-            "総想定粗利", "平均仕入価格", "総稼働時間 (h)", "想定時給"
+            "総想定粗利", "想定利益率", "想定ROI", "平均仕入価格", "総稼働時間 (h)", "想定時給"
         ]
         
         self.table.setRowCount(len(routes))
@@ -179,26 +180,78 @@ class RouteListWidget(QWidget):
             profit_item.setText(self._format_currency(total_gross_profit))
             self.table.setItem(i, 7, profit_item)
             
+            # 想定利益率（常に再計算して更新）
+            # 計算: (総想定粗利 / 総想定販売額) * 100
+            total_sales_amount = route.get('total_sales_amount', 0) or 0
+            if total_sales_amount > 0:
+                expected_margin = (total_gross_profit / total_sales_amount) * 100
+            else:
+                expected_margin = 0.0
+            expected_margin = round(expected_margin, 2)
+            margin_item = QTableWidgetItem()
+            margin_item.setData(Qt.EditRole, expected_margin)
+            margin_item.setText(f"{expected_margin:.2f}")
+            self.table.setItem(i, 8, margin_item)
+            
+            # 想定ROI（常に再計算して更新）
+            # 計算: (総想定粗利 / 総仕入額) * 100
+            total_purchase_amount = route.get('total_purchase_amount', 0) or 0
+            if total_purchase_amount > 0:
+                expected_roi = (total_gross_profit / total_purchase_amount) * 100
+            else:
+                expected_roi = 0.0
+            expected_roi = round(expected_roi, 2)
+            roi_item = QTableWidgetItem()
+            roi_item.setData(Qt.EditRole, expected_roi)
+            roi_item.setText(f"{expected_roi:.2f}")
+            self.table.setItem(i, 9, roi_item)
+            
+            # 計算した値をデータベースに保存（既存データにも適用）
+            route_id = route.get('id')
+            if route_id:
+                try:
+                    # 既存のroute_dataを取得して更新
+                    update_data = {
+                        'total_purchase_amount': total_purchase_amount,
+                        'total_sales_amount': total_sales_amount,
+                        'total_gross_profit': total_gross_profit,
+                        'expected_margin': expected_margin,
+                        'expected_roi': expected_roi,
+                    }
+                    # 他のフィールドも保持
+                    for key in ['route_date', 'route_code', 'departure_time', 'return_time',
+                               'toll_fee_outbound', 'toll_fee_return', 'parking_fee',
+                               'meal_cost', 'other_expenses', 'remarks',
+                               'total_working_hours', 'estimated_hourly_rate',
+                               'total_item_count', 'purchase_success_rate', 'avg_purchase_price']:
+                        if key in route:
+                            update_data[key] = route[key]
+                    
+                    self.route_db.update_route_summary(route_id, update_data)
+                except Exception as e:
+                    # エラーは無視（表示は継続）
+                    print(f"利益率・ROIの保存エラー (route_id={route_id}): {e}")
+            
             # 平均仕入価格
             avg_price = route.get('avg_purchase_price', 0) or 0
             avg_item = QTableWidgetItem()
             avg_item.setData(Qt.EditRole, avg_price)
             avg_item.setText(self._format_currency(avg_price))
-            self.table.setItem(i, 8, avg_item)
+            self.table.setItem(i, 10, avg_item)
             
             # 総稼働時間
             working_hours = route.get('total_working_hours', 0) or 0
             hours_item = QTableWidgetItem()
             hours_item.setData(Qt.EditRole, working_hours)
             hours_item.setText(self._format_hours(working_hours))
-            self.table.setItem(i, 9, hours_item)
+            self.table.setItem(i, 11, hours_item)
             
             # 想定時給
             hourly_rate = route.get('estimated_hourly_rate', 0) or 0
             rate_item = QTableWidgetItem()
             rate_item.setData(Qt.EditRole, hourly_rate)
             rate_item.setText(self._format_currency(hourly_rate))
-            self.table.setItem(i, 10, rate_item)
+            self.table.setItem(i, 12, rate_item)
             
             # 各行にIDを保持（ダブルクリック時の参照用）
             self.table.item(i, 0).setData(Qt.UserRole, route.get('id'))

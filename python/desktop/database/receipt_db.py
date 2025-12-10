@@ -96,13 +96,16 @@ class ReceiptDatabase:
         for name, ctype in (
             ("phone_number", "TEXT"),
             ("items_count", "INTEGER"),
-            ("receipt_id", "TEXT"),  # カスタムレシートID（日付_店舗コード_連番）
             ("original_file_path", "TEXT"),  # 元のファイルパス（リネーム用）
             ("purchase_time", "TEXT"),  # 購入時刻（HH:MM形式）
             ("sku", "TEXT"),                # 保証書連携用SKU
             ("product_name", "TEXT"),       # 保証書連携用商品名
             ("warranty_days", "INTEGER"),   # 保証期間（日数）
+            ("price_difference", "INTEGER"),  # 差額（紐付けSKU合計 - レシート合計）
             ("warranty_until", "TEXT"),     # 保証終了日（yyyy-MM-dd）
+            ("account_title", "TEXT"),      # レシートに紐付く勘定科目
+            ("plastic_bag_amount", "INTEGER"),  # レジ袋金額（複数ある場合は合計）
+            ("linked_skus", "TEXT"),        # 紐付けSKU（カンマ区切り）
         ):
             _ensure_column("receipts", name, ctype)
 
@@ -111,7 +114,7 @@ class ReceiptDatabase:
         fields = [
             "file_path","purchase_date","purchase_time","store_name_raw","phone_number","store_code","subtotal","tax",
             "discount_amount","total_amount","paid_amount","items_count","currency","ocr_provider","ocr_text",
-            "receipt_id","original_file_path",
+            "original_file_path","plastic_bag_amount","linked_skus",
         ]
         placeholders = ",".join(["?"] * len(fields))
         cur = self.conn.cursor()
@@ -122,54 +125,63 @@ class ReceiptDatabase:
         self.conn.commit()
         return cur.lastrowid
     
-    def generate_receipt_id(self, purchase_date: str, store_code: str) -> str:
-        """
-        レシートIDを生成（日付_店舗コード_連番形式）
-        例: 20251115_H1-003_01
-        """
-        if not purchase_date or not store_code:
+    def get_file_name_from_path(self, file_path: str) -> str:
+        """ファイルパスからファイル名（拡張子なし）を取得"""
+        if not file_path:
             return ""
-        
-        # 日付をyyyyMMdd形式に変換
-        date_str = purchase_date.replace("-", "").replace("/", "").replace(".", "")
-        if len(date_str) == 8:
-            date_part = date_str
-        elif len(date_str) == 10:  # yyyy-MM-dd形式
-            date_part = date_str[:4] + date_str[5:7] + date_str[8:10]
-        else:
-            return ""
-        
-        # 既存のレシートIDを検索して連番を決定
-        cur = self.conn.cursor()
-        pattern = f"{date_part}_{store_code}_%"
-        cur.execute(
-            "SELECT receipt_id FROM receipts WHERE receipt_id LIKE ? ORDER BY receipt_id DESC LIMIT 1",
-            (pattern,)
-        )
-        row = cur.fetchone()
-        
-        if row and row[0]:
-            # 既存のレシートIDから連番を取得
-            existing_id = row[0]
-            try:
-                # 最後の連番部分を取得（例: 20251115_H1-003_01 → 01）
-                last_part = existing_id.split("_")[-1]
-                next_number = int(last_part) + 1
-            except (ValueError, IndexError):
-                next_number = 1
-        else:
-            next_number = 1
-        
-        # レシートIDを生成（連番は2桁ゼロ埋め）
-        receipt_id = f"{date_part}_{store_code}_{next_number:02d}"
-        return receipt_id
+        from pathlib import Path
+        return Path(file_path).stem
     
-    def find_by_receipt_id(self, receipt_id: str) -> Optional[Dict[str, Any]]:
-        """レシートIDでレシートを検索"""
+    def find_by_file_name(self, file_name: str) -> Optional[Dict[str, Any]]:
+        """ファイル名でレシートを検索（画像ファイル名を識別子として使用）"""
+        if not file_name:
+            return None
+        
         cur = self.conn.cursor()
-        cur.execute("SELECT * FROM receipts WHERE receipt_id = ?", (receipt_id,))
-        row = cur.fetchone()
-        return dict(row) if row else None
+        # ファイル名から拡張子を除去
+        from pathlib import Path
+        file_name_without_ext = Path(file_name).stem
+        file_name_with_ext = Path(file_name).name
+        
+        # 検索パターンのリスト（優先順位順）
+        # ファイル名が既に拡張子なしの場合、file_name_without_extとfile_name_with_extは同じになる
+        search_patterns = [
+            # 1. 拡張子なしで末尾一致（最も一般的）
+            f"%{file_name_without_ext}",
+            # 2. 拡張子ありで末尾一致
+            f"%{file_name_with_ext}",
+            # 3. スラッシュ区切りで拡張子なし
+            f"%/{file_name_without_ext}",
+            # 4. スラッシュ区切りで拡張子あり
+            f"%/{file_name_with_ext}",
+            # 5. バックスラッシュ区切りで拡張子なし（Windows用）
+            f"%\\{file_name_without_ext}",
+            # 6. バックスラッシュ区切りで拡張子あり（Windows用）
+            f"%\\{file_name_with_ext}",
+            # 7. 拡張子付きで末尾一致（.jpg, .png, .jpegなど）
+            f"%{file_name_without_ext}.jpg",
+            f"%{file_name_without_ext}.png",
+            f"%{file_name_without_ext}.jpeg",
+            f"%{file_name_without_ext}.JPG",
+            f"%{file_name_without_ext}.PNG",
+            f"%{file_name_without_ext}.JPEG",
+        ]
+        
+        # file_pathとoriginal_file_pathの両方を検索
+        for pattern in search_patterns:
+            # file_pathで検索
+            cur.execute("SELECT * FROM receipts WHERE file_path LIKE ?", (pattern,))
+            row = cur.fetchone()
+            if row:
+                return dict(row)
+            
+            # original_file_pathで検索
+            cur.execute("SELECT * FROM receipts WHERE original_file_path LIKE ?", (pattern,))
+            row = cur.fetchone()
+            if row:
+                return dict(row)
+        
+        return None
 
     def update_receipt(self, receipt_id: int, updates: Dict[str, Any]) -> bool:
         if not updates:
@@ -183,6 +195,13 @@ class ReceiptDatabase:
         params.append(receipt_id)
         cur = self.conn.cursor()
         cur.execute(f"UPDATE receipts SET {set_sql} WHERE id = ?", tuple(params))
+        self.conn.commit()
+        return cur.rowcount > 0
+    
+    def delete_receipt(self, receipt_id: int) -> bool:
+        """レシートを削除"""
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM receipts WHERE id = ?", (receipt_id,))
         self.conn.commit()
         return cur.rowcount > 0
 

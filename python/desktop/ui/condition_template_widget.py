@@ -23,10 +23,10 @@ from database.condition_template_db import ConditionTemplateDatabase
 # コンディション定義
 CONDITIONS = [
     {'key': 'new', 'name': '新品'},
-    {'key': 'like_new', 'name': 'ほぼ新品'},
-    {'key': 'very_good', 'name': '非常に良い'},
-    {'key': 'good', 'name': '良い'},
-    {'key': 'acceptable', 'name': '可'},
+    {'key': 'like_new', 'name': '中古(ほぼ新品)'},
+    {'key': 'very_good', 'name': '中古(非常に良い)'},
+    {'key': 'good', 'name': '中古(良い)'},
+    {'key': 'acceptable', 'name': '中古(可)'},
 ]
 
 

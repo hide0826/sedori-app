@@ -54,14 +54,25 @@ class ReceiptMatchingService:
         if guessed:
             return guessed[0]
         # 2) 店舗マスタ: 部分一致
-        stores = self.store_db.search_stores(keyword=raw_name)
-        # search_stores が存在しない場合に備え、簡易実装
-        if not stores:
-            # fallback: 全店舗を取得して部分一致
+        try:
+            # list_storesメソッドを使用（検索語を指定）
+            stores = self.store_db.list_stores(search_term=raw_name)
+        except AttributeError:
+            # list_storesが存在しない場合は、全店舗を取得して部分一致
             try:
-                stores = self.store_db.get_all_stores()
+                stores = self.store_db.list_stores()  # 引数なしで全店舗を取得
             except Exception:
                 stores = []
+        except Exception:
+            stores = []
+        
+        # 検索結果が空の場合は、全店舗を取得して部分一致
+        if not stores:
+            try:
+                stores = self.store_db.list_stores()  # 引数なしで全店舗を取得
+            except Exception:
+                stores = []
+        
         raw_lower = raw_name.lower()
         for st in stores:
             name = (st.get('store_name') or '').lower()

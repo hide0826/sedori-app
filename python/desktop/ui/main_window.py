@@ -38,6 +38,10 @@ from ui.condition_template_widget import ConditionTemplateWidget
 from ui.barcode_checker_widget import BarcodeCheckerWidget
 from ui.image_manager_widget import ImageManagerWidget
 from ui.evidence_manager_widget import EvidenceManagerWidget
+from ui.purchase_ledger_widget import PurchaseLedgerWidget
+from ui.expense_ledger_widget import ExpenseLedgerWidget
+from ui.keepa_test_widget import KeepaTestWidget
+from ui.image_test_widget import ImageTestWidget
 
 
 class APIServerThread(QThread):
@@ -96,6 +100,34 @@ class MainWindow(QMainWindow):
         
         # 中央配置
         self.center_window()
+        
+    def closeEvent(self, event):
+        """ウィンドウが閉じるときのイベント"""
+        # 各ウィジェットの設定を保存
+        if hasattr(self, 'repricer_widget') and hasattr(self.repricer_widget, 'save_settings'):
+            self.repricer_widget.save_settings()
+        if hasattr(self, 'inventory_widget') and hasattr(self.inventory_widget, 'save_settings'):
+            self.inventory_widget.save_settings()
+        if hasattr(self, 'antique_widget') and hasattr(self.antique_widget, 'save_settings'):
+            self.antique_widget.save_settings()
+        if hasattr(self, 'route_summary_widget') and hasattr(self.route_summary_widget, 'save_settings'):
+            self.route_summary_widget.save_settings()
+        if hasattr(self, 'product_widget') and hasattr(self.product_widget, 'save_settings'):
+            self.product_widget.save_settings()
+        if hasattr(self, 'store_master_widget') and hasattr(self.store_master_widget, 'save_settings'):
+            self.store_master_widget.save_settings()
+        if hasattr(self, 'evidence_widget') and hasattr(self.evidence_widget, 'save_settings'):
+            self.evidence_widget.save_settings()
+        if hasattr(self, 'purchase_ledger_widget') and hasattr(self.purchase_ledger_widget, 'save_settings'):
+            self.purchase_ledger_widget.save_settings()
+        if hasattr(self, 'expense_ledger_widget') and hasattr(self.expense_ledger_widget, 'save_settings'):
+            self.expense_ledger_widget.save_settings()
+        if hasattr(self, 'image_manager_widget') and hasattr(self.image_manager_widget, 'save_settings'):
+            self.image_manager_widget.save_settings()
+        
+        # FastAPIサーバーを停止
+        self.stop_fastapi_server()
+        super().closeEvent(event)
         
     def setup_ui(self):
         """UIの基本設定"""
@@ -189,6 +221,14 @@ class MainWindow(QMainWindow):
         )
         self.tab_widget.addTab(self.evidence_widget, "証憑管理")
         
+        # 台帳タブ（確定申告用）
+        ledger_tabs = QTabWidget()
+        self.purchase_ledger_widget = PurchaseLedgerWidget(self.api_client)
+        ledger_tabs.addTab(self.purchase_ledger_widget, "仕入台帳")
+        self.expense_ledger_widget = ExpenseLedgerWidget(self.api_client)
+        ledger_tabs.addTab(self.expense_ledger_widget, "経費台帳")
+        self.tab_widget.addTab(ledger_tabs, "台帳")
+        
         # バーコードチェッカータブ
         self.barcode_checker_widget = BarcodeCheckerWidget()
         self.tab_widget.addTab(self.barcode_checker_widget, "バーコードチェッカー")
@@ -198,6 +238,14 @@ class MainWindow(QMainWindow):
         # ImageManagerWidgetにProductWidgetへの参照を設定
         self.image_manager_widget.set_product_widget(self.product_widget)
         self.tab_widget.addTab(self.image_manager_widget, "画像管理")
+
+        # Keepaテストタブ
+        self.keepa_test_widget = KeepaTestWidget()
+        self.tab_widget.addTab(self.keepa_test_widget, "Keepaテスト")
+        
+        # 画像テストタブ
+        self.image_test_widget = ImageTestWidget()
+        self.tab_widget.addTab(self.image_test_widget, "画像テスト")
         
         # 設定タブ
         self.settings_widget = SettingsWidget(self.api_client)
@@ -346,7 +394,7 @@ class MainWindow(QMainWindow):
     def stop_fastapi_server(self):
         """FastAPIサーバーの停止"""
         if not self.server_running:
-            QMessageBox.information(self, "サーバー停止", "FastAPIサーバーは起動していません")
+            # サーバーが起動していない場合は何もしない（メッセージも表示しない）
             return
             
         try:

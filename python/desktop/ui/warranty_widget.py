@@ -35,6 +35,7 @@ except Exception:
     from desktop.services.warranty_service import WarrantyService
 from database.warranty_db import WarrantyDatabase
 from database.product_db import ProductDatabase
+from desktop.utils.ui_utils import save_table_header_state, restore_table_header_state
 
 
 class WarrantyOCRThread(QThread):
@@ -75,6 +76,13 @@ class WarrantyWidget(QWidget):
         self.matching_candidates = []
         
         self.setup_ui()
+
+        # テーブルの列幅を復元
+        restore_table_header_state(self.warranty_table, "WarrantyWidget/TableState")
+
+    def save_settings(self):
+        """ウィジェットの設定（テーブルの列幅など）を保存します。"""
+        save_table_header_state(self.warranty_table, "WarrantyWidget/TableState")
     
     def setup_ui(self):
         """UIの設定"""

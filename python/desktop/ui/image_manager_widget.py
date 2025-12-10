@@ -17,7 +17,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 import logging
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QMimeData, QUrl
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QMimeData, QUrl, QSettings
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QTreeWidget, QTreeWidgetItem, QListWidget,
@@ -27,6 +27,8 @@ from PySide6.QtWidgets import (
     QTabWidget
 )
 from PySide6.QtGui import QPixmap, QFont, QDrag, QDropEvent, QImageReader, QImage, QDesktopServices, QCursor
+
+from desktop.utils.ui_utils import save_table_header_state, restore_table_header_state
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -170,6 +172,98 @@ class CandidateSelectionDialog(QDialog):
         super().accept()
 
 
+class PurchaseCandidateDialog(QDialog):
+    """JANグループと仕入DBを手動で紐付けるための候補選択ダイアログ"""
+
+    def __init__(self, jan_group: JanGroup, base_dt: datetime, candidates: List[Dict[str, Any]], parent=None):
+        super().__init__(parent)
+        self.jan_group = jan_group
+        self.base_dt = base_dt
+        self.candidates = candidates
+        self.selected_record: Optional[Dict[str, Any]] = None
+        self.setup_ui()
+
+    def setup_ui(self):
+        self.setWindowTitle("仕入DB候補の選択")
+        self.resize(900, 500)
+
+        layout = QVBoxLayout(self)
+
+        jan_text = self.jan_group.jan if self.jan_group.jan != "unknown" else "（JAN不明）"
+        info_label = QLabel(
+            f"JANグループ: {jan_text}\n"
+            f"基準日時: {self.base_dt.strftime('%Y/%m/%d %H:%M:%S')} 付近の仕入データ候補を表示しています。"
+        )
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(8)
+        self.table.setHorizontalHeaderLabels(
+            ["日差", "仕入れ日", "SKU", "ASIN", "JAN", "商品名", "店舗", "仕入価格"]
+        )
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.cellDoubleClicked.connect(self.on_cell_double_clicked)
+        layout.addWidget(self.table)
+
+        self.populate_table()
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        cancel_btn = QPushButton("キャンセル")
+        cancel_btn.clicked.connect(self.reject)
+        ok_btn = QPushButton("この仕入レコードと紐付け")
+        ok_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addWidget(ok_btn)
+        layout.addLayout(btn_layout)
+
+    def populate_table(self):
+        self.table.setRowCount(len(self.candidates))
+        for row, record in enumerate(self.candidates):
+            diff = record.get("_date_diff", "")
+            purchase_date = str(record.get("仕入れ日") or record.get("purchase_date") or "")
+            sku = str(record.get("SKU") or record.get("sku") or "")
+            asin = str(record.get("ASIN") or record.get("asin") or "")
+            jan = str(record.get("JAN") or record.get("jan") or "")
+            title = str(record.get("商品名") or record.get("product_name") or record.get("title") or "")
+            store = str(record.get("仕入先") or record.get("store_name") or "")
+            price = str(record.get("仕入れ価格") or record.get("purchase_price") or "")
+
+            values = [diff, purchase_date, sku, asin, jan, title, store, price]
+            for col, val in enumerate(values):
+                item = QTableWidgetItem(str(val))
+                if col == 5 and title:
+                    item.setToolTip(title)
+                self.table.setItem(row, col, item)
+
+            # 行全体に元レコードを紐付け
+            self.table.item(row, 0).setData(Qt.UserRole, record)
+
+    def on_cell_double_clicked(self, row: int, column: int):
+        item = self.table.item(row, 0)
+        if not item:
+            return
+        record = item.data(Qt.UserRole)
+        if record:
+            self.selected_record = record
+            self.accept()
+
+    def accept(self):
+        if self.selected_record is None:
+            current_row = self.table.currentRow()
+            if current_row >= 0:
+                item = self.table.item(current_row, 0)
+                if item:
+                    record = item.data(Qt.UserRole)
+                    if record:
+                        self.selected_record = record
+        super().accept()
+
+
 class JanGroupTreeWidget(QTreeWidget):
     """JANグループツリーウィジェット（ドロップ対応）"""
     
@@ -268,6 +362,13 @@ class ImageLoadThread(QThread):
         self.image_paths = image_paths
         self.max_size = max_size
         self.results = []
+        # 強制terminate()はQt内部のリソース破壊につながるため、
+        # フラグで安全にキャンセルできるようにする
+        self._cancelled = False
+    
+    def cancel(self):
+        """スレッド処理を安全にキャンセルするためのフラグを立てる"""
+        self._cancelled = True
     
     def run(self):
         """画像を読み込んでサムネイルを生成（並列処理）"""
@@ -283,6 +384,10 @@ class ImageLoadThread(QThread):
             }
             
             for future in concurrent.futures.as_completed(futures):
+                # キャンセル要求が来ていたら残りは無視して終了
+                if self._cancelled:
+                    break
+                
                 index = futures[future]
                 try:
                     img = future.result()
@@ -300,6 +405,8 @@ class ImageLoadThread(QThread):
 
     def _load_image(self, path: str) -> Optional[QImage]:
         """QImageReaderで縮小読み込みし、QImageを返す（スレッドセーフ）"""
+        if self._cancelled:
+            return None
         try:
             reader = QImageReader(path)
             # 自動回転に対応
@@ -341,6 +448,9 @@ class ImageManagerWidget(QWidget):
         self._scan_cancelled = False
         self._jan_title_cache: Dict[str, str] = {}
         self.registration_records: List[Dict[str, Any]] = []
+        # 画像登録タブ用の簡易スナップショット保存先
+        base_dir = Path(__file__).parent.parent
+        self.registration_snapshot_path = base_dir / "data" / "image_registration_snapshot.json"
         
         # 設定ファイルのパス
         self.config_path = Path(__file__).parent.parent.parent.parent / "config" / "inventory_settings.json"
@@ -351,6 +461,14 @@ class ImageManagerWidget(QWidget):
         
         self.setup_ui()
         self.load_last_directory()
+
+        # テーブルの列幅を復元
+        restore_table_header_state(self.registration_table, "ImageManagerWidget/RegistrationTableState")
+
+    def save_settings(self):
+        """ウィジェットの設定（テーブルの列幅など）を保存します。"""
+        save_table_header_state(self.registration_table, "ImageManagerWidget/RegistrationTableState")
+
     
     def set_product_widget(self, product_widget):
         """ProductWidgetへの参照を設定"""
@@ -833,8 +951,13 @@ class ImageManagerWidget(QWidget):
         # 既存のスレッドがあれば終了を待つ
         if self.load_thread:
             if self.load_thread.isRunning():
-                self.load_thread.terminate()
-                self.load_thread.wait(3000)  # 最大3秒待つ
+                # 強制terminate()は不安定要因になるため、キャンセルフラグ＋waitで終了させる
+                try:
+                    if hasattr(self.load_thread, "cancel"):
+                        self.load_thread.cancel()
+                    self.load_thread.wait(3000)  # 最大3秒待つ
+                except Exception as e:
+                    logger.debug(f"Failed to gracefully stop ImageLoadThread: {e}")
             self.load_thread = None
         
         # プログレスダイアログは必要に応じて表示（通常は非表示で高速化）
@@ -1510,17 +1633,57 @@ class ImageManagerWidget(QWidget):
 
         button_layout = QHBoxLayout()
         button_layout.addStretch()
+
+        # テンプレートファイル指定
+        template_label = QLabel("テンプレート:")
+        button_layout.addWidget(template_label)
+        
+        self.template_file_edit = QLineEdit()
+        self.template_file_edit.setPlaceholderText("AmazonテンプレートExcelファイルを選択...")
+        self.template_file_edit.setMinimumWidth(300)
+        self.template_file_edit.setReadOnly(True)
+        button_layout.addWidget(self.template_file_edit)
+        
+        self.template_file_browse_btn = QPushButton("参照...")
+        self.template_file_browse_btn.setToolTip("AmazonテンプレートExcelファイルを選択します")
+        self.template_file_browse_btn.clicked.connect(self.browse_template_file)
+        button_layout.addWidget(self.template_file_browse_btn)
+        
+        # スナップショット保存／読込（実行テスト用）
+        self.save_registration_snapshot_btn = QPushButton("スナップ保存")
+        self.save_registration_snapshot_btn.setToolTip("現在の一覧を一時保存します（再起動後のテスト用）")
+        self.save_registration_snapshot_btn.clicked.connect(self.save_registration_snapshot)
+        button_layout.addWidget(self.save_registration_snapshot_btn)
+
+        self.load_registration_snapshot_btn = QPushButton("スナップ読込")
+        self.load_registration_snapshot_btn.setToolTip("前回保存したスナップデータを読み込みます")
+        self.load_registration_snapshot_btn.clicked.connect(self.load_registration_snapshot)
+        button_layout.addWidget(self.load_registration_snapshot_btn)
+
         self.clear_registration_btn = QPushButton("一覧をクリア")
         self.clear_registration_btn.clicked.connect(self.clear_registration_records)
         button_layout.addWidget(self.clear_registration_btn)
+
         self.upload_to_gcs_btn = QPushButton("GCSアップロード")
         self.upload_to_gcs_btn.clicked.connect(self.upload_images_to_gcs)
         button_layout.addWidget(self.upload_to_gcs_btn)
-        # Lファイルではなく「TSVファイル生成」として表示
-        self.generate_amazon_l_btn = QPushButton("Amazon TSVファイル生成")
-        self.generate_amazon_l_btn.clicked.connect(self.generate_amazon_l_file)
-        button_layout.addWidget(self.generate_amazon_l_btn)
+
+        # AmazonテンプレートExcelに書き込み
+        self.write_amazon_template_btn = QPushButton("amazon（出品ファイルL）テンプレートに書き込み")
+        self.write_amazon_template_btn.setToolTip("AmazonテンプレートExcelファイル（出品ファイルL）にSKUと画像URLを書き込みます。")
+        self.write_amazon_template_btn.clicked.connect(self.write_to_amazon_template)
+        button_layout.addWidget(self.write_amazon_template_btn)
+
+        # Amazonアップロードリンクボタン
+        self.amazon_upload_link_btn = QPushButton("Amazonアップロードページを開く")
+        self.amazon_upload_link_btn.setToolTip("Amazon Seller Centralの出品ファイルアップロードページをブラウザで開きます")
+        self.amazon_upload_link_btn.clicked.connect(self.open_amazon_upload_page)
+        button_layout.addWidget(self.amazon_upload_link_btn)
+
         layout.addLayout(button_layout)
+        
+        # 設定からテンプレートファイルパスを読み込む
+        self.load_template_file_setting()
 
     def _get_record_value(self, record: Dict[str, Any], keys: List[str], default: str = "") -> str:
         """複数の候補キーから値を取得"""
@@ -1683,6 +1846,65 @@ class ImageManagerWidget(QWidget):
             self.registration_table.setRowCount(0)
             self._set_registration_preview(None)
 
+    def save_registration_snapshot(self):
+        """画像登録タブの現在の一覧をJSONファイルにスナップ保存（テスト用）"""
+        if not self.registration_records:
+            QMessageBox.information(self, "スナップ保存", "保存するデータがありません。")
+            return
+
+        try:
+            self.registration_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "record_count": len(self.registration_records),
+                "records": self.registration_records,
+            }
+            with open(self.registration_snapshot_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+
+            QMessageBox.information(
+                self,
+                "スナップ保存",
+                f"画像登録一覧をスナップ保存しました。\n"
+                f"ファイル: {self.registration_snapshot_path}",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "スナップ保存エラー", f"スナップ保存に失敗しました:\n{e}")
+
+    def load_registration_snapshot(self):
+        """前回保存したスナップショットを読み込んで一覧に復元"""
+        if not self.registration_snapshot_path.exists():
+            QMessageBox.information(
+                self,
+                "スナップ読込",
+                "スナップショットファイルが見つかりませんでした。\n"
+                "先に「スナップ保存」を実行してください。",
+            )
+            return
+
+        try:
+            with open(self.registration_snapshot_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+
+            records = payload.get("records", [])
+            if not isinstance(records, list):
+                raise ValueError("records フィールドの形式が不正です。")
+
+            self.registration_records = records
+            self.update_registration_table()
+            self._set_registration_preview(None)
+
+            saved_at = payload.get("saved_at", "不明な日時")
+            QMessageBox.information(
+                self,
+                "スナップ読込",
+                f"スナップショットを読み込みました。\n"
+                f"保存日時: {saved_at}\n"
+                f"件数: {len(self.registration_records)}件",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "スナップ読込エラー", f"スナップ読込に失敗しました:\n{e}")
+
     def on_registration_cell_double_clicked(self, row: int, column: int):
         """画像列ダブルクリックでファイルを開く"""
         if column < 4:
@@ -1798,13 +2020,62 @@ class ImageManagerWidget(QWidget):
             selected_rows = set(range(len(self.registration_records)))
         
         # GCSアップロードユーティリティのインポート
+        import sys
+        import os
+        # python/utils/gcs_uploader.py へのパスを追加
+        # このファイルは python/desktop/ui/ 配下なので、2つ上の python/ をsys.pathに追加する
+        current_file_dir = os.path.dirname(os.path.abspath(__file__))
+        python_dir = os.path.abspath(os.path.join(current_file_dir, '..', '..'))
+        
+        # パス候補を複数試す（PyInstaller等で__file__が期待通りでない場合に対応）
+        candidate_paths = [
+            python_dir,  # 通常の開発環境
+            os.path.join(python_dir, 'python'),  # プロジェクトルートから実行している場合
+        ]
+        
+        # 実際にutils/gcs_uploader.pyが存在するパスを探す
+        found_path = None
         try:
-            import sys
-            import os
-            # python/utils/gcs_uploader.py へのパスを追加
-            python_dir = os.path.join(os.path.dirname(__file__), '..', '..', '..')
-            sys.path.insert(0, python_dir)
-            from utils.gcs_uploader import upload_image_to_gcs, GCS_AVAILABLE, check_gcs_authentication
+            for candidate in candidate_paths:
+                gcs_uploader_path = os.path.join(candidate, 'utils', 'gcs_uploader.py')
+                if os.path.exists(gcs_uploader_path):
+                    found_path = candidate
+                    break
+            
+            if found_path:
+                # sys.pathの先頭を強制的にfound_pathに設定（他のコードが先頭を書き換えても確実にインポートできるように）
+                # 既に存在する場合は削除してから先頭に追加
+                if found_path in sys.path:
+                    sys.path.remove(found_path)
+                sys.path.insert(0, found_path)
+                # さらに、sys.path[0]を強制的にfound_pathに設定（念のため）
+                sys.path[0] = found_path
+            elif python_dir:
+                # found_pathが見つからない場合でも、python_dirを試す
+                if python_dir in sys.path:
+                    sys.path.remove(python_dir)
+                sys.path.insert(0, python_dir)
+                sys.path[0] = python_dir
+            
+            # インポート前にsys.pathの先頭を確認（デバッグ用）
+            # logger.debug(f"Importing from sys.path[0]: {sys.path[0]}")
+            
+            # importlibを使って直接ファイルパスからインポート（sys.pathの問題を回避）
+            if found_path:
+                import importlib.util
+                gcs_uploader_file = os.path.join(found_path, 'utils', 'gcs_uploader.py')
+                if os.path.exists(gcs_uploader_file):
+                    spec = importlib.util.spec_from_file_location("gcs_uploader", gcs_uploader_file)
+                    gcs_uploader_module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(gcs_uploader_module)
+                    upload_image_to_gcs = gcs_uploader_module.upload_image_to_gcs
+                    GCS_AVAILABLE = gcs_uploader_module.GCS_AVAILABLE
+                    check_gcs_authentication = gcs_uploader_module.check_gcs_authentication
+                else:
+                    raise ImportError(f"gcs_uploader.py not found at {gcs_uploader_file}")
+            else:
+                # フォールバック: 通常のインポートを試す
+                from utils.gcs_uploader import upload_image_to_gcs, GCS_AVAILABLE, check_gcs_authentication
             
             if not GCS_AVAILABLE:
                 QMessageBox.critical(
@@ -1824,9 +2095,31 @@ class ImageManagerWidget(QWidget):
                 )
                 return
         except ImportError as e:
+            # デバッグ情報を収集
+            debug_info = []
+            debug_info.append(f"エラー: {str(e)}")
+            debug_info.append(f"現在のファイル: {__file__}")
+            debug_info.append(f"計算されたpython_dir: {python_dir}")
+            debug_info.append(f"見つかったfound_path: {found_path if found_path else 'None'}")
+            debug_info.append(f"試したパス候補:")
+            for candidate in candidate_paths:
+                gcs_path = os.path.join(candidate, 'utils', 'gcs_uploader.py')
+                exists = os.path.exists(gcs_path)
+                debug_info.append(f"  - {candidate} (utils/gcs_uploader.py存在: {exists})")
+            debug_info.append(f"sys.path[0] (インポート時に使用): {sys.path[0] if sys.path else '空'}")
+            if found_path:
+                gcs_uploader_file = os.path.join(found_path, 'utils', 'gcs_uploader.py')
+                debug_info.append(f"importlibで使用するファイルパス: {gcs_uploader_file}")
+                debug_info.append(f"ファイル存在確認: {os.path.exists(gcs_uploader_file)}")
+            debug_info.append(f"sys.pathの先頭5件:")
+            for i, path in enumerate(sys.path[:5]):
+                marker = " ← これがインポート時に使用される" if i == 0 else ""
+                debug_info.append(f"  {i+1}. {path}{marker}")
+            
             QMessageBox.critical(
                 self, "エラー",
-                f"GCSアップロード機能の読み込みに失敗しました:\n{str(e)}"
+                f"GCSアップロード機能の読み込みに失敗しました:\n\n{str(e)}\n\n"
+                f"デバッグ情報:\n" + "\n".join(debug_info)
             )
             return
         
@@ -1982,8 +2275,8 @@ class ImageManagerWidget(QWidget):
         finally:
             progress.close()
     
-    def generate_amazon_l_file(self):
-        """Amazon Lファイル（TSV）を生成・保存"""
+    def write_to_amazon_template(self):
+        """AmazonテンプレートExcelファイルに商品データを書き込む"""
         if not self.registration_records:
             QMessageBox.warning(self, "警告", "登録されている商品がありません。")
             return
@@ -1996,78 +2289,43 @@ class ImageManagerWidget(QWidget):
             
             entry = self.registration_records[row]
             
-            # テーブルから編集された値を取得
-            col_offset = 10  # 既存カラム数
-            jan = self.registration_table.item(row, col_offset).text() if self.registration_table.item(row, col_offset) else entry.get("jan", "")
-            price = self.registration_table.item(row, col_offset + 1).text() if self.registration_table.item(row, col_offset + 1) else entry.get("price", "")
-            quantity = self.registration_table.item(row, col_offset + 2).text() if self.registration_table.item(row, col_offset + 2) else entry.get("quantity", "0")
-            condition_type = self.registration_table.item(row, col_offset + 3).text() if self.registration_table.item(row, col_offset + 3) else entry.get("condition_type", "")
-            condition_note = self.registration_table.item(row, col_offset + 4).text() if self.registration_table.item(row, col_offset + 4) else entry.get("condition_note", "")
-            
-            # 画像URLを取得
-            image_urls = []
-            for idx in range(5):
-                col = col_offset + 5 + idx
-                item = self.registration_table.item(row, col)
-                if item and item.text():
-                    image_urls.append(item.text())
-            
-            # 必須フィールドチェック
+            # SKUを取得
             sku = entry.get("sku", "")
-            asin = entry.get("asin", "")
-            
             if not sku:
                 continue
             
-            if not asin and not jan:
-                QMessageBox.warning(
-                    self, "警告",
-                    f"SKU {sku} にはASINまたはJANが必要です。"
-                )
-                continue
-
-            # A案: 価格・在庫は空でもOK（Lファイルは画像だけ更新用途）
-            # 空の場合はそのまま '' を渡し、Amazon側に「価格・在庫は更新しない」挙動を期待する
-            if not price:
-                price = ""
-            if not quantity:
-                quantity = ""
+            # 画像URLを取得（最大6枚まで）
+            # GCSアップロード後のURLをエントリから取得
+            image_urls = []
             
-            if not condition_type:
-                # コンディション文字列から変換を試みる
-                condition_str = entry.get("condition", "")
-                condition_map = {
-                    "中古(ほぼ新品)": "1",
-                    "中古(非常に良い)": "2",
-                    "中古(良い)": "3",
-                    "中古(可)": "4",
-                    "新品(新品)": "11",
-                    "新品": "11",
-                }
-                condition_type = condition_map.get(condition_str, "")
+            # 1. image_urlsリスト形式を優先的に確認
+            if 'image_urls' in entry and isinstance(entry.get('image_urls'), list):
+                image_urls = [url for url in entry['image_urls'] if url]
+            else:
+                # 2. image_url_1～6の個別キー形式を確認
+                for i in range(1, 7):  # 6枚まで取得
+                    img_key = f'image_url_{i}'
+                    img_url = entry.get(img_key, '')
+                    if img_url:
+                        image_urls.append(img_url)
             
-            if not condition_type:
-                QMessageBox.warning(
-                    self, "警告",
-                    f"SKU {sku} にはコンディション番号が必要です。"
-                )
-                continue
+            # 3. テーブルの画像URL列からも取得（画像URL1～5列、列15-19）
+            for img_idx in range(5):  # 画像URL1～5
+                col = 15 + img_idx  # 画像URL1列は15列目（0-indexed）
+                item = self.registration_table.item(row, col)
+                if item and item.text():
+                    image_url = item.text().strip()
+                    if image_url and image_url not in image_urls:
+                        image_urls.append(image_url)
             
-            # 商品データを作成
+            # 商品データを作成（SKUと画像URLのみ）
             product = {
                 "sku": sku,
-                "asin": asin,
-                "jan": jan,
-                "price": price,
-                "quantity": quantity,
-                "condition_type": condition_type,
-                "condition_note": condition_note,
             }
             
-            # 画像URLを追加
-            for idx, img_url in enumerate(image_urls):
-                if img_url:
-                    product[f"image_url_{idx + 1}"] = img_url
+            # 画像URLを追加（最大6枚まで）
+            if image_urls:
+                product["image_urls"] = image_urls[:6]  # 最大6枚まで
             
             products.append(product)
         
@@ -2075,44 +2333,140 @@ class ImageManagerWidget(QWidget):
             QMessageBox.warning(self, "警告", "有効な商品データがありません。")
             return
         
-        # TSV生成
+        # テンプレートファイルのパスを取得
         try:
             import sys
             import os
+            from pathlib import Path
+            
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
             from services.amazon_inventory_loader_service import AmazonInventoryLoaderService
             
-            tsv_bytes = AmazonInventoryLoaderService.generate_inventory_loader_tsv(products)
-            
-            if not tsv_bytes:
-                QMessageBox.warning(self, "エラー", "TSVファイルの生成に失敗しました。")
+            # テンプレートファイルのパス（設定から読み込む）
+            template_path_str = self.template_file_edit.text().strip()
+            if not template_path_str:
+                QMessageBox.warning(
+                    self, "警告",
+                    "テンプレートファイルが指定されていません。\n"
+                    "「参照...」ボタンからテンプレートファイルを選択してください。"
+                )
                 return
             
-            # ファイル保存ダイアログ
+            template_path = Path(template_path_str)
+            
+            if not template_path.exists():
+                QMessageBox.critical(
+                    self, "エラー",
+                    f"Amazonテンプレートファイルが見つかりません:\n{template_path}\n\n"
+                    f"テンプレートファイルを配置してください。"
+                )
+                return
+            
+            # 出力ファイルの保存先を選択
             from datetime import datetime
-            default_filename = f"amazon_inventory_loader_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tsv"
+            default_filename = f"ListingLoader_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsm"
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
-                "Amazon TSVファイルを保存",
+                "AmazonテンプレートExcelファイルを保存",
                 default_filename,
-                "TSVファイル (*.tsv);;すべてのファイル (*)"
+                "Excelマクロ有効ファイル (*.xlsm);;すべてのファイル (*)"
             )
             
-            if file_path:
-                with open(file_path, 'wb') as f:
-                    f.write(tsv_bytes)
-                
-                QMessageBox.information(
-                    self, "完了",
-                    f"Amazon TSVファイルを保存しました:\n{file_path}\n\n"
-                    f"商品数: {len(products)}件"
-                )
+            if not file_path:
+                return  # ユーザーがキャンセル
+            
+            # テンプレートに書き込み
+            output_path = AmazonInventoryLoaderService.write_to_amazon_template_excel(
+                template_path=str(template_path),
+                products=products,
+                output_path=file_path,
+                start_row=7
+            )
+            
+            QMessageBox.information(
+                self, "完了",
+                f"AmazonテンプレートExcelファイルを保存しました:\n{output_path}\n\n"
+                f"商品数: {len(products)}件\n\n"
+                f"書き込まれたデータ:\n"
+                f"  - SKU: A7列から\n"
+                f"  - 画像URL: O7列から（1枚目）\n"
+                f"  - 画像URL: P7列から（2枚目）\n"
+                f"  - 画像URL: Q7列から（3枚目）\n"
+                f"  - 画像URL: R7列から（4枚目）\n"
+                f"  - 画像URL: S7列から（5枚目）\n"
+                f"  - 画像URL: T7列から（6枚目）\n\n"
+                f"👉 このファイルをAmazon Seller Centralにアップロードしてください。"
+            )
         
         except Exception as e:
-            logger.error(f"Failed to generate Amazon L file: {e}", exc_info=True)
+            logger.error(f"Failed to write to Amazon template Excel: {e}", exc_info=True)
             QMessageBox.critical(
                 self, "エラー",
-                f"Amazon TSVファイルの生成中にエラーが発生しました:\n{str(e)}"
+                f"AmazonテンプレートExcelファイルの書き込み中にエラーが発生しました:\n{str(e)}"
+            )
+
+    def browse_template_file(self):
+        """テンプレートファイルを選択する"""
+        settings = QSettings("HIRIO", "SedoriApp")
+        last_dir = settings.value("amazon_template_last_dir", str(Path.home()))
+        
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "AmazonテンプレートExcelファイルを選択",
+            last_dir,
+            "Excelマクロ有効ファイル (*.xlsm);;すべてのファイル (*)"
+        )
+        
+        if file_path:
+            template_path = Path(file_path)
+            if template_path.exists():
+                self.template_file_edit.setText(str(template_path))
+                # 設定に保存
+                self.save_template_file_setting(str(template_path))
+                # 最後に開いたディレクトリを保存
+                settings.setValue("amazon_template_last_dir", str(template_path.parent))
+            else:
+                QMessageBox.warning(
+                    self, "警告",
+                    f"選択したファイルが見つかりません:\n{file_path}"
+                )
+    
+    def load_template_file_setting(self):
+        """設定からテンプレートファイルパスを読み込む"""
+        settings = QSettings("HIRIO", "SedoriApp")
+        template_path = settings.value("amazon_template_file_path", "")
+        
+        if template_path:
+            template_path_obj = Path(template_path)
+            if template_path_obj.exists():
+                self.template_file_edit.setText(template_path)
+            else:
+                # ファイルが存在しない場合は設定をクリア
+                settings.remove("amazon_template_file_path")
+                self.template_file_edit.clear()
+        else:
+            # デフォルトパスを試す
+            default_path = Path(__file__).parent.parent.parent / "ListingLoader.xlsm"
+            if default_path.exists():
+                self.template_file_edit.setText(str(default_path))
+                self.save_template_file_setting(str(default_path))
+    
+    def save_template_file_setting(self, template_path: str):
+        """テンプレートファイルパスを設定に保存する"""
+        settings = QSettings("HIRIO", "SedoriApp")
+        settings.setValue("amazon_template_file_path", template_path)
+        settings.sync()
+
+    def open_amazon_upload_page(self):
+        """Amazon Seller Centralの出品ファイルアップロードページをブラウザで開く"""
+        amazon_url = "https://sellercentral-japan.amazon.com/product-search/bulk"
+        try:
+            QDesktopServices.openUrl(QUrl(amazon_url))
+        except Exception as e:
+            QMessageBox.critical(
+                self, "エラー",
+                f"ブラウザでAmazonアップロードページを開けませんでした:\n{str(e)}\n\n"
+                f"手動で以下のURLにアクセスしてください:\n{amazon_url}"
             )
 
     def on_tree_context_menu(self, position):
@@ -2120,19 +2474,25 @@ class ImageManagerWidget(QWidget):
         item = self.tree_widget.itemAt(position)
         if not item:
             return
-        
+
         menu = QMenu(self)
-        
+
         group = item.data(0, Qt.UserRole)
         if isinstance(group, JanGroup):
             # JANグループが選択された
+            # 仕入DB候補表示（画像日時に近い仕入レコードから手動で紐付け）
+            link_action = menu.addAction("仕入DB候補を表示して紐付け")
+            link_action.triggered.connect(lambda: self.show_purchase_candidates_for_group(group))
+
+            menu.addSeparator()
+
             delete_action = menu.addAction("JANグループを削除")
             delete_action.triggered.connect(lambda: self.delete_jan_group(group))
         else:
             # 個別画像が選択された
             remove_action = menu.addAction("グループから削除")
             remove_action.triggered.connect(lambda: self.remove_image_from_group(item))
-        
+
         menu.exec_(self.tree_widget.mapToGlobal(position))
     
     def on_image_list_context_menu(self, position):
@@ -2164,6 +2524,121 @@ class ImageManagerWidget(QWidget):
             assign_menu.setEnabled(False)
         
         menu.exec_(self.image_list.mapToGlobal(position))
+
+    def show_purchase_candidates_for_group(self, group: JanGroup):
+        """
+        JANグループを右クリックしたときに、
+        画像の撮影日時に近い仕入DBレコード候補を表示して手動で紐付ける
+        """
+        if not self.product_widget:
+            QMessageBox.warning(self, "エラー", "仕入DBタブ（商品データベース）への参照がありません。")
+            return
+
+        if not group or not group.images:
+            QMessageBox.information(self, "情報", "画像が含まれていないJANグループです。")
+            return
+
+        # グループ内の画像から代表となる撮影日時を決定（最も古いものを基準にする）
+        capture_times: List[datetime] = []
+        for record in group.images:
+            if record.capture_dt:
+                capture_times.append(record.capture_dt)
+            else:
+                # EXIF優先で取得できれば上書き
+                exif_dt = self.image_service.get_exif_datetime(record.path)
+                if exif_dt:
+                    capture_times.append(exif_dt)
+
+        if not capture_times:
+            QMessageBox.warning(self, "エラー", "このJANグループの画像から撮影日時を取得できませんでした。")
+            return
+
+        base_dt = min(capture_times)
+
+        # 画像撮影日時 ±7日以内の仕入DB候補を取得
+        try:
+            candidates = self.product_widget.find_purchase_candidates_by_datetime(base_dt, days_window=7)
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"仕入DB候補の取得中にエラーが発生しました:\n{e}")
+            return
+
+        if not candidates:
+            QMessageBox.information(
+                self,
+                "候補なし",
+                "撮影日時付近の仕入データ候補が見つかりませんでした。\n"
+                "（仕入DBの取り込み状況や日付を確認してください）",
+            )
+            return
+
+        dialog = PurchaseCandidateDialog(group, base_dt, candidates, parent=self)
+        if dialog.exec_() != QDialog.Accepted or not dialog.selected_record:
+            return
+
+        selected = dialog.selected_record
+        target_jan = str(selected.get("JAN") or selected.get("jan") or "").strip()
+
+        if not target_jan:
+            reply = QMessageBox.question(
+                self,
+                "確認",
+                "選択した仕入レコードにはJANが設定されていません。\n"
+                "それでもこのレコードに画像を紐付けますか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        image_paths = [img.path for img in group.images]
+
+        try:
+            all_records = self.product_widget.get_all_purchase_records()
+            # JANが空の場合でも一応処理を行う（update_image_paths_for_jan側で弾く可能性あり）
+            success, added_count, record_snapshot = self.product_widget.update_image_paths_for_jan(
+                target_jan,
+                image_paths,
+                all_records,
+                skip_existing=True,
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"画像パスの紐付け中にエラーが発生しました:\n{e}")
+            return
+
+        if not success:
+            QMessageBox.warning(
+                self,
+                "紐付け失敗",
+                "選択したJANに対応する仕入レコードが見つかりませんでした。\n"
+                "（仕入DB側のJANを確認してください）",
+            )
+            return
+
+        if record_snapshot:
+            # 画像登録タブに追加（Amazon画像更新ワークフロー用）
+            self.add_registration_entry(record_snapshot)
+
+        # 必要であればJANグループのJANを仕入DB側のJANに合わせる
+        if target_jan and group.jan != target_jan:
+            reply = QMessageBox.question(
+                self,
+                "JANグループJAN更新の確認",
+                f"このJANグループのJANを仕入DBのJAN {target_jan} に更新しますか？\n"
+                f"（グループ内の全画像が新しいJANで再グルーピングされます）",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                for img_record in list(group.images):
+                    self.assign_image_to_jan(img_record.path, target_jan)
+
+        msg = "仕入DBレコードと画像グループを紐付けました。"
+        if added_count > 0:
+            msg += f"\n新しく登録された画像数: {added_count}枚"
+        else:
+            msg += "\nすべての画像は既に仕入DB側に登録済みでした。"
+
+        QMessageBox.information(self, "完了", msg)
     
     def delete_jan_group(self, group: JanGroup):
         """JANグループを削除"""

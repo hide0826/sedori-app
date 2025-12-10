@@ -14,7 +14,8 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView,
     QMessageBox, QDialog, QFormLayout, QLineEdit,
     QLabel, QGroupBox, QFileDialog, QTextEdit,
-    QComboBox, QCheckBox, QDialogButtonBox, QTabWidget
+    QComboBox, QCheckBox, QDialogButtonBox, QTabWidget,
+    QProgressDialog, QApplication
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
@@ -24,11 +25,25 @@ import os
 import webbrowser
 
 # プロジェクトルートをパスに追加
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from database.store_db import StoreDatabase
 from utils.excel_importer import ExcelImporter
 from ui.company_master_widget import CompanyMasterWidget
+
+# デスクトップ側servicesを優先して読み込む
+try:
+    from services.google_maps_service import get_store_info_from_google, recover_store_info_with_japanese  # python/desktop/services
+except Exception:
+    # 明示的パス指定のフォールバック
+    try:
+        service_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'services'))
+        if service_path not in sys.path:
+            sys.path.insert(0, service_path)
+        from google_maps_service import get_store_info_from_google, recover_store_info_with_japanese
+    except Exception:
+        get_store_info_from_google = None
+        recover_store_info_with_japanese = None
 
 
 class StoreEditDialog(QDialog):
@@ -523,6 +538,42 @@ class StoreListWidget(QWidget):
         """)
         route_layout.addWidget(open_browser_btn)
         
+        # 情報取得ボタン（住所・電話番号の自動補完）
+        fetch_info_btn = QPushButton("情報取得")
+        fetch_info_btn.clicked.connect(self.fetch_missing_store_info)
+        fetch_info_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ffc107;
+                color: #212529;
+                padding: 8px 16px;
+                border-radius: 4px;
+                min-width: 120px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #e0a800;
+            }
+        """)
+        route_layout.addWidget(fetch_info_btn)
+        
+        # データリカバリーボタン（英語住所を日本語に修正）
+        recover_info_btn = QPushButton("データリカバリー")
+        recover_info_btn.clicked.connect(self.recover_japanese_store_info)
+        recover_info_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+                min-width: 120px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #c82333;
+            }
+        """)
+        route_layout.addWidget(recover_info_btn)
+        
         route_layout.addStretch()
         
         parent_layout.addWidget(route_group)
@@ -616,6 +667,200 @@ class StoreListWidget(QWidget):
         self.current_selected_route = None
         self.load_stores()  # 全店舗一覧を表示
         self.clear_filter_btn_route.setEnabled(False)  # ルート解除ボタンの無効化
+    
+    def fetch_missing_store_info(self):
+        """住所・電話番号が欠けている店舗の情報をGoogle Maps APIから取得"""
+        # ヘルパー関数: Noneまたは文字列でない場合は空文字列を返す
+        def safe_strip(value):
+            """Noneまたは文字列でない場合は空文字列を返す"""
+            if value is None:
+                return ''
+            return str(value).strip() if isinstance(value, str) else ''
+        
+        # モジュールがインポートできていない場合
+        if get_store_info_from_google is None:
+            QMessageBox.warning(
+                self,
+                "エラー",
+                "Google Mapsサービスモジュールが読み込めませんでした。\n"
+                "googlemapsライブラリがインストールされているか確認してください。"
+            )
+            return
+        
+        # 現在表示されている店舗一覧を取得
+        stores = self.db.list_stores()
+        
+        # ルートフィルタが設定されている場合はフィルタリング
+        if self.current_filtered_route:
+            stores = [store for store in stores if store.get('affiliated_route_name') == self.current_filtered_route]
+        
+        # 住所または電話番号が空の店舗を抽出
+        missing_info_stores = []
+        for store in stores:
+            if not store:  # storeがNoneの場合はスキップ
+                continue
+            
+            address = safe_strip(store.get('address'))
+            phone = safe_strip(store.get('phone'))
+            store_name = safe_strip(store.get('store_name'))
+            
+            if store_name and (not address or not phone):
+                missing_info_stores.append(store)
+        
+        if not missing_info_stores:
+            QMessageBox.information(
+                self, 
+                "情報", 
+                "住所・電話番号が欠けている店舗はありません。"
+            )
+            return
+        
+        # 確認ダイアログ
+        reply = QMessageBox.question(
+            self,
+            "確認",
+            f"{len(missing_info_stores)}件の店舗の情報を取得しますか？\n"
+            f"（Google Maps APIを使用します）",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # プログレスダイアログを表示
+        progress = QProgressDialog("店舗情報を取得中...", "キャンセル", 0, len(missing_info_stores), self)
+        progress.setWindowTitle("情報取得中")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        
+        updated_count = 0
+        failed_count = 0
+        
+        for i, store in enumerate(missing_info_stores):
+            if progress.wasCanceled():
+                break
+            
+            if not store:  # storeがNoneの場合はスキップ
+                continue
+            
+            store_id = store.get('id')
+            store_name = safe_strip(store.get('store_name'))
+            current_address = safe_strip(store.get('address'))
+            current_phone = safe_strip(store.get('phone'))
+            
+            progress.setValue(i)
+            progress.setLabelText(f"取得中: {store_name}")
+            QApplication.processEvents()  # UIを更新
+            
+            # Google Maps APIから情報を取得（日本語で取得）
+            info = get_store_info_from_google(store_name, language_code='ja')
+            
+            if info:
+                # データベースを更新
+                update_data = {}
+                
+                # 住所が空の場合のみ更新
+                if not current_address and info.get('address'):
+                    update_data['address'] = info['address']
+                
+                # 電話番号が空の場合のみ更新
+                if not current_phone and info.get('phone'):
+                    update_data['phone'] = info['phone']
+                
+                if update_data:
+                    try:
+                        # 既存のデータを取得してマージ
+                        existing_store = self.db.get_store(store_id)
+                        if existing_store:
+                            for key, value in update_data.items():
+                                existing_store[key] = value
+                            
+                            # データベースを更新
+                            self.db.update_store(store_id, existing_store)
+                            updated_count += 1
+                    except Exception as e:
+                        print(f"店舗情報の更新エラー (ID: {store_id}): {e}")
+                        failed_count += 1
+            else:
+                failed_count += 1
+        
+        progress.setValue(len(missing_info_stores))
+        progress.close()
+        
+        # 結果を表示
+        QMessageBox.information(
+            self,
+            "完了",
+            f"情報取得が完了しました。\n\n"
+            f"更新: {updated_count}件\n"
+            f"失敗: {failed_count}件"
+        )
+        
+        # テーブルを再読み込み
+        self.load_stores(self.search_edit.text())
+    
+    def recover_japanese_store_info(self):
+        """住所に'Japan'が含まれている店舗の情報を日本語で再取得して更新"""
+        # モジュールがインポートできていない場合
+        if recover_store_info_with_japanese is None:
+            QMessageBox.warning(
+                self,
+                "エラー",
+                "Google Mapsサービスモジュールが読み込めませんでした。\n"
+                "googlemapsライブラリがインストールされているか確認してください。"
+            )
+            return
+        
+        # 確認ダイアログ
+        reply = QMessageBox.question(
+            self,
+            "確認",
+            "住所に'Japan'が含まれている店舗の情報を日本語で再取得しますか？\n"
+            "（Google Maps APIを使用します）",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # プログレスダイアログを表示（件数は後で更新）
+        progress = QProgressDialog("店舗情報をリカバリー中...", "キャンセル", 0, 100, self)
+        progress.setWindowTitle("データリカバリー中")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        
+        QApplication.processEvents()  # UIを更新
+        
+        # リカバリー処理を実行
+        try:
+            result = recover_store_info_with_japanese(self.db)
+            
+            progress.close()
+            
+            # 結果を表示
+            QMessageBox.information(
+                self,
+                "完了",
+                f"データリカバリーが完了しました。\n\n"
+                f"対象: {result['total']}件\n"
+                f"更新成功: {result['updated']}件\n"
+                f"失敗: {result['failed']}件"
+            )
+            
+            # テーブルを再読み込み
+            self.load_stores(self.search_edit.text())
+            
+        except Exception as e:
+            progress.close()
+            QMessageBox.warning(
+                self,
+                "エラー",
+                f"データリカバリー中にエラーが発生しました:\n{str(e)}"
+            )
     
     def setup_store_table(self, parent_layout):
         """店舗一覧テーブルの設定"""

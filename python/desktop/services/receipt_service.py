@@ -33,6 +33,7 @@ class ReceiptParseResult:
     total_amount: Optional[int]
     paid_amount: Optional[int]
     items_count: Optional[int]
+    plastic_bag_amount: Optional[int]  # レジ袋金額（複数ある場合は合計）
 
 
 logger = logging.getLogger(__name__)
@@ -548,14 +549,30 @@ class ReceiptService:
                 if phone_number:
                     break
 
-        # 商品点数
-        items_count = _find_int([
-            r"点数\s*[:：]?\s*([0-9０-９,\. \t]+)",
-            r"品数\s*[:：]?\s*([0-9０-９,\. \t]+)",
-            r"合計\s*品\s*[:：]?\s*([0-9０-９,\. \t]+)",
-            r"([0-9０-９]+)\s*点",
-            r"([0-9０-９]+)\s*品"
-        ])
+        # 商品点数（削除：不要になったため）
+        items_count = None
+
+        # レジ袋金額の抽出（複数ある場合は合計）
+        plastic_bag_amount = None
+        plastic_bag_patterns = [
+            r"レジ袋\s*[:：]?\s*([0-9,\. \t]+)",
+            r"有料レジ袋\s*[:：]?\s*([0-9,\. \t]+)",
+            r"レジ袋代\s*[:：]?\s*([0-9,\. \t]+)",
+            r"袋代\s*[:：]?\s*([0-9,\. \t]+)",
+            r"レジ袋\s+([0-9,\. \t]+)",  # レジ袋 5 のような形式
+            r"有料レジ袋\s+([0-9,\. \t]+)",  # 有料レジ袋 5 のような形式
+        ]
+        plastic_bag_amounts = []
+        for pat in plastic_bag_patterns:
+            matches = re.finditer(pat, text, flags=re.IGNORECASE)
+            for m in matches:
+                val = _to_int(m.group(1))
+                if val is not None and val > 0:  # 0より大きい値のみ
+                    plastic_bag_amounts.append(val)
+        
+        # 複数のレジ袋がある場合は合計
+        if plastic_bag_amounts:
+            plastic_bag_amount = sum(plastic_bag_amounts)
 
         return ReceiptParseResult(
             purchase_date=purchase_date,
@@ -567,7 +584,8 @@ class ReceiptService:
             discount_amount=discount_amount,
             total_amount=total_amount,
             paid_amount=paid_amount,
-            items_count=items_count,
+            items_count=None,  # 点数は削除
+            plastic_bag_amount=plastic_bag_amount,
         )
 
     def process_receipt(self, image_path: str | Path, currency: str = "JPY") -> Dict[str, Any]:
@@ -597,6 +615,7 @@ class ReceiptService:
                         total_amount=ai_result.get("total_amount"),
                         paid_amount=ai_result.get("paid_amount"),
                         items_count=ai_result.get("items_count"),
+                        plastic_bag_amount=ai_result.get("plastic_bag_amount"),
                     )
                     raw_text = ai_result.get("raw_text") or ""
                     ocr_provider = ai_result.get("provider") or "gemini"
@@ -649,6 +668,7 @@ class ReceiptService:
             "total_amount": parsed.total_amount,
             "paid_amount": parsed.paid_amount,
             "items_count": parsed.items_count,
+            "plastic_bag_amount": parsed.plastic_bag_amount,
             "currency": currency,
             "ocr_provider": ocr_provider,
             "ocr_text": raw_text,

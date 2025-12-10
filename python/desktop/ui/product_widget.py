@@ -10,7 +10,7 @@ import os
 import re
 import unicodedata
 import calendar
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -22,6 +22,11 @@ from PySide6.QtWidgets import (
     QAbstractItemView
 )
 from PySide6.QtGui import QDrag, QPixmap, QDesktopServices, QCursor, QCursor
+
+from desktop.utils.ui_utils import (
+    save_table_header_state, restore_table_header_state,
+    save_table_column_widths, restore_table_column_widths
+)
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -47,8 +52,12 @@ class DraggableTableWidget(QTableWidget):
         if item:
             col = self.column(item)
             header = self.horizontalHeaderItem(col)
-            if header and header.text() == "レシートID" and item.text().strip():
-                self.setCursor(QCursor(Qt.PointingHandCursor))
+            if header:
+                header_text = header.text()
+                if (header_text == "レシート画像" or header_text == "保証書画像") and item.text().strip():
+                    self.setCursor(QCursor(Qt.PointingHandCursor))
+                else:
+                    self.setCursor(QCursor(Qt.ArrowCursor))
             else:
                 self.setCursor(QCursor(Qt.ArrowCursor))
         else:
@@ -61,22 +70,24 @@ class DraggableTableWidget(QTableWidget):
         if item is None:
             return super().startDrag(supportedActions)
         
-        # レシートID列かどうかを確認
+        # レシート画像列または保証書画像列かどうかを確認
         col = self.currentColumn()
         header = self.horizontalHeaderItem(col)
-        if header and header.text() == "レシートID":
-            receipt_id = item.text().strip()
-            if receipt_id:
-                # ドラッグデータを作成
-                drag = QDrag(self)
-                mime_data = QMimeData()
-                # テキストデータとしてレシートIDを設定
-                mime_data.setText(receipt_id)
-                drag.setMimeData(mime_data)
-                # ドラッグを開始
-                drag.exec_(Qt.CopyAction)
-                return
-        # レシートID列以外は通常のドラッグ処理
+        if header:
+            header_text = header.text()
+            if header_text == "レシート画像" or header_text == "保証書画像":
+                image_name = item.text().strip()
+                if image_name:
+                    # ドラッグデータを作成
+                    drag = QDrag(self)
+                    mime_data = QMimeData()
+                    # テキストデータとして画像名を設定
+                    mime_data.setText(image_name)
+                    drag.setMimeData(mime_data)
+                    # ドラッグを開始
+                    drag.exec_(Qt.CopyAction)
+                    return
+        # レシート画像列・保証書画像列以外は通常のドラッグ処理
         super().startDrag(supportedActions)
 
 
@@ -289,6 +300,17 @@ class ProductWidget(QWidget):
         self.load_purchase_data(self.purchase_records)
         self.load_sales_data()
 
+        # テーブルの列幅を復元
+        restore_table_header_state(self.table, "ProductWidget/ProductTableState")
+        # purchase_tableは列幅のみを復元（リサイズモードは常にInteractive）
+        restore_table_header_state(self.sales_table, "ProductWidget/SalesTableState")
+
+    def save_settings(self):
+        """ウィジェットの設定（テーブルの列幅など）を保存します。"""
+        save_table_header_state(self.table, "ProductWidget/ProductTableState")
+        save_table_column_widths(self.purchase_table, "ProductWidget/PurchaseTableColumnWidths")
+        save_table_header_state(self.sales_table, "ProductWidget/SalesTableState")
+
     def _resolve_inventory_columns(self) -> List[str]:
         """仕入管理タブの列構成を取得（未設定時はデフォルト）"""
         base = []
@@ -305,17 +327,41 @@ class ProductWidget(QWidget):
                 "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "コメント",
                 "発送方法", "仕入先", "コンディション説明"
             ]
-            
-        # 追加すべきカラム
+        
+        # コンディション説明の後に挿入するカラム（順序重要）
+        insert_after_condition_note = [
+            "レシート画像",
+            "保証書画像",  # 保証書IDから変更
+            "保証期間",
+            "保証最終日"  # 新規追加
+        ]
+        
+        # その他の追加カラム
         extra_columns = [
-            # システム管理列
-            "保証期間", "レシートID", "保証書ID",
             # 画像列
             "画像1", "画像2", "画像3", "画像4", "画像5", "画像6",
             # 古物台帳関連列（新規追加）
             "品目", "品名", "氏名(個人)", "本人確認書類", "確認番号", "確認日", "確認者", "台帳登録済"
         ]
         
+        # コンディション説明の位置を探して、その後にカラムを挿入
+        if "コンディション説明" in base:
+            condition_note_idx = base.index("コンディション説明")
+            # 既存の「保証期間」「レシート画像」「保証書ID」を削除（あれば）
+            for old_col in ["保証期間", "レシート画像", "保証書ID"]:
+                if old_col in base:
+                    base.remove(old_col)
+            # コンディション説明の後に挿入
+            for i, col in enumerate(insert_after_condition_note):
+                if col not in base:
+                    base.insert(condition_note_idx + 1 + i, col)
+        else:
+            # コンディション説明がない場合は末尾に追加
+            for col in insert_after_condition_note:
+                if col not in base:
+                    base.append(col)
+        
+        # その他のカラムを追加（既存の「保証期間」「レシート画像」「保証書ID」を削除済み）
         for col in extra_columns:
             if col not in base:
                 base.append(col)
@@ -467,6 +513,9 @@ class ProductWidget(QWidget):
         # カスタムコンテキストメニューを有効化
         self.purchase_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.purchase_table.customContextMenuRequested.connect(self._show_purchase_context_menu)
+        # セルクリック時の処理を追加（レシート画像をクリックしたときに画像を表示）
+        self.purchase_table.cellClicked.connect(self.on_purchase_table_cell_clicked)
+        self.purchase_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         
         layout.addWidget(self.purchase_table)
 
@@ -492,6 +541,158 @@ class ProductWidget(QWidget):
     def get_all_purchase_records(self) -> List[Dict[str, Any]]:
         """現在のすべての仕入レコードを返す"""
         return getattr(self, 'purchase_all_records', [])
+
+    # ===== 画像管理タブとの連携用ユーティリティ =====
+
+    def find_purchase_candidates_by_datetime(
+        self,
+        base_dt: datetime,
+        days_window: int = 7,
+    ) -> List[Dict[str, Any]]:
+        """
+        指定した日時に近い仕入レコード候補を返す
+
+        - 画像の撮影日時から「±N日以内」の仕入データを探すために使用
+        - 仕入日カラムは「仕入れ日」または「purchase_date」を想定
+        """
+        if not hasattr(self, "purchase_all_records") or not self.purchase_all_records:
+            return []
+
+        base_date: date = base_dt.date()
+        candidates: List[Dict[str, Any]] = []
+
+        for record in self.purchase_all_records:
+            raw_date = str(
+                record.get("仕入れ日")
+                or record.get("purchase_date")
+                or ""
+            ).strip()
+            if not raw_date:
+                continue
+
+            norm = self._normalize_date_for_search(raw_date)
+            if not norm:
+                continue
+
+            try:
+                y, m, d = [int(x) for x in norm.split("-")[:3]]
+                rec_date = date(y, m, d)
+            except Exception:
+                continue
+
+            diff_days = abs((rec_date - base_date).days)
+            if diff_days <= days_window:
+                rec_copy = dict(record)
+                rec_copy["_date_diff"] = diff_days
+                candidates.append(rec_copy)
+
+        # 日差 → 仕入日 → SKU の順でソート
+        def _sort_key(r: Dict[str, Any]):
+            return (
+                r.get("_date_diff", 9999),
+                str(r.get("仕入れ日") or r.get("purchase_date") or ""),
+                str(r.get("SKU") or r.get("sku") or ""),
+            )
+
+        candidates.sort(key=_sort_key)
+        return candidates
+
+    def update_image_paths_for_jan(
+        self,
+        jan: str,
+        image_paths: List[str],
+        all_records: List[Dict[str, Any]],
+        skip_existing: bool = True,
+    ) -> Tuple[bool, int, Optional[Dict[str, Any]]]:
+        """
+        指定JANに対応する仕入レコードへ画像パスを割り当てる
+
+        Args:
+            jan: 対象とするJANコード
+            image_paths: 割り当てたい画像パスのリスト
+            all_records: 現在の全仕入レコード（purchase_all_records 相当）
+            skip_existing: 既に画像列が埋まっている場合はスキップするかどうか
+
+        Returns:
+            (success, added_count, record_snapshot)
+        """
+        if not jan or not image_paths or not all_records:
+            return False, 0, None
+
+        jan_norm = str(jan).strip().upper()
+
+        # 対象レコードを探す（最初に見つかった1件を対象とする）
+        target_record: Optional[Dict[str, Any]] = None
+        for record in all_records:
+            record_jan = str(
+                record.get("JAN") or record.get("jan") or ""
+            ).strip().upper()
+            if record_jan == jan_norm:
+                target_record = record
+                break
+
+        if target_record is None:
+            return False, 0, None
+
+        # 画像列名候補（仕入DB側の列名）
+        image_columns = [f"画像{i}" for i in range(1, 7)]
+
+        added_count = 0
+
+        # 既存の画像パスを取得（重複登録を避ける）
+        existing_paths = set()
+        for col in image_columns:
+            val = str(target_record.get(col) or "").strip()
+            if val:
+                existing_paths.add(val)
+
+        for image_path in image_paths:
+            if not image_path:
+                continue
+            image_path = str(image_path)
+
+            if image_path in existing_paths:
+                continue
+
+            # 空いている列を探す
+            empty_col_name: Optional[str] = None
+            for col in image_columns:
+                current_val = str(target_record.get(col) or "").strip()
+                if not current_val:
+                    empty_col_name = col
+                    break
+
+            if empty_col_name is None:
+                if skip_existing:
+                    # すべて埋まっている場合は追加しない
+                    continue
+                # skip_existing=False の場合は最後の列を上書き
+                empty_col_name = image_columns[-1]
+
+            target_record[empty_col_name] = image_path
+            existing_paths.add(image_path)
+            added_count += 1
+
+        if added_count == 0:
+            return True, 0, None
+
+        # purchase_all_records にも変更を反映（同じオブジェクトを指している前提）
+        if hasattr(self, "purchase_all_records") and self.purchase_all_records:
+            for idx, rec in enumerate(self.purchase_all_records):
+                sku1 = rec.get("SKU") or rec.get("sku")
+                sku2 = target_record.get("SKU") or target_record.get("sku")
+                if sku1 and sku2 and str(sku1) == str(sku2):
+                    self.purchase_all_records[idx] = target_record
+                    break
+
+        # テーブルを再描画
+        self.purchase_records = list(self.purchase_all_records)
+        self.populate_purchase_table(self.purchase_records)
+        self.update_purchase_count_label()
+
+        # スナップショット用にコピーを返す
+        record_snapshot = dict(target_record)
+        return True, added_count, record_snapshot
 
     def load_products(self):
         """商品データを読み込み"""
@@ -767,13 +968,27 @@ class ProductWidget(QWidget):
         """検索用に日付を正規化（yyyy-mm-dd形式）"""
         if not date_str:
             return None
-        date_str = date_str.replace("/", "-").replace(".", "-").replace("年", "-").replace("月", "-").replace("日", "")
+        # 区切り文字と日本語表記を統一
+        date_str = (
+            str(date_str)
+            .replace("/", "-")
+            .replace(".", "-")
+            .replace("年", "-")
+            .replace("月", "-")
+            .replace("日", "")
+        )
         parts = date_str.split("-")
         if len(parts) >= 3:
             try:
                 year = int(parts[0])
                 month = int(parts[1])
-                day = int(parts[2])
+                # 3つ目の要素に「日付＋時刻」が入っているケースに対応（例: '29 15:56'）
+                day_part = parts[2]
+                import re as _re
+                m = _re.match(r"\s*(\d{1,2})", str(day_part))
+                if not m:
+                    return date_str
+                day = int(m.group(1))
                 return f"{year:04d}-{month:02d}-{day:02d}"
             except ValueError:
                 pass
@@ -824,7 +1039,8 @@ class ProductWidget(QWidget):
             sku = row.get("SKU") or row.get("sku")
             comment_warranty = self._infer_warranty_from_comment(row)
             if comment_warranty:
-                row["保証期間"] = comment_warranty
+                # コメントから取得した保証期間は保証最終日として扱う
+                row["保証最終日"] = comment_warranty
 
             if sku:
                 try:
@@ -832,10 +1048,18 @@ class ProductWidget(QWidget):
                 except Exception:
                     product = None
                 if product:
-                    if ("保証期間" not in row or not row.get("保証期間")) and product.get("warranty_until"):
-                        row["保証期間"] = product.get("warranty_until")
-                    if "レシートID" not in row and product.get("receipt_id") is not None:
-                        row["レシートID"] = product.get("receipt_id")
+                    # 保証期間（日数）を取得
+                    warranty_period_days = product.get("warranty_period_days")
+                    if warranty_period_days is not None and "保証期間" not in row:
+                        row["保証期間"] = warranty_period_days
+                    
+                    # 保証最終日を取得
+                    warranty_until = product.get("warranty_until")
+                    if warranty_until and "保証最終日" not in row:
+                        row["保証最終日"] = warranty_until
+                    
+                    if "レシート画像" not in row and product.get("receipt_id") is not None:
+                        row["レシート画像"] = product.get("receipt_id")
                     for i in range(1, 7):
                         image_key = f"image_{i}"
                         image_col = f"画像{i}"
@@ -843,13 +1067,56 @@ class ProductWidget(QWidget):
                             image_path = product.get(image_key)
                             if image_path:
                                 row[image_col] = image_path
+                # 保証書情報の取得
                 try:
                     warranties = self.warranty_db.list_by_sku(sku)
                 except Exception:
                     warranties = []
-                warranty_id = warranties[0]["id"] if warranties else None
-                if "保証書ID" not in row and warranty_id is not None:
-                    row["保証書ID"] = warranty_id
+                
+                if warranties:
+                    # 最新の保証書を取得
+                    warranty = warranties[0]
+                    # 保証書画像（ファイル名、拡張子なし）
+                    warranty_file_path = warranty.get('file_path', '')
+                    if warranty_file_path:
+                        from pathlib import Path
+                        warranty_image_name = Path(warranty_file_path).stem
+                        if "保証書画像" not in row:
+                            row["保証書画像"] = warranty_image_name
+                    
+                    # 保証書ID（後方互換性のため保持、ただし保証書画像が設定されていない場合のみ）
+                    warranty_id = warranty.get('id')
+                    if warranty_id is not None:
+                        # 旧カラム名「保証書ID」も設定（後方互換性）
+                        if "保証書ID" not in row:
+                            row["保証書ID"] = warranty_id
+                else:
+                    # 保証書DBにない場合、既存の「保証書ID」から保証書画像を取得を試みる
+                    if "保証書画像" not in row and "保証書ID" in row:
+                        warranty_id = row.get("保証書ID")
+                        if warranty_id:
+                            try:
+                                warranty = self.warranty_db.get_warranty(int(warranty_id))
+                                if warranty:
+                                    warranty_file_path = warranty.get('file_path', '')
+                                    if warranty_file_path:
+                                        from pathlib import Path
+                                        warranty_image_name = Path(warranty_file_path).stem
+                                        row["保証書画像"] = warranty_image_name
+                            except Exception:
+                                pass
+                
+                # 保証期間と保証最終日をProductDatabaseから取得
+                if product:
+                    # 保証期間（日数）を取得
+                    warranty_period_days = product.get("warranty_period_days")
+                    if warranty_period_days is not None and "保証期間" not in row:
+                        row["保証期間"] = warranty_period_days
+                    
+                    # 保証最終日を取得
+                    warranty_until = product.get("warranty_until")
+                    if warranty_until and "保証最終日" not in row:
+                        row["保証最終日"] = warranty_until
 
                 # --- 古物台帳情報の取得（新規追加） ---
                 try:
@@ -879,18 +1146,10 @@ class ProductWidget(QWidget):
             augmented.append(row)
         return augmented
 
-    def _apply_purchase_column_resize(self, columns: List[str]) -> None:
-        """列幅を設定（商品名以外は自動調整）"""
-        header = self.purchase_table.horizontalHeader()
-        for idx, name in enumerate(columns):
-            if name == "商品名":
-                header.setSectionResizeMode(idx, QHeaderView.Fixed)
-                header.resizeSection(idx, self._calculate_product_name_width())
-            else:
-                header.setSectionResizeMode(idx, QHeaderView.ResizeToContents)
-
     def populate_purchase_table(self, records: List[Dict[str, Any]]):
         """仕入DBテーブルにレコードを反映"""
+        from pathlib import Path
+        
         base_columns = list(self.inventory_columns)
         if not base_columns:
             base_columns = self._resolve_inventory_columns()
@@ -906,7 +1165,11 @@ class ProductWidget(QWidget):
         self.purchase_table.setRowCount(len(records))
         self.purchase_table.setColumnCount(len(columns))
         self.purchase_table.setHorizontalHeaderLabels(columns)
-        self._apply_purchase_column_resize(columns)
+        
+        # 列幅を変更可能にする設定（データ設定前に設定）
+        header = self.purchase_table.horizontalHeader()
+        for col_idx in range(len(columns)):
+            header.setSectionResizeMode(col_idx, QHeaderView.Interactive)
 
         for row, record in enumerate(records):
             for col, header in enumerate(columns):
@@ -921,18 +1184,75 @@ class ProductWidget(QWidget):
                     if full_text:
                         item.setToolTip(full_text)
                     item.setData(Qt.UserRole, full_text)
-                elif header == "レシートID":
-                    receipt_id_str = "" if value is None else str(value)
-                    item = QTableWidgetItem(receipt_id_str)
-                    if receipt_id_str:
+                elif header == "レシート画像":
+                    receipt_image_str = "" if value is None else str(value)
+                    item = QTableWidgetItem(receipt_image_str)
+                    if receipt_image_str:
                         item.setFlags(item.flags() | Qt.ItemIsEnabled)
-                        receipt_info = self.receipt_db.find_by_receipt_id(receipt_id_str)
-                        if receipt_info and receipt_info.get('file_path'):
-                            file_path = receipt_info.get('file_path')
-                            item.setToolTip(f"クリックで画像を開く\n{file_path}")
-                            item.setData(Qt.UserRole, file_path)
+                        # 画像ファイル名で検索（拡張子なし）
+                        receipt_info = self.receipt_db.find_by_file_name(receipt_image_str)
+                        if receipt_info:
+                            # original_file_pathを優先、なければfile_path
+                            file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path')
+                            if file_path:
+                                # ファイルが存在するか確認
+                                file_path_obj = Path(file_path)
+                                if file_path_obj.exists():
+                                    item.setToolTip(f"クリックで画像を開く\n{file_path}")
+                                    item.setData(Qt.UserRole, str(file_path_obj.resolve()))
+                                else:
+                                    # ファイルが存在しない場合は、file_pathをそのまま保存（後で検索できるように）
+                                    item.setToolTip(f"レシート画像: {receipt_image_str}\n（ファイルが見つかりません: {file_path}）")
+                                    item.setData(Qt.UserRole, file_path)
+                            else:
+                                # デバッグ: レシート情報は見つかったが、file_pathがない
+                                item.setToolTip("レシート画像: " + receipt_image_str + "\n（レシートDBにfile_pathがありません）")
+                                # UserRoleにはreceipt_idを保存して、後で検索できるようにする
+                                item.setData(Qt.UserRole, receipt_image_str)
                         else:
-                            item.setToolTip("レシートID: " + receipt_id_str)
+                            # レシートが見つからない場合
+                            item.setToolTip("レシート画像: " + receipt_image_str + "\n（レシートDBに見つかりません）")
+                            # UserRoleにはファイル名を保存して、後で検索できるようにする
+                            item.setData(Qt.UserRole, receipt_image_str)
+                        item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
+                elif header == "保証書画像":
+                    warranty_image_str = "" if value is None else str(value)
+                    item = QTableWidgetItem(warranty_image_str)
+                    if warranty_image_str:
+                        item.setFlags(item.flags() | Qt.ItemIsEnabled)
+                        # レシートDBからファイルパスを取得（保証書もレシートDBに保存されている）
+                        warranty_file_path = None
+                        try:
+                            # まずレシートDBから検索（ファイル名で検索）
+                            receipt_info = self.receipt_db.find_by_file_name(warranty_image_str)
+                            if receipt_info:
+                                # original_file_pathを優先、なければfile_path
+                                warranty_file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path', '')
+                        except Exception:
+                            pass
+                        
+                        # レシートDBで見つからない場合は、保証書DBから検索
+                        if not warranty_file_path:
+                            try:
+                                warranties = self.warranty_db.list_by_sku(record.get('SKU') or record.get('sku') or '')
+                                if warranties:
+                                    # 最新の保証書を取得
+                                    warranty = warranties[0]
+                                    warranty_file_path = warranty.get('file_path', '')
+                            except Exception:
+                                pass
+                        
+                        if warranty_file_path:
+                            file_path_obj = Path(warranty_file_path)
+                            if file_path_obj.exists():
+                                item.setToolTip(f"クリックで画像を開く\n{warranty_file_path}")
+                                item.setData(Qt.UserRole, str(file_path_obj.resolve()))
+                            else:
+                                item.setToolTip(f"保証書画像: {warranty_image_str}\n（ファイルが見つかりません: {warranty_file_path}）")
+                                item.setData(Qt.UserRole, warranty_file_path)
+                        else:
+                            item.setToolTip("保証書画像: " + warranty_image_str + "\n（ファイルパスが見つかりません）")
+                            item.setData(Qt.UserRole, warranty_image_str)
                         item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
                 elif header and header.startswith("画像") and header[2:].isdigit():
                     image_path = value or ""
@@ -950,6 +1270,14 @@ class ProductWidget(QWidget):
                 else:
                     item = QTableWidgetItem(str(value))
                 self.purchase_table.setItem(row, col, item)
+
+        # 各列をリサイズ可能に設定
+        header = self.purchase_table.horizontalHeader()
+        for col_idx in range(len(columns)):
+            header.setSectionResizeMode(col_idx, QHeaderView.Interactive)
+        
+        # 列幅のみを復元（リサイズモードは変更しない）
+        restore_table_column_widths(self.purchase_table, "ProductWidget/PurchaseTableColumnWidths")
 
     def _get_record_value(self, record: Dict[str, Any], keys: List[str]) -> Any:
         """大文字小文字を無視して値を取得"""
@@ -1033,6 +1361,156 @@ class ProductWidget(QWidget):
         if asin:
             QApplication.clipboard().setText(asin)
 
+    def on_purchase_table_cell_clicked(self, row: int, col: int):
+        """仕入DBテーブルのセルクリック時の処理（レシート画像をクリックしたときに画像を表示）"""
+        header = self.purchase_table.horizontalHeaderItem(col)
+        if not header:
+            return
+        
+        header_text = header.text()
+        if header_text == "レシート画像":
+            item = self.purchase_table.item(row, col)
+            if not item:
+                return
+            
+            # ファイルパスを取得（UserRoleに保存されている）
+            file_path = item.data(Qt.UserRole)
+            
+            # UserRoleにファイルパスがない、またはファイルが存在しない場合は、テキストから再検索
+            if not file_path:
+                # UserRoleにない場合は、テキストから検索
+                receipt_image_name = item.text().strip()
+                if receipt_image_name:
+                    receipt_info = self.receipt_db.find_by_file_name(receipt_image_name)
+                    if receipt_info:
+                        # original_file_pathを優先、なければfile_path
+                        file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path')
+            else:
+                # UserRoleにファイル名（文字列）が保存されている場合は、再検索
+                from pathlib import Path
+                file_path_obj = Path(file_path)
+                if not file_path_obj.exists():
+                    # ファイルが存在しない場合は、テキストから再検索
+                    receipt_image_name = item.text().strip()
+                    if receipt_image_name:
+                        receipt_info = self.receipt_db.find_by_file_name(receipt_image_name)
+                        if receipt_info:
+                            # original_file_pathを優先、なければfile_path
+                            file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path')
+            
+            if file_path:
+                from pathlib import Path
+                image_file = Path(file_path)
+                if image_file.exists():
+                    # 画像を表示
+                    from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel
+                    from PySide6.QtGui import QPixmap
+                    
+                    dialog = QDialog(self)
+                    dialog.setWindowTitle("レシート画像")
+                    layout = QVBoxLayout(dialog)
+                    
+                    label = QLabel()
+                    pixmap = QPixmap(str(file_path))
+                    if not pixmap.isNull():
+                        # 画像を適切なサイズにリサイズ（最大800x600）
+                        scaled_pixmap = pixmap.scaled(800, 600, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        label.setPixmap(scaled_pixmap)
+                    else:
+                        label.setText("画像を読み込めませんでした。")
+                    
+                    layout.addWidget(label)
+                    dialog.exec_()
+                else:
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.warning(self, "警告", f"画像ファイルが見つかりません:\n{file_path}")
+            else:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.information(self, "情報", "レシート画像が設定されていません。")
+        elif header_text == "保証書画像":
+            item = self.purchase_table.item(row, col)
+            if not item:
+                return
+            
+            # ファイルパスを取得（UserRoleに保存されている）
+            file_path = item.data(Qt.UserRole)
+            
+            # UserRoleにファイルパスがない、またはファイルが存在しない場合は、テキストから再検索
+            if not file_path:
+                # UserRoleにない場合は、テキストから検索（レシートDBから検索）
+                warranty_image_name = item.text().strip()
+                if warranty_image_name:
+                    # レシートDBから保証書を検索（ファイル名で検索）
+                    receipt_info = self.receipt_db.find_by_file_name(warranty_image_name)
+                    if receipt_info:
+                        # original_file_pathを優先、なければfile_path
+                        file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path')
+                    else:
+                        # レシートDBで見つからない場合は、保証書DBから検索
+                        sku = self._get_value_from_row(row, ["SKU", "sku"])
+                        if sku:
+                            try:
+                                warranties = self.warranty_db.list_by_sku(sku)
+                                if warranties:
+                                    warranty = warranties[0]
+                                    file_path = warranty.get('file_path', '')
+                            except Exception:
+                                pass
+            else:
+                # UserRoleにファイル名（文字列）が保存されている場合は、再検索
+                from pathlib import Path
+                file_path_obj = Path(file_path)
+                if not file_path_obj.exists():
+                    # ファイルが存在しない場合は、テキストから再検索（レシートDBから検索）
+                    warranty_image_name = item.text().strip()
+                    if warranty_image_name:
+                        # レシートDBから保証書を検索（ファイル名で検索）
+                        receipt_info = self.receipt_db.find_by_file_name(warranty_image_name)
+                        if receipt_info:
+                            # original_file_pathを優先、なければfile_path
+                            file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path')
+                        else:
+                            # レシートDBで見つからない場合は、保証書DBから検索
+                            sku = self._get_value_from_row(row, ["SKU", "sku"])
+                            if sku:
+                                try:
+                                    warranties = self.warranty_db.list_by_sku(sku)
+                                    if warranties:
+                                        warranty = warranties[0]
+                                        file_path = warranty.get('file_path', '')
+                                except Exception:
+                                    pass
+            
+            if file_path:
+                from pathlib import Path
+                image_file = Path(file_path)
+                if image_file.exists():
+                    # 画像を表示
+                    from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel
+                    from PySide6.QtGui import QPixmap
+                    
+                    dialog = QDialog(self)
+                    dialog.setWindowTitle("保証書画像")
+                    layout = QVBoxLayout(dialog)
+                    
+                    label = QLabel()
+                    pixmap = QPixmap(str(file_path))
+                    if not pixmap.isNull():
+                        # 画像を適切なサイズにリサイズ（最大800x600）
+                        scaled_pixmap = pixmap.scaled(800, 600, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        label.setPixmap(scaled_pixmap)
+                    else:
+                        label.setText("画像を読み込めませんでした。")
+                    
+                    layout.addWidget(label)
+                    dialog.exec_()
+                else:
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.warning(self, "警告", f"画像ファイルが見つかりません:\n{file_path}")
+            else:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.information(self, "情報", "保証書画像が設定されていません。")
+    
     def _get_value_from_row(self, row: int, keys: List[str]) -> Optional[str]:
         for col in range(self.purchase_table.columnCount()):
             header = self.purchase_table.horizontalHeaderItem(col).text()
