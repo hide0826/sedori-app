@@ -576,15 +576,8 @@ class RepricerWidget(QWidget):
         # 結果テーブルの更新
         self.update_result_table(result)
         
-        auto_save_message = ""
-        try:
-            saved_path = self.auto_save_results_to_source_dir()
-            if saved_path:
-                auto_save_message = f"\n自動保存先: {saved_path}"
-            else:
-                auto_save_message = "\n自動保存に失敗しました。「結果をCSV保存」から手動保存してください。"
-        except Exception as e:
-            auto_save_message = f"\n自動保存に失敗しました（{e}）。「結果をCSV保存」から手動保存してください。"
+        # 自動保存は行わず、手動保存のみとする
+        auto_save_message = "\n自動保存は行っていません。「結果をCSV保存」から手動保存してください。"
         
         QMessageBox.information(
             self, 
