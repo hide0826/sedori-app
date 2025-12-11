@@ -2192,6 +2192,34 @@ class ImageManagerWidget(QWidget):
                             item.setFlags(item.flags() | Qt.ItemIsEditable)
                             self.registration_table.setItem(row, col, item)
                     
+                    # 仕入DBの画像URLにも保存
+                    try:
+                        sku = entry.get("sku")
+                        if sku:
+                            from database.purchase_db import PurchaseDatabase
+                            purchase_db = PurchaseDatabase()
+                            purchase_record = purchase_db.get_by_sku(sku)
+                            
+                            if purchase_record:
+                                # 既存レコードを更新
+                                update_data = dict(purchase_record)
+                                # image_idxは0始まりなので、image_url_1～6に保存（1始まりに変換）
+                                image_url_key = f"image_url_{image_idx + 1}"
+                                update_data[image_url_key] = public_url
+                                purchase_db.upsert(update_data)
+                                logger.info(f"Updated purchase DB image_url_{image_idx + 1} for SKU {sku}")
+                            else:
+                                # レコードが存在しない場合は新規作成（最小限の情報で）
+                                new_data = {
+                                    "sku": sku,
+                                    f"image_url_{image_idx + 1}": public_url
+                                }
+                                purchase_db.upsert(new_data)
+                                logger.info(f"Created new purchase DB record with image_url_{image_idx + 1} for SKU {sku}")
+                    except Exception as e:
+                        # 仕入DBへの保存に失敗してもアップロード処理は続行
+                        logger.warning(f"Failed to update purchase DB for SKU {entry.get('sku', 'N/A')}: {e}")
+                    
                     uploaded_count += 1
                     logger.info(f"Uploaded {image_path} -> {public_url}")
                 

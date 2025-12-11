@@ -340,6 +340,8 @@ class ProductWidget(QWidget):
         extra_columns = [
             # 画像列
             "画像1", "画像2", "画像3", "画像4", "画像5", "画像6",
+            # 画像URL列
+            "画像URL1", "画像URL2", "画像URL3", "画像URL4", "画像URL5", "画像URL6",
             # 古物台帳関連列（新規追加）
             "品目", "品名", "氏名(個人)", "本人確認書類", "確認番号", "確認日", "確認者", "台帳登録済"
         ]
@@ -720,7 +722,7 @@ class ProductWidget(QWidget):
                     item.setData(Qt.UserRole, image_path) # フルパスを保持
                     if image_path:
                         item.setToolTip(f"クリックして開く: {image_path}")
-                        item.setForeground(Qt.blue)
+                        item.setForeground(Qt.white)  # 青色から白色に変更
                         font = item.font()
                         font.setUnderline(True)
                         item.setFont(font)
@@ -1037,6 +1039,15 @@ class ProductWidget(QWidget):
         for record in records:
             row = dict(record)
             sku = row.get("SKU") or row.get("sku")
+            
+            # 画像URLをrecordから取得（既に設定されている場合はスキップ）
+            for i in range(1, 7):
+                image_url_key = f"image_url_{i}"
+                image_url_col = f"画像URL{i}"
+                if image_url_col not in row or not row.get(image_url_col):
+                    image_url = record.get(image_url_key) or record.get(f"画像URL{i}")
+                    if image_url:
+                        row[image_url_col] = image_url
             comment_warranty = self._infer_warranty_from_comment(row)
             if comment_warranty:
                 # コメントから取得した保証期間は保証最終日として扱う
@@ -1067,6 +1078,13 @@ class ProductWidget(QWidget):
                             image_path = product.get(image_key)
                             if image_path:
                                 row[image_col] = image_path
+                        # 画像URLを取得
+                        image_url_key = f"image_url_{i}"
+                        image_url_col = f"画像URL{i}"
+                        if image_url_col not in row or not row.get(image_url_col):
+                            image_url = product.get(image_url_key)
+                            if image_url:
+                                row[image_url_col] = image_url
                 # 保証書情報の取得
                 try:
                     warranties = self.warranty_db.list_by_sku(sku)
@@ -1261,10 +1279,18 @@ class ProductWidget(QWidget):
                         item = QTableWidgetItem(image_name)
                         item.setData(Qt.UserRole, image_path)
                         item.setToolTip(f"クリックで画像を開く\n{image_path}")
-                        item.setForeground(Qt.blue)
+                        item.setForeground(Qt.white)  # 青色から白色に変更
                         font = item.font()
                         font.setUnderline(True)
                         item.setFont(font)
+                    else:
+                        item = QTableWidgetItem("")
+                elif header and header.startswith("画像URL") and header[6:].isdigit():
+                    # 画像URL列の処理
+                    image_url = value or ""
+                    if image_url:
+                        item = QTableWidgetItem(str(image_url))
+                        item.setToolTip(f"画像URL: {image_url}")
                     else:
                         item = QTableWidgetItem("")
                 else:
@@ -1510,6 +1536,44 @@ class ProductWidget(QWidget):
             else:
                 from PySide6.QtWidgets import QMessageBox
                 QMessageBox.information(self, "情報", "保証書画像が設定されていません。")
+        elif header_text and header_text.startswith("画像") and header_text[2:].isdigit():
+            # 画像1～6のクリック処理
+            item = self.purchase_table.item(row, col)
+            if not item:
+                return
+            
+            # ファイルパスを取得（UserRoleに保存されている）
+            file_path = item.data(Qt.UserRole)
+            
+            if file_path:
+                from pathlib import Path
+                image_file = Path(file_path)
+                if image_file.exists():
+                    # 画像を表示
+                    from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel
+                    from PySide6.QtGui import QPixmap
+                    
+                    dialog = QDialog(self)
+                    dialog.setWindowTitle(f"{header_text}: {image_file.name}")
+                    layout = QVBoxLayout(dialog)
+                    
+                    label = QLabel()
+                    pixmap = QPixmap(str(file_path))
+                    if not pixmap.isNull():
+                        # 画像を適切なサイズにリサイズ（最大800x600）
+                        scaled_pixmap = pixmap.scaled(800, 600, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        label.setPixmap(scaled_pixmap)
+                    else:
+                        label.setText("画像を読み込めませんでした。")
+                    
+                    layout.addWidget(label)
+                    dialog.exec_()
+                else:
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.warning(self, "警告", f"画像ファイルが見つかりません:\n{file_path}")
+            else:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.information(self, "情報", f"{header_text}が設定されていません。")
     
     def _get_value_from_row(self, row: int, keys: List[str]) -> Optional[str]:
         for col in range(self.purchase_table.columnCount()):
