@@ -468,6 +468,34 @@
   - リモートリポジトリへのプッシュ完了
 - **次回**: 動作確認を進めながら細かい修正
 
+### 2025-02-XX
+- **チャット**: Agentモード（実装）
+- **内容**: テキスト編集時の文字の重複表示問題を修正
+- **実装完了**:
+  - **テキスト編集ウィジェットの改善**
+    - `python/desktop/ui/condition_template_widget.py`:
+      - `ConditionTextEdit`クラスで`QTextEdit`から`QPlainTextEdit`に変更
+      - `QPlainTextEdit`はよりシンプルで、文字の重複表示問題が発生しにくい
+      - フォント設定を明示的に指定（font-family: "Segoe UI", font-size: 9pt, font-weight: normal）
+      - スタイルシートを直接設定し、背景色を`rgba`ではなく`rgb`で指定
+      - ドキュメントのマージンを0に設定
+      - `setAcceptRichText()`の呼び出しを削除（QPlainTextEditには存在しないメソッド）
+    - `python/desktop/ui/styles.qss`:
+      - `QLineEdit`, `QTextEdit`, `QPlainTextEdit`にフォント設定を追加
+      - フォントファミリー、サイズ、Weightを統一
+      - フォーカス時の背景色を`rgba`から`rgb`に変更（重複描画を防ぐ）
+      - テーブル内の`QTextEdit`用の特別なスタイルを追加
+    - `python/desktop/main.py`:
+      - アプリケーションレベルのフォント設定で`font-weight: Normal`を明示的に指定
+- **動作確認**: 
+  - コンディション説明テンプレートの編集時に文字が2重にならず、正常に表示されることを確認
+- **効果**:
+  - テキスト編集時の視認性が大幅に改善
+  - 文字の重複表示による編集困難が解消
+- **Gitコミット**: 
+  - fix: テキスト編集時の文字の重複表示問題を修正
+  - QTextEditからQPlainTextEditに変更し、フォント設定を明確化
+
 ---
 **最終更新**: 2025-02-XX
 **更新者**: Agentモード（実装）

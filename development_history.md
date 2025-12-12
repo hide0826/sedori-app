@@ -1,3 +1,33 @@
+## 2025-02-XX: テキスト編集時の文字の重複表示問題を修正
+
+- **タスク:** アプリ内で文章等を編集しようとすると文字が2重になって見えなくなる問題を修正
+- **状況:** 完了
+- **作業時間:** 約1時間
+- **詳細:**
+    - `python/desktop/ui/condition_template_widget.py`
+        - `ConditionTextEdit`クラスで`QTextEdit`から`QPlainTextEdit`に変更
+        - `QPlainTextEdit`はよりシンプルで、文字の重複表示問題が発生しにくい
+        - フォント設定を明示的に指定（font-family: "Segoe UI", font-size: 9pt, font-weight: normal）
+        - スタイルシートを直接設定し、背景色を`rgba`ではなく`rgb`で指定（重複描画を防ぐ）
+        - ドキュメントのマージンを0に設定
+        - `setAcceptRichText()`の呼び出しを削除（QPlainTextEditには存在しないメソッド）
+    - `python/desktop/ui/styles.qss`
+        - `QLineEdit`, `QTextEdit`, `QPlainTextEdit`にフォント設定を追加
+        - `font-family: "Segoe UI", "Meiryo", "MS Gothic", sans-serif`
+        - `font-size: 9pt`
+        - `font-weight: normal`
+        - フォーカス時の背景色を`rgba`から`rgb`に変更（重複描画を防ぐ）
+        - テーブル内の`QTextEdit`用の特別なスタイルを追加
+    - `python/desktop/main.py`
+        - アプリケーションレベルのフォント設定で`font-weight: Normal`を明示的に指定
+- **動作確認:**
+    - コンディション説明テンプレートの編集時に文字が2重にならず、正常に表示されることを確認
+- **効果:**
+    - テキスト編集時の視認性が大幅に改善
+    - 文字の重複表示による編集困難が解消
+
+---
+
 ## 2025-11-30: GCS画像アップローダー実装
 
 - **タスク:** Google Cloud Storage (GCS) に画像をアップロードし、公開URLを取得するユーティリティを作成

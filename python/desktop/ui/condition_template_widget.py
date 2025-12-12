@@ -35,12 +35,54 @@ class ConditionTextEdit(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        from PySide6.QtWidgets import QTextEdit
+        from PySide6.QtWidgets import QPlainTextEdit
+        from PySide6.QtGui import QFont
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
-        self.text_edit = QTextEdit()
+        layout.setSpacing(0)
+        # QPlainTextEditを使用（文字の重複表示を防ぐため）
+        self.text_edit = QPlainTextEdit()
         self.text_edit.setMaximumHeight(100)
-        self.text_edit.setAcceptRichText(False)
+        # QPlainTextEditは常にプレーンテキストのみなので、setAcceptRichText()は不要
+        
+        # フォント設定を明示的に指定（文字の重複表示を防ぐ）
+        font = QFont("Segoe UI", 9)
+        font.setWeight(QFont.Weight.Normal)
+        font.setStyleHint(QFont.StyleHint.SansSerif)
+        font.setHintingPreference(QFont.HintingPreference.PreferDefaultHinting)
+        self.text_edit.setFont(font)
+        
+        # テーブルセル内のウィジェットとして正しく描画されるように設定
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
+        
+        # スタイルシートを直接設定（文字の重複表示を防ぐ）
+        # 背景色はrgbaではなくrgbを使用（重複描画を防ぐ）
+        # QPlainTextEdit用のスタイル
+        self.text_edit.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: rgb(60, 60, 60);
+                color: rgb(255, 255, 255);
+                border: 1px solid rgb(85, 85, 85);
+                border-radius: 3px;
+                padding: 4px 8px;
+                font-family: "Segoe UI", "Meiryo", "MS Gothic", sans-serif;
+                font-size: 9pt;
+                font-weight: normal;
+                selection-background-color: rgb(0, 120, 212);
+                selection-color: rgb(255, 255, 255);
+            }
+            QPlainTextEdit:focus {
+                border: 1px solid rgb(90, 162, 255);
+                background-color: rgb(64, 64, 64);
+            }
+        """)
+        
+        # documentのスタイル設定（文字の重複表示を防ぐ）
+        doc = self.text_edit.document()
+        doc.setDefaultFont(font)
+        # ドキュメントのマージンを0にして重複描画を防ぐ
+        doc.setDocumentMargin(0)
+        
         layout.addWidget(self.text_edit)
     
     def setText(self, text: str):

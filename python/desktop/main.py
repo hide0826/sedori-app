@@ -77,8 +77,9 @@ class HIRIOApplication:
         # self.app.setAttribute(Qt.AA_EnableHighDpiScaling, True)
         # self.app.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
         
-        # フォント設定
+        # フォント設定（文字の重複表示を防ぐため明示的に設定）
         font = QFont("Segoe UI", 9)
+        font.setWeight(QFont.Weight.Normal)
         self.app.setFont(font)
         
         # APIクライアントとメインウィンドウの作成（インポート含めて保護）
