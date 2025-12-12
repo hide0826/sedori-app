@@ -143,22 +143,26 @@ class ReceiptDatabase:
         file_name_without_ext = Path(file_name).stem
         file_name_with_ext = Path(file_name).name
         
+        # ファイル名を正規化（アンダースコアやハイフンの扱い）
         # 検索パターンのリスト（優先順位順）
         # ファイル名が既に拡張子なしの場合、file_name_without_extとfile_name_with_extは同じになる
         search_patterns = [
-            # 1. 拡張子なしで末尾一致（最も一般的）
+            # 1. 完全一致（ファイル名のみ、パスなし）
+            file_name_without_ext,
+            file_name_with_ext,
+            # 2. 拡張子なしで末尾一致（最も一般的）
             f"%{file_name_without_ext}",
-            # 2. 拡張子ありで末尾一致
+            # 3. 拡張子ありで末尾一致
             f"%{file_name_with_ext}",
-            # 3. スラッシュ区切りで拡張子なし
+            # 4. スラッシュ区切りで拡張子なし
             f"%/{file_name_without_ext}",
-            # 4. スラッシュ区切りで拡張子あり
+            # 5. スラッシュ区切りで拡張子あり
             f"%/{file_name_with_ext}",
-            # 5. バックスラッシュ区切りで拡張子なし（Windows用）
+            # 6. バックスラッシュ区切りで拡張子なし（Windows用）
             f"%\\{file_name_without_ext}",
-            # 6. バックスラッシュ区切りで拡張子あり（Windows用）
+            # 7. バックスラッシュ区切りで拡張子あり（Windows用）
             f"%\\{file_name_with_ext}",
-            # 7. 拡張子付きで末尾一致（.jpg, .png, .jpegなど）
+            # 8. 拡張子付きで末尾一致（.jpg, .png, .jpegなど）
             f"%{file_name_without_ext}.jpg",
             f"%{file_name_without_ext}.png",
             f"%{file_name_without_ext}.jpeg",
@@ -169,14 +173,22 @@ class ReceiptDatabase:
         
         # file_pathとoriginal_file_pathの両方を検索
         for pattern in search_patterns:
-            # file_pathで検索
-            cur.execute("SELECT * FROM receipts WHERE file_path LIKE ?", (pattern,))
+            # file_pathで検索（LIKEと=の両方を試す）
+            if '%' not in pattern:
+                # 完全一致
+                cur.execute("SELECT * FROM receipts WHERE file_path = ? OR file_path LIKE ?", (pattern, f"%{pattern}"))
+            else:
+                cur.execute("SELECT * FROM receipts WHERE file_path LIKE ?", (pattern,))
             row = cur.fetchone()
             if row:
                 return dict(row)
             
             # original_file_pathで検索
-            cur.execute("SELECT * FROM receipts WHERE original_file_path LIKE ?", (pattern,))
+            if '%' not in pattern:
+                # 完全一致
+                cur.execute("SELECT * FROM receipts WHERE original_file_path = ? OR original_file_path LIKE ?", (pattern, f"%{pattern}"))
+            else:
+                cur.execute("SELECT * FROM receipts WHERE original_file_path LIKE ?", (pattern,))
             row = cur.fetchone()
             if row:
                 return dict(row)

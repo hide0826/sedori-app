@@ -26,8 +26,8 @@ from PySide6.QtWidgets import (
     QSplitter, QListWidget, QListWidgetItem, QMenu,
     QFormLayout,
 )
-from PySide6.QtCore import Qt, QDate, QThread, Signal, QSettings, QTimer
-from PySide6.QtGui import QPixmap, QTransform, QColor
+from PySide6.QtCore import Qt, QDate, QThread, Signal, QSettings, QTimer, QUrl
+from PySide6.QtGui import QPixmap, QTransform, QColor, QDesktopServices
 
 from desktop.utils.ui_utils import save_table_header_state, restore_table_header_state
 
@@ -472,6 +472,8 @@ class ReceiptWidget(QWidget):
         self.receipt_table.horizontalHeader().setStretchLastSection(True)
         self.receipt_table.itemDoubleClicked.connect(self.on_receipt_double_clicked)
         self.receipt_table.itemSelectionChanged.connect(self.on_receipt_selection_changed)
+        # セルクリックで画像を開く（画像ファイル名列のみ）
+        self.receipt_table.cellClicked.connect(self.on_receipt_table_cell_clicked)
         # 右クリックメニューを有効化
         self.receipt_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.receipt_table.customContextMenuRequested.connect(self.on_receipt_table_context_menu)
@@ -507,6 +509,8 @@ class ReceiptWidget(QWidget):
         self.warranty_table.cellChanged.connect(self.on_warranty_cell_changed)
         # 画像名ダブルクリックで拡大表示
         self.warranty_table.itemDoubleClicked.connect(self.on_warranty_item_double_clicked)
+        # セルクリックで画像を開く（画像ファイル名列のみ）
+        self.warranty_table.cellClicked.connect(self.on_warranty_table_cell_clicked)
         warranty_layout.addWidget(self.warranty_table)
 
         # スプリッターで管理するため、固定高さの設定を削除
@@ -1242,13 +1246,20 @@ class ReceiptWidget(QWidget):
         # 学習
         self.matching_service.learn_store_correction(self.current_receipt_id, store_code)
         
+        # レシートDBからファイルパスを取得
+        receipt = self.receipt_db.get_receipt(db_receipt_id)
+        receipt_image_path = None
+        if receipt:
+            receipt_image_path = receipt.get('original_file_path') or receipt.get('file_path')
+        
         # 仕入DBの該当SKUに画像ファイル名を自動入力
         self._link_receipt_to_purchase_records(
             purchase_date=purchase_date,
             purchase_time=purchase_time,
             store_code=store_code,
             image_file_name=image_file_name,
-            db_receipt_id=db_receipt_id
+            db_receipt_id=db_receipt_id,
+            receipt_image_path=receipt_image_path
         )
         
         QMessageBox.information(
@@ -1265,7 +1276,8 @@ class ReceiptWidget(QWidget):
         purchase_time: Optional[str],
         store_code: str,
         image_file_name: str,
-        db_receipt_id: int
+        db_receipt_id: int,
+        receipt_image_path: Optional[str] = None
     ):
         """
         仕入DBの該当SKUに画像ファイル名を自動入力
@@ -1525,8 +1537,13 @@ class ReceiptWidget(QWidget):
                         if is_match:
                             # 画像ファイル名を設定（識別子として使用）
                             self.inventory_widget.inventory_data.at[idx, 'レシートID'] = image_file_name
+                            # ファイルパス情報も保存（画像リンク用）
+                            if receipt_image_path:
+                                if 'レシート画像パス' not in self.inventory_widget.inventory_data.columns:
+                                    self.inventory_widget.inventory_data['レシート画像パス'] = ''
+                                self.inventory_widget.inventory_data.at[idx, 'レシート画像パス'] = receipt_image_path
                             matched_in_inventory = True
-                            _write_log(f"仕入管理タブ更新成功: SKU={sku} (idx={idx}) に画像ファイル名={image_file_name}を設定")
+                            _write_log(f"仕入管理タブ更新成功: SKU={sku} (idx={idx}) に画像ファイル名={image_file_name}, ファイルパス={receipt_image_path}を設定")
                             # 確認のため、設定後の値をログ出力
                             updated_value = self.inventory_widget.inventory_data.at[idx, 'レシートID']
                             _write_log(f"設定確認: idx={idx}の画像ファイル名={updated_value}")
@@ -1550,8 +1567,13 @@ class ReceiptWidget(QWidget):
                                        row_sku_normalized == target_sku_normalized)
                             if is_match:
                                 self.inventory_widget.filtered_data.at[idx, 'レシートID'] = image_file_name
+                                # ファイルパス情報も保存（画像リンク用）
+                                if receipt_image_path:
+                                    if 'レシート画像パス' not in self.inventory_widget.filtered_data.columns:
+                                        self.inventory_widget.filtered_data['レシート画像パス'] = ''
+                                    self.inventory_widget.filtered_data.at[idx, 'レシート画像パス'] = receipt_image_path
                                 matched_in_filtered = True
-                                _write_log(f"filtered_data更新成功: SKU={sku} (idx={idx}) に画像ファイル名={image_file_name}を設定")
+                                _write_log(f"filtered_data更新成功: SKU={sku} (idx={idx}) に画像ファイル名={image_file_name}, ファイルパス={receipt_image_path}を設定")
                                 # 確認のため、設定後の値をログ出力
                                 updated_value = self.inventory_widget.filtered_data.at[idx, 'レシートID']
                                 _write_log(f"filtered_data設定確認: idx={idx}の画像ファイル名={updated_value}")
@@ -1589,8 +1611,13 @@ class ReceiptWidget(QWidget):
                         
                         if is_match:
                             self.inventory_widget.filtered_data.at[idx, 'レシートID'] = image_file_name
+                            # ファイルパス情報も保存（画像リンク用）
+                            if receipt_image_path:
+                                if 'レシート画像パス' not in self.inventory_widget.filtered_data.columns:
+                                    self.inventory_widget.filtered_data['レシート画像パス'] = ''
+                                self.inventory_widget.filtered_data.at[idx, 'レシート画像パス'] = receipt_image_path
                             matched_in_filtered = True
-                            _write_log(f"filtered_data更新成功: SKU={sku} (idx={idx}) に画像ファイル名={image_file_name}を設定")
+                            _write_log(f"filtered_data更新成功: SKU={sku} (idx={idx}) に画像ファイル名={image_file_name}, ファイルパス={receipt_image_path}を設定")
                             # 確認のため、設定後の値をログ出力
                             updated_value = self.inventory_widget.filtered_data.at[idx, 'レシートID']
                             _write_log(f"filtered_data設定確認: idx={idx}の画像ファイル名={updated_value}")
@@ -1703,8 +1730,13 @@ class ReceiptWidget(QWidget):
                         sku = record.get('SKU') or record.get('sku') or ''
                         if sku in matched_skus:
                             record['レシートID'] = image_file_name
+                            # レシート画像列にもファイル名を設定（既存の処理と統一）
+                            record['レシート画像'] = image_file_name
+                            # ファイルパス情報も保存（画像リンク用）
+                            if receipt_image_path:
+                                record['レシート画像パス'] = receipt_image_path
                             updated_purchase_records += 1
-                            _write_log(f"仕入DBタブ更新: SKU={sku}, 画像ファイル名={image_file_name}")
+                            _write_log(f"仕入DBタブ更新: SKU={sku}, 画像ファイル名={image_file_name}, ファイルパス={receipt_image_path}")
                     
                     # テーブルを再描画
                     if hasattr(self.product_widget, 'populate_purchase_table'):
@@ -2621,6 +2653,86 @@ class ReceiptWidget(QWidget):
         else:
             # それ以外の列は従来どおり読み込み
             self.load_receipt(item)
+
+    def on_receipt_table_cell_clicked(self, row: int, col: int):
+        """レシート一覧テーブルのセルクリック処理（画像ファイル名列をクリックで画像を開く）"""
+        # 画像ファイル名列（col=3）のみ処理
+        if col != 3:
+            return
+        
+        id_item = self.receipt_table.item(row, 0)
+        if not id_item:
+            return
+        
+        try:
+            receipt_id = int(id_item.text())
+        except ValueError:
+            return
+        
+        receipt = self.receipt_db.get_receipt(receipt_id)
+        if not receipt:
+            return
+        
+        image_path = receipt.get('file_path') or receipt.get('original_file_path')
+        if not image_path:
+            QMessageBox.warning(self, "警告", "画像ファイルパスが登録されていません。")
+            return
+        
+        # OSのデフォルトアプリで画像を開く
+        from pathlib import Path
+        image_file = Path(image_path)
+        if image_file.exists() and image_file.is_file():
+            file_url = QUrl.fromLocalFile(str(image_file.absolute()))
+            if not QDesktopServices.openUrl(file_url):
+                QMessageBox.warning(self, "警告", f"画像ファイルを開けませんでした:\n{image_path}")
+        else:
+            QMessageBox.warning(
+                self, "警告",
+                f"画像ファイルが見つかりません:\n\n"
+                f"ファイルパス: {image_path}\n\n"
+                f"ファイルが削除されているか、\n"
+                f"パスが変更されている可能性があります。"
+            )
+
+    def on_warranty_table_cell_clicked(self, row: int, col: int):
+        """保証書一覧テーブルのセルクリック処理（画像ファイル名列をクリックで画像を開く）"""
+        # 画像ファイル名列（col=2）のみ処理
+        if col != 2:
+            return
+        
+        id_item = self.warranty_table.item(row, 0)
+        if not id_item:
+            return
+        
+        try:
+            receipt_id = int(id_item.text())
+        except ValueError:
+            return
+        
+        receipt = self.receipt_db.get_receipt(receipt_id)
+        if not receipt:
+            return
+        
+        image_path = receipt.get('file_path') or receipt.get('original_file_path')
+        if not image_path:
+            QMessageBox.warning(self, "警告", "画像ファイルパスが登録されていません。")
+            return
+        
+        # OSのデフォルトアプリで画像を開く
+        from pathlib import Path
+        image_file = Path(image_path)
+        if image_file.exists() and image_file.is_file():
+            file_url = QUrl.fromLocalFile(str(image_file.absolute()))
+            if not QDesktopServices.openUrl(file_url):
+                QMessageBox.warning(self, "警告", f"画像ファイルを開けませんでした:\n{image_path}")
+        else:
+            QMessageBox.warning(
+                self, "警告",
+                f"画像ファイルが見つかりません:\n\n"
+                f"ファイルパス: {image_path}\n\n"
+                f"ファイルが削除されているか、\n"
+                f"パスが変更されている可能性があります。"
+            )
 
     def on_warranty_item_double_clicked(self, item: QTableWidgetItem):
         """保証書一覧のダブルクリック動作（画像ファイル名は拡大表示）"""

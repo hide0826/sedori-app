@@ -1207,31 +1207,44 @@ class ProductWidget(QWidget):
                     item = QTableWidgetItem(receipt_image_str)
                     if receipt_image_str:
                         item.setFlags(item.flags() | Qt.ItemIsEnabled)
-                        # 画像ファイル名で検索（拡張子なし）
-                        receipt_info = self.receipt_db.find_by_file_name(receipt_image_str)
-                        if receipt_info:
-                            # original_file_pathを優先、なければfile_path
-                            file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path')
-                            if file_path:
-                                # ファイルが存在するか確認
-                                file_path_obj = Path(file_path)
-                                if file_path_obj.exists():
-                                    item.setToolTip(f"クリックで画像を開く\n{file_path}")
-                                    item.setData(Qt.UserRole, str(file_path_obj.resolve()))
-                                else:
-                                    # ファイルが存在しない場合は、file_pathをそのまま保存（後で検索できるように）
-                                    item.setToolTip(f"レシート画像: {receipt_image_str}\n（ファイルが見つかりません: {file_path}）")
-                                    item.setData(Qt.UserRole, file_path)
+                        # レコードにファイルパス情報が保存されている場合は優先的に使用
+                        file_path = record.get('レシート画像パス') or record.get('receipt_image_path')
+                        if file_path:
+                            # ファイルパスがレコードに保存されている場合
+                            file_path_obj = Path(file_path)
+                            if file_path_obj.exists():
+                                item.setToolTip(f"クリックで画像を開く\n{file_path}")
+                                item.setData(Qt.UserRole, str(file_path_obj.resolve()))
                             else:
-                                # デバッグ: レシート情報は見つかったが、file_pathがない
-                                item.setToolTip("レシート画像: " + receipt_image_str + "\n（レシートDBにfile_pathがありません）")
-                                # UserRoleにはreceipt_idを保存して、後で検索できるようにする
-                                item.setData(Qt.UserRole, receipt_image_str)
+                                # ファイルが存在しない場合は、file_pathをそのまま保存（後で検索できるように）
+                                item.setToolTip(f"レシート画像: {receipt_image_str}\n（ファイルが見つかりません: {file_path}）")
+                                item.setData(Qt.UserRole, file_path)
                         else:
-                            # レシートが見つからない場合
-                            item.setToolTip("レシート画像: " + receipt_image_str + "\n（レシートDBに見つかりません）")
-                            # UserRoleにはファイル名を保存して、後で検索できるようにする
-                            item.setData(Qt.UserRole, receipt_image_str)
+                            # レコードにファイルパスがない場合は、レシートDBから検索
+                            receipt_info = self.receipt_db.find_by_file_name(receipt_image_str)
+                            if receipt_info:
+                                # original_file_pathを優先、なければfile_path
+                                file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path')
+                                if file_path:
+                                    # ファイルが存在するか確認
+                                    file_path_obj = Path(file_path)
+                                    if file_path_obj.exists():
+                                        item.setToolTip(f"クリックで画像を開く\n{file_path}")
+                                        item.setData(Qt.UserRole, str(file_path_obj.resolve()))
+                                    else:
+                                        # ファイルが存在しない場合は、file_pathをそのまま保存（後で検索できるように）
+                                        item.setToolTip(f"レシート画像: {receipt_image_str}\n（ファイルが見つかりません: {file_path}）")
+                                        item.setData(Qt.UserRole, file_path)
+                                else:
+                                    # デバッグ: レシート情報は見つかったが、file_pathがない
+                                    item.setToolTip("レシート画像: " + receipt_image_str + "\n（レシートDBにfile_pathがありません）")
+                                    # UserRoleにはreceipt_idを保存して、後で検索できるようにする
+                                    item.setData(Qt.UserRole, receipt_image_str)
+                            else:
+                                # レシートが見つからない場合
+                                item.setToolTip("レシート画像: " + receipt_image_str + "\n（レシートDBに見つかりません）")
+                                # UserRoleにはファイル名を保存して、後で検索できるようにする
+                                item.setData(Qt.UserRole, receipt_image_str)
                         item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
                 elif header == "保証書画像":
                     warranty_image_str = "" if value is None else str(value)
@@ -1399,143 +1412,147 @@ class ProductWidget(QWidget):
             if not item:
                 return
             
-            # ファイルパスを取得（UserRoleに保存されている）
-            file_path = item.data(Qt.UserRole)
-            
-            # UserRoleにファイルパスがない、またはファイルが存在しない場合は、テキストから再検索
-            if not file_path:
-                # UserRoleにない場合は、テキストから検索
-                receipt_image_name = item.text().strip()
-                if receipt_image_name:
-                    receipt_info = self.receipt_db.find_by_file_name(receipt_image_name)
-                    if receipt_info:
-                        # original_file_pathを優先、なければfile_path
-                        file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path')
-            else:
-                # UserRoleにファイル名（文字列）が保存されている場合は、再検索
-                from pathlib import Path
-                file_path_obj = Path(file_path)
-                if not file_path_obj.exists():
-                    # ファイルが存在しない場合は、テキストから再検索
-                    receipt_image_name = item.text().strip()
-                    if receipt_image_name:
-                        receipt_info = self.receipt_db.find_by_file_name(receipt_image_name)
-                        if receipt_info:
-                            # original_file_pathを優先、なければfile_path
-                            file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path')
-            
-            if file_path:
-                from pathlib import Path
-                image_file = Path(file_path)
-                if image_file.exists():
-                    # 画像を表示
-                    from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel
-                    from PySide6.QtGui import QPixmap
-                    
-                    dialog = QDialog(self)
-                    dialog.setWindowTitle("レシート画像")
-                    layout = QVBoxLayout(dialog)
-                    
-                    label = QLabel()
-                    pixmap = QPixmap(str(file_path))
-                    if not pixmap.isNull():
-                        # 画像を適切なサイズにリサイズ（最大800x600）
-                        scaled_pixmap = pixmap.scaled(800, 600, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                        label.setPixmap(scaled_pixmap)
-                    else:
-                        label.setText("画像を読み込めませんでした。")
-                    
-                    layout.addWidget(label)
-                    dialog.exec_()
-                else:
-                    from PySide6.QtWidgets import QMessageBox
-                    QMessageBox.warning(self, "警告", f"画像ファイルが見つかりません:\n{file_path}")
-            else:
-                from PySide6.QtWidgets import QMessageBox
+            receipt_image_name = item.text().strip()
+            if not receipt_image_name:
                 QMessageBox.information(self, "情報", "レシート画像が設定されていません。")
-        elif header_text == "保証書画像":
-            item = self.purchase_table.item(row, col)
-            if not item:
                 return
             
             # ファイルパスを取得（UserRoleに保存されている）
             file_path = item.data(Qt.UserRole)
             
             # UserRoleにファイルパスがない、またはファイルが存在しない場合は、テキストから再検索
-            if not file_path:
-                # UserRoleにない場合は、テキストから検索（レシートDBから検索）
-                warranty_image_name = item.text().strip()
-                if warranty_image_name:
-                    # レシートDBから保証書を検索（ファイル名で検索）
-                    receipt_info = self.receipt_db.find_by_file_name(warranty_image_name)
-                    if receipt_info:
-                        # original_file_pathを優先、なければfile_path
-                        file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path')
-                    else:
-                        # レシートDBで見つからない場合は、保証書DBから検索
-                        sku = self._get_value_from_row(row, ["SKU", "sku"])
-                        if sku:
-                            try:
-                                warranties = self.warranty_db.list_by_sku(sku)
-                                if warranties:
-                                    warranty = warranties[0]
-                                    file_path = warranty.get('file_path', '')
-                            except Exception:
-                                pass
-            else:
-                # UserRoleにファイル名（文字列）が保存されている場合は、再検索
+            file_path_found = False
+            if file_path:
                 from pathlib import Path
                 file_path_obj = Path(file_path)
-                if not file_path_obj.exists():
-                    # ファイルが存在しない場合は、テキストから再検索（レシートDBから検索）
-                    warranty_image_name = item.text().strip()
-                    if warranty_image_name:
-                        # レシートDBから保証書を検索（ファイル名で検索）
-                        receipt_info = self.receipt_db.find_by_file_name(warranty_image_name)
-                        if receipt_info:
-                            # original_file_pathを優先、なければfile_path
-                            file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path')
-                        else:
-                            # レシートDBで見つからない場合は、保証書DBから検索
-                            sku = self._get_value_from_row(row, ["SKU", "sku"])
-                            if sku:
-                                try:
-                                    warranties = self.warranty_db.list_by_sku(sku)
-                                    if warranties:
-                                        warranty = warranties[0]
-                                        file_path = warranty.get('file_path', '')
-                                except Exception:
-                                    pass
+                # ファイルパスが存在するか確認
+                if file_path_obj.exists() and file_path_obj.is_file():
+                    file_path_found = True
+                else:
+                    # UserRoleに保存されている値がファイル名の可能性があるので、再検索
+                    file_path = None
+            
+            # 再検索が必要な場合
+            receipt_info = None
+            if not file_path_found:
+                receipt_info = self.receipt_db.find_by_file_name(receipt_image_name)
+                if receipt_info:
+                    # original_file_pathを優先、なければfile_path
+                    file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path')
             
             if file_path:
                 from pathlib import Path
                 image_file = Path(file_path)
-                if image_file.exists():
-                    # 画像を表示
-                    from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel
-                    from PySide6.QtGui import QPixmap
-                    
-                    dialog = QDialog(self)
-                    dialog.setWindowTitle("保証書画像")
-                    layout = QVBoxLayout(dialog)
-                    
-                    label = QLabel()
-                    pixmap = QPixmap(str(file_path))
-                    if not pixmap.isNull():
-                        # 画像を適切なサイズにリサイズ（最大800x600）
-                        scaled_pixmap = pixmap.scaled(800, 600, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                        label.setPixmap(scaled_pixmap)
-                    else:
-                        label.setText("画像を読み込めませんでした。")
-                    
-                    layout.addWidget(label)
-                    dialog.exec_()
+                if image_file.exists() and image_file.is_file():
+                    # OSのデフォルトアプリで画像を開く
+                    file_url = QUrl.fromLocalFile(str(image_file.absolute()))
+                    if not QDesktopServices.openUrl(file_url):
+                        QMessageBox.warning(self, "警告", f"画像ファイルを開けませんでした:\n{file_path}")
                 else:
-                    from PySide6.QtWidgets import QMessageBox
-                    QMessageBox.warning(self, "警告", f"画像ファイルが見つかりません:\n{file_path}")
+                    # ファイルが存在しない場合の詳細メッセージ
+                    if receipt_info:
+                        QMessageBox.warning(
+                            self, "警告",
+                            f"レシート画像のファイルが見つかりません:\n\n"
+                            f"ファイル名: {receipt_image_name}\n"
+                            f"ファイルパス: {file_path}\n\n"
+                            f"レシートDBには登録されていますが、\n"
+                            f"ファイルが削除されているか、\n"
+                            f"パスが変更されている可能性があります。"
+                        )
+                    else:
+                        QMessageBox.warning(
+                            self, "警告",
+                            f"レシート画像が見つかりません:\n\n"
+                            f"ファイル名: {receipt_image_name}\n\n"
+                            f"レシートDBに登録されていない可能性があります。"
+                        )
             else:
-                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.information(
+                    self, "情報",
+                    f"レシート画像の情報を取得できませんでした:\n\n"
+                    f"ファイル名: {receipt_image_name}"
+                )
+        elif header_text == "保証書画像":
+            item = self.purchase_table.item(row, col)
+            if not item:
+                return
+            
+            warranty_image_name = item.text().strip()
+            if not warranty_image_name:
                 QMessageBox.information(self, "情報", "保証書画像が設定されていません。")
+                return
+            
+            # ファイルパスを取得（UserRoleに保存されている）
+            file_path = item.data(Qt.UserRole)
+            
+            # UserRoleにファイルパスがない、またはファイルが存在しない場合は、テキストから再検索
+            file_path_found = False
+            receipt_info = None
+            warranty_info = None
+            
+            if file_path:
+                from pathlib import Path
+                file_path_obj = Path(file_path)
+                # ファイルパスが存在するか確認
+                if file_path_obj.exists() and file_path_obj.is_file():
+                    file_path_found = True
+                else:
+                    # UserRoleに保存されている値がファイル名の可能性があるので、再検索
+                    file_path = None
+            
+            # 再検索が必要な場合
+            if not file_path_found:
+                # まずレシートDBから保証書を検索（ファイル名で検索）
+                receipt_info = self.receipt_db.find_by_file_name(warranty_image_name)
+                if receipt_info:
+                    # original_file_pathを優先、なければfile_path
+                    file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path')
+                else:
+                    # レシートDBで見つからない場合は、保証書DBから検索
+                    sku = self._get_value_from_row(row, ["SKU", "sku"])
+                    if sku:
+                        try:
+                            warranties = self.warranty_db.list_by_sku(sku)
+                            if warranties:
+                                warranty_info = warranties[0]
+                                file_path = warranty_info.get('file_path', '')
+                        except Exception:
+                            pass
+            
+            if file_path:
+                from pathlib import Path
+                image_file = Path(file_path)
+                if image_file.exists() and image_file.is_file():
+                    # OSのデフォルトアプリで画像を開く
+                    file_url = QUrl.fromLocalFile(str(image_file.absolute()))
+                    if not QDesktopServices.openUrl(file_url):
+                        QMessageBox.warning(self, "警告", f"画像ファイルを開けませんでした:\n{file_path}")
+                else:
+                    # ファイルが存在しない場合の詳細メッセージ
+                    if receipt_info or warranty_info:
+                        QMessageBox.warning(
+                            self, "警告",
+                            f"保証書画像のファイルが見つかりません:\n\n"
+                            f"ファイル名: {warranty_image_name}\n"
+                            f"ファイルパス: {file_path}\n\n"
+                            f"データベースには登録されていますが、\n"
+                            f"ファイルが削除されているか、\n"
+                            f"パスが変更されている可能性があります。"
+                        )
+                    else:
+                        QMessageBox.warning(
+                            self, "警告",
+                            f"保証書画像が見つかりません:\n\n"
+                            f"ファイル名: {warranty_image_name}\n\n"
+                            f"レシートDBまたは保証書DBに登録されていない可能性があります。"
+                        )
+            else:
+                QMessageBox.information(
+                    self, "情報",
+                    f"保証書画像の情報を取得できませんでした:\n\n"
+                    f"ファイル名: {warranty_image_name}"
+                )
         elif header_text and header_text.startswith("画像") and header_text[2:].isdigit():
             # 画像1～6のクリック処理
             item = self.purchase_table.item(row, col)
@@ -1569,10 +1586,8 @@ class ProductWidget(QWidget):
                     layout.addWidget(label)
                     dialog.exec_()
                 else:
-                    from PySide6.QtWidgets import QMessageBox
                     QMessageBox.warning(self, "警告", f"画像ファイルが見つかりません:\n{file_path}")
             else:
-                from PySide6.QtWidgets import QMessageBox
                 QMessageBox.information(self, "情報", f"{header_text}が設定されていません。")
     
     def _get_value_from_row(self, row: int, keys: List[str]) -> Optional[str]:
