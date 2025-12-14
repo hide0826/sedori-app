@@ -38,6 +38,20 @@ from database.warranty_db import WarrantyDatabase
 from database.product_purchase_db import ProductPurchaseDatabase
 from database.purchase_db import PurchaseDatabase  # 古物台帳情報の参照用
 
+class SortableDateItem(QTableWidgetItem):
+    """日付ソート対応のQTableWidgetItem"""
+    
+    def __init__(self, text: str, sort_value: float = 0.0):
+        super().__init__(text)
+        self.sort_value = sort_value
+    
+    def __lt__(self, other):
+        """ソート時の比較処理"""
+        if isinstance(other, SortableDateItem):
+            return self.sort_value < other.sort_value
+        return super().__lt__(other)
+
+
 class DraggableTableWidget(QTableWidget):
     """ドラッグアンドドロップ対応のQTableWidget"""
     
@@ -511,6 +525,9 @@ class ProductWidget(QWidget):
         self.purchase_table.setAlternatingRowColors(True)
         self.purchase_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.purchase_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        
+        # ソート機能を有効化
+        self.purchase_table.setSortingEnabled(True)
         
         # カスタムコンテキストメニューを有効化
         self.purchase_table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -1306,6 +1323,125 @@ class ProductWidget(QWidget):
                         item.setToolTip(f"画像URL: {image_url}")
                     else:
                         item = QTableWidgetItem("")
+                elif header == "想定利益率" or header == "想定ROI":
+                    # 想定利益率・想定ROI列の処理：空欄の場合は再計算
+                    value_str = str(value) if value else ""
+                    value_float = None
+                    try:
+                        if value_str:
+                            value_float = float(value_str)
+                    except (ValueError, TypeError):
+                        value_float = None
+                    
+                    # 空欄または0の場合は再計算
+                    if value_float is None or value_float == 0:
+                        # 再計算に必要な値を取得
+                        purchase_price = None
+                        planned_price = None
+                        expected_profit = None
+                        
+                        # 仕入れ価格を取得
+                        purchase_price_key = None
+                        for key in ["仕入れ価格", "仕入価格", "purchase_price", "cost"]:
+                            if key in record:
+                                purchase_price_key = key
+                                break
+                        if purchase_price_key:
+                            try:
+                                purchase_price = float(record[purchase_price_key]) if record[purchase_price_key] else 0
+                            except (ValueError, TypeError):
+                                purchase_price = 0
+                        
+                        # 販売予定価格を取得
+                        planned_price_key = None
+                        for key in ["販売予定価格", "planned_price", "price"]:
+                            if key in record:
+                                planned_price_key = key
+                                break
+                        if planned_price_key:
+                            try:
+                                planned_price = float(record[planned_price_key]) if record[planned_price_key] else 0
+                            except (ValueError, TypeError):
+                                planned_price = 0
+                        
+                        # 見込み利益を取得
+                        expected_profit_key = None
+                        for key in ["見込み利益", "expected_profit", "profit"]:
+                            if key in record:
+                                expected_profit_key = key
+                                break
+                        if expected_profit_key:
+                            try:
+                                expected_profit = float(record[expected_profit_key]) if record[expected_profit_key] else 0
+                            except (ValueError, TypeError):
+                                expected_profit = 0
+                        
+                        # 見込み利益が計算されていない場合は計算
+                        if expected_profit is None or expected_profit == 0:
+                            if planned_price and purchase_price:
+                                other_cost = record.get('その他費用') or record.get('other_cost') or 0
+                                try:
+                                    other_cost = float(other_cost) if other_cost else 0
+                                except (ValueError, TypeError):
+                                    other_cost = 0
+                                expected_profit = planned_price - purchase_price - other_cost
+                        
+                        # 想定利益率または想定ROIを計算
+                        if header == "想定利益率":
+                            if planned_price and planned_price > 0 and expected_profit:
+                                calculated_value = (expected_profit / planned_price) * 100
+                                value_float = round(calculated_value, 2)
+                                # レコードにも保存
+                                record['想定利益率'] = value_float
+                            else:
+                                value_float = 0.0
+                        elif header == "想定ROI":
+                            if purchase_price and purchase_price > 0 and expected_profit:
+                                calculated_value = (expected_profit / purchase_price) * 100
+                                value_float = round(calculated_value, 2)
+                                # レコードにも保存
+                                record['想定ROI'] = value_float
+                            else:
+                                value_float = 0.0
+                    
+                    # 値を表示
+                    if value_float is not None and value_float != 0:
+                        item = QTableWidgetItem(f"{value_float:.2f}")
+                    else:
+                        item = QTableWidgetItem("")
+                elif header == "仕入れ日" or header.upper() == "PURCHASE_DATE":
+                    # 仕入れ日列の処理：ソート用の値を設定
+                    date_str = str(value) if value else ""
+                    # ソート用の値を設定（datetimeオブジェクトまたはタイムスタンプ）
+                    sort_value = 0.0
+                    if date_str:
+                        try:
+                            # 日付文字列をパース（複数の形式に対応）
+                            date_str_clean = date_str.strip()
+                            # "2025/12/6 10:16" 形式を想定
+                            if " " in date_str_clean:
+                                date_part, time_part = date_str_clean.split(" ", 1)
+                                date_part = date_part.replace("/", "-")
+                                datetime_str = f"{date_part} {time_part}"
+                                # "YYYY-MM-DD HH:MM" 形式でパース
+                                dt = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M")
+                                sort_value = dt.timestamp()
+                            else:
+                                # 日付のみの場合
+                                date_part = date_str_clean.replace("/", "-")
+                                dt = datetime.strptime(date_part, "%Y-%m-%d")
+                                sort_value = dt.timestamp()
+                        except Exception:
+                            try:
+                                # 別の形式を試す
+                                date_part = date_str_clean.replace("/", "-").split(" ")[0]
+                                dt = datetime.strptime(date_part, "%Y-%m-%d")
+                                sort_value = dt.timestamp()
+                            except Exception:
+                                # パースに失敗した場合は、0を設定（最古として扱う）
+                                sort_value = 0.0
+                    # SortableDateItemを使用してソート可能にする
+                    item = SortableDateItem(date_str, sort_value)
                 else:
                     item = QTableWidgetItem(str(value))
                 self.purchase_table.setItem(row, col, item)
@@ -1317,6 +1453,23 @@ class ProductWidget(QWidget):
         
         # 列幅のみを復元（リサイズモードは変更しない）
         restore_table_column_widths(self.purchase_table, "ProductWidget/PurchaseTableColumnWidths")
+        
+        # デフォルトで仕入れ日列を降順でソート
+        # 仕入れ日列のインデックスを取得
+        purchase_date_col_idx = None
+        for col_idx, col_name in enumerate(columns):
+            if col_name == "仕入れ日" or col_name.upper() == "PURCHASE_DATE":
+                purchase_date_col_idx = col_idx
+                break
+        
+        # 仕入れ日列が見つかった場合は降順でソート
+        if purchase_date_col_idx is not None:
+            # ソートを一時的に無効化してからソートを実行（データ設定後にソートを実行するため）
+            self.purchase_table.setSortingEnabled(False)
+            # 仕入れ日列で降順ソート
+            self.purchase_table.sortItems(purchase_date_col_idx, Qt.DescendingOrder)
+            # ソート機能を再度有効化
+            self.purchase_table.setSortingEnabled(True)
 
     def _get_record_value(self, record: Dict[str, Any], keys: List[str]) -> Any:
         """大文字小文字を無視して値を取得"""

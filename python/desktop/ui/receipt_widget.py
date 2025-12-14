@@ -24,10 +24,10 @@ from PySide6.QtWidgets import (
     QDialogButtonBox, QTextEdit, QDateEdit, QSpinBox,
     QScrollArea, QSizePolicy, QStyledItemDelegate,
     QSplitter, QListWidget, QListWidgetItem, QMenu,
-    QFormLayout,
+    QFormLayout, QApplication,
 )
 from PySide6.QtCore import Qt, QDate, QThread, Signal, QSettings, QTimer, QUrl
-from PySide6.QtGui import QPixmap, QTransform, QColor, QDesktopServices
+from PySide6.QtGui import QPixmap, QTransform, QColor, QDesktopServices, QClipboard
 
 from desktop.utils.ui_utils import save_table_header_state, restore_table_header_state
 
@@ -2670,6 +2670,12 @@ class ReceiptWidget(QWidget):
         
         menu = QMenu(self)
         
+        # コピー機能
+        copy_action = menu.addAction("コピー")
+        copy_action.triggered.connect(lambda: self.copy_warranty_cell(row, item.column()))
+        
+        menu.addSeparator()
+        
         # 商品の追加メニュー
         add_product_action = menu.addAction("商品の追加")
         add_product_action.triggered.connect(lambda: self.add_warranty_product_row(row))
@@ -2813,6 +2819,9 @@ class ReceiptWidget(QWidget):
         
         # 新しい行を選択状態にする
         self.warranty_table.selectRow(new_row)
+        
+        # データベースに新しいレシートレコードを作成（永続化のため）
+        self.save_warranty_row_to_db(new_row)
     
     def on_warranty_table_cell_clicked(self, row: int, col: int):
         """保証書一覧テーブルのセルクリック処理（画像ファイル名列をクリックで画像を開く）"""
@@ -2853,6 +2862,106 @@ class ReceiptWidget(QWidget):
                 f"ファイルが削除されているか、\n"
                 f"パスが変更されている可能性があります。"
             )
+    
+    def copy_warranty_cell(self, row: int, col: int):
+        """保証書テーブルのセルをクリップボードにコピー"""
+        if not hasattr(self, 'warranty_table'):
+            return
+        
+        # セルのテキストを取得
+        item = self.warranty_table.item(row, col)
+        if item:
+            text = item.text()
+        else:
+            # ウィジェットの場合はテキストを取得
+            widget = self.warranty_table.cellWidget(row, col)
+            if widget:
+                if hasattr(widget, 'text'):
+                    text = widget.text()
+                elif hasattr(widget, 'currentText'):
+                    text = widget.currentText()
+                elif hasattr(widget, 'date'):
+                    qdate = widget.date()
+                    if qdate.isValid():
+                        text = qdate.toString("yyyy-MM-dd")
+                    else:
+                        text = ""
+                else:
+                    text = ""
+            else:
+                text = ""
+        
+        # クリップボードにコピー
+        if text:
+            clipboard = QApplication.clipboard()
+            clipboard.setText(text)
+    
+    def save_warranty_row_to_db(self, row: int):
+        """保証書テーブルの行をデータベースに保存"""
+        if not hasattr(self, 'warranty_table'):
+            return
+        
+        try:
+            # テーブルからデータを取得
+            id_item = self.warranty_table.item(row, 0)
+            if not id_item:
+                return
+            
+            # 既存のreceipt_idがある場合は、新しいレシートレコードを作成しない（既存のレシートに紐付け）
+            receipt_id = None
+            try:
+                receipt_id = int(id_item.text())
+            except ValueError:
+                pass
+            
+            # 新しいレシートレコードを作成する必要があるかどうかを判定
+            # 既存のreceipt_idがある場合は、新しいレシートレコードを作成しない
+            if receipt_id:
+                # 既存のレシートに紐付けられている場合は、新しいレシートレコードを作成しない
+                return
+            
+            # テーブルからデータを取得
+            doc_type_item = self.warranty_table.item(row, 1)
+            image_item = self.warranty_table.item(row, 2)
+            date_item = self.warranty_table.item(row, 3)
+            store_name_item = self.warranty_table.item(row, 4)
+            phone_item = self.warranty_table.item(row, 5)
+            store_code_item = self.warranty_table.item(row, 6)
+            
+            # 店舗コードを取得
+            store_code = ""
+            if store_code_item:
+                store_code = store_code_item.data(Qt.UserRole) or ""
+                if not store_code:
+                    store_code = store_code_item.text().split(" ")[0] if store_code_item.text() else ""
+            
+            # 画像ファイル名を取得
+            image_file_name = image_item.text() if image_item else ""
+            
+            # 新しいレシートレコードを作成
+            receipt_data = {
+                "file_path": image_file_name,
+                "original_file_path": image_file_name,
+                "purchase_date": date_item.text() if date_item else "",
+                "store_name_raw": store_name_item.text() if store_name_item else "",
+                "phone_number": phone_item.text() if phone_item else "",
+                "store_code": store_code,
+                "ocr_text": "保証書",  # 保証書として識別
+                "total_amount": 0,
+                "items_count": 0,
+            }
+            
+            # データベースに保存
+            new_receipt_id = self.receipt_db.insert_receipt(receipt_data)
+            
+            # テーブルのID列を更新
+            if new_receipt_id:
+                self.warranty_table.setItem(row, 0, QTableWidgetItem(str(new_receipt_id)))
+            
+        except Exception as e:
+            import traceback
+            print(f"保証書行の保存エラー: {e}\n{traceback.format_exc()}")
+            QMessageBox.warning(self, "警告", f"保証書行の保存に失敗しました:\n{e}")
 
     def on_warranty_item_double_clicked(self, item: QTableWidgetItem):
         """保証書一覧のダブルクリック動作（画像ファイル名は拡大表示）"""
