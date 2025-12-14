@@ -472,8 +472,6 @@ class ReceiptWidget(QWidget):
         self.receipt_table.horizontalHeader().setStretchLastSection(True)
         self.receipt_table.itemDoubleClicked.connect(self.on_receipt_double_clicked)
         self.receipt_table.itemSelectionChanged.connect(self.on_receipt_selection_changed)
-        # セルクリックで画像を開く（画像ファイル名列のみ）
-        self.receipt_table.cellClicked.connect(self.on_receipt_table_cell_clicked)
         # 右クリックメニューを有効化
         self.receipt_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.receipt_table.customContextMenuRequested.connect(self.on_receipt_table_context_menu)
@@ -511,6 +509,9 @@ class ReceiptWidget(QWidget):
         self.warranty_table.itemDoubleClicked.connect(self.on_warranty_item_double_clicked)
         # セルクリックで画像を開く（画像ファイル名列のみ）
         self.warranty_table.cellClicked.connect(self.on_warranty_table_cell_clicked)
+        # コンテキストメニューを有効化
+        self.warranty_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.warranty_table.customContextMenuRequested.connect(self.on_warranty_table_context_menu)
         warranty_layout.addWidget(self.warranty_table)
 
         # スプリッターで管理するため、固定高さの設定を削除
@@ -1956,22 +1957,44 @@ class ReceiptWidget(QWidget):
                 # 保証最終日（カレンダー付き日付入力）
                 date_edit = QDateEdit()
                 date_edit.setCalendarPopup(True)
-                # 既存の保証最終日があればそれを優先、なければ購入日+保証期間から推測
+                
+                # デフォルト値の設定順序：
+                # 1. 既存の保証最終日があればそれを優先
+                # 2. 保証期間(日)があれば日付+保証期間で計算
+                # 3. どちらもなければ日付（保証書の日付）をデフォルトにする
                 final_str = receipt.get('warranty_until') or ""
                 qdate = None
+                
+                # 日付を取得（receiptから、またはテーブルの日付列から）
+                purchase_date_str = receipt.get('purchase_date') or receipt.get('date') or ""
+                if purchase_date_str:
+                    purchase_date_str = purchase_date_str.replace("/", "-").split(" ")[0]
+                
                 if final_str:
                     qdate = QDate.fromString(final_str, "yyyy-MM-dd")
-                if (not qdate or not qdate.isValid()) and receipt.get('purchase_date') and receipt.get('warranty_days'):
-                    try:
-                        from datetime import datetime, timedelta
-
-                        base = datetime.strptime(str(receipt.get('purchase_date')), "%Y-%m-%d")
-                        qdate = QDate.fromString(
-                            (base + timedelta(days=int(receipt.get('warranty_days')))).strftime("%Y-%m-%d"),
-                            "yyyy-MM-dd",
-                        )
-                    except Exception:
-                        qdate = None
+                
+                # 保証期間(日)があれば日付+保証期間で計算
+                if (not qdate or not qdate.isValid()) and purchase_date_str:
+                    warranty_days = receipt.get('warranty_days')
+                    if warranty_days:
+                        try:
+                            from datetime import datetime, timedelta
+                            base = datetime.strptime(purchase_date_str, "%Y-%m-%d")
+                            qdate = QDate.fromString(
+                                (base + timedelta(days=int(warranty_days))).strftime("%Y-%m-%d"),
+                                "yyyy-MM-dd",
+                            )
+                        except Exception:
+                            pass
+                    
+                    # 保証期間がない場合は、日付（保証書の日付）をデフォルトにする
+                    if not qdate or not qdate.isValid():
+                        try:
+                            from datetime import datetime
+                            qdate = QDate.fromString(purchase_date_str, "yyyy-MM-dd")
+                        except Exception:
+                            pass
+                
                 if qdate and qdate.isValid():
                     date_edit.setDate(qdate)
                 self.warranty_table.setCellWidget(row, 10, date_edit)
@@ -2630,70 +2653,167 @@ class ReceiptWidget(QWidget):
         self.process_image(image_path)
     
     def on_receipt_double_clicked(self, item: QTableWidgetItem):
-        """レシート一覧のダブルクリック動作を制御"""
-        row = item.row()
-        col = item.column()
-        # 画像ファイル名列なら拡大画像を表示
-        if col == 3:
-            id_item = self.receipt_table.item(row, 0)
-            if not id_item:
-                return
-            try:
-                receipt_id = int(id_item.text())
-            except ValueError:
-                return
-            receipt = self.receipt_db.get_receipt(receipt_id)
-            if not receipt:
-                return
-            image_path = receipt.get('file_path') or receipt.get('original_file_path')
-            if not image_path:
-                QMessageBox.warning(self, "警告", "画像ファイルパスが登録されていません。")
-                return
-            self._show_image_popup(image_path)
-        else:
-            # それ以外の列は従来どおり読み込み
-            self.load_receipt(item)
+        """レシート一覧のダブルクリック動作を制御（詳細編集を開く）"""
+        # すべての列で詳細編集を開く
+        self.load_receipt(item)
 
-    def on_receipt_table_cell_clicked(self, row: int, col: int):
-        """レシート一覧テーブルのセルクリック処理（画像ファイル名列をクリックで画像を開く）"""
-        # 画像ファイル名列（col=3）のみ処理
-        if col != 3:
+    def on_warranty_table_context_menu(self, position):
+        """保証書テーブルの右クリックメニュー"""
+        item = self.warranty_table.itemAt(position)
+        if not item:
             return
         
-        id_item = self.receipt_table.item(row, 0)
+        row = item.row()
+        id_item = self.warranty_table.item(row, 0)
         if not id_item:
             return
         
-        try:
-            receipt_id = int(id_item.text())
-        except ValueError:
+        menu = QMenu(self)
+        
+        # 商品の追加メニュー
+        add_product_action = menu.addAction("商品の追加")
+        add_product_action.triggered.connect(lambda: self.add_warranty_product_row(row))
+        
+        menu.exec_(self.warranty_table.viewport().mapToGlobal(position))
+    
+    def add_warranty_product_row(self, source_row: int):
+        """選択行の種別〜店舗コードをコピーして新しい行を追加"""
+        if not hasattr(self, 'warranty_table'):
             return
         
-        receipt = self.receipt_db.get_receipt(receipt_id)
-        if not receipt:
-            return
+        # 元の行からデータを取得（列1〜6をコピー）
+        # 列インデックス: 0=ID, 1=種別, 2=画像ファイル名, 3=日付, 4=店舗名, 5=電話番号, 6=店舗コード
+        source_items = {}
+        for col in range(1, 7):  # 列1〜6
+            item = self.warranty_table.item(source_row, col)
+            if item:
+                source_items[col] = item.text()
+            else:
+                widget = self.warranty_table.cellWidget(source_row, col)
+                if widget:
+                    # ウィジェットの場合はテキストを取得できないので、対応する列のデータを別途取得
+                    pass
         
-        image_path = receipt.get('file_path') or receipt.get('original_file_path')
-        if not image_path:
-            QMessageBox.warning(self, "警告", "画像ファイルパスが登録されていません。")
-            return
+        # 店舗コード列のデータを取得（UserRoleに保存されている）
+        store_code_item = self.warranty_table.item(source_row, 6)
+        store_code = ""
+        store_label = ""
+        if store_code_item:
+            store_code = store_code_item.data(Qt.UserRole) or ""
+            store_label = store_code_item.text() or ""
         
-        # OSのデフォルトアプリで画像を開く
-        from pathlib import Path
-        image_file = Path(image_path)
-        if image_file.exists() and image_file.is_file():
-            file_url = QUrl.fromLocalFile(str(image_file.absolute()))
-            if not QDesktopServices.openUrl(file_url):
-                QMessageBox.warning(self, "警告", f"画像ファイルを開けませんでした:\n{image_path}")
-        else:
-            QMessageBox.warning(
-                self, "警告",
-                f"画像ファイルが見つかりません:\n\n"
-                f"ファイルパス: {image_path}\n\n"
-                f"ファイルが削除されているか、\n"
-                f"パスが変更されている可能性があります。"
+        # ID列を取得（receipt_idを取得するため）
+        id_item = self.warranty_table.item(source_row, 0)
+        receipt_id = None
+        if id_item:
+            try:
+                receipt_id = int(id_item.text())
+            except ValueError:
+                pass
+        
+        # receiptデータを取得（店舗名や電話番号などの詳細情報を取得するため）
+        receipt = None
+        if receipt_id:
+            receipt = self.receipt_db.get_receipt(receipt_id)
+        
+        # 新しい行を追加
+        self.warranty_table.blockSignals(True)
+        new_row = self.warranty_table.rowCount()
+        self.warranty_table.insertRow(new_row)
+        
+        # ID列: 元のreceipt_idをコピー（同じ保証書なので）
+        if receipt_id:
+            self.warranty_table.setItem(new_row, 0, QTableWidgetItem(str(receipt_id)))
+        
+        # 種別（列1）
+        doc_type_item = self.warranty_table.item(source_row, 1)
+        if doc_type_item:
+            self.warranty_table.setItem(new_row, 1, QTableWidgetItem(doc_type_item.text()))
+        
+        # 画像ファイル名（列2）
+        image_item = self.warranty_table.item(source_row, 2)
+        if image_item:
+            self.warranty_table.setItem(new_row, 2, QTableWidgetItem(image_item.text()))
+        
+        # 日付（列3）
+        date_item = self.warranty_table.item(source_row, 3)
+        if date_item:
+            self.warranty_table.setItem(new_row, 3, QTableWidgetItem(date_item.text()))
+        elif receipt:
+            self.warranty_table.setItem(new_row, 3, QTableWidgetItem(receipt.get('purchase_date') or ""))
+        
+        # 店舗名（列4）
+        store_name_item = self.warranty_table.item(source_row, 4)
+        if store_name_item:
+            self.warranty_table.setItem(new_row, 4, QTableWidgetItem(store_name_item.text()))
+        elif receipt:
+            self.warranty_table.setItem(new_row, 4, QTableWidgetItem(receipt.get('store_name_raw') or ""))
+        
+        # 電話番号（列5）
+        phone_item = self.warranty_table.item(source_row, 5)
+        if phone_item:
+            self.warranty_table.setItem(new_row, 5, QTableWidgetItem(phone_item.text()))
+        elif receipt:
+            self.warranty_table.setItem(new_row, 5, QTableWidgetItem(receipt.get('phone_number') or ""))
+        
+        # 店舗コード（列6）
+        if store_code or store_label:
+            store_item = QTableWidgetItem(store_label if store_label else store_code)
+            store_item.setData(Qt.UserRole, store_code)
+            self.warranty_table.setItem(new_row, 6, store_item)
+        elif receipt:
+            store_code_from_receipt = receipt.get('store_code') or ""
+            store_label_from_receipt = self._format_store_code_label(
+                store_code_from_receipt, 
+                receipt.get('store_name_raw') or ""
             )
-
+            store_item = QTableWidgetItem(store_label_from_receipt)
+            store_item.setData(Qt.UserRole, store_code_from_receipt)
+            self.warranty_table.setItem(new_row, 6, store_item)
+        
+        # SKU・商品名（列7, 8）: 空欄でプルダウンを設定
+        if receipt:
+            self._populate_warranty_product_cell(new_row, receipt, "", "")
+        else:
+            # receiptがない場合でも、テーブルのデータから最低限のreceiptオブジェクトを作成
+            minimal_receipt = {
+                'purchase_date': date_item.text() if date_item else "",
+                'store_code': store_code,
+                'store_name_raw': store_name_item.text() if store_name_item else "",
+            }
+            self._populate_warranty_product_cell(new_row, minimal_receipt, "", "")
+        
+        # 保証期間(日)（列9）: 空欄
+        self.warranty_table.setItem(new_row, 9, QTableWidgetItem(""))
+        
+        # 保証最終日（列10）: 日付をデフォルトに設定
+        from PySide6.QtWidgets import QDateEdit
+        date_edit = QDateEdit()
+        date_edit.setCalendarPopup(True)
+        
+        # 日付列から日付を取得してデフォルトに設定
+        date_item = self.warranty_table.item(new_row, 3)
+        if date_item:
+            purchase_date_str = date_item.text().strip().replace("/", "-").split(" ")[0]
+            if purchase_date_str:
+                try:
+                    from datetime import datetime
+                    qdate = QDate.fromString(purchase_date_str, "yyyy-MM-dd")
+                    if qdate.isValid():
+                        date_edit.setDate(qdate)
+                except Exception:
+                    pass
+        
+        self.warranty_table.setCellWidget(new_row, 10, date_edit)
+        
+        # 日付変更時の処理を接続
+        date_edit.dateChanged.connect(lambda qd, r=new_row: self.on_warranty_date_changed(r, qd))
+        
+        self.warranty_table.blockSignals(False)
+        
+        # 新しい行を選択状態にする
+        self.warranty_table.selectRow(new_row)
+    
     def on_warranty_table_cell_clicked(self, row: int, col: int):
         """保証書一覧テーブルのセルクリック処理（画像ファイル名列をクリックで画像を開く）"""
         # 画像ファイル名列（col=2）のみ処理
@@ -2792,14 +2912,14 @@ class ReceiptWidget(QWidget):
             self._populate_warranty_product_cell(row, receipt, current_sku, current_name)
             return
 
-        # 保証期間(日)列でなければ何もしない
-        if column != 10:
+        # 保証期間(日)列でなければ何もしない（列インデックス9）
+        if column != 9:
             return
         if not hasattr(self, "warranty_table"):
             return
         id_item = self.warranty_table.item(row, 0)
-        date_item = self.warranty_table.item(row, 4)
-        days_item = self.warranty_table.item(row, 10)
+        date_item = self.warranty_table.item(row, 3)  # 日付列（列インデックス3）
+        days_item = self.warranty_table.item(row, 9)  # 保証期間(日)列（列インデックス9）
         if not id_item or not date_item or not days_item:
             return
         try:
@@ -2829,7 +2949,7 @@ class ReceiptWidget(QWidget):
         from PySide6.QtWidgets import QDateEdit
 
         self.warranty_table.blockSignals(True)
-        widget = self.warranty_table.cellWidget(row, 11)
+        widget = self.warranty_table.cellWidget(row, 10)  # 保証最終日列（列インデックス10）
         if isinstance(widget, QDateEdit):
             widget.setDate(QDate.fromString(final_str, "yyyy-MM-dd"))
         else:
@@ -2845,7 +2965,7 @@ class ReceiptWidget(QWidget):
         if not hasattr(self, "warranty_table"):
             return
         id_item = self.warranty_table.item(row, 0)
-        date_item = self.warranty_table.item(row, 4)
+        date_item = self.warranty_table.item(row, 3)  # 日付列（列インデックス3）
         if not id_item or not date_item:
             return
         try:
@@ -2879,7 +2999,7 @@ class ReceiptWidget(QWidget):
 
         # テーブル更新（cellChanged を発火させないようにシグナルをブロック）
         self.warranty_table.blockSignals(True)
-        self.warranty_table.setItem(row, 9, QTableWidgetItem(str(days)))
+        self.warranty_table.setItem(row, 9, QTableWidgetItem(str(days)))  # 保証期間(日)列（列インデックス9）
         self.warranty_table.blockSignals(False)
 
         # DB更新
@@ -4756,6 +4876,19 @@ class ReceiptWidget(QWidget):
         from pathlib import Path
         from PySide6.QtWidgets import QMessageBox
         
+        # デバッグ: メソッドが呼ばれたことを確認
+        print(f"[DEBUG] confirm_receipt_linkage が呼ばれました")
+        print(f"[DEBUG] product_widget: {self.product_widget}")
+        
+        # product_widgetが設定されていない場合は警告を表示
+        if not hasattr(self, 'product_widget') or not self.product_widget:
+            QMessageBox.warning(
+                self, "エラー",
+                "仕入管理ウィジェットが設定されていません。\n"
+                "データベース管理タブを開いてから再度お試しください。"
+            )
+            return
+        
         # レシート一覧から紐付け情報を取得
         updated_count = 0
         warranty_updated_count = 0  # 保証書情報の更新件数
@@ -4765,6 +4898,7 @@ class ReceiptWidget(QWidget):
         try:
             # レシート一覧の全レコードを取得
             all_receipts = self.receipt_db.find_by_date_and_store(None, None)
+            print(f"[DEBUG] レシート件数: {len(all_receipts)}")
             
             for receipt in all_receipts:
                 receipt_id = receipt.get('id')
@@ -4815,7 +4949,10 @@ class ReceiptWidget(QWidget):
                 linked_skus_text = receipt.get('linked_skus', '') or ''
                 linked_skus = [sku.strip() for sku in linked_skus_text.split(',') if sku.strip()] if linked_skus_text else []
                 
+                print(f"[DEBUG] レシートID {receipt_id}: linked_skus_text={linked_skus_text}, linked_skus={linked_skus}")
+                
                 if not linked_skus:
+                    print(f"[DEBUG] レシートID {receipt_id}: SKUが紐付けられていないためスキップ")
                     continue
                 
                 # 各SKUに対して仕入DBを更新
@@ -5116,7 +5253,16 @@ class ReceiptWidget(QWidget):
             receipt_count = updated_count - warranty_updated_count
             warranty_count = warranty_updated_count
             
-            if error_count == 0:
+            print(f"[DEBUG] 確定処理完了: receipt_count={receipt_count}, warranty_count={warranty_count}, error_count={error_count}")
+            
+            if receipt_count == 0 and warranty_count == 0 and error_count == 0:
+                # 処理対象がなかった場合
+                QMessageBox.information(
+                    self, "確定",
+                    "確定するレコードがありませんでした。\n"
+                    "レシート一覧にSKUが紐付けられているレコードがあるか確認してください。"
+                )
+            elif error_count == 0:
                 message = f"{receipt_count} 件のSKUにレシート画像を設定しました。"
                 if warranty_count > 0:
                     message += f"\n{warranty_count} 件のSKUに保証書情報（保証書画像・保証期間・保証最終日）を設定しました。"
