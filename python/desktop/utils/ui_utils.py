@@ -76,3 +76,4 @@ def restore_table_column_widths(table_view: QTableView, settings_key: str):
                     pass
 
 
+

@@ -13,13 +13,14 @@ import calendar
 from datetime import datetime, date
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
+import copy
 
 from PySide6.QtCore import Qt, QMimeData, QUrl
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QGroupBox, QFormLayout, QLineEdit, QDialog, QDialogButtonBox,
     QMessageBox, QLabel, QTabWidget, QHeaderView, QFileDialog, QMenu, QApplication,
-    QAbstractItemView
+    QAbstractItemView, QComboBox
 )
 from PySide6.QtGui import QDrag, QPixmap, QDesktopServices, QCursor, QCursor
 
@@ -344,6 +345,8 @@ class ProductWidget(QWidget):
         
         # コンディション説明の後に挿入するカラム（順序重要）
         insert_after_condition_note = [
+            "ステータス",
+            "ステータス理由",
             "レシート画像",
             "保証書画像",  # 保証書IDから変更
             "保証期間",
@@ -487,6 +490,18 @@ class ProductWidget(QWidget):
         self.purchase_search_jan.setPlaceholderText("JANで検索")
         search_layout.addWidget(self.purchase_search_jan, 0, 7)
         
+        # ステータスフィルタ
+        search_layout.addWidget(QLabel("ステータス:"), 1, 0)
+        self.purchase_status_filter = QComboBox()
+        self.purchase_status_filter.addItem("すべて", "")
+        self.purchase_status_filter.addItem("出品可能", "ready")
+        self.purchase_status_filter.addItem("破損", "damaged")
+        self.purchase_status_filter.addItem("登録不可", "unlistable")
+        self.purchase_status_filter.addItem("保管中", "storage")
+        self.purchase_status_filter.addItem("次回出品予定", "pending")
+        self.purchase_status_filter.currentIndexChanged.connect(self.filter_purchase_records)
+        search_layout.addWidget(self.purchase_status_filter, 1, 1)
+        
         # 検索ボタン
         search_btn = QPushButton("検索")
         search_btn.clicked.connect(self.filter_purchase_records)
@@ -502,10 +517,8 @@ class ProductWidget(QWidget):
 
         # コントロールボタン
         controls_layout = QHBoxLayout()
-        self.import_inventory_button = QPushButton("仕入管理データを取り込み")
-        self.import_inventory_button.clicked.connect(self.on_import_inventory)
-        controls_layout.addWidget(self.import_inventory_button)
-
+        
+        # 行操作ボタン
         self.delete_purchase_row_button = QPushButton("行削除")
         self.delete_purchase_row_button.clicked.connect(self.on_delete_purchase_row)
         controls_layout.addWidget(self.delete_purchase_row_button)
@@ -514,11 +527,38 @@ class ProductWidget(QWidget):
         self.delete_all_purchase_button.clicked.connect(self.on_delete_all_purchase)
         controls_layout.addWidget(self.delete_all_purchase_button)
 
+        controls_layout.addWidget(QLabel("|"))  # 区切り
+        
+        # 表示切り替えボタン
+        self.view_all_button = QPushButton("ALL")
+        self.view_all_button.setCheckable(True)
+        self.view_all_button.setChecked(True)  # デフォルトで全表示
+        self.view_all_button.clicked.connect(lambda: self.toggle_view_mode("all"))
+        controls_layout.addWidget(self.view_all_button)
+        
+        self.view_status_button = QPushButton("ステータス")
+        self.view_status_button.setCheckable(True)
+        self.view_status_button.clicked.connect(lambda: self.toggle_view_mode("status"))
+        controls_layout.addWidget(self.view_status_button)
+        
+        self.view_image_button = QPushButton("画像")
+        self.view_image_button.setCheckable(True)
+        self.view_image_button.clicked.connect(lambda: self.toggle_view_mode("image"))
+        controls_layout.addWidget(self.view_image_button)
+        
+        self.view_ledger_button = QPushButton("古物台帳")
+        self.view_ledger_button.setCheckable(True)
+        self.view_ledger_button.clicked.connect(lambda: self.toggle_view_mode("ledger"))
+        controls_layout.addWidget(self.view_ledger_button)
+
         self.purchase_count_label = QLabel("保存件数: 0件")
         controls_layout.addWidget(self.purchase_count_label)
 
         controls_layout.addStretch()
         layout.addLayout(controls_layout)
+        
+        # 表示モードを初期化
+        self.purchase_view_mode = "all"
 
         # 仕入DBテーブル
         self.purchase_table = DraggableTableWidget()  # ドラッグ対応テーブルに変更
@@ -817,7 +857,10 @@ class ProductWidget(QWidget):
     # --- 仕入DB関連 ---
     def load_purchase_data(self, records: List[Dict[str, Any]]):
         """仕入DBデータを読み込み"""
-        self.purchase_records = records
+        # マスターを保持しておき、フィルタ時はそこから再計算する
+        self.purchase_all_records_master = copy.deepcopy(records)
+        self.purchase_all_records = copy.deepcopy(records)
+        self.purchase_records = copy.deepcopy(records)
         self.populate_purchase_table(self.purchase_records)
         self.update_purchase_count_label()
 
@@ -923,39 +966,54 @@ class ProductWidget(QWidget):
         sku_query = self.purchase_search_sku.text().strip().lower()
         asin_query = self.purchase_search_asin.text().strip().lower()
         jan_query = self.purchase_search_jan.text().strip().lower()
-        
-        if not hasattr(self, 'purchase_all_records'):
+        status_filter = self.purchase_status_filter.currentData()
+        # マスターがなければ空で初期化
+        if not hasattr(self, 'purchase_all_records_master') or self.purchase_all_records_master is None:
+            self.purchase_all_records_master = []
+        if not hasattr(self, 'purchase_all_records') or self.purchase_all_records is None:
             self.purchase_all_records = []
 
-        if not (date_query or sku_query or asin_query or jan_query):
-            self.purchase_records = list(self.purchase_all_records)
-            self.populate_purchase_table(self.purchase_records)
-            self.update_purchase_count_label()
-            return
-            
-        filtered_records = []
-        for record in self.purchase_all_records:
-            match = True
-            if date_query:
-                record_date = str(record.get("仕入れ日") or "")
-                if not self._date_matches(record_date, date_query):
-                    match = False
-            if match and sku_query:
-                record_sku = str(record.get("SKU") or record.get("sku") or "").lower()
-                if sku_query not in record_sku:
-                    match = False
-            if match and asin_query:
-                record_asin = str(record.get("ASIN") or record.get("asin") or "").lower()
-                if asin_query not in record_asin:
-                    match = False
-            if match and jan_query:
-                record_jan = str(record.get("JAN") or record.get("jan") or "").lower()
-                if jan_query not in record_jan:
-                    match = False
-            
-            if match:
-                filtered_records.append(record)
-        
+        # マスターから都度フィルタ（前回の結果に依存しない）
+        source_records = self.purchase_all_records_master if self.purchase_all_records_master else self.purchase_all_records
+        filtered_records = copy.deepcopy(source_records)
+
+        # 日付フィルタ
+        if date_query:
+            filtered_records = [
+                r for r in filtered_records
+                if self._date_matches(str(r.get("仕入れ日") or ""), date_query)
+            ]
+
+        # SKUフィルタ
+        if sku_query:
+            filtered_records = [
+                r for r in filtered_records
+                if sku_query in str(r.get("SKU") or r.get("sku") or "").lower()
+            ]
+
+        # ASINフィルタ
+        if asin_query:
+            filtered_records = [
+                r for r in filtered_records
+                if asin_query in str(r.get("ASIN") or r.get("asin") or "").lower()
+            ]
+
+        # JANフィルタ
+        if jan_query:
+            filtered_records = [
+                r for r in filtered_records
+                if jan_query in str(r.get("JAN") or r.get("jan") or "").lower()
+            ]
+
+        # ステータスフィルタ
+        if status_filter:
+            sf = str(status_filter).lower()
+            filtered_records = [
+                r for r in filtered_records
+                if str(r.get("ステータス") or r.get("status") or "ready").lower() == sf
+            ]
+
+        # 結果を反映
         self.purchase_records = filtered_records
         self.populate_purchase_table(self.purchase_records)
         self.update_purchase_count_label()
@@ -966,9 +1024,112 @@ class ProductWidget(QWidget):
         self.purchase_search_sku.clear()
         self.purchase_search_asin.clear()
         self.purchase_search_jan.clear()
+        self.purchase_status_filter.setCurrentIndex(0)  # "すべて"を選択
         self.purchase_records = list(self.purchase_all_records) if hasattr(self, 'purchase_all_records') else []
         self.populate_purchase_table(self.purchase_records)
         self.update_purchase_count_label()
+    
+    def toggle_view_mode(self, mode: str):
+        """表示モードを切り替え"""
+        # 既に選択されているボタンを再度クリックした場合は何もしない
+        if hasattr(self, 'purchase_view_mode') and self.purchase_view_mode == mode:
+            # 同じボタンを再度クリックした場合は、ALLに戻す
+            if mode != "all":
+                mode = "all"
+            else:
+                return  # 既にALLが選択されている場合は何もしない
+        
+        # ボタンの状態を更新
+        self.view_all_button.setChecked(mode == "all")
+        self.view_status_button.setChecked(mode == "status")
+        self.view_image_button.setChecked(mode == "image")
+        self.view_ledger_button.setChecked(mode == "ledger")
+        
+        self.purchase_view_mode = mode
+        
+        # 列の表示/非表示を更新
+        self._update_column_visibility()
+    
+    def _update_column_visibility(self):
+        """列の表示/非表示を更新"""
+        if not hasattr(self, 'purchase_columns'):
+            return
+        
+        # 「仕入れ個数」列のインデックスを取得
+        quantity_col_idx = None
+        for i, col_name in enumerate(self.purchase_columns):
+            if col_name == "仕入れ個数":
+                quantity_col_idx = i
+                break
+        
+        if quantity_col_idx is None:
+            return
+        
+        # 表示する列の範囲を定義
+        if self.purchase_view_mode == "all":
+            # 全列表示
+            visible_ranges = [(quantity_col_idx + 1, len(self.purchase_columns))]
+        elif self.purchase_view_mode == "status":
+            # ステータス・ステータス理由のみ
+            status_start = None
+            status_end = None
+            for i, col_name in enumerate(self.purchase_columns):
+                if col_name == "ステータス":
+                    status_start = i
+                if col_name == "ステータス理由":
+                    status_end = i + 1
+                    break
+            if status_start is not None and status_end is not None:
+                visible_ranges = [(status_start, status_end)]
+            else:
+                visible_ranges = []
+        elif self.purchase_view_mode == "image":
+            # レシート画像から画像URL6まで
+            image_start = None
+            image_end = None
+            for i, col_name in enumerate(self.purchase_columns):
+                if col_name == "レシート画像":
+                    image_start = i
+                if col_name == "画像URL6":
+                    image_end = i + 1
+                    break
+            if image_start is not None and image_end is not None:
+                visible_ranges = [(image_start, image_end)]
+            else:
+                visible_ranges = []
+        elif self.purchase_view_mode == "ledger":
+            # 品目から台帳登録済まで
+            ledger_start = None
+            ledger_end = None
+            for i, col_name in enumerate(self.purchase_columns):
+                if col_name == "品目":
+                    ledger_start = i
+                if col_name == "台帳登録済":
+                    ledger_end = i + 1
+                    break
+            if ledger_start is not None and ledger_end is not None:
+                visible_ranges = [(ledger_start, ledger_end)]
+            else:
+                visible_ranges = []
+        else:
+            visible_ranges = []
+        
+        # 列の表示/非表示を設定
+        for col_idx in range(len(self.purchase_columns)):
+            # 「仕入れ個数」より左の列は常に表示
+            if col_idx <= quantity_col_idx:
+                self.purchase_table.setColumnHidden(col_idx, False)
+            else:
+                # 「仕入れ個数」より右の列は、表示範囲内かどうかで判定
+                is_visible = False
+                if self.purchase_view_mode == "all":
+                    is_visible = True
+                else:
+                    for start, end in visible_ranges:
+                        if start <= col_idx < end:
+                            is_visible = True
+                            break
+                self.purchase_table.setColumnHidden(col_idx, not is_visible)
     
     def update_purchase_count_label(self):
         """保存件数ラベルを更新"""
@@ -1175,6 +1336,18 @@ class ProductWidget(QWidget):
                                     row[disp_col] = "済" if val else ""
                                 else:
                                     row[disp_col] = val
+                        
+                        # ステータス情報を取得
+                        status = purchase_info.get("status", "ready")
+                        status_reason = purchase_info.get("status_reason", "")
+                        status_set_at = purchase_info.get("status_set_at", "")
+                        row["ステータス"] = status
+                        row["status"] = status
+                        if status_reason:
+                            row["ステータス理由"] = status_reason
+                            row["status_reason"] = status_reason
+                        if status_set_at:
+                            row["status_set_at"] = status_set_at
                 except Exception as e:
                     print(f"古物台帳情報取得エラー(SKU={sku}): {e}")
 
@@ -1184,12 +1357,15 @@ class ProductWidget(QWidget):
     def populate_purchase_table(self, records: List[Dict[str, Any]]):
         """仕入DBテーブルにレコードを反映"""
         from pathlib import Path
+        records = records or []
         
         base_columns = list(self.inventory_columns)
         if not base_columns:
             base_columns = self._resolve_inventory_columns()
         columns = list(base_columns)
         seen = set(col.upper() for col in columns)
+        
+        # レコードから追加の列を取得（既にcolumnsに含まれているものは除外）
         for record in records:
             for key in record.keys():
                 upper_key = key.upper()
@@ -1197,6 +1373,11 @@ class ProductWidget(QWidget):
                     seen.add(upper_key)
                     columns.append(key)
         self.purchase_columns = columns
+
+        # テーブル内容をクリアし、更新中はソート/シグナルを止める（穴あき防止）
+        self.purchase_table.blockSignals(True)
+        self.purchase_table.setSortingEnabled(False)
+        self.purchase_table.clearContents()
         self.purchase_table.setRowCount(len(records))
         self.purchase_table.setColumnCount(len(columns))
         self.purchase_table.setHorizontalHeaderLabels(columns)
@@ -1442,9 +1623,92 @@ class ProductWidget(QWidget):
                                 sort_value = 0.0
                     # SortableDateItemを使用してソート可能にする
                     item = SortableDateItem(date_str, sort_value)
+                elif header == "ステータス":
+                    # ステータス列の処理：プルダウンで選択可能
+                    status_value = str(value) if value else "ready"
+                    status_combo = QComboBox()
+                    status_combo.addItem("出品可能", "ready")
+                    status_combo.addItem("破損", "damaged")
+                    status_combo.addItem("登録不可", "unlistable")
+                    status_combo.addItem("保管中", "storage")
+                    status_combo.addItem("次回出品予定", "pending")
+                    
+                    # 現在の値を設定
+                    current_index = 0
+                    for i in range(status_combo.count()):
+                        if status_combo.itemData(i) == status_value:
+                            current_index = i
+                            break
+                    status_combo.setCurrentIndex(current_index)
+                    
+                    # ステータス変更時の処理
+                    def on_status_changed(idx, r=row, rec=record):
+                        new_status = status_combo.itemData(idx)
+                        rec["ステータス"] = new_status
+                        rec["status"] = new_status
+                        # ステータス設定日時を更新
+                        rec["status_set_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        # purchase_all_records / master / purchase_records を更新
+                        sku = rec.get("SKU") or rec.get("sku")
+                        if sku:
+                            for target_list in ["purchase_all_records", "purchase_all_records_master", "purchase_records"]:
+                                lst = getattr(self, target_list, None)
+                                if lst:
+                                    for t_rec in lst:
+                                        t_sku = t_rec.get("SKU") or t_rec.get("sku")
+                                        if t_sku == sku:
+                                            t_rec["ステータス"] = new_status
+                                            t_rec["status"] = new_status
+                                            t_rec["status_set_at"] = rec["status_set_at"]
+                                            break
+                        
+                        # データベースに保存
+                        if sku:
+                            try:
+                                purchase_data = {
+                                    "sku": sku,
+                                    "status": new_status,
+                                    "status_set_at": rec["status_set_at"]
+                                }
+                                self.purchase_history_db.upsert(purchase_data)
+                            except Exception as e:
+                                print(f"ステータス保存エラー: {e}")
+                        
+                        # 行の背景色を更新
+                        self._update_row_color_by_status(r, new_status)
+
+                        # ステータスフィルタをリセットして再描画（変更後に行が消えないよう常に全件表示に戻す）
+                        if hasattr(self, 'purchase_status_filter'):
+                            try:
+                                self.purchase_status_filter.blockSignals(True)
+                                self.purchase_status_filter.setCurrentIndex(0)  # 「すべて」
+                            finally:
+                                self.purchase_status_filter.blockSignals(False)
+
+                        # フィルタを再適用（全件表示）してテーブルを再描画
+                        self.filter_purchase_records()
+                    
+                    status_combo.currentIndexChanged.connect(on_status_changed)
+                    self.purchase_table.setCellWidget(row, col, status_combo)
+                    continue  # セルウィジェットを設定したので、itemは設定しない
+                elif header == "ステータス理由":
+                    # ステータス理由列の処理：編集可能なテキスト
+                    reason_value = str(value) if value else ""
+                    item = QTableWidgetItem(reason_value)
+                    item.setFlags(item.flags() | Qt.ItemIsEditable)
+                    # 編集時の処理は、itemChangedシグナルで処理（後で接続）
                 else:
                     item = QTableWidgetItem(str(value))
-                self.purchase_table.setItem(row, col, item)
+                
+                if header != "ステータス":  # ステータス列はセルウィジェットを設定済み
+                    self.purchase_table.setItem(row, col, item)
+        
+        # すべての行の背景色を設定（ステータスに応じて）
+        for row in range(len(records)):
+            record = records[row]
+            status_value = str(record.get("ステータス") or record.get("status") or "ready")
+            self._update_row_color_by_status(row, status_value)
 
         # 各列をリサイズ可能に設定
         header = self.purchase_table.horizontalHeader()
@@ -1453,6 +1717,43 @@ class ProductWidget(QWidget):
         
         # 列幅のみを復元（リサイズモードは変更しない）
         restore_table_column_widths(self.purchase_table, "ProductWidget/PurchaseTableColumnWidths")
+        
+        # ステータス理由列の編集時の処理を接続（既存の接続を解除してから接続）
+        status_reason_col_idx = None
+        for col_idx, col_name in enumerate(columns):
+            if col_name == "ステータス理由":
+                status_reason_col_idx = col_idx
+                break
+        
+        if status_reason_col_idx is not None:
+            # 既存のitemChangedシグナル接続を解除（重複接続を防ぐ）
+            try:
+                self.purchase_table.itemChanged.disconnect()
+            except TypeError:
+                pass  # 接続がない場合はエラーにならない
+            
+            # itemChangedシグナルを接続（編集時に自動保存）
+            def on_item_changed(item_changed):
+                if item_changed.column() == status_reason_col_idx:
+                    row = item_changed.row()
+                    if 0 <= row < len(records):
+                        record = records[row]
+                        new_reason = item_changed.text()
+                        record["ステータス理由"] = new_reason
+                        record["status_reason"] = new_reason
+                        # データベースに保存
+                        sku = record.get("SKU") or record.get("sku")
+                        if sku:
+                            try:
+                                purchase_data = {
+                                    "sku": sku,
+                                    "status_reason": new_reason
+                                }
+                                self.purchase_history_db.upsert(purchase_data)
+                            except Exception as e:
+                                print(f"ステータス理由保存エラー: {e}")
+            
+            self.purchase_table.itemChanged.connect(on_item_changed)
         
         # デフォルトで仕入れ日列を降順でソート
         # 仕入れ日列のインデックスを取得
@@ -1464,12 +1765,21 @@ class ProductWidget(QWidget):
         
         # 仕入れ日列が見つかった場合は降順でソート
         if purchase_date_col_idx is not None:
-            # ソートを一時的に無効化してからソートを実行（データ設定後にソートを実行するため）
-            self.purchase_table.setSortingEnabled(False)
             # 仕入れ日列で降順ソート
             self.purchase_table.sortItems(purchase_date_col_idx, Qt.DescendingOrder)
-            # ソート機能を再度有効化
-            self.purchase_table.setSortingEnabled(True)
+        
+        # 表示モードに応じた列の表示/非表示を設定
+        if hasattr(self, 'purchase_view_mode'):
+            self._update_column_visibility()
+        else:
+            # デフォルトで全表示
+            self.purchase_view_mode = "all"
+            self._update_column_visibility()
+
+        # 再描画のためソートを有効化し、シグナルを戻す
+        self.purchase_table.setSortingEnabled(True)
+        self.purchase_table.blockSignals(False)
+        self.purchase_table.viewport().update()
 
     def _get_record_value(self, record: Dict[str, Any], keys: List[str]) -> Any:
         """大文字小文字を無視して値を取得"""
@@ -1484,6 +1794,34 @@ class ProductWidget(QWidget):
         if len(text) <= limit:
             return text
         return text[:limit] + "..."
+    
+    def _update_row_color_by_status(self, row: int, status: str):
+        """ステータスに応じて行の背景色を設定"""
+        from PySide6.QtGui import QColor
+        
+        status = str(status).lower() if status else "ready"
+        
+        # ステータスに応じた色を設定
+        color_map = {
+            "ready": QColor(50, 50, 50),  # 通常（デフォルトの背景色）
+            "damaged": QColor(80, 30, 30),  # 破損：赤系
+            "unlistable": QColor(80, 50, 20),  # 登録不可：オレンジ系
+            "storage": QColor(20, 30, 80),  # 保管中：青系
+            "pending": QColor(80, 70, 20),  # 次回出品予定：黄色系
+        }
+        
+        bg_color = color_map.get(status, QColor(50, 50, 50))
+        
+        # 行全体の背景色を設定
+        for col in range(self.purchase_table.columnCount()):
+            item = self.purchase_table.item(row, col)
+            if item:
+                item.setBackground(bg_color)
+            else:
+                # セルウィジェットがある場合（ステータス列など）
+                widget = self.purchase_table.cellWidget(row, col)
+                if widget:
+                    widget.setStyleSheet(f"background-color: rgb({bg_color.red()}, {bg_color.green()}, {bg_color.blue()});")
 
     def _show_purchase_context_menu(self, position):
         """コンテキストメニューを表示"""

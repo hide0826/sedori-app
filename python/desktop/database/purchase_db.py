@@ -116,6 +116,10 @@ class PurchaseDatabase:
             # 利益率とROI
             ("expected_margin", "REAL"),  # 想定利益率（%）
             ("expected_roi", "REAL"),     # 想定ROI（%）
+            # 商品ステータス管理
+            ("status", "TEXT DEFAULT 'ready'"),  # 'ready': 出品可能, 'damaged': 破損, 'unlistable': 登録不可, 'storage': 保管中, 'pending': 次回出品予定
+            ("status_reason", "TEXT"),  # ステータス設定の理由・詳細
+            ("status_set_at", "DATETIME"),  # ステータスを設定した日時
         ]
 
         for col_name, col_def in new_columns:
@@ -148,7 +152,8 @@ class PurchaseDatabase:
         fields = [
             "product_id", "sku", "purchase_date", "purchase_price", "quantity",
             "store_code", "store_name", "condition_code", "condition_note",
-            "receipt_id", "comment", "other_cost", "expected_margin", "expected_roi"
+            "receipt_id", "comment", "other_cost", "expected_margin", "expected_roi",
+            "status", "status_reason", "status_set_at"
         ]
         # purchase辞書に含まれるキーのみを対象とする（古物台帳カラムも更新対象に含めるか検討）
         # ここでは基本的な仕入情報の更新のみ行う

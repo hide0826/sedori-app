@@ -2999,6 +2999,18 @@ class InventoryWidget(QWidget):
             data_list = self.filtered_data.to_dict('records')
             # 除外商品を除く
             included_list = [r for r in data_list if not self._is_excluded_row(r)]
+            
+            # ステータスで除外（ready以外のステータスを除外）
+            status_excluded_count = 0
+            status_included_list = []
+            for r in included_list:
+                status = str(r.get('ステータス') or r.get('status') or 'ready').lower()
+                if status == 'ready':
+                    status_included_list.append(r)
+                else:
+                    status_excluded_count += 1
+            
+            included_list = status_included_list
             excluded_count = len(data_list) - len(included_list)
             
             # 列名をマッピング（日本語→英語）
