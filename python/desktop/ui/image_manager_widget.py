@@ -18,6 +18,8 @@ from datetime import datetime
 import logging
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QMimeData, QUrl, QSettings
+from urllib.request import urlopen, Request
+from urllib.error import URLError, HTTPError
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QTreeWidget, QTreeWidgetItem, QListWidget,
@@ -430,6 +432,10 @@ class ImageLoadThread(QThread):
 
 class ImageManagerWidget(QWidget):
     """画像管理ウィジェット"""
+    
+    # URL画像プレビュー用シグナル（バックグラウンド→メインスレッド）
+    _preview_image_ready = Signal(str, bytes)  # (token, image_data)
+    _preview_image_error = Signal(str, str)    # (token, error_message)
     
     def __init__(self, api_client=None, parent=None):
         super().__init__(parent)
@@ -1610,14 +1616,22 @@ class ImageManagerWidget(QWidget):
         self.registration_table.setColumnCount(len(self.registration_columns))
         self.registration_table.setHorizontalHeaderLabels(self.registration_columns)
         self.registration_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
-        # 編集可能なカラムを設定（Amazon Lファイル用カラムのみ編集可能）
-        self.registration_table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.SelectedClicked)
+        # 編集トリガー:
+        # - シングルクリックは「プレビュー表示」に使いたいので、SelectedClickedは使わない
+        # - 編集は「ダブルクリック」または「F2キー」で開始
+        self.registration_table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
         self.registration_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.registration_table.setSelectionMode(QTableWidget.SingleSelection)
         self.registration_table.verticalHeader().setVisible(False)
         self.registration_table.setDragEnabled(True)
         self.registration_table.cellDoubleClicked.connect(self.on_registration_cell_double_clicked)
         self.registration_table.cellClicked.connect(self.on_registration_cell_clicked)
+        # 環境によってはcellClickedが発火しない/分かりにくい場合があるため、
+        # カレントセル変更でもプレビュー更新を行う（保険）
+        self.registration_table.currentCellChanged.connect(self.on_registration_current_cell_changed)
+        # 行選択モードでも確実に拾えるよう、itemClicked/itemPressedでもプレビュー更新（保険）
+        self.registration_table.itemClicked.connect(self.on_registration_item_clicked)
+        self.registration_table.itemPressed.connect(self.on_registration_item_clicked)
         self.registration_table.cellChanged.connect(self.on_registration_cell_changed)
         layout.addWidget(self.registration_table)
 
@@ -1626,10 +1640,21 @@ class ImageManagerWidget(QWidget):
         self.registration_preview_label = QLabel("画像を選択してください")
         self.registration_preview_label.setAlignment(Qt.AlignCenter)
         self.registration_preview_label.setMinimumHeight(200)
-        self.registration_preview_label.setStyleSheet("border: 1px solid gray; background-color: #f8f8f8;")
+        # ダークテーマ時でもメッセージが見えるように文字色を固定（背景は白）
+        self.registration_preview_label.setStyleSheet(
+            "border: 1px solid gray; background-color: #f8f8f8; color: #111;"
+        )
         self.registration_preview_label.setScaledContents(False)
         preview_layout.addWidget(self.registration_preview_label)
         layout.addWidget(preview_group)
+
+        # URL画像プレビュー用（非同期・urllibで取得して確実に表示）
+        self._registration_preview_pending_url = ""
+        self._registration_preview_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        self._registration_preview_future = None
+        # シグナル接続（バックグラウンドスレッドからメインスレッドへ）
+        self._preview_image_ready.connect(self._on_preview_image_ready)
+        self._preview_image_error.connect(self._on_preview_image_error)
 
         button_layout = QHBoxLayout()
         button_layout.addStretch()
@@ -1665,8 +1690,21 @@ class ImageManagerWidget(QWidget):
         button_layout.addWidget(self.clear_registration_btn)
 
         self.upload_to_gcs_btn = QPushButton("GCSアップロード")
+        self.upload_to_gcs_btn.setToolTip("選択行（未選択の場合は確認後に全行）の商品画像をGCSにアップロードします")
         self.upload_to_gcs_btn.clicked.connect(self.upload_images_to_gcs)
         button_layout.addWidget(self.upload_to_gcs_btn)
+
+        # GCS一括アップロード（全行）
+        self.upload_all_to_gcs_btn = QPushButton("GCS一括アップロード")
+        self.upload_all_to_gcs_btn.setToolTip("表示中の全行の未アップロード画像をGCSに一括アップロードします")
+        self.upload_all_to_gcs_btn.clicked.connect(self.upload_all_images_to_gcs)
+        button_layout.addWidget(self.upload_all_to_gcs_btn)
+
+        # GCS存在チェック（全行 or 選択行）
+        self.check_existing_gcs_btn = QPushButton("GCS存在チェック")
+        self.check_existing_gcs_btn.setToolTip("GCSに既に存在する画像があれば検索し、画像URL欄に自動入力します（ファイル名で検索）")
+        self.check_existing_gcs_btn.clicked.connect(self.check_existing_images_in_gcs)
+        button_layout.addWidget(self.check_existing_gcs_btn)
 
         # AmazonテンプレートExcelに書き込み
         self.write_amazon_template_btn = QPushButton("amazon（出品ファイルL）テンプレートに書き込み")
@@ -1907,6 +1945,17 @@ class ImageManagerWidget(QWidget):
 
     def on_registration_cell_double_clicked(self, row: int, column: int):
         """画像列ダブルクリックでファイルを開く"""
+        col_offset = 10
+        # 画像URL1～5 はダブルクリックで別窓表示
+        if col_offset + 5 <= column <= col_offset + 9:
+            item = self.registration_table.item(row, column)
+            if not item:
+                return
+            url = (item.text() or "").strip()
+            if url.startswith("http://") or url.startswith("https://"):
+                self._show_remote_image_dialog(url)
+            return
+
         if column < 4:
             return
         item = self.registration_table.item(row, column)
@@ -1923,6 +1972,24 @@ class ImageManagerWidget(QWidget):
 
     def on_registration_cell_clicked(self, row: int, column: int):
         """画像選択時にプレビュー表示"""
+        print(f"[DEBUG] on_registration_cell_clicked: row={row}, column={column}")
+        col_offset = 10
+        # 画像URL1～5 はクリックでプレビュー表示（リモート画像）
+        if col_offset + 5 <= column <= col_offset + 9:
+            print(f"[DEBUG] URL列クリック: column={column}, URL列範囲={col_offset+5}～{col_offset+9}")
+            item = self.registration_table.item(row, column)
+            if not item:
+                print("[DEBUG] itemがNone")
+                return
+            url = (item.text() or "").strip()
+            print(f"[DEBUG] URL取得: '{url}'")
+            if url.startswith("http://") or url.startswith("https://"):
+                print(f"[DEBUG] _set_registration_preview_url呼び出し: {url}")
+                self._set_registration_preview_url(url)
+            else:
+                print(f"[DEBUG] URLがhttp/httpsで始まっていない")
+            return
+
         if column < 4:
             self._set_registration_preview(None)
             return
@@ -1932,6 +1999,21 @@ class ImageManagerWidget(QWidget):
             return
         image_path = item.data(Qt.UserRole)
         self._set_registration_preview(image_path)
+
+    def on_registration_current_cell_changed(self, current_row: int, current_col: int, prev_row: int, prev_col: int):
+        """カレントセル変更時にもプレビュー更新（クリックが取れない環境の保険）"""
+        if current_row < 0 or current_col < 0:
+            return
+        self.on_registration_cell_clicked(current_row, current_col)
+
+    def on_registration_item_clicked(self, item: QTableWidgetItem):
+        """itemClicked/itemPressed用（行選択でも確実に拾う）"""
+        try:
+            row = item.row()
+            col = item.column()
+        except Exception:
+            return
+        self.on_registration_cell_clicked(row, col)
     
     def on_registration_cell_changed(self, row: int, column: int):
         """テーブルセル編集時にregistration_recordsを更新"""
@@ -1994,30 +2076,130 @@ class ImageManagerWidget(QWidget):
         self.registration_preview_label.setPixmap(scaled)
         self.registration_preview_label.setAlignment(Qt.AlignCenter)
         self.registration_preview_label.setText("")
+
+    def _set_registration_preview_url(self, url: str):
+        """URL画像を下のプレビュー枠に表示（非同期・シグナル経由でメインスレッドに通知）"""
+        print(f"[DEBUG] _set_registration_preview_url呼び出し: url='{url}'")
+        url = (url or "").strip()
+        if not url:
+            print("[DEBUG] URLが空")
+            self.registration_preview_label.setText("画像URLが空です")
+            self.registration_preview_label.setPixmap(QPixmap())
+            return
+
+        # よくある誤入力（https://...）を検出
+        if url.endswith("...") or url.endswith("…") or url == "https://..." or url == "http://...":
+            print("[DEBUG] URLが省略表示")
+            self.registration_preview_label.setText("画像URLが省略表示のままです（https://...）。\n実際のURLを入力してください。")
+            self.registration_preview_label.setPixmap(QPixmap())
+            return
+
+        self._registration_preview_pending_url = url
+        print(f"[DEBUG] プレビューラベルに「読み込み中」表示、visible={self.registration_preview_label.isVisible()}, size={self.registration_preview_label.size()}")
+        self.registration_preview_label.setPixmap(QPixmap())
+        self.registration_preview_label.setText("画像を読み込み中...")
+
+        token = url
+
+        def _fetch_and_emit():
+            """バックグラウンドで画像取得してシグナルで通知"""
+            try:
+                req = Request(url, headers={"User-Agent": "HIRIO-DesktopApp/1.0"})
+                with urlopen(req, timeout=15) as resp:
+                    data = resp.read()
+                print(f"[DEBUG] データ取得成功: {len(data)} bytes, シグナル emit")
+                self._preview_image_ready.emit(token, data)
+            except HTTPError as e:
+                print(f"[DEBUG] HTTPError: {e.code}")
+                self._preview_image_error.emit(token, f"画像取得に失敗しました（HTTP {e.code}）")
+            except URLError as e:
+                print(f"[DEBUG] URLError: {e}")
+                self._preview_image_error.emit(token, f"画像取得に失敗しました（通信エラー）\n{e}")
+            except Exception as e:
+                print(f"[DEBUG] Exception: {e}")
+                self._preview_image_error.emit(token, f"画像取得に失敗しました\n{e}")
+
+        try:
+            self._registration_preview_executor.submit(_fetch_and_emit)
+            print("[DEBUG] バックグラウンドタスク送信完了")
+        except Exception as e:
+            self.registration_preview_label.setText(f"URLの読み込みに失敗しました:\n{e}")
+            self.registration_preview_label.setPixmap(QPixmap())
+
+    def _on_preview_image_ready(self, token: str, data: bytes):
+        """シグナル受信: 画像データをプレビューに表示（メインスレッド）"""
+        print(f"[DEBUG] _on_preview_image_ready: token={token}, pending={self._registration_preview_pending_url}, data_len={len(data)}")
+        if token != self._registration_preview_pending_url:
+            print("[DEBUG] tokenが一致しないのでスキップ")
+            return
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(data):
+            print("[DEBUG] pixmap.loadFromData失敗")
+            self.registration_preview_label.setText("画像を読み込めませんでした（形式不明）")
+            self.registration_preview_label.setPixmap(QPixmap())
+            return
+        print(f"[DEBUG] pixmap読み込み成功: {pixmap.width()}x{pixmap.height()}")
+        max_width = self.registration_preview_label.width() - 20
+        max_height = self.registration_preview_label.height() - 20
+        if max_width < 10:
+            max_width = 400
+        if max_height < 10:
+            max_height = 200
+        print(f"[DEBUG] プレビュー領域: {max_width}x{max_height}")
+        scaled = pixmap.scaled(
+            max_width,
+            max_height,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
+        )
+        print(f"[DEBUG] スケール後: {scaled.width()}x{scaled.height()}")
+        self.registration_preview_label.setPixmap(scaled)
+        self.registration_preview_label.setAlignment(Qt.AlignCenter)
+        self.registration_preview_label.setText("")
+        print("[DEBUG] プレビュー表示完了")
+
+    def _on_preview_image_error(self, token: str, error_message: str):
+        """シグナル受信: エラーメッセージを表示（メインスレッド）"""
+        print(f"[DEBUG] _on_preview_image_error: token={token}, error={error_message}")
+        if token != self._registration_preview_pending_url:
+            return
+        self.registration_preview_label.setText(error_message)
+        self.registration_preview_label.setPixmap(QPixmap())
     
     def upload_images_to_gcs(self):
-        """選択行の商品画像をGCSにアップロード"""
+        """選択行（未選択の場合は確認後に全行）の商品画像をGCSにアップロード"""
+        return self._upload_images_to_gcs_impl(force_all=False)
+
+    def upload_all_images_to_gcs(self):
+        """全行の商品画像をGCSにアップロード"""
+        return self._upload_images_to_gcs_impl(force_all=True)
+
+    def _upload_images_to_gcs_impl(self, force_all: bool = False):
+        """GCSアップロードの共通実装（force_all=Trueで全行）"""
         if not self.registration_records:
             QMessageBox.warning(self, "警告", "登録されている商品がありません。")
             return
         
-        # 選択行を取得（選択がない場合は全行）
-        selected_rows = set()
-        for item in self.registration_table.selectedItems():
-            selected_rows.add(item.row())
-        
-        if not selected_rows:
-            # 選択がない場合は全行を対象
-            reply = QMessageBox.question(
-                self,
-                "確認",
-                "選択された行がありません。全行の画像をアップロードしますか？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
-            )
-            if reply == QMessageBox.No:
-                return
+        # 対象行を決定
+        if force_all:
             selected_rows = set(range(len(self.registration_records)))
+        else:
+            # 選択行を取得（選択がない場合は確認して全行）
+            selected_rows = set()
+            for item in self.registration_table.selectedItems():
+                selected_rows.add(item.row())
+            
+            if not selected_rows:
+                reply = QMessageBox.question(
+                    self,
+                    "確認",
+                    "選択された行がありません。全行の画像をアップロードしますか？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                if reply == QMessageBox.No:
+                    return
+                selected_rows = set(range(len(self.registration_records)))
         
         # GCSアップロードユーティリティのインポート
         import sys
@@ -2071,11 +2253,18 @@ class ImageManagerWidget(QWidget):
                     upload_image_to_gcs = gcs_uploader_module.upload_image_to_gcs
                     GCS_AVAILABLE = gcs_uploader_module.GCS_AVAILABLE
                     check_gcs_authentication = gcs_uploader_module.check_gcs_authentication
+                    find_existing_public_url_for_local_file = getattr(
+                        gcs_uploader_module, "find_existing_public_url_for_local_file", None
+                    )
                 else:
                     raise ImportError(f"gcs_uploader.py not found at {gcs_uploader_file}")
             else:
                 # フォールバック: 通常のインポートを試す
                 from utils.gcs_uploader import upload_image_to_gcs, GCS_AVAILABLE, check_gcs_authentication
+                try:
+                    from utils.gcs_uploader import find_existing_public_url_for_local_file
+                except Exception:
+                    find_existing_public_url_for_local_file = None
             
             if not GCS_AVAILABLE:
                 QMessageBox.critical(
@@ -2170,8 +2359,19 @@ class ImageManagerWidget(QWidget):
                 QApplication.processEvents()
                 
                 try:
+                    # 既にGCSに存在する場合は、アップロードせずURLを設定（重複アップロード防止）
+                    if find_existing_public_url_for_local_file:
+                        try:
+                            existing_url = find_existing_public_url_for_local_file(image_path)
+                        except Exception:
+                            existing_url = None
+                        if existing_url:
+                            public_url = existing_url
+                        else:
+                            public_url = upload_image_to_gcs(image_path)
+                    else:
                     # GCSにアップロード
-                    public_url = upload_image_to_gcs(image_path)
+                        public_url = upload_image_to_gcs(image_path)
                     
                     # entryのimage_urlsを更新
                     if "image_urls" not in entry:
@@ -2302,6 +2502,184 @@ class ImageManagerWidget(QWidget):
         
         finally:
             progress.close()
+
+    def check_existing_images_in_gcs(self):
+        """GCSに既に存在する画像を検索して画像URL欄に反映（選択行/未選択なら全行）"""
+        if not self.registration_records:
+            QMessageBox.warning(self, "警告", "登録されている商品がありません。")
+            return
+
+        # 対象行（選択がなければ全行）
+        selected_rows = set()
+        for item in self.registration_table.selectedItems():
+            selected_rows.add(item.row())
+        if not selected_rows:
+            selected_rows = set(range(len(self.registration_records)))
+
+        # gcs_uploaderを読み込む（uploadと同じパス解決）
+        try:
+            import sys
+            import os
+            current_file_dir = os.path.dirname(os.path.abspath(__file__))
+            python_dir = os.path.abspath(os.path.join(current_file_dir, '..', '..'))
+            candidate_paths = [python_dir, os.path.join(python_dir, 'python')]
+
+            found_path = None
+            for candidate in candidate_paths:
+                gcs_uploader_path = os.path.join(candidate, 'utils', 'gcs_uploader.py')
+                if os.path.exists(gcs_uploader_path):
+                    found_path = candidate
+                    break
+
+            if found_path:
+                if found_path in sys.path:
+                    sys.path.remove(found_path)
+                sys.path.insert(0, found_path)
+                sys.path[0] = found_path
+
+                import importlib.util
+                gcs_uploader_file = os.path.join(found_path, 'utils', 'gcs_uploader.py')
+                spec = importlib.util.spec_from_file_location("gcs_uploader", gcs_uploader_file)
+                gcs_uploader_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(gcs_uploader_module)
+                GCS_AVAILABLE = gcs_uploader_module.GCS_AVAILABLE
+                check_gcs_authentication = gcs_uploader_module.check_gcs_authentication
+                find_existing_public_url_for_local_file = getattr(
+                    gcs_uploader_module, "find_existing_public_url_for_local_file", None
+                )
+            else:
+                from utils.gcs_uploader import GCS_AVAILABLE, check_gcs_authentication, find_existing_public_url_for_local_file
+
+            if not GCS_AVAILABLE:
+                QMessageBox.critical(
+                    self, "エラー",
+                    "google-cloud-storageがインストールされていません。\n"
+                    "pip install google-cloud-storage を実行してください。"
+                )
+                return
+
+            auth_success, auth_error = check_gcs_authentication()
+            if not auth_success:
+                QMessageBox.critical(
+                    self, "認証エラー",
+                    f"GCSへの認証に失敗しました。\n\n{auth_error}\n\n"
+                    f"サービスアカウントキーの設定を確認してください。"
+                )
+                return
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"GCS存在チェック機能の初期化に失敗しました:\n{e}")
+            return
+
+        if not find_existing_public_url_for_local_file:
+            QMessageBox.warning(self, "警告", "GCS存在チェック機能が利用できません（関数が見つかりません）。")
+            return
+
+        # 進捗
+        tasks = []
+        for row in sorted(selected_rows):
+            if row >= len(self.registration_records):
+                continue
+            entry = self.registration_records[row]
+            product_images = entry.get("product_images", [])
+            existing_urls = entry.get("image_urls", []) if isinstance(entry.get("image_urls"), list) else []
+            for idx, image_path in enumerate(product_images):
+                if not image_path:
+                    continue
+                # URLが既に埋まっているならスキップ
+                if idx < len(existing_urls) and existing_urls[idx]:
+                    continue
+                tasks.append((row, entry, idx, image_path))
+
+        if not tasks:
+            QMessageBox.information(self, "情報", "チェック対象がありません（既にURLが入っている、または画像がありません）。")
+            return
+
+        progress = QProgressDialog("GCSの既存画像を確認中...", "キャンセル", 0, len(tasks), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        found_count = 0
+        try:
+            from database.purchase_db import PurchaseDatabase
+            purchase_db = PurchaseDatabase()
+
+            for i, (row, entry, image_idx, image_path) in enumerate(tasks):
+                if progress.wasCanceled():
+                    break
+                progress.setValue(i)
+                progress.setLabelText(f"確認中: {Path(image_path).name}")
+                QApplication.processEvents()
+
+                url = find_existing_public_url_for_local_file(image_path)
+                if not url:
+                    continue
+
+                # entry更新
+                if "image_urls" not in entry:
+                    entry["image_urls"] = [""] * 5
+                while len(entry["image_urls"]) <= image_idx:
+                    entry["image_urls"].append("")
+                entry["image_urls"][image_idx] = url
+
+                # テーブル反映（画像URL1～5は col_offset=10, +5..+9）
+                col_offset = 10
+                col = col_offset + 5 + image_idx
+                if col < self.registration_table.columnCount():
+                    self.registration_table.blockSignals(True)
+                    try:
+                        item = self.registration_table.item(row, col)
+                        if item:
+                            item.setText(url)
+                        else:
+                            item = QTableWidgetItem(url)
+                            item.setFlags(item.flags() | Qt.ItemIsEditable)
+                            self.registration_table.setItem(row, col, item)
+                    finally:
+                        self.registration_table.blockSignals(False)
+
+                # 仕入DBへ保存（SKUがあれば）
+                sku = entry.get("sku")
+                if sku:
+                    try:
+                        purchase_db.upsert({"sku": sku, f"image_url_{image_idx + 1}": url})
+                    except Exception:
+                        pass
+
+                found_count += 1
+
+        finally:
+            progress.close()
+
+        QMessageBox.information(self, "完了", f"GCS存在チェック完了：URL反映 {found_count} 件")
+
+    def _show_remote_image_dialog(self, url: str):
+        """URLの画像をダイアログ表示"""
+        if not url:
+            return
+        try:
+            import urllib.request
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                data = resp.read()
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(data):
+                QMessageBox.warning(self, "エラー", f"画像を読み込めませんでした:\n{url}")
+                return
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle("画像プレビュー")
+            layout = QVBoxLayout(dialog)
+            label = QLabel()
+            label.setAlignment(Qt.AlignCenter)
+            layout.addWidget(label)
+
+            # 最大表示サイズ
+            scaled = pixmap.scaled(1000, 800, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            label.setPixmap(scaled)
+            dialog.resize(min(1100, scaled.width() + 40), min(900, scaled.height() + 60))
+            dialog.exec()
+        except Exception as e:
+            QMessageBox.warning(self, "エラー", f"画像の取得に失敗しました:\n{url}\n\n{e}")
     
     def write_to_amazon_template(self):
         """AmazonテンプレートExcelファイルに商品データを書き込む"""
