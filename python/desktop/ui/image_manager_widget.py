@@ -469,11 +469,12 @@ class ImageManagerWidget(QWidget):
         self.load_last_directory()
 
         # テーブルの列幅を復元
-        restore_table_header_state(self.registration_table, "ImageManagerWidget/RegistrationTableState")
+        # 列構成を変更したのでキーを更新（古い保存状態を無効化）
+        restore_table_header_state(self.registration_table, "ImageManagerWidget/RegistrationTableState/v3")
 
     def save_settings(self):
         """ウィジェットの設定（テーブルの列幅など）を保存します。"""
-        save_table_header_state(self.registration_table, "ImageManagerWidget/RegistrationTableState")
+        save_table_header_state(self.registration_table, "ImageManagerWidget/RegistrationTableState/v3")
 
     
     def set_product_widget(self, product_widget):
@@ -1607,15 +1608,26 @@ class ImageManagerWidget(QWidget):
 
         self.registration_table = RegistrationTableWidget()
         self.registration_columns = [
-            "コンディション", "SKU", "ASIN", "商品名",
+            "コンディション", "SKU", "ASIN", "JAN", "商品名",
             "画像1", "画像2", "画像3", "画像4", "画像5", "画像6",
-            # Amazon Lファイル用追加列
-            "JAN", "販売価格", "在庫数", "コンディション番号", "コンディション説明",
+            # Amazon Lファイル用追加列（URLのみ残す）
             "画像URL1", "画像URL2", "画像URL3", "画像URL4", "画像URL5"
         ]
         self.registration_table.setColumnCount(len(self.registration_columns))
         self.registration_table.setHorizontalHeaderLabels(self.registration_columns)
-        self.registration_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        header = self.registration_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)  # 全列を手動リサイズ可能に
+        header.setTextElideMode(Qt.ElideNone)  # ヘッダー文字列を省略しない
+        self.registration_table.setTextElideMode(Qt.ElideNone)  # セル文字列も省略しない
+        # 初期幅の目安を設定（後から手動リサイズ可能）
+        self.registration_table.setColumnWidth(1, 180)  # SKU
+        self.registration_table.setColumnWidth(2, 150)  # ASIN
+        self.registration_table.setColumnWidth(3, 150)  # JAN
+        self.registration_table.setColumnWidth(4, 320)  # 商品名
+        for col in range(5, 11):  # 画像1～6
+            self.registration_table.setColumnWidth(col, 180)
+        for col in range(11, 16):  # 画像URL1～5
+            self.registration_table.setColumnWidth(col, 220)
         # 編集トリガー:
         # - シングルクリックは「プレビュー表示」に使いたいので、SelectedClickedは使わない
         # - 編集は「ダブルクリック」または「F2キー」で開始
@@ -1633,6 +1645,9 @@ class ImageManagerWidget(QWidget):
         self.registration_table.itemClicked.connect(self.on_registration_item_clicked)
         self.registration_table.itemPressed.connect(self.on_registration_item_clicked)
         self.registration_table.cellChanged.connect(self.on_registration_cell_changed)
+        # 右クリックメニュー（画像URL削除用）
+        self.registration_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.registration_table.customContextMenuRequested.connect(self.on_registration_table_context_menu)
         layout.addWidget(self.registration_table)
 
         preview_group = QGroupBox("プレビュー")
@@ -1813,15 +1828,19 @@ class ImageManagerWidget(QWidget):
                 entry.get("condition", ""),
                 entry.get("sku", ""),
                 entry.get("asin", ""),
-                entry.get("product_name", "")
+                entry.get("jan", ""),
+                entry.get("product_name", ""),
             ]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
+                # JANのみ編集可
+                if col == 3:
+                    item.setFlags(item.flags() | Qt.ItemIsEditable)
                 self.registration_table.setItem(row, col, item)
 
             # 元の画像パス（既存カラム、表示用）
             for idx, image_path in enumerate(entry.get("images", [])):
-                col = 4 + idx
+                col = 5 + idx
                 if col >= len(self.registration_columns):
                     break
                 display_text = Path(image_path).name if image_path else ""
@@ -1834,35 +1853,10 @@ class ImageManagerWidget(QWidget):
                     item.setFlags(item.flags() & ~Qt.ItemIsDragEnabled)
                 self.registration_table.setItem(row, col, item)
             
-            # Amazon Lファイル用追加カラム
-            col_offset = 10  # 既存カラム数（コンディション、SKU、ASIN、商品名、画像1～6）
-            # JAN
-            col = col_offset
-            item = QTableWidgetItem(entry.get("jan", ""))
-            self.registration_table.setItem(row, col, item)
-            # 販売価格（編集可能）
-            col = col_offset + 1
-            item = QTableWidgetItem(entry.get("price", ""))
-            item.setFlags(item.flags() | Qt.ItemIsEditable)
-            self.registration_table.setItem(row, col, item)
-            # 在庫数（編集可能）
-            col = col_offset + 2
-            item = QTableWidgetItem(entry.get("quantity", "0"))
-            item.setFlags(item.flags() | Qt.ItemIsEditable)
-            self.registration_table.setItem(row, col, item)
-            # コンディション番号（編集可能）
-            col = col_offset + 3
-            item = QTableWidgetItem(entry.get("condition_type", ""))
-            item.setFlags(item.flags() | Qt.ItemIsEditable)
-            self.registration_table.setItem(row, col, item)
-            # コンディション説明（編集可能）
-            col = col_offset + 4
-            item = QTableWidgetItem(entry.get("condition_note", ""))
-            item.setFlags(item.flags() | Qt.ItemIsEditable)
-            self.registration_table.setItem(row, col, item)
             # 画像URL1～5（編集可能、GCSアップロード後のURL）
+            col_offset = 11  # 既存カラム数（コンディション、SKU、ASIN、JAN、商品名、画像1～6）
             for idx in range(5):
-                col = col_offset + 5 + idx
+                col = col_offset + idx
                 img_url = entry.get("image_urls", [])[idx] if idx < len(entry.get("image_urls", [])) else ""
                 item = QTableWidgetItem(img_url)
                 item.setFlags(item.flags() | Qt.ItemIsEditable)
@@ -1945,9 +1939,9 @@ class ImageManagerWidget(QWidget):
 
     def on_registration_cell_double_clicked(self, row: int, column: int):
         """画像列ダブルクリックでファイルを開く"""
-        col_offset = 10
+        col_offset = 11
         # 画像URL1～5 はダブルクリックで別窓表示
-        if col_offset + 5 <= column <= col_offset + 9:
+        if col_offset <= column <= col_offset + 4:
             item = self.registration_table.item(row, column)
             if not item:
                 return
@@ -1972,22 +1966,15 @@ class ImageManagerWidget(QWidget):
 
     def on_registration_cell_clicked(self, row: int, column: int):
         """画像選択時にプレビュー表示"""
-        print(f"[DEBUG] on_registration_cell_clicked: row={row}, column={column}")
-        col_offset = 10
+        col_offset = 11
         # 画像URL1～5 はクリックでプレビュー表示（リモート画像）
-        if col_offset + 5 <= column <= col_offset + 9:
-            print(f"[DEBUG] URL列クリック: column={column}, URL列範囲={col_offset+5}～{col_offset+9}")
+        if col_offset <= column <= col_offset + 4:
             item = self.registration_table.item(row, column)
             if not item:
-                print("[DEBUG] itemがNone")
                 return
             url = (item.text() or "").strip()
-            print(f"[DEBUG] URL取得: '{url}'")
             if url.startswith("http://") or url.startswith("https://"):
-                print(f"[DEBUG] _set_registration_preview_url呼び出し: {url}")
                 self._set_registration_preview_url(url)
-            else:
-                print(f"[DEBUG] URLがhttp/httpsで始まっていない")
             return
 
         if column < 4:
@@ -2025,26 +2012,102 @@ class ImageManagerWidget(QWidget):
         if not item:
             return
         
-        col_offset = 10  # 既存カラム数
+        col_offset = 11  # 既存カラム数（コンディション、SKU、ASIN、JAN、商品名、画像1～6）
         
         # 編集可能なカラムのみ更新
-        if column == col_offset:  # JAN
+        if column == 3:  # JAN
             entry["jan"] = item.text()
-        elif column == col_offset + 1:  # 販売価格
-            entry["price"] = item.text()
-        elif column == col_offset + 2:  # 在庫数
-            entry["quantity"] = item.text()
-        elif column == col_offset + 3:  # コンディション番号
-            entry["condition_type"] = item.text()
-        elif column == col_offset + 4:  # コンディション説明
-            entry["condition_note"] = item.text()
-        elif col_offset + 5 <= column <= col_offset + 9:  # 画像URL1～5
-            idx = column - (col_offset + 5)
+        elif col_offset <= column <= col_offset + 4:  # 画像URL1～5
+            idx = column - col_offset
             if "image_urls" not in entry:
                 entry["image_urls"] = [""] * 5
             while len(entry["image_urls"]) <= idx:
                 entry["image_urls"].append("")
             entry["image_urls"][idx] = item.text()
+
+    def on_registration_table_context_menu(self, pos):
+        """画像登録テーブルの右クリックメニュー"""
+        item = self.registration_table.itemAt(pos)
+        if not item:
+            return
+        
+        row = item.row()
+        column = item.column()
+        
+        # 画像URL1～5の列（11～15）のみメニュー表示
+        col_offset = 11  # 画像URL1の列インデックス
+        if not (col_offset <= column <= col_offset + 4):
+            return
+        
+        url_idx = column - col_offset  # 0～4
+        url_label = f"画像URL{url_idx + 1}"
+        
+        menu = QMenu(self)
+        delete_action = menu.addAction(f"{url_label} を削除（後続URLをスライド）")
+        clear_action = menu.addAction(f"{url_label} をクリア（スライドなし）")
+        
+        action = menu.exec_(self.registration_table.viewport().mapToGlobal(pos))
+        
+        if action == delete_action:
+            self._delete_and_slide_image_url(row, url_idx)
+        elif action == clear_action:
+            self._clear_image_url(row, url_idx)
+
+    def _delete_and_slide_image_url(self, row: int, url_idx: int):
+        """指定した画像URLを削除し、後続URLを前にスライド"""
+        if row >= len(self.registration_records):
+            return
+        
+        entry = self.registration_records[row]
+        if "image_urls" not in entry:
+            entry["image_urls"] = [""] * 5
+        
+        # URLリストを5要素に揃える
+        while len(entry["image_urls"]) < 5:
+            entry["image_urls"].append("")
+        
+        # 指定インデックス以降を前にスライド
+        for i in range(url_idx, 4):
+            entry["image_urls"][i] = entry["image_urls"][i + 1]
+        entry["image_urls"][4] = ""  # 最後は空に
+        
+        # テーブルUIを更新
+        self._update_image_url_cells(row, entry)
+    
+    def _clear_image_url(self, row: int, url_idx: int):
+        """指定した画像URLをクリア（スライドなし）"""
+        if row >= len(self.registration_records):
+            return
+        
+        entry = self.registration_records[row]
+        if "image_urls" not in entry:
+            entry["image_urls"] = [""] * 5
+        
+        while len(entry["image_urls"]) <= url_idx:
+            entry["image_urls"].append("")
+        
+        entry["image_urls"][url_idx] = ""
+        
+        # テーブルUIを更新
+        self._update_image_url_cells(row, entry)
+    
+    def _update_image_url_cells(self, row: int, entry: Dict[str, Any]):
+        """画像URL1～5のセルを更新"""
+        col_offset = 11  # 画像URL1の列インデックス
+        self.registration_table.blockSignals(True)
+        try:
+            for idx in range(5):
+                col = col_offset + idx
+                url = entry.get("image_urls", [])[idx] if idx < len(entry.get("image_urls", [])) else ""
+                item = self.registration_table.item(row, col)
+                if item:
+                    item.setText(url)
+                else:
+                    item = QTableWidgetItem(url)
+                    item.setFlags(item.flags() | Qt.ItemIsEditable)
+                    self.registration_table.setItem(row, col, item)
+        finally:
+            self.registration_table.blockSignals(False)
 
     def _set_registration_preview(self, image_path: Optional[str]):
         """プレビュー画像の更新"""
@@ -2079,23 +2142,19 @@ class ImageManagerWidget(QWidget):
 
     def _set_registration_preview_url(self, url: str):
         """URL画像を下のプレビュー枠に表示（非同期・シグナル経由でメインスレッドに通知）"""
-        print(f"[DEBUG] _set_registration_preview_url呼び出し: url='{url}'")
         url = (url or "").strip()
         if not url:
-            print("[DEBUG] URLが空")
             self.registration_preview_label.setText("画像URLが空です")
             self.registration_preview_label.setPixmap(QPixmap())
             return
 
         # よくある誤入力（https://...）を検出
         if url.endswith("...") or url.endswith("…") or url == "https://..." or url == "http://...":
-            print("[DEBUG] URLが省略表示")
             self.registration_preview_label.setText("画像URLが省略表示のままです（https://...）。\n実際のURLを入力してください。")
             self.registration_preview_label.setPixmap(QPixmap())
             return
 
         self._registration_preview_pending_url = url
-        print(f"[DEBUG] プレビューラベルに「読み込み中」表示、visible={self.registration_preview_label.isVisible()}, size={self.registration_preview_label.size()}")
         self.registration_preview_label.setPixmap(QPixmap())
         self.registration_preview_label.setText("画像を読み込み中...")
 
@@ -2107,60 +2166,47 @@ class ImageManagerWidget(QWidget):
                 req = Request(url, headers={"User-Agent": "HIRIO-DesktopApp/1.0"})
                 with urlopen(req, timeout=15) as resp:
                     data = resp.read()
-                print(f"[DEBUG] データ取得成功: {len(data)} bytes, シグナル emit")
                 self._preview_image_ready.emit(token, data)
             except HTTPError as e:
-                print(f"[DEBUG] HTTPError: {e.code}")
                 self._preview_image_error.emit(token, f"画像取得に失敗しました（HTTP {e.code}）")
             except URLError as e:
-                print(f"[DEBUG] URLError: {e}")
                 self._preview_image_error.emit(token, f"画像取得に失敗しました（通信エラー）\n{e}")
             except Exception as e:
-                print(f"[DEBUG] Exception: {e}")
                 self._preview_image_error.emit(token, f"画像取得に失敗しました\n{e}")
 
         try:
             self._registration_preview_executor.submit(_fetch_and_emit)
-            print("[DEBUG] バックグラウンドタスク送信完了")
         except Exception as e:
             self.registration_preview_label.setText(f"URLの読み込みに失敗しました:\n{e}")
             self.registration_preview_label.setPixmap(QPixmap())
 
     def _on_preview_image_ready(self, token: str, data: bytes):
         """シグナル受信: 画像データをプレビューに表示（メインスレッド）"""
-        print(f"[DEBUG] _on_preview_image_ready: token={token}, pending={self._registration_preview_pending_url}, data_len={len(data)}")
         if token != self._registration_preview_pending_url:
-            print("[DEBUG] tokenが一致しないのでスキップ")
             return
         pixmap = QPixmap()
         if not pixmap.loadFromData(data):
-            print("[DEBUG] pixmap.loadFromData失敗")
             self.registration_preview_label.setText("画像を読み込めませんでした（形式不明）")
             self.registration_preview_label.setPixmap(QPixmap())
             return
-        print(f"[DEBUG] pixmap読み込み成功: {pixmap.width()}x{pixmap.height()}")
         max_width = self.registration_preview_label.width() - 20
         max_height = self.registration_preview_label.height() - 20
         if max_width < 10:
             max_width = 400
         if max_height < 10:
             max_height = 200
-        print(f"[DEBUG] プレビュー領域: {max_width}x{max_height}")
         scaled = pixmap.scaled(
             max_width,
             max_height,
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation
         )
-        print(f"[DEBUG] スケール後: {scaled.width()}x{scaled.height()}")
         self.registration_preview_label.setPixmap(scaled)
         self.registration_preview_label.setAlignment(Qt.AlignCenter)
         self.registration_preview_label.setText("")
-        print("[DEBUG] プレビュー表示完了")
 
     def _on_preview_image_error(self, token: str, error_message: str):
         """シグナル受信: エラーメッセージを表示（メインスレッド）"""
-        print(f"[DEBUG] _on_preview_image_error: token={token}, error={error_message}")
         if token != self._registration_preview_pending_url:
             return
         self.registration_preview_label.setText(error_message)
@@ -2381,8 +2427,8 @@ class ImageManagerWidget(QWidget):
                     entry["image_urls"][image_idx] = public_url
                     
                     # テーブルに反映
-                    col_offset = 10
-                    col = col_offset + 5 + image_idx
+                    col_offset = 11  # URL1列の開始位置
+                    col = col_offset + image_idx
                     if col < self.registration_table.columnCount():
                         item = self.registration_table.item(row, col)
                         if item:
@@ -2622,9 +2668,9 @@ class ImageManagerWidget(QWidget):
                     entry["image_urls"].append("")
                 entry["image_urls"][image_idx] = url
 
-                # テーブル反映（画像URL1～5は col_offset=10, +5..+9）
-                col_offset = 10
-                col = col_offset + 5 + image_idx
+                # テーブル反映（画像URL1～5は col_offset=11, +0..+4）
+                col_offset = 11
+                col = col_offset + image_idx
                 if col < self.registration_table.columnCount():
                     self.registration_table.blockSignals(True)
                     try:
