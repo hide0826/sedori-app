@@ -870,7 +870,12 @@ class StoreListWidget(QWidget):
         self.store_table = QTableWidget()
         self.store_table.setAlternatingRowColors(True)
         self.store_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.store_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        # ダブルクリックで編集可能に（備考欄のみ編集可能）
+        self.store_table.setEditTriggers(QTableWidget.DoubleClicked)
+        # テキストの省略（...）を無効化
+        self.store_table.setTextElideMode(Qt.ElideNone)
+        # テキストを折り返して全文表示
+        self.store_table.setWordWrap(True)
         
         # ソート機能を有効化
         self.store_table.setSortingEnabled(True)
@@ -880,6 +885,9 @@ class StoreListWidget(QWidget):
         header.setStretchLastSection(True)
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setSectionsClickable(True)  # ヘッダークリックでソート可能に
+        
+        # 備考欄の変更を監視
+        self.store_table.cellChanged.connect(self.on_store_cell_changed)
         
         table_layout.addWidget(self.store_table)
         
@@ -921,24 +929,43 @@ class StoreListWidget(QWidget):
         self.store_table.setColumnCount(len(columns))
         self.store_table.setHorizontalHeaderLabels(columns)
         
+        # cellChangedシグナルを一時的にブロック
+        self.store_table.blockSignals(True)
+        
         # データの設定
         for i, store in enumerate(stores):
+            store_id = store.get('id', 0)
+            
             # 基本カラム
             # IDは数値としてソートできるように設定
             id_item = QTableWidgetItem()
-            id_item.setData(Qt.EditRole, store.get('id', 0))  # 数値として設定
-            id_item.setText(str(store.get('id', '')))
+            id_item.setData(Qt.EditRole, store_id)  # 数値として設定
+            id_item.setText(str(store_id))
+            id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)  # 編集不可
             self.store_table.setItem(i, 0, id_item)
             
-            self.store_table.setItem(i, 1, QTableWidgetItem(store.get('affiliated_route_name', '')))
-            self.store_table.setItem(i, 2, QTableWidgetItem(store.get('route_code', '')))
-            self.store_table.setItem(i, 3, QTableWidgetItem(store.get('supplier_code', '')))
-            self.store_table.setItem(i, 4, QTableWidgetItem(store.get('store_name', '')))
-            self.store_table.setItem(i, 5, QTableWidgetItem(store.get('address', '')))
-            self.store_table.setItem(i, 6, QTableWidgetItem(store.get('phone', '')))
-            self.store_table.setItem(i, 7, QTableWidgetItem(store.get('notes', '') or ''))
+            # 編集不可のカラム（0-6列）
+            for col, value in enumerate([
+                store.get('affiliated_route_name', ''),
+                store.get('route_code', ''),
+                store.get('supplier_code', ''),
+                store.get('store_name', ''),
+                store.get('address', ''),
+                store.get('phone', '')
+            ], start=1):
+                item = QTableWidgetItem(str(value) if value else '')
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)  # 編集不可
+                self.store_table.setItem(i, col, item)
             
-            # カスタムフィールド
+            # 備考欄（7列目）は編集可能
+            notes_text = store.get('notes', '') or ''
+            notes_item = QTableWidgetItem(notes_text)
+            notes_item.setData(Qt.UserRole, store_id)  # 店舗IDを保存（更新時に使用）
+            notes_item.setToolTip(notes_text)  # ツールチップで全文表示
+            # 編集可能（フラグはそのまま）
+            self.store_table.setItem(i, 7, notes_item)
+            
+            # カスタムフィールド（編集不可）
             custom_fields = store.get('custom_fields', {})
             for j, field_def in enumerate(self.custom_fields_def):
                 col_idx = len(basic_columns) + j
@@ -965,13 +992,26 @@ class StoreListWidget(QWidget):
                 else:
                     item.setText(str(value) if value else '')
                 
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)  # 編集不可
                 self.store_table.setItem(i, col_idx, item)
+        
+        # cellChangedシグナルのブロックを解除
+        self.store_table.blockSignals(False)
         
         # データ投入完了後、ソート機能を再有効化
         self.store_table.setSortingEnabled(True)
         
         # 列幅の自動調整
         self.store_table.resizeColumnsToContents()
+        
+        # 備考カラム（7列目）の設定
+        if self.store_table.columnCount() > 7:
+            # 備考カラムはStretchモードで残りのスペースを使用
+            header = self.store_table.horizontalHeader()
+            header.setSectionResizeMode(7, QHeaderView.Stretch)
+        
+        # 行の高さを内容に合わせて自動調整（折り返しテキスト対応）
+        self.store_table.resizeRowsToContents()
     
     def update_statistics(self):
         """統計情報を更新"""
@@ -980,6 +1020,40 @@ class StoreListWidget(QWidget):
             f"統計: 店舗数 {stats['total_stores']}件, "
             f"カスタムフィールド {stats['active_custom_fields']}件"
         )
+    
+    def on_store_cell_changed(self, row: int, column: int):
+        """セルが変更されたときの処理（備考欄のみ保存）"""
+        # 備考欄（7列目）以外は無視
+        if column != 7:
+            return
+        
+        try:
+            # 備考欄のアイテムを取得
+            notes_item = self.store_table.item(row, column)
+            if not notes_item:
+                return
+            
+            # 店舗IDを取得（UserRoleに保存されている）
+            store_id = notes_item.data(Qt.UserRole)
+            if not store_id:
+                # UserRoleにIDがない場合は、ID列から取得を試みる
+                id_item = self.store_table.item(row, 0)
+                if id_item:
+                    try:
+                        store_id = int(id_item.text())
+                    except ValueError:
+                        return
+                else:
+                    return
+            
+            # 新しい備考の値
+            new_notes = notes_item.text()
+            
+            # データベースに保存
+            self.db.update_store_notes(store_id, new_notes)
+            
+        except Exception as e:
+            print(f"備考欄の保存エラー: {e}")
     
     def on_search_changed(self, text):
         """検索テキスト変更時の処理"""

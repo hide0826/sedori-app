@@ -77,6 +77,13 @@ class StoreDatabase:
         except sqlite3.OperationalError:
             # カラムが既に存在する場合はスキップ
             pass
+        
+        # notesカラムが存在しない場合は追加（マイグレーション）
+        try:
+            cursor.execute("ALTER TABLE stores ADD COLUMN notes TEXT")
+        except sqlite3.OperationalError:
+            # カラムが既に存在する場合はスキップ
+            pass
         # address / phone カラムが存在しない場合は追加（マイグレーション）
         for col, ddl in (
             ("address", "ALTER TABLE stores ADD COLUMN address TEXT"),
@@ -219,6 +226,18 @@ class StoreDatabase:
             custom_fields_json,
             store_id
         ))
+        
+        conn.commit()
+        return cursor.rowcount > 0
+    
+    def update_store_notes(self, store_id: int, notes: str) -> bool:
+        """店舗の備考のみを更新"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            UPDATE stores SET notes = ? WHERE id = ?
+        """, (notes, store_id))
         
         conn.commit()
         return cursor.rowcount > 0

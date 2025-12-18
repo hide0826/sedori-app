@@ -241,6 +241,10 @@ class RouteSummaryWidget(QWidget):
         self.store_visits_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.store_visits_table.setSelectionMode(QTableWidget.SingleSelection)
         self.store_visits_table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
+        # テキストの省略（...）を無効化
+        self.store_visits_table.setTextElideMode(Qt.ElideNone)
+        # テキストを折り返して全文表示
+        self.store_visits_table.setWordWrap(True)
         
         # ドラッグ＆ドロップを有効化（行間に挿入する設定）
         self.store_visits_table.setDragEnabled(True)
@@ -260,7 +264,7 @@ class RouteSummaryWidget(QWidget):
         headers = [
             "訪問順序", "店舗コード", "店舗名", "店舗IN時間", "店舗OUT時間",
             "店舗滞在時間", "移動時間（分）", "想定粗利", "仕入れ点数",
-            "店舗評価", "店舗メモ"
+            "店舗評価", "備考"
         ]
         self.store_visits_table.setColumnCount(len(headers))
         self.store_visits_table.setHorizontalHeaderLabels(headers)
@@ -280,6 +284,8 @@ class RouteSummaryWidget(QWidget):
         
         # 店舗名列をコンテンツに合わせて自動調整
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # 店舗名列（インデックス2）
+        # 備考カラム（10列目）はStretchモードで残りのスペースを使用
+        header.setSectionResizeMode(10, QHeaderView.Stretch)
         
         # デフォルトの行高を調整（星評価が綺麗に収まるように）
         self.store_visits_table.verticalHeader().setDefaultSectionSize(24)
@@ -372,6 +378,13 @@ class RouteSummaryWidget(QWidget):
         clear_all_btn.clicked.connect(self.clear_all_rows)
         clear_all_btn.setStyleSheet("background-color: #dc3545; color: white;")
         button_layout.addWidget(clear_all_btn)
+        
+        # 一括入替ボタン（訪問順序に基づいて行を並び替え）
+        reorder_btn = QPushButton("一括入替")
+        reorder_btn.clicked.connect(self.reorder_by_visit_order)
+        reorder_btn.setToolTip("訪問順序列に入力した数字に基づいて行を並び替えます")
+        reorder_btn.setStyleSheet("background-color: #17a2b8; color: white;")
+        button_layout.addWidget(reorder_btn)
         
         button_layout.addStretch()
         
@@ -514,6 +527,10 @@ class RouteSummaryWidget(QWidget):
         self.store_visits_table.setAlternatingRowColors(True)
         self.store_visits_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.store_visits_table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
+        # テキストの省略（...）を無効化
+        self.store_visits_table.setTextElideMode(Qt.ElideNone)
+        # テキストを折り返して全文表示
+        self.store_visits_table.setWordWrap(True)
         
         # ドラッグ＆ドロップを有効化（行間に挿入する設定）
         self.store_visits_table.setDragEnabled(True)
@@ -526,7 +543,7 @@ class RouteSummaryWidget(QWidget):
         headers = [
             "訪問順序", "店舗コード", "店舗名", "店舗IN時間", "店舗OUT時間",
             "店舗滞在時間", "移動時間（分）", "想定粗利", "仕入れ点数",
-            "店舗評価", "店舗メモ"
+            "店舗評価", "備考"
         ]
         self.store_visits_table.setColumnCount(len(headers))
         self.store_visits_table.setHorizontalHeaderLabels(headers)
@@ -537,6 +554,8 @@ class RouteSummaryWidget(QWidget):
         
         # 店舗名列をコンテンツに合わせて自動調整
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # 店舗名列（インデックス2）
+        # 備考カラム（10列目）はStretchモードで残りのスペースを使用
+        header.setSectionResizeMode(10, QHeaderView.Stretch)
         
         # デフォルトの行高を調整（星評価が綺麗に収まるように）
         self.store_visits_table.verticalHeader().setDefaultSectionSize(24)
@@ -838,6 +857,8 @@ class RouteSummaryWidget(QWidget):
             
             # 訪問順序を再設定
             self.update_visit_order()
+            # 行の高さを内容に合わせて自動調整（折り返しテキスト対応）
+            self.store_visits_table.resizeRowsToContents()
             getattr(self, 'update_calculation_results', lambda: None)()
         finally:
             # 変更イベントを再有効化
@@ -1166,9 +1187,8 @@ class RouteSummaryWidget(QWidget):
                 # テーブルへ反映
                 self.store_visits_table.setRowCount(len(rows_data))
                 for i, rd in enumerate(rows_data):
-                    # 訪問順序
+                    # 訪問順序（編集可能）
                     order_item = QTableWidgetItem(str(i + 1))
-                    order_item.setFlags(order_item.flags() & ~Qt.ItemIsEditable)
                     self.store_visits_table.setItem(i, 0, order_item)
 
                     self.store_visits_table.setItem(i, 1, QTableWidgetItem(rd['code']))
@@ -1176,8 +1196,11 @@ class RouteSummaryWidget(QWidget):
                     self.store_visits_table.setItem(i, 3, QTableWidgetItem(rd['in']))
                     self.store_visits_table.setItem(i, 4, QTableWidgetItem(rd['out']))
                     self.store_visits_table.setItem(i, 5, QTableWidgetItem(str(rd['stay'])))
-                    # 店舗メモ（備考）
-                    self.store_visits_table.setItem(i, 10, QTableWidgetItem(rd['memo']))
+                    # 備考
+                    memo_text = rd['memo'] or ''
+                    memo_item = QTableWidgetItem(memo_text)
+                    memo_item.setToolTip(memo_text)  # ツールチップで全文表示
+                    self.store_visits_table.setItem(i, 10, memo_item)
 
                     # 店舗評価は0で初期化
                     star_widget = StarRatingWidget(self.store_visits_table, rating=0, star_size=14)
@@ -1764,9 +1787,8 @@ class RouteSummaryWidget(QWidget):
                 row = current_rows + i
                 self.store_visits_table.insertRow(row)
                 
-                # 訪問順序
+                # 訪問順序（編集可能）
                 order_item = QTableWidgetItem(str(row + 1))
-                order_item.setFlags(order_item.flags() & ~Qt.ItemIsEditable)
                 self.store_visits_table.setItem(row, 0, order_item)
                 
                 # 店舗コード
@@ -1781,12 +1803,21 @@ class RouteSummaryWidget(QWidget):
                 star_widget = StarRatingWidget(self.store_visits_table, rating=0, star_size=14)
                 star_widget.rating_changed.connect(lambda rating, r=row: self.on_star_rating_changed(r, rating))
                 self.store_visits_table.setCellWidget(row, 9, star_widget)
+                
+                # 備考（店舗マスタの備考欄から取得）
+                notes = store.get('notes', '') or ''
+                notes_item = QTableWidgetItem(notes)
+                notes_item.setToolTip(notes)  # ツールチップで全文表示
+                self.store_visits_table.setItem(row, 10, notes_item)
             
             # 訪問順序を再設定
             self.update_visit_order()
             
             # 訪問順序を保存
             self.save_store_order()
+            
+            # 行の高さを内容に合わせて自動調整（折り返しテキスト対応）
+            self.store_visits_table.resizeRowsToContents()
             
             # 変更後の状態を保存
             self.save_table_state()
@@ -1868,6 +1899,105 @@ class RouteSummaryWidget(QWidget):
         except Exception as e:
             print(f"移動時間計算エラー: {e}")
 
+    def reorder_by_visit_order(self):
+        """訪問順序列に入力された数字に基づいて行を並び替える"""
+        try:
+            row_count = self.store_visits_table.rowCount()
+            if row_count == 0:
+                QMessageBox.information(self, "情報", "並び替える行がありません")
+                return
+            
+            # 変更前の状態を保存（Undo用）
+            self.save_table_state()
+            
+            # 各行のデータと訪問順序を取得
+            rows_data = []
+            for row in range(row_count):
+                # 訪問順序を取得
+                order_item = self.store_visits_table.item(row, 0)
+                order_text = order_item.text().strip() if order_item else ""
+                
+                # 訪問順序を数値に変換（数値でない場合は元の行番号+1000で最後に配置）
+                try:
+                    order_num = int(order_text) if order_text else row + 1000
+                except ValueError:
+                    order_num = row + 1000  # 数値変換できない場合は最後尾へ
+                
+                # 行データを収集
+                row_data = {
+                    'order': order_num,
+                    'original_row': row,
+                    'cells': []
+                }
+                
+                # 全列のデータを保存
+                for col in range(self.store_visits_table.columnCount()):
+                    item = self.store_visits_table.item(row, col)
+                    cell_text = item.text() if item else ""
+                    row_data['cells'].append(cell_text)
+                
+                # 星評価ウィジェットの値も保存
+                star_widget = self.store_visits_table.cellWidget(row, 9)
+                if star_widget and hasattr(star_widget, 'rating'):
+                    row_data['star_rating'] = star_widget.rating()  # メソッド呼び出し
+                else:
+                    row_data['star_rating'] = 0
+                
+                rows_data.append(row_data)
+            
+            # 訪問順序でソート
+            rows_data.sort(key=lambda x: x['order'])
+            
+            # テーブルを一旦ブロック
+            self.store_visits_table.blockSignals(True)
+            
+            try:
+                # テーブルをクリアして再構築
+                self.store_visits_table.setRowCount(0)
+                self.store_visits_table.setRowCount(len(rows_data))
+                
+                for new_row, data in enumerate(rows_data):
+                    # 全列のデータを設定
+                    for col, cell_text in enumerate(data['cells']):
+                        if col == 0:
+                            # 訪問順序は新しい行番号+1に設定
+                            item = QTableWidgetItem(str(new_row + 1))
+                        else:
+                            item = QTableWidgetItem(cell_text)
+                        self.store_visits_table.setItem(new_row, col, item)
+                    
+                    # 星評価ウィジェットを再配置
+                    star_widget = StarRatingWidget(
+                        self.store_visits_table, 
+                        rating=data['star_rating'], 
+                        star_size=14
+                    )
+                    star_widget.rating_changed.connect(
+                        lambda rating, r=new_row: self.on_star_rating_changed(r, rating)
+                    )
+                    self.store_visits_table.setCellWidget(new_row, 9, star_widget)
+                
+            finally:
+                self.store_visits_table.blockSignals(False)
+            
+            # 移動時間を再計算
+            self.recalc_travel_times()
+            
+            # 訪問順序を保存
+            self.save_store_order()
+            
+            # 変更後の状態を保存
+            self.save_table_state()
+            
+            # 計算結果を更新
+            getattr(self, 'update_calculation_results', lambda: None)()
+            
+            QMessageBox.information(self, "完了", "訪問順序に基づいて行を並び替えました")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"並び替え中にエラーが発生しました:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def add_store_visit_row(self):
         """店舗訪問行を追加"""
@@ -1877,9 +2007,8 @@ class RouteSummaryWidget(QWidget):
         row = self.store_visits_table.rowCount()
         self.store_visits_table.insertRow(row)
         
-        # 訪問順序を自動設定
+        # 訪問順序を自動設定（編集可能）
         order_item = QTableWidgetItem(str(row + 1))
-        order_item.setFlags(order_item.flags() & ~Qt.ItemIsEditable)
         self.store_visits_table.setItem(row, 0, order_item)
         
         # 星評価ウィジェットをセルに配置
