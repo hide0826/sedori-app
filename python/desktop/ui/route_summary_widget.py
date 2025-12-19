@@ -79,9 +79,10 @@ class RouteSummaryWidget(QWidget):
         self.store_visits = []
         self.latest_summary_metrics = {}
         self.settings = QSettings("HIRIO", "SedoriDesktopApp")
-        stored_dir = self.settings.value("route_template/default_load_dir", "")
-        self.template_default_dir = str(stored_dir) if stored_dir else ""
         self.last_loaded_template_path: str = ""
+        # テンプレート生成のデフォルトフォルダ
+        stored_template_dir = self.settings.value("route_template/default_save_dir", "")
+        self.template_save_default_dir = str(stored_template_dir) if stored_template_dir else ""
         
         # Undo/Redoスタック
         self.undo_stack = []
@@ -116,49 +117,29 @@ class RouteSummaryWidget(QWidget):
         template_btn.setStyleSheet("background-color: #28a745; color: white;")
         button_layout.addWidget(template_btn)
         
-        # テンプレート読み込みボタン
-        load_template_btn = QPushButton("テンプレート読み込み")
-        load_template_btn.clicked.connect(self.load_template)
-        button_layout.addWidget(load_template_btn)
-        
-        # 店舗自動追加ボタン
-        auto_add_btn = QPushButton("選択ルートの店舗を自動追加")
+        # 選択ルート読み込みボタン
+        auto_add_btn = QPushButton("選択ルート読み込み")
         auto_add_btn.clicked.connect(self.auto_add_stores)
         auto_add_btn.setStyleSheet("background-color: #17a2b8; color: white;")
         button_layout.addWidget(auto_add_btn)
         
-        # 保存ボタン
-        save_btn = QPushButton("保存")
-        save_btn.clicked.connect(self.save_data)
-        save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
-        button_layout.addWidget(save_btn)
-        
-        # 保存履歴（読み込み/削除）
-        history_btn = QPushButton("保存履歴")
-        history_btn.clicked.connect(self.open_saved_history)
-        button_layout.addWidget(history_btn)
-        
-        # 新規作成ボタン
-        new_btn = QPushButton("新規作成")
-        new_btn.clicked.connect(lambda: getattr(self, 'new_route', lambda: None)())
-        button_layout.addWidget(new_btn)
-        
         button_layout.addStretch()
-
-        template_dir_label = QLabel("テンプレート読込フォルダ:")
-        template_dir_label.setStyleSheet("color: #cccccc;")
-        button_layout.addWidget(template_dir_label)
-
-        self.template_dir_edit = QLineEdit()
-        self.template_dir_edit.setPlaceholderText("未設定")
-        self.template_dir_edit.setFixedWidth(260)
-        self.template_dir_edit.setText(self.template_default_dir)
-        self.template_dir_edit.editingFinished.connect(self.on_template_dir_edit_finished)
-        button_layout.addWidget(self.template_dir_edit)
-
-        browse_dir_btn = QPushButton("参照…")
-        browse_dir_btn.clicked.connect(self.browse_template_dir)
-        button_layout.addWidget(browse_dir_btn)
+        
+        # テンプレート生成フォルダ指定（右側に配置）
+        template_save_dir_label = QLabel("テンプレート保存フォルダ:")
+        template_save_dir_label.setStyleSheet("color: #cccccc;")
+        button_layout.addWidget(template_save_dir_label)
+        
+        self.template_save_dir_edit = QLineEdit()
+        self.template_save_dir_edit.setPlaceholderText("未設定")
+        self.template_save_dir_edit.setFixedWidth(260)
+        self.template_save_dir_edit.setText(self.template_save_default_dir)
+        self.template_save_dir_edit.editingFinished.connect(self.on_template_save_dir_edit_finished)
+        button_layout.addWidget(self.template_save_dir_edit)
+        
+        browse_save_dir_btn = QPushButton("参照…")
+        browse_save_dir_btn.clicked.connect(self.browse_template_save_dir)
+        button_layout.addWidget(browse_save_dir_btn)
         
         parent_layout.addWidget(button_group)
     
@@ -193,40 +174,8 @@ class RouteSummaryWidget(QWidget):
         self.route_code_combo.currentTextChanged.connect(self.on_route_code_changed)
         route_layout.addRow("ルートコード:", self.route_code_combo)
         self.update_route_codes()
-        
-        # 出発時間（自由入力のテキスト: HH:MM）
-        self.departure_time_edit = QLineEdit()
-        self.departure_time_edit.setPlaceholderText("HH:MM")
-        self.departure_time_edit.setText(QTime.currentTime().toString('HH:mm'))
-        route_layout.addRow("出発時間:", self.departure_time_edit)
-        
-        # 帰宅時間（自由入力のテキスト: HH:MM）
-        self.return_time_edit = QLineEdit()
-        self.return_time_edit.setPlaceholderText("HH:MM")
-        self.return_time_edit.setText(QTime.currentTime().toString('HH:mm'))
-        route_layout.addRow("帰宅時間:", self.return_time_edit)
-        
-        # 経費（駐車場代・食費・その他を削除）
-        cost_layout = QHBoxLayout()
-        self.toll_fee_outbound_spin = QDoubleSpinBox()
-        self.toll_fee_outbound_spin.setMaximum(999999)
-        self.toll_fee_outbound_spin.setSuffix(" 円")
-        self.toll_fee_outbound_spin.setDecimals(0)  # 小数不要
-        cost_layout.addWidget(QLabel("往路高速代:"))
-        cost_layout.addWidget(self.toll_fee_outbound_spin)
-        
-        self.toll_fee_return_spin = QDoubleSpinBox()
-        self.toll_fee_return_spin.setMaximum(999999)
-        self.toll_fee_return_spin.setSuffix(" 円")
-        self.toll_fee_return_spin.setDecimals(0)  # 小数不要
-        cost_layout.addWidget(QLabel("復路高速代:"))
-        cost_layout.addWidget(self.toll_fee_return_spin)
-        route_layout.addRow("経費:", cost_layout)
-        
-        # 備考
-        self.remarks_edit = QTextEdit()
-        self.remarks_edit.setMaximumHeight(50)
-        route_layout.addRow("備考:", self.remarks_edit)
+        # デフォルトは空白（update_route_codes()の後に設定）
+        self.route_code_combo.setCurrentText("")
         
         layout.addWidget(route_group, 0)  # stretch=0で最小サイズに
         
@@ -343,19 +292,6 @@ class RouteSummaryWidget(QWidget):
             "QTableView::item{border: none;}"
         )
 
-        # 店舗評価の計算ロジック案内
-        rating_info_layout = QHBoxLayout()
-        rating_info_layout.addStretch()
-        self.rating_info_button = QPushButton("※ 店舗評価の計算ロジック")
-        self.rating_info_button.setCursor(Qt.PointingHandCursor)
-        self.rating_info_button.setFlat(True)
-        self.rating_info_button.setStyleSheet(
-            "QPushButton { color: #5aa2ff; text-decoration: underline; border: none; font-size: 10pt; }"
-            "QPushButton:hover { color: #8fc4ff; }"
-        )
-        self.rating_info_button.clicked.connect(self.show_rating_logic_popup)
-        rating_info_layout.addWidget(self.rating_info_button)
-        visits_layout.addLayout(rating_info_layout)
 
         # ドラッグ＆ドロップのため選択は有効（単一行）
         visits_layout.addWidget(self.store_visits_table)
@@ -462,58 +398,8 @@ class RouteSummaryWidget(QWidget):
         
         # ルートコード一覧を更新
         self.update_route_codes()
-        
-        # 出発時間（自由入力のテキスト: HH:MM）
-        self.departure_time_edit = QLineEdit()
-        self.departure_time_edit.setPlaceholderText("HH:MM")
-        self.departure_time_edit.setText(QTime.currentTime().toString('HH:mm'))
-        layout.addRow("出発時間:", self.departure_time_edit)
-        
-        # 帰宅時間（自由入力のテキスト: HH:MM）
-        self.return_time_edit = QLineEdit()
-        self.return_time_edit.setPlaceholderText("HH:MM")
-        self.return_time_edit.setText(QTime.currentTime().toString('HH:mm'))
-        layout.addRow("帰宅時間:", self.return_time_edit)
-        
-        # 経費
-        cost_layout = QHBoxLayout()
-        self.toll_fee_outbound_spin = QDoubleSpinBox()
-        self.toll_fee_outbound_spin.setMaximum(999999)
-        self.toll_fee_outbound_spin.setSuffix(" 円")
-        cost_layout.addWidget(QLabel("往路高速代:"))
-        cost_layout.addWidget(self.toll_fee_outbound_spin)
-        
-        self.toll_fee_return_spin = QDoubleSpinBox()
-        self.toll_fee_return_spin.setMaximum(999999)
-        self.toll_fee_return_spin.setSuffix(" 円")
-        cost_layout.addWidget(QLabel("復路高速代:"))
-        cost_layout.addWidget(self.toll_fee_return_spin)
-        
-        self.parking_fee_spin = QDoubleSpinBox()
-        self.parking_fee_spin.setMaximum(999999)
-        self.parking_fee_spin.setSuffix(" 円")
-        cost_layout.addWidget(QLabel("駐車場代:"))
-        cost_layout.addWidget(self.parking_fee_spin)
-        layout.addRow("経費:", cost_layout)
-        
-        expense_layout = QHBoxLayout()
-        self.meal_cost_spin = QDoubleSpinBox()
-        self.meal_cost_spin.setMaximum(999999)
-        self.meal_cost_spin.setSuffix(" 円")
-        expense_layout.addWidget(QLabel("食費:"))
-        expense_layout.addWidget(self.meal_cost_spin)
-        
-        self.other_expenses_spin = QDoubleSpinBox()
-        self.other_expenses_spin.setMaximum(999999)
-        self.other_expenses_spin.setSuffix(" 円")
-        expense_layout.addWidget(QLabel("その他:"))
-        expense_layout.addWidget(self.other_expenses_spin)
-        layout.addRow("", expense_layout)
-        
-        # 備考
-        self.remarks_edit = QTextEdit()
-        self.remarks_edit.setMaximumHeight(60)
-        layout.addRow("備考:", self.remarks_edit)
+        # デフォルトは空白（update_route_codes()の後に設定）
+        self.route_code_combo.setCurrentText("")
         
         return widget
     
@@ -604,12 +490,15 @@ class RouteSummaryWidget(QWidget):
         return widget
     
     def setup_calculation_results(self, parent_layout):
-        """計算結果表示の設定"""
+        """計算結果表示の設定（非表示）"""
         result_group = QGroupBox("計算結果")
         result_layout = QVBoxLayout(result_group)
         
         self.calculation_label = QLabel("計算結果: データ未入力")
         result_layout.addWidget(self.calculation_label)
+        
+        # 計算結果エリアを非表示にする
+        result_group.setVisible(False)
         
         parent_layout.addWidget(result_group)
     
@@ -644,25 +533,6 @@ class RouteSummaryWidget(QWidget):
         )
         self.calculation_label.setText(text)
     
-    def show_rating_logic_popup(self):
-        """店舗評価の計算ロジックを表示"""
-        detail_text = (
-            "【店舗評価の自動計算】\n\n"
-            "1. 基礎星スコア（仕入れ点数）\n"
-            "   1〜2点: ★1 / 3〜4点: ★2 / 5〜6点: ★3 / 7〜9点: ★4 / 10点以上: ★5\n\n"
-            "2. 粗利係数（想定粗利）\n"
-            "   〜5,000円:0.8 / 5,001〜10,000円:1.0 / 10,001〜20,000円:1.2 /\n"
-            "   20,001〜40,000円:1.4 / 40,001円以上:1.6\n\n"
-            "3. 最終スコア\n"
-            "   最終スコア = (基礎星スコア × 粗利係数) × (想定粗利 ÷ 滞在時間)\n"
-            "   ※滞在時間が1分未満の場合は1分として計算します。\n\n"
-            "4. 星への変換\n"
-            "   〜1.5→★1 / 1.6〜2.5→★2 / 2.6〜3.5→★3 /\n"
-            "   3.6〜4.5→★4 / 4.6以上→★5\n\n"
-            "仕入れ点数または想定粗利が未入力の場合は★0を設定します。"
-        )
-        QMessageBox.information(self, "店舗評価の計算ロジック", detail_text)
-
     def auto_calculate_store_ratings(self):
         """店舗訪問テーブルの星評価を自動計算"""
         if not hasattr(self, "store_visits_table"):
@@ -750,6 +620,9 @@ class RouteSummaryWidget(QWidget):
             # 空の選択肢も追加（手動入力用）
             if not self.route_code_combo.findText("") >= 0:
                 self.route_code_combo.addItem("")
+            
+            # デフォルトは空白に設定
+            self.route_code_combo.setCurrentText("")
                 
         except Exception as e:
             print(f"ルートコード一覧更新エラー: {e}")
@@ -979,12 +852,23 @@ class RouteSummaryWidget(QWidget):
             route_name = self.route_code_combo.currentText().strip()
             route_code = self.get_selected_route_code()
             
+            # デフォルトフォルダを取得
+            default_dir = self.template_save_default_dir if self.template_save_default_dir and os.path.isdir(self.template_save_default_dir) else ""
+            default_filename = f"route_template_{route_name or 'new'}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+            default_path = os.path.join(default_dir, default_filename) if default_dir else default_filename
+            
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
                 "テンプレートファイルを保存",
-                f"route_template_{route_name or 'new'}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                default_path,
                 "Excelファイル (*.xlsx);;CSVファイル (*.csv)"
             )
+            
+            # 保存先フォルダを設定に保存
+            if file_path:
+                save_dir = os.path.dirname(file_path)
+                if save_dir and os.path.isdir(save_dir):
+                    self.update_template_save_default_dir(save_dir)
             
             if not file_path:
                 return None
@@ -1014,373 +898,77 @@ class RouteSummaryWidget(QWidget):
                 QMessageBox.warning(self, "エラー", "テンプレート生成機能が利用できません")
                 return
             
+            # ルート日付を取得（QDateをdatetime.dateに変換）
+            try:
+                qdate = self.route_date_edit.dateTime().date()
+                # QDateをdatetime.dateに変換
+                route_date = datetime(qdate.year(), qdate.month(), qdate.day()).date()
+                print(f"ルート日付取得: {route_date} (QDate: {qdate.year()}-{qdate.month()}-{qdate.day()})")
+            except Exception as e:
+                print(f"ルート日付取得エラー: {e}")
+                import traceback
+                print(traceback.format_exc())
+                route_date = None
+            
             if file_path.endswith('.xlsx'):
-                # ルート名（日本語名）を渡してテンプレートに表示
-                success = TemplateGenerator.generate_excel_template(file_path, route_name, store_codes, stores)
+                # ルート名（日本語名）とルート日付を渡してテンプレートに表示
+                print(f"Excelテンプレート生成開始: ファイル={file_path}, ルート名={route_name}, 店舗数={len(stores) if stores else len(store_codes) if store_codes else 0}, ルート日付={route_date}")
+                success = TemplateGenerator.generate_excel_template(file_path, route_name, store_codes, stores, route_date)
             else:
-                success = TemplateGenerator.generate_csv_template(file_path, route_code, store_codes)
+                # CSVテンプレートにもルート日付を渡す
+                print(f"CSVテンプレート生成開始: ファイル={file_path}, ルートコード={route_code}, 店舗数={len(store_codes) if store_codes else 0}, ルート日付={route_date}")
+                success = TemplateGenerator.generate_csv_template(file_path, route_code, store_codes, route_date)
             
             if success:
                 QMessageBox.information(self, "成功", f"テンプレートを生成しました:\n{file_path}")
             else:
-                QMessageBox.warning(self, "エラー", "テンプレートの生成に失敗しました")
+                QMessageBox.warning(self, "エラー", "テンプレートの生成に失敗しました。\n詳細はコンソールを確認してください。")
                 
         except Exception as e:
-            QMessageBox.critical(self, "エラー", f"テンプレート生成中にエラーが発生しました:\n{str(e)}")
+            import traceback
+            error_detail = traceback.format_exc()
+            print(f"テンプレート生成エラー詳細:\n{error_detail}")
+            QMessageBox.critical(self, "エラー", f"テンプレート生成中にエラーが発生しました:\n{str(e)}\n\n詳細はコンソールを確認してください。")
     
-    def load_template(self):
-        """テンプレート読み込み"""
-        try:
-            initial_dir = self.get_template_default_dir()
-            file_path, _ = QFileDialog.getOpenFileName(
-                self,
-                "テンプレートファイルを選択",
-                initial_dir,
-                "Excelファイル (*.xlsx *.xlsm);;CSVファイル (*.csv);;すべてのファイル (*)"
-            )
-            
-            if not file_path:
-                return
-            
-            # 保存済みのデフォルトフォルダが空の場合のみ更新（初回設定用）
-            if not self.template_default_dir:
-                self.update_template_default_dir(os.path.dirname(file_path))
-            
-            # Excel読み込み
-            if file_path.endswith(('.xlsx', '.xlsm')):
-                df_route = None
-                # 単一シート構成にも対応
-                try:
-                    df_route = pd.read_excel(file_path, sheet_name='ルート情報')
-                except Exception:
-                    df_route = None
-                try:
-                    df_visits = pd.read_excel(file_path, sheet_name='店舗訪問詳細')
-                except Exception as e:
-                    QMessageBox.warning(self, "エラー", f"Excelファイルの読み込みに失敗しました:\n{str(e)}")
-                    return
-            else:
-                # CSV読み込み（簡易実装）
-                QMessageBox.warning(self, "注意", "CSV形式の読み込みは開発中です")
-                return
-            
-            # ルート情報を読み込み（2シート構成の場合）
-            route_values = {}
-            if df_route is not None and '値' in df_route.columns and '項目' in df_route.columns:
-                for _, row in df_route.iterrows():
-                    item = row.get('項目', '')
-                    value = row.get('値', '')
-                    if item == 'ルート日付':
-                        try:
-                            dt = pd.to_datetime(value)
-                            self.route_date_edit.setDateTime(QDateTime.fromString(dt.strftime('%Y-%m-%d'), 'yyyy-MM-dd'))
-                        except:
-                            pass
-                    elif item == 'ルートコード':
-                        # ルートコードをコンボボックスに設定
-                        route_code_text = str(value)
-                        # 既存のルート名から該当するものを探す
-                        index = self.route_code_combo.findText(route_code_text)
-                        if index >= 0:
-                            self.route_code_combo.setCurrentIndex(index)
-                        else:
-                            # 見つからない場合は手動入力として設定
-                            self.route_code_combo.setCurrentText(route_code_text)
-                    elif item == '出発時間':
-                        try:
-                            dt = pd.to_datetime(value)
-                            self.departure_time_edit.setText(dt.strftime('%H:%M'))
-                        except Exception:
-                            pass
-                    elif item == '帰宅時間':
-                        try:
-                            dt = pd.to_datetime(value)
-                            self.return_time_edit.setText(dt.strftime('%H:%M'))
-                        except Exception:
-                            pass
-                    elif item == '往路高速代':
-                        self.toll_fee_outbound_spin.setValue(float(value) if value else 0)
-                    elif item == '復路高速代':
-                        self.toll_fee_return_spin.setValue(float(value) if value else 0)
-                    elif item == '駐車場代':
-                        # 削除済みのため無視
-                        pass
-                    elif item == '食費':
-                        # 削除済みのため無視
-                        pass
-                    elif item == 'その他経費':
-                        # 削除済みのため無視
-                        pass
-                    elif item == '備考（天候等）' or item == '備考':
-                        self.remarks_edit.setPlainText(str(value) if value else '')
-
-            # 単一シート構成（1枚目の生成テンプレ形式）に対応：openpyxlでセル値も取得
-            try:
-                wb = openpyxl.load_workbook(file_path, data_only=True)
-                ws = wb['店舗訪問詳細'] if '店舗訪問詳細' in wb.sheetnames else wb.active
-
-                def _to_time_str(v: Any) -> str:
-                    if v is None or v == '':
-                        return ''
-                    if isinstance(v, dt_time):
-                        return QTime(v.hour, v.minute).toString('HH:mm')
-                    if isinstance(v, datetime):
-                        return QTime(v.hour, v.minute).toString('HH:mm')
-                    # Excel数値(1日=1) の場合
-                    try:
-                        num = float(v)
-                        total_minutes = int(round(num * 24 * 60))
-                        hh = total_minutes // 60
-                        mm = total_minutes % 60
-                        return f"{hh:02d}:{mm:02d}"
-                    except Exception:
-                        s = str(v).strip()
-                        # 既にHH:MMの文字列
-                        return s
-
-                # 上部情報の読み込み
-                top_date = ws['B1'].value
-                if top_date:
-                    try:
-                        if isinstance(top_date, datetime):
-                            d_str = top_date.strftime('%Y-%m-%d')
-                        else:
-                            d_str = pd.to_datetime(str(top_date)).strftime('%Y-%m-%d')
-                        self.route_date_edit.setDateTime(QDateTime.fromString(d_str, 'yyyy-MM-dd'))
-                    except Exception:
-                        pass
-
-                route_name = (ws['B2'].value or '').strip()
-                if route_name:
-                    idx = self.route_code_combo.findText(route_name)
-                    if idx >= 0:
-                        self.route_code_combo.setCurrentIndex(idx)
-                    else:
-                        self.route_code_combo.setCurrentText(route_name)
-
-                # データ行（4行目以降、A列が空で終了）
-                rows_data: List[Dict[str, Any]] = []
-                r = 4
-                while True:
-                    code = ws[f'A{r}'].value
-                    name = ws[f'B{r}'].value
-                    if (code is None or str(code).strip() == '') and (name is None or str(name).strip() == ''):
-                        break
-                    arrival = _to_time_str(ws[f'C{r}'].value)
-                    depart = _to_time_str(ws[f'D{r}'].value)
-                    stay_val = ws[f'E{r}'].value
-                    try:
-                        stay_minutes = int(round(float(stay_val))) if stay_val not in (None, '') else 0
-                    except Exception:
-                        stay_minutes = 0
-                    memo = ws[f'F{r}'].value or ''
-                    rows_data.append({
-                        'code': str(code or ''),
-                        'name': str(name or ''),
-                        'in': arrival,
-                        'out': depart,
-                        'stay': stay_minutes,
-                        'memo': str(memo)
-                    })
-                    r += 1
-
-                # テーブルへ反映
-                self.store_visits_table.setRowCount(len(rows_data))
-                for i, rd in enumerate(rows_data):
-                    # 訪問順序（編集可能）
-                    order_item = QTableWidgetItem(str(i + 1))
-                    self.store_visits_table.setItem(i, 0, order_item)
-
-                    self.store_visits_table.setItem(i, 1, QTableWidgetItem(rd['code']))
-                    self.store_visits_table.setItem(i, 2, QTableWidgetItem(rd['name']))
-                    self.store_visits_table.setItem(i, 3, QTableWidgetItem(rd['in']))
-                    self.store_visits_table.setItem(i, 4, QTableWidgetItem(rd['out']))
-                    self.store_visits_table.setItem(i, 5, QTableWidgetItem(str(rd['stay'])))
-                    # 備考
-                    memo_text = rd['memo'] or ''
-                    memo_item = QTableWidgetItem(memo_text)
-                    memo_item.setToolTip(memo_text)  # ツールチップで全文表示
-                    self.store_visits_table.setItem(i, 10, memo_item)
-
-                    # 店舗評価は0で初期化
-                    star_widget = StarRatingWidget(self.store_visits_table, rating=0, star_size=14)
-                    star_widget.rating_changed.connect(lambda rating, r=i: self.on_star_rating_changed(r, rating))
-                    self.store_visits_table.setCellWidget(i, 9, star_widget)
-
-                # 下部情報の読み込み
-                try:
-                    # A列を1行目から順にチェックして各項目を探す（文字列検索で確実に取得）
-                    dep_row = None
-                    ret_row = None
-                    toll_out_row = None
-                    toll_ret_row = None
-                    
-                    # 1行目から200行目までチェック（十分な範囲を確保）
-                    for row_num in range(1, 201):
-                        a_cell_value = ws[f'A{row_num}'].value
-                        if a_cell_value is None:
-                            continue
-                        
-                        a_key = str(a_cell_value).strip()
-                        
-                        # 出発時刻・出発時間を探す
-                        if dep_row is None and a_key in ('出発時刻', '出発時間'):
-                            dep_row = row_num
-                        
-                        # 帰宅時刻・帰宅時間を探す
-                        if ret_row is None and a_key in ('帰宅時刻', '帰宅時間'):
-                            ret_row = row_num
-                        
-                        # 往路高速代を探す
-                        if toll_out_row is None and a_key == '往路高速代':
-                            toll_out_row = row_num
-                        
-                        # 復路高速代を探す
-                        if toll_ret_row is None and a_key == '復路高速代':
-                            toll_ret_row = row_num
-                        
-                        # 全て見つかったら終了
-                        if dep_row is not None and ret_row is not None and toll_out_row is not None and toll_ret_row is not None:
-                            break
-                    
-                    # 出発時刻を読み込み
-                    if dep_row is not None:
-                        dep_raw = ws[f'B{dep_row}'].value
-                        dep_str = _to_time_str(dep_raw)
-                        if dep_str:
-                            self.departure_time_edit.setText(dep_str)
-                    
-                    # 帰宅時刻を読み込み
-                    if ret_row is not None:
-                        ret_raw = ws[f'B{ret_row}'].value
-                        ret_str = _to_time_str(ret_raw)
-                        if ret_str:
-                            self.return_time_edit.setText(ret_str)
-                    
-                    # 往路高速代を読み込み
-                    if toll_out_row is not None:
-                        try:
-                            toll_out_raw = ws[f'B{toll_out_row}'].value
-                            toll_out_val = float(str(toll_out_raw or '0').replace(',', ''))
-                            self.toll_fee_outbound_spin.setValue(toll_out_val)
-                        except Exception:
-                            pass
-                    
-                    # 復路高速代を読み込み
-                    if toll_ret_row is not None:
-                        try:
-                            toll_ret_raw = ws[f'B{toll_ret_row}'].value
-                            toll_ret_val = float(str(toll_ret_raw or '0').replace(',', ''))
-                            self.toll_fee_return_spin.setValue(toll_ret_val)
-                        except Exception:
-                            pass
-                    
-                    # 旧コード（削除予定）: その他の下部情報（15行目以降、出発時刻・帰宅時刻以外）
-                    bottom_map = {}
-                    for rr in range(15, 15 + 20):  # 15行目から35行目まで
-                        key = ws[f'A{rr}'].value
-                        val = ws[f'B{rr}'].value
-                        if (key is None or str(key).strip() == '') and ws[f'B{rr}'].value:
-                            key = ws[f'B{rr}'].value
-                            val = ws[f'C{rr}'].value
-                        if key is None or str(key).strip() == '':
-                            # 連続して空行が続いたら抜ける
-                            if (ws[f'B{rr}'].value is None or str(ws[f'B{rr}'].value).strip() == '') and \
-                               (ws[f'C{rr}'].value is None or str(ws[f'C{rr}'].value).strip() == ''):
-                                break
-                            continue
-                        key_str = str(key).strip()
-                        # 出発時刻・帰宅時刻は既に処理済みなのでスキップ
-                        if key_str in ('出発時刻', '出発時間', '帰宅時刻', '帰宅時間'):
-                            continue
-                        bottom_map[key_str] = val
-                    
-                    # 出発時刻・帰宅時刻がまだ設定されていない場合、bottom_mapからも試す（フォールバック）
-                    if not self.departure_time_edit.text() or self.departure_time_edit.text() == QTime.currentTime().toString('HH:mm'):
-                        dep_raw = bottom_map.get('出発時刻')
-                        if dep_raw is None:
-                            dep_raw = bottom_map.get('出発時間')
-                        dep_str = _to_time_str(dep_raw)
-                        if dep_str:
-                            self.departure_time_edit.setText(dep_str)
-                    
-                    if not self.return_time_edit.text() or self.return_time_edit.text() == QTime.currentTime().toString('HH:mm'):
-                        ret_raw = bottom_map.get('帰宅時刻')
-                        if ret_raw is None:
-                            ret_raw = bottom_map.get('帰宅時間')
-                        ret_str = _to_time_str(ret_raw)
-                        if ret_str:
-                            self.return_time_edit.setText(ret_str)
-
-                    # 高速代は既に文字列検索で読み込み済み（上記のtoll_out_row/toll_ret_rowで処理）
-                except Exception as _:
-                    pass
-            except Exception:
-                # 旧ロジック（pandas）にフォールバック
-                pass
-            
-            QMessageBox.information(self, "完了", "テンプレートを読み込みました")
-            # 移動時間（分）を自動計算
-            self.recalc_travel_times()
-            getattr(self, 'update_calculation_results', lambda: None)()
-            self.last_loaded_template_path = file_path
-            try:
-                self.settings.setValue("route_template/last_selected", file_path)
-            except Exception:
-                pass
-            return file_path
-            
-        except Exception as e:
-            QMessageBox.critical(self, "エラー", f"テンプレート読み込み中にエラーが発生しました:\n{str(e)}")
-            return None
-    
-    def browse_template_dir(self):
-        """テンプレート読込フォルダの選択"""
-        current_dir = self.get_template_default_dir(fallback=False)
+    def browse_template_save_dir(self):
+        """テンプレート保存フォルダの選択"""
+        current_dir = self.template_save_default_dir if self.template_save_default_dir and os.path.isdir(self.template_save_default_dir) else str(Path.home())
         selected_dir = QFileDialog.getExistingDirectory(
             self,
-            "テンプレート読込フォルダを選択",
-            current_dir or str(Path.home())
+            "テンプレート保存フォルダを選択",
+            current_dir
         )
         if selected_dir:
-            self.update_template_default_dir(selected_dir)
+            self.update_template_save_default_dir(selected_dir)
     
-    def on_template_dir_edit_finished(self):
-        """手入力でテンプレートフォルダを更新"""
-        text = self.template_dir_edit.text().strip()
+    def on_template_save_dir_edit_finished(self):
+        """手入力でテンプレート保存フォルダを更新"""
+        text = self.template_save_dir_edit.text().strip()
         if not text:
-            self.update_template_default_dir("")
+            self.update_template_save_default_dir("")
             return
         expanded = os.path.expanduser(text)
         if not os.path.isdir(expanded):
             QMessageBox.warning(self, "エラー", "指定したフォルダが存在しません。")
             # 元の値へ戻す
-            self.template_dir_edit.blockSignals(True)
-            self.template_dir_edit.setText(self.template_default_dir)
-            self.template_dir_edit.blockSignals(False)
+            self.template_save_dir_edit.blockSignals(True)
+            self.template_save_dir_edit.setText(self.template_save_default_dir)
+            self.template_save_dir_edit.blockSignals(False)
             return
-        self.update_template_default_dir(os.path.abspath(expanded))
+        self.update_template_save_default_dir(os.path.abspath(expanded))
     
-    def update_template_default_dir(self, directory: str):
-        """テンプレートフォルダの設定を保存"""
+    def update_template_save_default_dir(self, directory: str):
+        """テンプレート保存フォルダの設定を保存"""
         normalized = directory if directory else ""
         if normalized and not os.path.isdir(normalized):
             return
-        self.template_default_dir = normalized
-        if hasattr(self, "template_dir_edit"):
-            self.template_dir_edit.blockSignals(True)
-            self.template_dir_edit.setText(self.template_default_dir)
-            self.template_dir_edit.blockSignals(False)
+        self.template_save_default_dir = normalized
+        if hasattr(self, "template_save_dir_edit"):
+            self.template_save_dir_edit.blockSignals(True)
+            self.template_save_dir_edit.setText(self.template_save_default_dir)
+            self.template_save_dir_edit.blockSignals(False)
         if self.settings is not None:
-            self.settings.setValue("route_template/default_load_dir", self.template_default_dir)
-    
-    def get_template_default_dir(self, fallback: bool = True) -> str:
-        """テンプレートフォルダの取得"""
-        if self.template_default_dir and os.path.isdir(self.template_default_dir):
-            return self.template_default_dir
-        if fallback:
-            return str(Path.home())
-        return ""
+            self.settings.setValue("route_template/default_save_dir", self.template_save_default_dir)
     
     def run_matching(self):
         """照合処理実行（改良版：仕入管理データを参照）"""
@@ -1609,22 +1197,7 @@ class RouteSummaryWidget(QWidget):
                 # ルートコードが空の場合は、コンボボックスを更新してクリア
                 self.update_route_codes()
                 self.route_code_combo.setCurrentText('')
-            dep = row.get('departure_time') or ''
-            ret = row.get('return_time') or ''
-            try:
-                self.departure_time_edit.setText(dep.split(' ')[1][:5] if ' ' in dep else dep[:5])
-            except Exception:
-                self.departure_time_edit.setText('')
-            try:
-                self.return_time_edit.setText(ret.split(' ')[1][:5] if ' ' in ret else ret[:5])
-            except Exception:
-                self.return_time_edit.setText('')
-            try:
-                self.toll_fee_outbound_spin.setValue(float(row.get('toll_fee_outbound') or 0))
-                self.toll_fee_return_spin.setValue(float(row.get('toll_fee_return') or 0))
-            except Exception:
-                pass
-            self.remarks_edit.setPlainText(row.get('remarks') or '')
+            # 出発時間・帰宅時間・経費・備考は削除されたため、読み込み処理をスキップ
             
             # 店舗訪問詳細
             visits = self.route_db.get_store_visits_by_route(route_id)
@@ -1876,14 +1449,8 @@ class RouteSummaryWidget(QWidget):
                 else:
                     self.store_visits_table.setItem(r, 5, QTableWidgetItem(''))
 
-            # 1店舗目: 出発時間 から IN時間
-            first_in = parse_hhmm(get_text(0, 3))
-            dep_time = parse_hhmm(self.departure_time_edit.text())
-            if first_in and dep_time:
-                mins = dep_time.secsTo(first_in) // 60
-                mins = max(0, int(mins))
-                self.store_visits_table.setItem(0, 6, QTableWidgetItem(str(mins)))
-            else:
+            # 1店舗目の移動時間は空（出発時間が削除されたため）
+            if row_count > 0:
                 self.store_visits_table.setItem(0, 6, QTableWidgetItem(''))
 
             # 2店舗目以降: 前店舗OUT → 現在IN
@@ -2178,34 +1745,18 @@ class RouteSummaryWidget(QWidget):
     def get_route_data(self) -> Dict[str, Any]:
         """入力データを取得"""
         route_date = self.route_date_edit.dateTime().toString('yyyy-MM-dd')
-        dep_text = (self.departure_time_edit.text() or '').strip()
-        ret_text = (self.return_time_edit.text() or '').strip()
-        def to_sec(text: str) -> str:
-            try:
-                parts = text.split(':')
-                if len(parts) != 2:
-                    return ''
-                h = int(parts[0]); m = int(parts[1])
-                if 0 <= h <= 23 and 0 <= m <= 59:
-                    return f"{h:02d}:{m:02d}:00"
-            except Exception:
-                return ''
-            return ''
-        dep_time = to_sec(dep_text) or '00:00:00'
-        ret_time = to_sec(ret_text) or '00:00:00'
-        departure_time = f"{route_date} {dep_time}"
-        return_time = f"{route_date} {ret_time}"
+        # 出発時間・帰宅時間・経費・備考は削除されたため、デフォルト値を設定
         return {
             'route_date': route_date,
             'route_code': self.get_selected_route_code(),
-            'departure_time': departure_time,
-            'return_time': return_time,
-            'toll_fee_outbound': self.toll_fee_outbound_spin.value(),
-            'toll_fee_return': self.toll_fee_return_spin.value(),
+            'departure_time': f"{route_date} 00:00:00",
+            'return_time': f"{route_date} 00:00:00",
+            'toll_fee_outbound': 0,
+            'toll_fee_return': 0,
             'parking_fee': 0,
             'meal_cost': 0,
             'other_expenses': 0,
-            'remarks': self.remarks_edit.toPlainText()
+            'remarks': ''
         }
 
     def get_store_visits_data(self) -> List[Dict[str, Any]]:
@@ -2285,17 +1836,7 @@ class RouteSummaryWidget(QWidget):
                         self.route_code_combo.setCurrentText(display_value)
             finally:
                 self.route_code_combo.blockSignals(False)
-        self.departure_time_edit.setText(self._format_hm(route_data.get('departure_time')))
-        self.return_time_edit.setText(self._format_hm(route_data.get('return_time')))
-        try:
-            self.toll_fee_outbound_spin.setValue(float(route_data.get('toll_fee_outbound') or 0))
-        except Exception:
-            self.toll_fee_outbound_spin.setValue(0)
-        try:
-            self.toll_fee_return_spin.setValue(float(route_data.get('toll_fee_return') or 0))
-        except Exception:
-            self.toll_fee_return_spin.setValue(0)
-        self.remarks_edit.setPlainText(route_data.get('remarks', '') or '')
+        # 出発時間・帰宅時間・経費・備考は削除されたため、読み込み処理をスキップ
         
         self.store_visits_table.blockSignals(True)
         try:

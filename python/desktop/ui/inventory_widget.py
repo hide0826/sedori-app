@@ -621,6 +621,20 @@ class InventoryWidget(QWidget):
         # テーブルをレイアウトに追加（stretch factorを0にして高さを制限、折りたたみ時に動的に変更）
         content_layout.addWidget(self.route_template_table, 0)
         
+        # 店舗評価の計算ロジック案内
+        rating_info_layout = QHBoxLayout()
+        rating_info_layout.addStretch()
+        self.rating_info_button = QPushButton("※ 店舗評価の計算ロジック")
+        self.rating_info_button.setCursor(Qt.PointingHandCursor)
+        self.rating_info_button.setFlat(True)
+        self.rating_info_button.setStyleSheet(
+            "QPushButton { color: #5aa2ff; text-decoration: underline; border: none; font-size: 10pt; }"
+            "QPushButton:hover { color: #8fc4ff; }"
+        )
+        self.rating_info_button.clicked.connect(self.show_rating_logic_popup)
+        rating_info_layout.addWidget(self.rating_info_button)
+        content_layout.addLayout(rating_info_layout)
+        
         # ルート情報の操作ボタン
         route_ops_layout = QHBoxLayout()
         self.route_clear_btn = QPushButton("クリア")
@@ -2351,6 +2365,25 @@ class InventoryWidget(QWidget):
                 self.route_clear_btn.setEnabled(False)
             if hasattr(self, 'route_delete_row_btn'):
                 self.route_delete_row_btn.setEnabled(False)
+    
+    def show_rating_logic_popup(self):
+        """店舗評価の計算ロジックを表示"""
+        detail_text = (
+            "【店舗評価の自動計算】\n\n"
+            "1. 基礎星スコア（仕入れ点数）\n"
+            "   1〜2点: ★1 / 3〜4点: ★2 / 5〜6点: ★3 / 7〜9点: ★4 / 10点以上: ★5\n\n"
+            "2. 粗利係数（想定粗利）\n"
+            "   〜5,000円:0.8 / 5,001〜10,000円:1.0 / 10,001〜20,000円:1.2 /\n"
+            "   20,001〜40,000円:1.4 / 40,001円以上:1.6\n\n"
+            "3. 最終スコア\n"
+            "   最終スコア = (基礎星スコア × 粗利係数) × (想定粗利 ÷ 滞在時間)\n"
+            "   ※滞在時間が1分未満の場合は1分として計算します。\n\n"
+            "4. 星への変換\n"
+            "   〜1.5→★1 / 1.6〜2.5→★2 / 2.6〜3.5→★3 /\n"
+            "   3.6〜4.5→★4 / 4.6以上→★5\n\n"
+            "仕入れ点数または想定粗利が未入力の場合は★0を設定します。"
+        )
+        QMessageBox.information(self, "店舗評価の計算ロジック", detail_text)
     
     def delete_selected_route_rows(self):
         """選択されたルート情報の行を削除"""

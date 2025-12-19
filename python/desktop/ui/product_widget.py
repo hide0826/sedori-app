@@ -564,7 +564,13 @@ class ProductWidget(QWidget):
         self.purchase_table = DraggableTableWidget()  # ドラッグ対応テーブルに変更
         self.purchase_table.setAlternatingRowColors(True)
         self.purchase_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.purchase_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        # 編集トリガーを設定（ダブルクリック、選択＋クリック、F2キーで編集可能）
+        # ただし、ItemIsEditableフラグが設定されているセルのみ編集可能
+        self.purchase_table.setEditTriggers(
+            QTableWidget.DoubleClicked | 
+            QTableWidget.SelectedClicked | 
+            QTableWidget.EditKeyPressed
+        )
         
         # ソート機能を有効化
         self.purchase_table.setSortingEnabled(True)
@@ -857,6 +863,11 @@ class ProductWidget(QWidget):
     # --- 仕入DB関連 ---
     def load_purchase_data(self, records: List[Dict[str, Any]]):
         """仕入DBデータを読み込み"""
+        # 起動時はスナップショットから復元されるため、DB側の最新情報（ステータス/理由など）をマージしてから表示する
+        try:
+            records = self._augment_purchase_records(records or [])
+        except Exception as e:
+            print(f"仕入DBデータのaugmentエラー: {e}")
         # マスターを保持しておき、フィルタ時はそこから再計算する
         self.purchase_all_records_master = copy.deepcopy(records)
         self.purchase_all_records = copy.deepcopy(records)
@@ -1663,17 +1674,28 @@ class ProductWidget(QWidget):
                                             t_rec["status_set_at"] = rec["status_set_at"]
                                             break
                         
-                        # データベースに保存
+                        # データベースに保存（ステータス理由も含める）
                         if sku:
                             try:
+                                # ステータス理由も取得して保存
+                                status_reason = rec.get("ステータス理由") or rec.get("status_reason") or ""
                                 purchase_data = {
                                     "sku": sku,
                                     "status": new_status,
+                                    "status_reason": status_reason,
                                     "status_set_at": rec["status_set_at"]
                                 }
                                 self.purchase_history_db.upsert(purchase_data)
+                                print(f"ステータス保存成功: SKU={sku}, status={new_status}, status_reason={status_reason}")
                             except Exception as e:
-                                print(f"ステータス保存エラー: {e}")
+                                import traceback
+                                error_msg = f"ステータス保存エラー (SKU={sku}): {e}\n{traceback.format_exc()}"
+                                print(error_msg)
+                                QMessageBox.warning(
+                                    self,
+                                    "保存エラー",
+                                    f"ステータスの保存に失敗しました。\nSKU: {sku}\nエラー: {str(e)}"
+                                )
                         
                         # 行の背景色を更新
                         self._update_row_color_by_status(r, new_status)
@@ -1688,6 +1710,14 @@ class ProductWidget(QWidget):
 
                         # フィルタを再適用（全件表示）してテーブルを再描画
                         self.filter_purchase_records()
+                        # 表示モードに応じた列の表示/非表示を確実に更新
+                        self._update_column_visibility()
+
+                        # スナップショットも保存（次回起動時にステータスがリセットされないようにする）
+                        try:
+                            self.save_purchase_snapshot()
+                        except Exception as e:
+                            print(f"スナップショット保存エラー(ステータス変更): {e}")
                     
                     status_combo.currentIndexChanged.connect(on_status_changed)
                     self.purchase_table.setCellWidget(row, col, status_combo)
@@ -1720,38 +1750,111 @@ class ProductWidget(QWidget):
         
         # ステータス理由列の編集時の処理を接続（既存の接続を解除してから接続）
         status_reason_col_idx = None
+        sku_col_idx = None
+        status_col_idx = None
         for col_idx, col_name in enumerate(columns):
             if col_name == "ステータス理由":
                 status_reason_col_idx = col_idx
-                break
+            if col_name == "SKU":
+                sku_col_idx = col_idx
+            if col_name == "ステータス":
+                status_col_idx = col_idx
+        # SKU列が無い場合は安全に終了
+        if sku_col_idx is None:
+            sku_col_idx = None
         
         if status_reason_col_idx is not None:
             # 既存のitemChangedシグナル接続を解除（重複接続を防ぐ）
+            # 注意: disconnect()を引数なしで呼ぶと、接続がない場合にRuntimeWarningが出るが、
+            # 動作には影響しないため、例外をキャッチして無視する
             try:
                 self.purchase_table.itemChanged.disconnect()
-            except TypeError:
-                pass  # 接続がない場合はエラーにならない
+            except (TypeError, RuntimeError, AttributeError):
+                # 接続がない場合や切断に失敗した場合はエラーを無視
+                pass
             
             # itemChangedシグナルを接続（編集時に自動保存）
             def on_item_changed(item_changed):
                 if item_changed.column() == status_reason_col_idx:
                     row = item_changed.row()
+                    if row < 0:
+                        return
+
+                    new_reason = item_changed.text()
+
+                    # ソート有効時は records[row] が別レコードになるため、テーブル上のSKUで特定する
+                    sku_val = None
+                    if sku_col_idx is not None:
+                        sku_item = self.purchase_table.item(row, sku_col_idx)
+                        if sku_item:
+                            sku_val = (sku_item.text() or "").strip()
+                    if not sku_val:
+                        # フォールバック：recordsから取る（ソートしていない前提）
+                        if 0 <= row < len(records):
+                            sku_val = (records[row].get("SKU") or records[row].get("sku") or "").strip()
+                    if not sku_val:
+                        return
+
+                    # まず表示用records（この描画に渡ってきたリスト）にも反映（見た目が戻らないように）
                     if 0 <= row < len(records):
-                        record = records[row]
-                        new_reason = item_changed.text()
-                        record["ステータス理由"] = new_reason
-                        record["status_reason"] = new_reason
-                        # データベースに保存
-                        sku = record.get("SKU") or record.get("sku")
-                        if sku:
-                            try:
-                                purchase_data = {
-                                    "sku": sku,
-                                    "status_reason": new_reason
-                                }
-                                self.purchase_history_db.upsert(purchase_data)
-                            except Exception as e:
-                                print(f"ステータス理由保存エラー: {e}")
+                        records[row]["ステータス理由"] = new_reason
+                        records[row]["status_reason"] = new_reason
+
+                    # purchase_all_records / master / purchase_records へ反映（再描画・再起動で消えないようにする）
+                    for target_list in ["purchase_all_records", "purchase_all_records_master", "purchase_records"]:
+                        lst = getattr(self, target_list, None)
+                        if not lst:
+                            continue
+                        for t_rec in lst:
+                            t_sku = (t_rec.get("SKU") or t_rec.get("sku") or "")
+                            if str(t_sku).strip() == sku_val:
+                                t_rec["ステータス理由"] = new_reason
+                                t_rec["status_reason"] = new_reason
+                                break
+
+                    # 現在のステータスもテーブルから取得（可能なら）
+                    current_status = None
+                    if status_col_idx is not None:
+                        w = self.purchase_table.cellWidget(row, status_col_idx)
+                        if isinstance(w, QComboBox):
+                            current_status = w.currentData()
+                    if not current_status:
+                        # フォールバック：マスターから取得
+                        current_status = "ready"
+                        for lst_name in ["purchase_all_records_master", "purchase_all_records"]:
+                            lst = getattr(self, lst_name, None)
+                            if not lst:
+                                continue
+                            for t_rec in lst:
+                                t_sku = (t_rec.get("SKU") or t_rec.get("sku") or "")
+                                if str(t_sku).strip() == sku_val:
+                                    current_status = t_rec.get("ステータス") or t_rec.get("status") or "ready"
+                                    break
+
+                    # データベースに保存（ステータスも一緒に保存）
+                    try:
+                        purchase_data = {
+                            "sku": sku_val,
+                            "status": current_status,
+                            "status_reason": new_reason
+                        }
+                        self.purchase_history_db.upsert(purchase_data)
+                        print(f"ステータス理由保存成功: SKU={sku_val}, status={current_status}, status_reason={new_reason}")
+                    except Exception as e:
+                        import traceback
+                        error_msg = f"ステータス理由保存エラー (SKU={sku_val}): {e}\n{traceback.format_exc()}"
+                        print(error_msg)
+                        QMessageBox.warning(
+                            self,
+                            "保存エラー",
+                            f"ステータス理由の保存に失敗しました。\nSKU: {sku_val}\nエラー: {str(e)}"
+                        )
+
+                    # スナップショットも保存（次回起動時に理由が消えないようにする）
+                    try:
+                        self.save_purchase_snapshot()
+                    except Exception as e:
+                        print(f"スナップショット保存エラー(ステータス理由変更): {e}")
             
             self.purchase_table.itemChanged.connect(on_item_changed)
         
@@ -1768,13 +1871,11 @@ class ProductWidget(QWidget):
             # 仕入れ日列で降順ソート
             self.purchase_table.sortItems(purchase_date_col_idx, Qt.DescendingOrder)
         
-        # 表示モードに応じた列の表示/非表示を設定
-        if hasattr(self, 'purchase_view_mode'):
-            self._update_column_visibility()
-        else:
+        # 表示モードに応じた列の表示/非表示を設定（必ず実行）
+        if not hasattr(self, 'purchase_view_mode'):
             # デフォルトで全表示
             self.purchase_view_mode = "all"
-            self._update_column_visibility()
+        self._update_column_visibility()
 
         # 再描画のためソートを有効化し、シグナルを戻す
         self.purchase_table.setSortingEnabled(True)
@@ -1892,12 +1993,21 @@ class ProductWidget(QWidget):
             QApplication.clipboard().setText(asin)
 
     def on_purchase_table_cell_clicked(self, row: int, col: int):
-        """仕入DBテーブルのセルクリック時の処理（レシート画像をクリックしたときに画像を表示）"""
+        """仕入DBテーブルのセルクリック時の処理（レシート画像をクリックしたときに画像を表示、ステータス理由をクリックしたときに編集モードに入る）"""
         header = self.purchase_table.horizontalHeaderItem(col)
         if not header:
             return
         
         header_text = header.text()
+        
+        # ステータス理由列をクリックしたときに編集モードに入る
+        if header_text == "ステータス理由":
+            item = self.purchase_table.item(row, col)
+            if item and (item.flags() & Qt.ItemIsEditable):
+                # 編集モードに入る（少し遅延を入れて確実に編集モードに入るようにする）
+                QApplication.processEvents()
+                self.purchase_table.editItem(item)
+            return
         if header_text == "レシート画像":
             item = self.purchase_table.item(row, col)
             if not item:

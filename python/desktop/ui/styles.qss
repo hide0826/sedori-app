@@ -403,7 +403,7 @@ QCheckBox::indicator:checked {
 }
 
 QCheckBox::indicator:checked:after {
-    content: "✓";
+    /* contentプロパティはQtのスタイルシートではサポートされていません */
     color: #ffffff;
     font-weight: bold;
 }

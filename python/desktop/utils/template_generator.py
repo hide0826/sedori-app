@@ -19,7 +19,7 @@ class TemplateGenerator:
     """ルートサマリーテンプレート生成クラス"""
     
     @staticmethod
-    def generate_csv_template(output_path: str, route_code: Optional[str] = None, store_codes: Optional[List[str]] = None) -> bool:
+    def generate_csv_template(output_path: str, route_code: Optional[str] = None, store_codes: Optional[List[str]] = None, route_date: Optional[datetime.date] = None) -> bool:
         """
         CSV形式のルートサマリーテンプレートを生成
         
@@ -27,11 +27,15 @@ class TemplateGenerator:
             output_path: 出力ファイルパス
             route_code: ルートコード（任意）
             store_codes: 店舗コードリスト（任意）
+            route_date: ルート日付（任意、指定されない場合は今日の日付を使用）
         
         Returns:
             生成成功時True
         """
         try:
+            # ルート日付を取得（指定されていない場合は今日の日付）
+            route_date_str = route_date.strftime('%Y-%m-%d') if route_date else datetime.now().strftime('%Y-%m-%d')
+            
             # ルート情報セクションのデータ
             route_data = {
                 '項目': [
@@ -47,7 +51,7 @@ class TemplateGenerator:
                     '備考（天候等）'
                 ],
                 '値': [
-                    datetime.now().strftime('%Y-%m-%d'),
+                    route_date_str,
                     route_code or '',
                     '',
                     '',
@@ -149,11 +153,14 @@ class TemplateGenerator:
             return True
             
         except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
             print(f"CSVテンプレート生成エラー: {e}")
+            print(f"エラー詳細:\n{error_detail}")
             return False
     
     @staticmethod
-    def generate_excel_template(output_path: str, route_code: Optional[str] = None, store_codes: Optional[List[str]] = None, stores_data: Optional[List[Dict[str, Any]]] = None) -> bool:
+    def generate_excel_template(output_path: str, route_code: Optional[str] = None, store_codes: Optional[List[str]] = None, stores_data: Optional[List[Dict[str, Any]]] = None, route_date: Optional[datetime.date] = None) -> bool:
         """
         Excel形式のルートサマリーテンプレートを生成
         
@@ -162,6 +169,7 @@ class TemplateGenerator:
             route_code: ルートコード（任意）
             store_codes: 店舗コードリスト（任意）
             stores_data: 店舗データリスト（店舗名等を含む）
+            route_date: ルート日付（任意、指定されない場合は今日の日付を使用）
         
         Returns:
             生成成功時True
@@ -199,7 +207,8 @@ class TemplateGenerator:
             route_date_cell.alignment = Alignment(horizontal='left', vertical='center')
             
             date_value_cell = visit_sheet.cell(row=1, column=2)
-            date_value_cell.value = datetime.now().date()
+            # ルート日付が指定されている場合はそれを使用、そうでない場合は今日の日付を使用
+            date_value_cell.value = route_date if route_date else datetime.now().date()
             date_value_cell.border = border
             date_value_cell.number_format = 'yyyy/mm/dd'  # 日付形式
             
@@ -327,6 +336,9 @@ class TemplateGenerator:
             return True
             
         except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
             print(f"Excelテンプレート生成エラー: {e}")
+            print(f"エラー詳細:\n{error_detail}")
             return False
 
