@@ -6,6 +6,35 @@ import re
 from core.config import CONFIG_PATH
 from core.csv_utils import normalize_dataframe_for_cp932
 
+# アクション名の日本語マッピング
+ACTION_NAMES_JP = {
+    "maintain": "維持",
+    "priceTrace": "Trace変更",
+    "price_down_1": "1%値下げ",
+    "price_down_2": "2%値下げ",
+    "profit_ignore_down": "1%値下げ(ガード無視)",
+    "price_down_ignore": "1%値下げ(利益無視)",  # 設定ファイルで使用される名前
+    "exclude": "除外",
+}
+
+# Trace値の日本語マッピング
+TRACE_VALUE_NAMES_JP = {
+    0: "維持",
+    1: "FBA状態合わせ",
+    2: "状態合わせ",
+    3: "FBA最安値",
+    4: "最安値",
+    5: "カート価格",
+}
+
+def format_trace_value(trace_value):
+    """Trace値を日本語に変換"""
+    try:
+        trace_int = int(float(trace_value)) if trace_value is not None else 0
+        return TRACE_VALUE_NAMES_JP.get(trace_int, str(trace_value))
+    except (ValueError, TypeError):
+        return str(trace_value) if trace_value is not None else "維持"
+
 def preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     DataFrameの前処理: Excel数式記法の完全除去
@@ -88,8 +117,12 @@ def get_days_since_listed(sku: str, today: datetime) -> int:
     patterns = [
         # 2024_08_28 or 2024_0828
         r"^(?P<year>\d{4})_(?P<month>\d{2})_?(?P<day>\d{2})",
-        # 20250201-...
+        # 20250201-... (ハイフン区切り)
         r"^(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})-",
+        # 20251108B... (YYYYMMDD + アルファベットで始まる文字列)
+        r"^(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})(?=[A-Za-z])",
+        # hmk-20251108-... (プレフィックス-YYYYMMDD-形式)
+        r"^[a-z]+-(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})-",
         # pr_..._20250217_...
         r"_(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})_",
         # 250518-... (YYMMDD形式)
@@ -140,7 +173,8 @@ def calculate_new_price_and_trace(price: float, akaji: float, rule: Dict[str, An
     6. exclude: 対象外（変更なし）
     """
     action = rule["action"]
-    reason = f"Rule for {days_since_listed} days ({action})"
+    action_jp = ACTION_NAMES_JP.get(action, action)
+    reason = f"{days_since_listed}日経過: {action_jp}"
 
     # 計算前にfloatに変換
     price = float(price)
@@ -165,7 +199,7 @@ def calculate_new_price_and_trace(price: float, akaji: float, rule: Dict[str, An
         guard_price = config.get("profit_guard_percentage", 1.1)
         if new_price < guard_price:
             new_price = round(guard_price)
-            reason += " (Profit Guard Applied)"
+            reason += "（利益ガード適用）"
 
     elif action == "price_down_2":
         # 価格のみ2%値下げ、priceTraceは変更なし
@@ -173,16 +207,21 @@ def calculate_new_price_and_trace(price: float, akaji: float, rule: Dict[str, An
         guard_price = config.get("profit_guard_percentage", 1.1)
         if new_price < guard_price:
             new_price = round(guard_price)
-            reason += " (Profit Guard Applied)"
+            reason += "（利益ガード適用）"
 
     elif action == "profit_ignore_down":
         # 価格のみ1%値下げ（利益率ガード無視）、priceTraceは変更なし
         new_price = round(price * 0.99)
-        reason += " (Profit Guard Ignored)"
+        reason += "（利益ガード無視）"
+
+    elif action == "price_down_ignore":
+        # 価格のみ1%値下げ（利益率ガード無視）、priceTraceは変更なし
+        # 設定ファイルで使用される名前（profit_ignore_downと同じ処理）
+        new_price = round(price * 0.99)
 
     elif action == "exclude":
         # 対象外、変更なし
-        reason = f"Excluded: {days_since_listed} days (manual handling required)"
+        reason = f"{days_since_listed}日経過: 除外（要手動対応）"
 
     return action, reason, new_price, new_price_trace
 
@@ -214,10 +253,11 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
             asin = row.get("ASIN", "")
             title = row.get("title", "")
             log_data.append({
-                "sku": sku, "asin": asin, "title": title, "days": -1, "action": "exclude",
-                "reason": "Excluded SKU", "price": price,
+                "sku": sku, "asin": asin, "title": title, "days": -1, "action": "除外",
+                "reason": "除外SKU（設定で除外指定）", "price": price,
                 "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace,
-                "priceTraceChange": 0
+                "priceTraceChange": 0,
+                "priceTraceChangeDisplay": "無し"  # Traceを行わない
             })
             excluded_inventory_data.append(row.to_dict())
             continue
@@ -229,10 +269,11 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
             asin = row.get("ASIN", "")
             title = row.get("title", "")
             log_data.append({
-                "sku": sku, "asin": asin, "title": title, "days": days_since_listed, "action": "maintain",
-                "reason": "Date unknown (maintained)", "price": price,
+                "sku": sku, "asin": asin, "title": title, "days": days_since_listed, "action": "維持",
+                "reason": "日付不明（維持）", "price": price,
                 "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace,
-                "priceTraceChange": 0
+                "priceTraceChange": 0,
+                "priceTraceChangeDisplay": "無し"  # Traceを行わない
             })
             row_dict = row.to_dict()
             updated_inventory_data.append(row_dict)
@@ -243,10 +284,11 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
             asin = row.get("ASIN", "")
             title = row.get("title", "")
             log_data.append({
-                "sku": sku, "asin": asin, "title": title, "days": days_since_listed, "action": "exclude",
-                "reason": "Over 365 days (manual handling required)", "price": price,
+                "sku": sku, "asin": asin, "title": title, "days": days_since_listed, "action": "除外",
+                "reason": f"{days_since_listed}日経過: 365日超過（要手動対応）", "price": price,
                 "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace,
-                "priceTraceChange": 0
+                "priceTraceChange": 0,
+                "priceTraceChangeDisplay": "無し"  # Traceを行わない
             })
             excluded_inventory_data.append(row.to_dict())
             continue
@@ -261,19 +303,43 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
         asin = row.get("ASIN", "")
         title = row.get("title", "")
         
-        # priceTraceChangeの計算（変更があった場合のみ）
-        # priceTraceアクションの場合、new_price_traceがprice_traceと異なる場合は変更あり
-        price_trace_change = new_price_trace if action == "priceTrace" and new_price_trace != price_trace else 0
+        # priceTraceChangeの計算と表示文字列の決定
+        # priceTraceアクションの場合:
+        #   - new_price_trace != price_trace: 変更値（日本語表記）
+        #   - new_price_trace == price_trace: "元のTrace値維持"（例: "FBA状態合わせ維持"）
+        # priceTraceアクション以外: "無し"（文字列）
+        if action == "priceTrace":
+            if new_price_trace != price_trace:
+                # Traceを変更する場合
+                price_trace_change = new_price_trace
+                price_trace_change_display = format_trace_value(new_price_trace)  # 数値を日本語に変換
+            else:
+                # Traceを維持する場合（元のTrace値を日本語に変換して表示）
+                price_trace_change = price_trace  # 数値として保持（後方互換性のため）
+                trace_name = format_trace_value(price_trace)  # 元のTrace値を日本語に変換
+                price_trace_change_display = f"{trace_name}維持"  # 例: "FBA状態合わせ維持"
+        else:
+            # Traceを行わない場合
+            price_trace_change = 0  # 数値として保持（後方互換性のため）
+            price_trace_change_display = "無し"  # 表示用文字列
         
         # デバッグ出力
         if action == "priceTrace":
-            print(f"[DEBUG priceTrace] SKU: {sku}, action: {action}, price_trace: {price_trace}, new_price_trace: {new_price_trace}, price_trace_change: {price_trace_change}")
+            print(f"[DEBUG priceTrace] SKU: {sku}, action: {action}, price_trace: {price_trace}, new_price_trace: {new_price_trace}, price_trace_change: {price_trace_change}, display: {price_trace_change_display}")
+        
+        # アクション名を日本語に変換
+        action_jp = ACTION_NAMES_JP.get(action, action)
+        
+        # 利益無視（price_down_ignore）の場合はakajiを空白にする（akajiストッパー回避のため）
+        akaji_value = "" if action == "price_down_ignore" else None  # Noneの場合は元の値を保持
         
         log_data.append({
             "sku": sku, "asin": asin, "title": title, "days": days_since_listed, 
-            "action": action, "reason": reason, "price": price, "new_price": new_price,
+            "action": action_jp, "reason": reason, "price": price, "new_price": new_price,
             "priceTrace": price_trace, "new_priceTrace": new_price_trace,
-            "priceTraceChange": price_trace_change  # フロント表示用のフィールドを追加
+            "priceTraceChange": price_trace_change,  # 数値（後方互換性のため）
+            "priceTraceChangeDisplay": price_trace_change_display,  # 表示用文字列
+            "akaji": akaji_value  # price_down_ignoreの場合は空白、それ以外はNone（元の値を保持）
         })
 
         # Prister形式の全列を保持したまま価格とpriceTraceのみ更新
@@ -284,6 +350,11 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
             # 価格とpriceTraceの更新（Prister形式の16列すべてを保持）
             row_dict['price'] = new_price
             row_dict['priceTrace'] = new_price_trace
+            
+            # 利益無視（price_down_ignore）の場合はakajiを空白にする（akajiストッパー回避のため）
+            if action == "price_down_ignore":
+                row_dict['akaji'] = ""  # 空白に設定
+            
             updated_inventory_data.append(row_dict)
 
     log_df = pd.DataFrame(log_data)

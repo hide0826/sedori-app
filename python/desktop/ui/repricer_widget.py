@@ -272,6 +272,10 @@ class RepricerWidget(QWidget):
                     self.preview_btn.setEnabled(True)
                     self.execute_btn.setEnabled(True)
                     
+                    # 選択したファイルのディレクトリを保存（次回同じフォルダから開く）
+                    selected_dir = str(Path(file_path).parent)
+                    self.settings.setValue("directories/csv", selected_dir)
+                    
                     # ファイル選択完了後、自動的にCSVプレビューを表示
                     QTimer.singleShot(100, self.show_csv_preview)
                     
@@ -405,14 +409,8 @@ class RepricerWidget(QWidget):
                     title_column = j
                     break
             
-            # title列が見つかった場合、その列にスクロール
+            # title列が見つかった場合、その列をハイライト
             if title_column >= 0:
-                # 水平スクロールでtitle列を表示
-                self.preview_table.scrollToItem(
-                    self.preview_table.item(current_row, title_column),
-                    QTableWidget.PositionAtCenter
-                )
-                
                 # title列のセルをハイライト
                 for j in range(self.preview_table.columnCount()):
                     item = self.preview_table.item(current_row, j)
@@ -446,14 +444,8 @@ class RepricerWidget(QWidget):
                     title_column = j
                     break
             
-            # Title列が見つかった場合、その列にスクロール
+            # Title列が見つかった場合、その列をハイライト
             if title_column >= 0:
-                # 水平スクロールでTitle列を表示
-                self.result_table.scrollToItem(
-                    self.result_table.item(current_row, title_column),
-                    QTableWidget.PositionAtCenter
-                )
-                
                 # Title列のセルをハイライト
                 for j in range(self.result_table.columnCount()):
                     item = self.result_table.item(current_row, j)
@@ -616,22 +608,30 @@ class RepricerWidget(QWidget):
             reason = str(item.get('reason', ''))
             price = float(item.get('price', 0)) if item.get('price') is not None else 0
             new_price = float(item.get('new_price', 0)) if item.get('new_price') is not None else 0
-            # priceTraceChangeの安全な型変換
-            price_trace_change = 0
-            try:
-                trace_value = item.get('priceTraceChange', item.get('price_trace_change', 0))
-                if trace_value is not None and str(trace_value).strip():
-                    # 数値文字列の場合のみfloat変換
-                    if str(trace_value).replace('.', '').replace('-', '').isdigit():
-                        price_trace_change = float(trace_value)
-                    else:
-                        # 文字列の場合は0として扱う
-                        price_trace_change = 0
-            except (ValueError, TypeError):
-                price_trace_change = 0
+            # priceTraceChangeDisplayを優先的に使用（表示用文字列）
+            trace_change_text = item.get('priceTraceChangeDisplay', None)
             
-            # Trace変更の日本語化
-            trace_change_text = self._format_trace_change(price_trace_change)
+            # priceTraceChangeDisplayがない場合は、従来の処理でフォールバック
+            if trace_change_text is None:
+                # priceTraceChangeの安全な型変換
+                price_trace_change = 0
+                try:
+                    trace_value = item.get('priceTraceChange', item.get('price_trace_change', 0))
+                    if trace_value is not None and str(trace_value).strip():
+                        # 数値文字列の場合のみfloat変換
+                        if str(trace_value).replace('.', '').replace('-', '').isdigit():
+                            price_trace_change = float(trace_value)
+                        else:
+                            # 文字列の場合は0として扱う
+                            price_trace_change = 0
+                except (ValueError, TypeError):
+                    price_trace_change = 0
+                
+                # Trace変更の日本語化
+                trace_change_text = self._format_trace_change(price_trace_change)
+            
+            # 文字列に変換（Noneの場合は空文字列）
+            trace_change_text = str(trace_change_text) if trace_change_text is not None else ""
             
             # Excel数式記法のクリーンアップ
             self.result_table.setItem(i, 0, QTableWidgetItem(self.clean_excel_formula(str(sku))))
@@ -664,22 +664,37 @@ class RepricerWidget(QWidget):
             
             self.result_table.setItem(i, 8, QTableWidgetItem(trace_change_text))
             
-            # 価格変更に応じて色分け（型変換を追加）
-            try:
-                price_float = float(price) if price else 0
-                new_price_float = float(new_price) if new_price else 0
-                
-                if new_price_float > price_float:
-                    # 価格上昇：緑色
-                    for j in range(9):
-                        self.result_table.item(i, j).setBackground(QColor(200, 255, 200))
-                elif new_price_float < price_float:
-                    # 価格下降：赤色
-                    for j in range(9):
-                        self.result_table.item(i, j).setBackground(QColor(255, 200, 200))
-            except (ValueError, TypeError):
-                # 型変換に失敗した場合は色分けをスキップ
-                pass
+            # 日付不明の行を識別（daysが-1、または理由に「日付不明」が含まれる）
+            is_date_unknown = (days == -1) or ("日付不明" in reason)
+            
+            # 日付不明の場合は灰色で表示
+            if is_date_unknown:
+                for j in range(9):
+                    item = self.result_table.item(i, j)
+                    if item:
+                        item.setBackground(QColor(150, 150, 150))  # グレー背景
+                        item.setForeground(QColor(255, 255, 255))  # 白文字
+            else:
+                # 価格変更に応じて色分け（型変換を追加）
+                try:
+                    price_float = float(price) if price else 0
+                    new_price_float = float(new_price) if new_price else 0
+                    
+                    if new_price_float > price_float:
+                        # 価格上昇：緑色
+                        for j in range(9):
+                            item = self.result_table.item(i, j)
+                            if item:
+                                item.setBackground(QColor(200, 255, 200))
+                    elif new_price_float < price_float:
+                        # 価格下降：赤色
+                        for j in range(9):
+                            item = self.result_table.item(i, j)
+                            if item:
+                                item.setBackground(QColor(255, 200, 200))
+                except (ValueError, TypeError):
+                    # 型変換に失敗した場合は色分けをスキップ
+                    pass
         
         # データ投入完了後、ソート機能を再有効化
         self.result_table.setSortingEnabled(True)
@@ -733,35 +748,30 @@ class RepricerWidget(QWidget):
             QMessageBox.warning(self, "エラー", "保存する結果がありません")
             return
             
-        # 設定からデフォルトディレクトリを取得（結果保存用）
-        default_dir = self.settings.value("directories/result", "")
+        # CSVファイル選択で指定したフォルダをデフォルトディレクトリとして使用
+        default_dir = self.settings.value("directories/csv", "")
+        if not default_dir and self.csv_path:
+            # CSVファイルパスが設定されている場合はそのディレクトリを使用
+            default_dir = str(Path(self.csv_path).parent)
+        
         default_filename = "repricing_result.csv"
         
-        # 自動リネーム機能付きでファイルパスを生成
-        file_path = self._get_unique_file_path(default_dir, default_filename)
+        # デフォルトディレクトリがある場合は、自動リネーム機能付きでファイルパスを生成
+        if default_dir:
+            default_path = self._get_unique_file_path(default_dir, default_filename)
+        else:
+            default_path = default_filename
         
-        # ユーザーに確認（手動選択のオプション付き）
-        if file_path:
-            reply = QMessageBox.question(
-                self,
-                "ファイル保存確認",
-                f"以下のファイル名で保存しますか？\n{file_path}\n\n「いいえ」を選択すると手動でファイル名を指定できます。",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes
-            )
-            
-            if reply == QMessageBox.No:
-                # 手動でファイル名を選択
-                manual_path, _ = QFileDialog.getSaveFileName(
-                    self,
-                    "結果をCSV保存（手動選択）",
-                    file_path,
-                    "CSVファイル (*.csv)"
-                )
-                if manual_path:
-                    file_path = manual_path
-                else:
-                    return
+        # 直接ファイル保存ダイアログを表示（確認ダイアログなし）
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "結果をCSV保存",
+            default_path,  # デフォルトパスを指定（CSVファイル選択時のフォルダ）
+            "CSVファイル (*.csv)"
+        )
+        
+        if not file_path:
+            return  # キャンセルされた場合
         
         if file_path:
             try:
@@ -816,9 +826,13 @@ class RepricerWidget(QWidget):
             except (ValueError, TypeError):
                 price_trace = 0
             
+            # akajiの情報を取得（price_down_ignoreの場合は空白）
+            akaji_value = item.get('akaji', None)
+            
             repricing_dict[sku] = {
                 'new_price': new_price,
-                'price_trace': price_trace
+                'price_trace': price_trace,
+                'akaji': akaji_value  # Noneの場合は元の値を保持、空文字の場合は空白に設定
             }
         
         # 元ファイルのデータをコピーして、該当する行のみpriceとpriceTraceを更新
@@ -835,6 +849,7 @@ class RepricerWidget(QWidget):
             if sku in repricing_dict:
                 new_price = repricing_dict[sku]['new_price']
                 new_price_trace = repricing_dict[sku]['price_trace']
+                akaji_value = repricing_dict[sku].get('akaji', None)
                 
                 # 価格とpriceTraceの両方が変更されていない場合はスキップ（CSVに保存しない）
                 if new_price == original_price and new_price_trace == original_price_trace:
@@ -846,6 +861,9 @@ class RepricerWidget(QWidget):
                 row_data['priceTrace'] = new_price_trace
                 # conditionNoteは空にする
                 row_data['conditionNote'] = ""
+                # 利益無視（price_down_ignore）の場合はakajiを空白にする
+                if akaji_value is not None:
+                    row_data['akaji'] = akaji_value  # 空文字の場合は空白に設定
                 data.append(row_data)
             else:
                 # 対象外の場合は元のデータをそのまま使用
@@ -953,8 +971,7 @@ class RepricerWidget(QWidget):
                     # エラーが発生した列の文字を安全な文字に置換
                     df[col] = df[col].astype(str).str.encode('shift_jis', errors='replace').str.decode('shift_jis')
             
-            # 再試行（連番解決後のパスで）
-            target = resolve_unique_path(Path(file_path))
+            # 再試行（同じtargetパスを使用、resolve_unique_pathは呼ばない）
             df.to_csv(str(target), index=False, encoding='shift_jis', quoting=0)
         
         return str(target)
