@@ -2727,9 +2727,11 @@ class ReceiptWidget(QWidget):
         new_row = self.warranty_table.rowCount()
         self.warranty_table.insertRow(new_row)
         
-        # ID列: 元のreceipt_idをコピー（同じ保証書なので）
-        if receipt_id:
-            self.warranty_table.setItem(new_row, 0, QTableWidgetItem(str(receipt_id)))
+        # ID列:
+        # 「商品の追加」は“同じ保証書画像に紐づく別商品の行”を作る用途なので、
+        # ここでは元のreceipt_idをコピーしない（コピーするとDB保存がスキップされ、再起動で消える）。
+        # 空IDにしておき、最後にsave_warranty_row_to_db()で新しいreceiptレコードを作成してIDを採番する。
+        self.warranty_table.setItem(new_row, 0, QTableWidgetItem(""))
         
         # 種別（列1）
         doc_type_item = self.warranty_table.item(source_row, 1)
@@ -2907,17 +2909,16 @@ class ReceiptWidget(QWidget):
             if not id_item:
                 return
             
-            # 既存のreceipt_idがある場合は、新しいレシートレコードを作成しない（既存のレシートに紐付け）
+            # 既存のreceipt_idがある場合は、基本的に新規作成しない（既存行の再保存を避ける）
             receipt_id = None
             try:
                 receipt_id = int(id_item.text())
             except ValueError:
                 pass
             
-            # 新しいレシートレコードを作成する必要があるかどうかを判定
-            # 既存のreceipt_idがある場合は、新しいレシートレコードを作成しない
+            # receipt_idが既に入っている行はここでは新規作成しない
+            # （SKU/商品名/保証期間などの編集は別ロジックでupdate_receiptされる）
             if receipt_id:
-                # 既存のレシートに紐付けられている場合は、新しいレシートレコードを作成しない
                 return
             
             # テーブルからデータを取得
@@ -2937,11 +2938,22 @@ class ReceiptWidget(QWidget):
             
             # 画像ファイル名を取得
             image_file_name = image_item.text() if image_item else ""
+
+            # file_path/original_file_path は可能なら既存レコードから実パスを引き継ぐ（ファイル名だけだと起動後に画像が開けない）
+            resolved_file_path = image_file_name
+            resolved_original_file_path = image_file_name
+            try:
+                existing_by_name = self.receipt_db.find_by_file_name(image_file_name)
+                if existing_by_name:
+                    resolved_file_path = existing_by_name.get("file_path") or resolved_file_path
+                    resolved_original_file_path = existing_by_name.get("original_file_path") or resolved_original_file_path
+            except Exception:
+                pass
             
             # 新しいレシートレコードを作成
             receipt_data = {
-                "file_path": image_file_name,
-                "original_file_path": image_file_name,
+                "file_path": resolved_file_path,
+                "original_file_path": resolved_original_file_path,
                 "purchase_date": date_item.text() if date_item else "",
                 "store_name_raw": store_name_item.text() if store_name_item else "",
                 "phone_number": phone_item.text() if phone_item else "",
@@ -3214,61 +3226,33 @@ class ReceiptWidget(QWidget):
         self.warranty_table.setCellWidget(row, 8, combo)
 
     def load_receipt(self, item: QTableWidgetItem):
-        """レシートを読み込み"""
+        """レシートを読み込み（レシート情報編集ダイアログを表示）"""
         row = item.row()
-        receipt_id = int(self.receipt_table.item(row, 0).text())
+        
+        # ID列からreceipt_idを取得
+        id_item = self.receipt_table.item(row, 0)
+        if not id_item:
+            return
+        
+        try:
+            receipt_id = int(id_item.text())
+        except (ValueError, TypeError):
+            return
+        
+        # レシートデータを取得
         receipt = self.receipt_db.get_receipt(receipt_id)
-        if receipt:
-            self.current_receipt_id = receipt_id
-            self.current_receipt_data = dict(receipt)
-            
-            purchase_date = receipt.get('purchase_date')
-            if purchase_date:
-                try:
-                    # 新形式（yyyy/MM/dd）と旧形式（yyyy-MM-dd）の両方に対応
-                    date = QDate.fromString(purchase_date, "yyyy/MM/dd")
-                    if not date.isValid():
-                        date = QDate.fromString(str(purchase_date).replace("/", "-"), "yyyy-MM-dd")
-                    if date.isValid():
-                        if hasattr(self, 'date_edit'):
-                            self.date_edit.setDate(date)
-                except Exception:
-                    pass
-            
-            # 時刻を表示
-            purchase_time = receipt.get('purchase_time')
-            if hasattr(self, 'time_edit'):
-                self.time_edit.setText(purchase_time or "")
-            
-            if hasattr(self, 'store_name_edit'):
-                self.store_name_edit.setText(receipt.get('store_name_raw') or "")
-            if hasattr(self, 'phone_edit'):
-                self.phone_edit.setText(receipt.get('phone_number') or "")
-            if hasattr(self, 'total_edit'):
-                self.total_edit.setText(str(receipt.get('total_amount') or ""))
-            if hasattr(self, 'discount_edit'):
-                self.discount_edit.setText(str(receipt.get('discount_amount') or ""))
-            items_count = receipt.get('items_count')
-            
-            # レジ袋金額を表示
-            plastic_bag_amount = receipt.get('plastic_bag_amount')
-            if hasattr(self, 'plastic_bag_edit'):
-                self.plastic_bag_edit.setText(str(plastic_bag_amount) if plastic_bag_amount is not None else "")
-            
-            self.load_store_codes()
-            if hasattr(self, 'store_code_combo') and receipt.get('store_code'):
-                idx = self.store_code_combo.findData(receipt.get('store_code'))
-                if idx >= 0:
-                    self.store_code_combo.setCurrentIndex(idx)
-            
-            # 仕入DBから自動検索・入力（店舗コードが未設定の場合）
-            if not receipt.get('store_code'):
-                self.search_from_purchase_db()
-            
-            if hasattr(self, 'match_btn'):
-                self.match_btn.setEnabled(True)
-            if hasattr(self, 'view_image_btn'):
-                self.view_image_btn.setEnabled(True)
+        if not receipt:
+            QMessageBox.warning(self, "警告", "レシートデータが見つかりません。")
+            return
+        
+        # 画像ファイルパスを取得
+        image_path = receipt.get('file_path') or receipt.get('original_file_path')
+        if not image_path:
+            QMessageBox.warning(self, "警告", "画像ファイルパスが見つかりません。")
+            return
+        
+        # レシート情報編集ダイアログを表示
+        self._show_image_popup(image_path, receipt_id)
     
     def view_receipt_image(self):
         """レシート画像を別画面で表示"""

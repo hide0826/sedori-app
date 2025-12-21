@@ -846,6 +846,418 @@ class RouteSummaryWidget(QWidget):
         except Exception as e:
             print(f"訪問順序保存エラー: {e}")
     
+    def load_template(self) -> Optional[str]:
+        """
+        テンプレートファイルを読み込む
+        
+        Returns:
+            読み込んだファイルパス（キャンセル時はNone）
+        """
+        try:
+            # 前回選択したフォルダを取得
+            last_path = self.settings.value("route_template/last_selected", "")
+            default_dir = os.path.dirname(last_path) if last_path and os.path.exists(last_path) else ""
+            
+            # ファイル選択ダイアログ
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "ルートテンプレートファイルを選択",
+                default_dir,
+                "Excelファイル (*.xlsx *.xls);;CSVファイル (*.csv);;すべてのファイル (*)"
+            )
+            
+            if not file_path:
+                return None
+            
+            # ファイル拡張子で処理を分岐
+            file_ext = os.path.splitext(file_path)[1].lower()
+            
+            if file_ext in ['.xlsx', '.xls']:
+                # Excelファイルの読み込み
+                self._load_excel_template(file_path)
+            elif file_ext == '.csv':
+                # CSVファイルの読み込み
+                self._load_csv_template(file_path)
+            else:
+                QMessageBox.warning(self, "警告", "サポートされていないファイル形式です。")
+                return None
+            
+            # 読み込み成功時はパスを保存
+            self.last_loaded_template_path = file_path
+            self.settings.setValue("route_template/last_selected", file_path)
+            
+            # 計算結果を更新
+            getattr(self, 'update_calculation_results', lambda: None)()
+            
+            return file_path
+            
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"テンプレートの読み込みに失敗しました:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _load_excel_template(self, file_path: str):
+        """Excelテンプレートファイルを読み込む"""
+        try:
+            import openpyxl
+            
+            wb = openpyxl.load_workbook(file_path, data_only=True)
+            
+            # 店舗訪問詳細シートを探す
+            visit_sheet = None
+            for sheet_name in wb.sheetnames:
+                if '店舗訪問詳細' in sheet_name or '訪問' in sheet_name:
+                    visit_sheet = wb[sheet_name]
+                    break
+            
+            if not visit_sheet:
+                # デフォルトで最初のシートを使用
+                visit_sheet = wb.active
+            
+            # ルート日付とルートコードを取得（1-2行目）
+            route_date = None
+            route_code = None
+            
+            # 1行目: 日付
+            date_label = visit_sheet.cell(row=1, column=1).value
+            if date_label and ('日付' in str(date_label) or 'date' in str(date_label).lower()):
+                date_value = visit_sheet.cell(row=1, column=2).value
+                if date_value:
+                    if isinstance(date_value, datetime):
+                        route_date = date_value.strftime('%Y-%m-%d')
+                    else:
+                        route_date = str(date_value)
+            
+            # 2行目: ルート
+            route_label = visit_sheet.cell(row=2, column=1).value
+            if route_label and ('ルート' in str(route_label) or 'route' in str(route_label).lower()):
+                route_value = visit_sheet.cell(row=2, column=2).value
+                if route_value:
+                    route_code = str(route_value).strip()
+            
+            # ルート情報を設定
+            if route_date:
+                try:
+                    if isinstance(route_date, str):
+                        route_date_obj = datetime.strptime(route_date, '%Y-%m-%d').date()
+                    else:
+                        route_date_obj = route_date
+                    self.route_date_edit.setDate(route_date_obj)
+                except Exception:
+                    pass
+            
+            if route_code:
+                # ルートコードをコンボボックスに設定
+                self.update_route_codes()
+                idx = self.route_code_combo.findText(route_code)
+                if idx >= 0:
+                    self.route_code_combo.setCurrentIndex(idx)
+                else:
+                    # 見つからない場合は追加
+                    self.route_code_combo.addItem(route_code)
+                    self.route_code_combo.setCurrentText(route_code)
+            
+            # 店舗訪問詳細を読み込み（3行目がヘッダー、4行目以降がデータ）
+            visits = []
+            header_row = 3
+            data_start_row = 4
+            
+            # ヘッダーを取得
+            headers = []
+            for col in range(1, visit_sheet.max_column + 1):
+                header_value = visit_sheet.cell(row=header_row, column=col).value
+                if header_value:
+                    headers.append(str(header_value).strip())
+                else:
+                    headers.append('')
+            
+            # 出発時刻・帰宅時刻・往路高速代・復路高速代を保存する変数
+            departure_time = None
+            return_time = None
+            toll_fee_outbound = 0
+            toll_fee_return = 0
+            
+            # データ行を読み込み
+            for row in range(data_start_row, visit_sheet.max_row + 1):
+                # 店舗コードが空の行はスキップ
+                store_code_cell = visit_sheet.cell(row=row, column=1)
+                store_code = store_code_cell.value
+                if not store_code or str(store_code).strip() == '':
+                    continue
+                
+                # 除外対象の店舗コードをチェック（値を取得してからスキップ）
+                store_code_str = str(store_code).strip()
+                if store_code_str == '出発時刻':
+                    # 出発時刻を取得（B列）
+                    departure_time = self._format_time_value(visit_sheet.cell(row=row, column=2).value)
+                    continue
+                elif store_code_str == '帰宅時刻':
+                    # 帰宅時刻を取得（B列）
+                    return_time = self._format_time_value(visit_sheet.cell(row=row, column=2).value)
+                    continue
+                elif store_code_str == '往路高速代':
+                    # 往路高速代を取得（B列）
+                    toll_value = visit_sheet.cell(row=row, column=2).value
+                    toll_fee_outbound = self._safe_float(str(toll_value or '')) or 0
+                    continue
+                elif store_code_str == '復路高速代':
+                    # 復路高速代を取得（B列）
+                    toll_value = visit_sheet.cell(row=row, column=2).value
+                    toll_fee_return = self._safe_float(str(toll_value or '')) or 0
+                    continue
+                
+                visit = {
+                    'visit_order': len(visits) + 1,
+                    'store_code': store_code_str,
+                    'store_name': str(visit_sheet.cell(row=row, column=2).value or '').strip(),
+                    'store_in_time': self._format_time_value(visit_sheet.cell(row=row, column=3).value),
+                    'store_out_time': self._format_time_value(visit_sheet.cell(row=row, column=4).value),
+                    'stay_duration': self._safe_float(str(visit_sheet.cell(row=row, column=5).value or '')) or 0.0,
+                    'store_notes': str(visit_sheet.cell(row=row, column=6).value or '').strip(),
+                }
+                visits.append(visit)
+            
+            # 読み込んだ値をroute_dataに保存
+            if departure_time or return_time or toll_fee_outbound or toll_fee_return:
+                if not hasattr(self, 'route_data') or not self.route_data:
+                    self.route_data = {}
+                
+                if departure_time:
+                    # ルート日付と結合してdatetime形式に
+                    if route_date:
+                        self.route_data['departure_time'] = f"{route_date} {departure_time}:00"
+                    else:
+                        self.route_data['departure_time'] = departure_time
+                
+                if return_time:
+                    # ルート日付と結合してdatetime形式に
+                    if route_date:
+                        self.route_data['return_time'] = f"{route_date} {return_time}:00"
+                    else:
+                        self.route_data['return_time'] = return_time
+                
+                if toll_fee_outbound:
+                    self.route_data['toll_fee_outbound'] = toll_fee_outbound
+                
+                if toll_fee_return:
+                    self.route_data['toll_fee_return'] = toll_fee_return
+            
+            # テーブルに反映
+            self.store_visits_table.blockSignals(True)
+            try:
+                self.store_visits_table.setRowCount(len(visits))
+                for i, visit in enumerate(visits):
+                    # 訪問順序
+                    order_item = QTableWidgetItem(str(i + 1))
+                    self.store_visits_table.setItem(i, 0, order_item)
+                    
+                    # 店舗コード
+                    self.store_visits_table.setItem(i, 1, QTableWidgetItem(visit.get('store_code', '')))
+                    
+                    # 店舗名
+                    self.store_visits_table.setItem(i, 2, QTableWidgetItem(visit.get('store_name', '')))
+                    
+                    # IN時間
+                    in_time = visit.get('store_in_time', '')
+                    self.store_visits_table.setItem(i, 3, QTableWidgetItem(in_time))
+                    
+                    # OUT時間
+                    out_time = visit.get('store_out_time', '')
+                    self.store_visits_table.setItem(i, 4, QTableWidgetItem(out_time))
+                    
+                    # 滞在時間（自動計算されるので空欄）
+                    self.store_visits_table.setItem(i, 5, QTableWidgetItem(''))
+                    
+                    # 移動時間（自動計算されるので空欄）
+                    self.store_visits_table.setItem(i, 6, QTableWidgetItem(''))
+                    
+                    # 想定粗利
+                    self.store_visits_table.setItem(i, 7, QTableWidgetItem('0'))
+                    
+                    # 仕入れ点数
+                    self.store_visits_table.setItem(i, 8, QTableWidgetItem('0'))
+                    
+                    # 評価（星評価ウィジェット）
+                    star_widget = StarRatingWidget(self.store_visits_table, rating=0, star_size=14)
+                    star_widget.rating_changed.connect(lambda rating, r=i: self.on_star_rating_changed(r, rating))
+                    self.store_visits_table.setCellWidget(i, 9, star_widget)
+                    
+                    # メモ
+                    self.store_visits_table.setItem(i, 10, QTableWidgetItem(visit.get('store_notes', '')))
+            finally:
+                self.store_visits_table.blockSignals(False)
+            
+            # 滞在時間と移動時間を自動計算
+            self.recalc_travel_times()
+            
+            # 訪問順序を更新
+            self.update_visit_order()
+            
+            QMessageBox.information(self, "完了", f"テンプレートを読み込みました。\n店舗数: {len(visits)}件")
+            
+        except Exception as e:
+            raise Exception(f"Excelファイルの読み込みエラー: {str(e)}")
+    
+    def _load_csv_template(self, file_path: str):
+        """CSVテンプレートファイルを読み込む"""
+        try:
+            # CSVファイルの読み込み（UTF-8 BOM対応）
+            df = pd.read_csv(file_path, encoding='utf-8-sig', dtype=str, keep_default_na=False)
+            
+            # ルート情報セクションと店舗訪問詳細セクションを分離
+            route_data = {}
+            visits = []
+            
+            in_route_section = False
+            in_visit_section = False
+            
+            with open(file_path, 'r', encoding='utf-8-sig') as f:
+                lines = f.readlines()
+            
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                
+                if 'ルート情報' in line:
+                    in_route_section = True
+                    in_visit_section = False
+                    continue
+                elif '店舗訪問詳細' in line:
+                    in_route_section = False
+                    in_visit_section = True
+                    continue
+                
+                if in_route_section:
+                    # ルート情報の処理（簡易実装）
+                    parts = line.split(',')
+                    if len(parts) >= 2:
+                        key = parts[0].strip()
+                        value = parts[1].strip() if len(parts) > 1 else ''
+                        if key == 'ルート日付':
+                            route_data['route_date'] = value
+                        elif key == 'ルートコード':
+                            route_data['route_code'] = value
+                        elif key == '出発時間':
+                            route_data['departure_time'] = value
+                        elif key == '帰宅時間':
+                            route_data['return_time'] = value
+                        elif key == '往路高速代':
+                            try:
+                                route_data['toll_fee_outbound'] = float(value) if value else 0
+                            except (ValueError, TypeError):
+                                route_data['toll_fee_outbound'] = 0
+                        elif key == '復路高速代':
+                            try:
+                                route_data['toll_fee_return'] = float(value) if value else 0
+                            except (ValueError, TypeError):
+                                route_data['toll_fee_return'] = 0
+                elif in_visit_section:
+                    # 店舗訪問詳細の処理
+                    parts = line.split(',')
+                    if len(parts) >= 2 and parts[0].strip() != '訪問順序':
+                        visit = {
+                            'visit_order': len(visits) + 1,
+                            'store_code': parts[1].strip() if len(parts) > 1 else '',
+                            'store_name': parts[2].strip() if len(parts) > 2 else '',
+                            'store_in_time': parts[3].strip() if len(parts) > 3 else '',
+                            'store_out_time': parts[4].strip() if len(parts) > 4 else '',
+                            'store_notes': parts[11].strip() if len(parts) > 11 else '',
+                        }
+                        if visit['store_code']:
+                            visits.append(visit)
+            
+            # ルート情報を設定
+            route_date_str = None
+            if 'route_date' in route_data:
+                route_date_str = route_data['route_date']
+                try:
+                    route_date_obj = datetime.strptime(route_date_str, '%Y-%m-%d').date()
+                    self.route_date_edit.setDate(route_date_obj)
+                except Exception:
+                    pass
+            
+            if 'route_code' in route_data:
+                self.update_route_codes()
+                route_code = route_data['route_code']
+                idx = self.route_code_combo.findText(route_code)
+                if idx >= 0:
+                    self.route_code_combo.setCurrentIndex(idx)
+                else:
+                    self.route_code_combo.addItem(route_code)
+                    self.route_code_combo.setCurrentText(route_code)
+            
+            # 出発時刻・帰宅時刻・往路高速代・復路高速代をroute_dataに保存
+            if not hasattr(self, 'route_data') or not self.route_data:
+                self.route_data = {}
+            
+            if 'departure_time' in route_data:
+                dep_time = route_data['departure_time']
+                if route_date_str:
+                    self.route_data['departure_time'] = f"{route_date_str} {dep_time}:00" if ' ' not in str(dep_time) else dep_time
+                else:
+                    self.route_data['departure_time'] = dep_time
+            
+            if 'return_time' in route_data:
+                ret_time = route_data['return_time']
+                if route_date_str:
+                    self.route_data['return_time'] = f"{route_date_str} {ret_time}:00" if ' ' not in str(ret_time) else ret_time
+                else:
+                    self.route_data['return_time'] = ret_time
+            
+            if 'toll_fee_outbound' in route_data:
+                self.route_data['toll_fee_outbound'] = route_data['toll_fee_outbound']
+            
+            if 'toll_fee_return' in route_data:
+                self.route_data['toll_fee_return'] = route_data['toll_fee_return']
+            
+            # テーブルに反映（Excelと同じ処理）
+            self.store_visits_table.blockSignals(True)
+            try:
+                self.store_visits_table.setRowCount(len(visits))
+                for i, visit in enumerate(visits):
+                    order_item = QTableWidgetItem(str(i + 1))
+                    self.store_visits_table.setItem(i, 0, order_item)
+                    self.store_visits_table.setItem(i, 1, QTableWidgetItem(visit.get('store_code', '')))
+                    self.store_visits_table.setItem(i, 2, QTableWidgetItem(visit.get('store_name', '')))
+                    self.store_visits_table.setItem(i, 3, QTableWidgetItem(visit.get('store_in_time', '')))
+                    self.store_visits_table.setItem(i, 4, QTableWidgetItem(visit.get('store_out_time', '')))
+                    self.store_visits_table.setItem(i, 5, QTableWidgetItem(''))
+                    self.store_visits_table.setItem(i, 6, QTableWidgetItem(''))
+                    self.store_visits_table.setItem(i, 7, QTableWidgetItem('0'))
+                    self.store_visits_table.setItem(i, 8, QTableWidgetItem('0'))
+                    star_widget = StarRatingWidget(self.store_visits_table, rating=0, star_size=14)
+                    star_widget.rating_changed.connect(lambda rating, r=i: self.on_star_rating_changed(r, rating))
+                    self.store_visits_table.setCellWidget(i, 9, star_widget)
+                    self.store_visits_table.setItem(i, 10, QTableWidgetItem(visit.get('store_notes', '')))
+            finally:
+                self.store_visits_table.blockSignals(False)
+            
+            self.recalc_travel_times()
+            self.update_visit_order()
+            
+            QMessageBox.information(self, "完了", f"テンプレートを読み込みました。\n店舗数: {len(visits)}件")
+            
+        except Exception as e:
+            raise Exception(f"CSVファイルの読み込みエラー: {str(e)}")
+    
+    def _format_time_value(self, value) -> str:
+        """時刻値を文字列に変換"""
+        if value is None:
+            return ''
+        if isinstance(value, datetime):
+            return value.strftime('%H:%M')
+        if isinstance(value, dt_time):
+            return value.strftime('%H:%M')
+        value_str = str(value).strip()
+        if ':' in value_str:
+            # HH:MM形式の場合はそのまま返す
+            parts = value_str.split(':')
+            if len(parts) >= 2:
+                return f"{parts[0].zfill(2)}:{parts[1].zfill(2)}"
+        return value_str
+    
     def generate_template(self):
         """テンプレート生成"""
         try:
@@ -1745,14 +2157,33 @@ class RouteSummaryWidget(QWidget):
     def get_route_data(self) -> Dict[str, Any]:
         """入力データを取得"""
         route_date = self.route_date_edit.dateTime().toString('yyyy-MM-dd')
-        # 出発時間・帰宅時間・経費・備考は削除されたため、デフォルト値を設定
+        
+        # route_dataから読み込んだ値を取得（テンプレート読み込み時に設定される）
+        departure_time = self.route_data.get('departure_time') if hasattr(self, 'route_data') and self.route_data else None
+        return_time = self.route_data.get('return_time') if hasattr(self, 'route_data') and self.route_data else None
+        toll_fee_outbound = self.route_data.get('toll_fee_outbound') if hasattr(self, 'route_data') and self.route_data else 0
+        toll_fee_return = self.route_data.get('toll_fee_return') if hasattr(self, 'route_data') and self.route_data else 0
+        
+        # デフォルト値の設定
+        if not departure_time:
+            departure_time = f"{route_date} 00:00:00"
+        elif ' ' not in str(departure_time) and route_date:
+            # HH:MM形式の場合はルート日付と結合
+            departure_time = f"{route_date} {departure_time}:00"
+        
+        if not return_time:
+            return_time = f"{route_date} 00:00:00"
+        elif ' ' not in str(return_time) and route_date:
+            # HH:MM形式の場合はルート日付と結合
+            return_time = f"{route_date} {return_time}:00"
+        
         return {
             'route_date': route_date,
             'route_code': self.get_selected_route_code(),
-            'departure_time': f"{route_date} 00:00:00",
-            'return_time': f"{route_date} 00:00:00",
-            'toll_fee_outbound': 0,
-            'toll_fee_return': 0,
+            'departure_time': departure_time,
+            'return_time': return_time,
+            'toll_fee_outbound': toll_fee_outbound if toll_fee_outbound else 0,
+            'toll_fee_return': toll_fee_return if toll_fee_return else 0,
             'parking_fee': 0,
             'meal_cost': 0,
             'other_expenses': 0,

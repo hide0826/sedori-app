@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QMenuBar, QMenu, QStatusBar, QLabel,
     QMessageBox, QSplitter, QPushButton
 )
-from PySide6.QtCore import Qt, QTimer, QThread, Signal
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings
 from PySide6.QtGui import QAction, QKeySequence
 import subprocess
 import threading
@@ -88,6 +88,9 @@ class MainWindow(QMainWindow):
         self.api_server_thread = None
         self.server_running = False
         
+        # 設定管理
+        self.settings = QSettings("HIRIO", "SedoriDesktopApp")
+        
         # UIの初期化
         self.setup_ui()
         self.setup_menu()
@@ -101,8 +104,14 @@ class MainWindow(QMainWindow):
         # 中央配置
         self.center_window()
         
+        # タブの順序を復元
+        self.restore_tab_order()
+        
     def closeEvent(self, event):
         """ウィンドウが閉じるときのイベント"""
+        # タブの順序を保存
+        self.save_tab_order()
+        
         # 各ウィジェットの設定を保存
         if hasattr(self, 'repricer_widget') and hasattr(self.repricer_widget, 'save_settings'):
             self.repricer_widget.save_settings()
@@ -143,6 +152,10 @@ class MainWindow(QMainWindow):
         # タブウィジェットの作成
         self.tab_widget = QTabWidget()
         self.tab_widget.setTabPosition(QTabWidget.North)
+        # タブのドラッグ&ドロップによる順序変更を有効化
+        self.tab_widget.setMovable(True)
+        # タブが移動されたときに順序を保存
+        self.tab_widget.tabBar().tabMoved.connect(self.save_tab_order)
         
         # 各タブの追加
         self.setup_tabs()
@@ -491,3 +504,68 @@ class MainWindow(QMainWindow):
             <p>© 2025 HIRIO Project</p>
             """
         )
+    
+    def save_tab_order(self):
+        """タブの順序を保存"""
+        tab_count = self.tab_widget.count()
+        tab_order = []
+        for i in range(tab_count):
+            tab_text = self.tab_widget.tabText(i)
+            tab_order.append(tab_text)
+        self.settings.setValue("main_tab_order", tab_order)
+    
+    def restore_tab_order(self):
+        """タブの順序を復元"""
+        tab_order = self.settings.value("main_tab_order", [])
+        if not tab_order or len(tab_order) == 0:
+            return
+        
+        # 一時的にタブの移動を無効化
+        self.tab_widget.setMovable(False)
+        
+        # 現在のタブの位置を取得（テキスト→インデックス）
+        tab_text_to_index = {}
+        tab_count = self.tab_widget.count()
+        for i in range(tab_count):
+            tab_text = self.tab_widget.tabText(i)
+            tab_text_to_index[tab_text] = i
+        
+        # 保存された順序に従ってタブを移動
+        # 後ろから前に移動することで、インデックスのずれを防ぐ
+        moved_tabs = set()
+        for target_index, tab_text in enumerate(tab_order):
+            if tab_text in tab_text_to_index:
+                # 現在の位置を再取得（移動により変更されている可能性がある）
+                current_index = None
+                for i in range(self.tab_widget.count()):
+                    if self.tab_widget.tabText(i) == tab_text:
+                        current_index = i
+                        break
+                
+                if current_index is not None and current_index != target_index:
+                    self.tab_widget.tabBar().moveTab(current_index, target_index)
+                moved_tabs.add(tab_text)
+        
+        # 保存された順序に存在しないタブを最後に配置
+        remaining_tabs = []
+        for i in range(self.tab_widget.count()):
+            tab_text = self.tab_widget.tabText(i)
+            if tab_text not in moved_tabs:
+                remaining_tabs.append((i, tab_text))
+        
+        # 残りのタブを順番に最後に移動
+        target_index = len(tab_order)
+        for original_index, tab_text in remaining_tabs:
+            # 現在の位置を再取得
+            current_index = None
+            for i in range(self.tab_widget.count()):
+                if self.tab_widget.tabText(i) == tab_text:
+                    current_index = i
+                    break
+            
+            if current_index is not None and current_index != target_index:
+                self.tab_widget.tabBar().moveTab(current_index, target_index)
+            target_index += 1
+        
+        # タブの移動を再有効化
+        self.tab_widget.setMovable(True)
