@@ -162,6 +162,29 @@ class StoreDatabase:
             END
         """)
         
+        # chain_store_code_mappings テーブル作成（チェーン店コードマッピング）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chain_store_code_mappings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chain_code TEXT NOT NULL,
+                chain_name_patterns TEXT NOT NULL,
+                is_active INTEGER DEFAULT 1,
+                priority INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # chain_store_code_mappings の updated_at を自動更新するトリガー
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS update_chain_store_code_mappings_timestamp 
+            AFTER UPDATE ON chain_store_code_mappings
+            FOR EACH ROW
+            BEGIN
+                UPDATE chain_store_code_mappings SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            END
+        """)
+        
         conn.commit()
     
     def close(self):
@@ -777,4 +800,222 @@ class StoreDatabase:
         
         cursor.execute("SELECT COUNT(*) FROM company_master")
         return cursor.fetchone()[0]
+    
+    # ==================== chain_store_code_mappings テーブル操作 ====================
+    
+    def add_chain_store_code_mapping(self, mapping_data: Dict[str, Any]) -> int:
+        """チェーン店コードマッピングを追加"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # chain_name_patternsをJSON文字列に変換
+        patterns_json = json.dumps(mapping_data.get('chain_name_patterns', []), ensure_ascii=False)
+        
+        cursor.execute("""
+            INSERT INTO chain_store_code_mappings (
+                chain_code, chain_name_patterns, is_active, priority
+            ) VALUES (?, ?, ?, ?)
+        """, (
+            mapping_data.get('chain_code'),
+            patterns_json,
+            mapping_data.get('is_active', 1),
+            mapping_data.get('priority', 0)
+        ))
+        
+        conn.commit()
+        return cursor.lastrowid
+    
+    def update_chain_store_code_mapping(self, mapping_id: int, mapping_data: Dict[str, Any]) -> bool:
+        """チェーン店コードマッピングを更新"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        patterns_json = json.dumps(mapping_data.get('chain_name_patterns', []), ensure_ascii=False)
+        
+        cursor.execute("""
+            UPDATE chain_store_code_mappings SET
+                chain_code = ?,
+                chain_name_patterns = ?,
+                is_active = ?,
+                priority = ?
+            WHERE id = ?
+        """, (
+            mapping_data.get('chain_code'),
+            patterns_json,
+            mapping_data.get('is_active', 1),
+            mapping_data.get('priority', 0),
+            mapping_id
+        ))
+        
+        conn.commit()
+        return cursor.rowcount > 0
+    
+    def delete_chain_store_code_mapping(self, mapping_id: int) -> bool:
+        """チェーン店コードマッピングを削除"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("DELETE FROM chain_store_code_mappings WHERE id = ?", (mapping_id,))
+        conn.commit()
+        
+        return cursor.rowcount > 0
+    
+    def get_chain_store_code_mapping(self, mapping_id: int) -> Optional[Dict[str, Any]]:
+        """チェーン店コードマッピングを取得"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM chain_store_code_mappings WHERE id = ?", (mapping_id,))
+        row = cursor.fetchone()
+        
+        if row:
+            return self._chain_mapping_row_to_dict(row)
+        return None
+    
+    def list_chain_store_code_mappings(self, active_only: bool = False) -> List[Dict[str, Any]]:
+        """チェーン店コードマッピング一覧を取得（優先度順）"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        if active_only:
+            cursor.execute("""
+                SELECT * FROM chain_store_code_mappings 
+                WHERE is_active = 1 
+                ORDER BY priority DESC, chain_code ASC
+            """)
+        else:
+            cursor.execute("""
+                SELECT * FROM chain_store_code_mappings 
+                ORDER BY priority DESC, chain_code ASC
+            """)
+        
+        rows = cursor.fetchall()
+        return [self._chain_mapping_row_to_dict(row) for row in rows]
+    
+    def _chain_mapping_row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+        """Rowを辞書に変換（chain_name_patternsをパース）"""
+        mapping_dict = dict(row)
+        
+        # chain_name_patternsをJSONからリストに変換
+        if mapping_dict.get('chain_name_patterns'):
+            try:
+                mapping_dict['chain_name_patterns'] = json.loads(mapping_dict['chain_name_patterns'])
+            except json.JSONDecodeError:
+                mapping_dict['chain_name_patterns'] = []
+        else:
+            mapping_dict['chain_name_patterns'] = []
+        
+        return mapping_dict
+    
+    def find_chain_code_by_store_name(self, store_name: str) -> Optional[str]:
+        """店舗名からチェーン店コードを検索"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # 優先度順に取得
+        cursor.execute("""
+            SELECT chain_code, chain_name_patterns 
+            FROM chain_store_code_mappings 
+            WHERE is_active = 1 
+            ORDER BY priority DESC, chain_code ASC
+        """)
+        
+        rows = cursor.fetchall()
+        
+        for row in rows:
+            chain_code = row[0]
+            patterns_json = row[1]
+            
+            try:
+                patterns = json.loads(patterns_json)
+                # 店舗名にパターンが含まれているかチェック（大文字小文字を区別しない）
+                store_name_upper = store_name.upper()
+                for pattern in patterns:
+                    if pattern.upper() in store_name_upper:
+                        return chain_code
+            except json.JSONDecodeError:
+                continue
+        
+        return None
+    
+    def get_max_supplier_code_for_prefix(self, prefix: str) -> Optional[str]:
+        """指定プレフィックスの最大仕入れ先コードを取得"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "SELECT supplier_code FROM stores WHERE supplier_code LIKE ? AND supplier_code IS NOT NULL AND supplier_code != ''",
+            (f"{prefix}-%",)
+        )
+        rows = cursor.fetchall()
+        
+        if not rows:
+            return None
+        
+        supplier_codes = [row[0] for row in rows if row[0]]
+        
+        if not supplier_codes:
+            return None
+        
+        # コードを数値部分でソート
+        def parse_supplier_code(code: str) -> tuple:
+            """仕入れ先コードを解析（例: 'BO-01' -> ('BO', 1)）"""
+            try:
+                if '-' in code:
+                    code_prefix, number_part = code.rsplit('-', 1)
+                    if code_prefix == prefix:  # プレフィックスが一致する場合のみ
+                        return (code_prefix, int(number_part))
+            except (ValueError, AttributeError):
+                pass
+            return (prefix, 0)
+        
+        parsed_codes = [parse_supplier_code(code) for code in supplier_codes]
+        parsed_codes = [pc for pc in parsed_codes if pc[0] == prefix]  # プレフィックス一致のみ
+        if not parsed_codes:
+            return None
+        
+        parsed_codes.sort(key=lambda x: x[1])
+        max_prefix, max_number = parsed_codes[-1]
+        
+        return f"{max_prefix}-{max_number:02d}"
+    
+    def _extract_store_prefix(self, store_name: str) -> str:
+        """店舗名からプレフィックスを抽出（フォールバック用）"""
+        import re
+        alpha_only = re.sub(r'[^A-Za-z]', '', store_name)
+        
+        if not alpha_only:
+            if len(store_name) >= 2:
+                prefix = store_name[:2].upper()
+                if not re.match(r'^[A-Z0-9]+$', prefix):
+                    prefix = 'ST'
+                return prefix[:2]
+            return 'ST'
+        
+        return alpha_only[:2].upper()
+    
+    def get_next_supplier_code_from_store_name(self, store_name: str) -> str:
+        """店舗名から次の仕入れ先コードを生成"""
+        # チェーン店コードマッピングから検索
+        chain_code = self.find_chain_code_by_store_name(store_name)
+        
+        if not chain_code:
+            # マッピングが見つからない場合は、店舗名から自動抽出
+            chain_code = self._extract_store_prefix(store_name)
+        
+        # 既存の最大コードを取得
+        max_code = self.get_max_supplier_code_for_prefix(chain_code)
+        
+        if not max_code:
+            return f"{chain_code}-01"
+        
+        try:
+            if '-' in max_code:
+                code_prefix, number_part = max_code.rsplit('-', 1)
+                if code_prefix == chain_code:
+                    next_number = int(number_part) + 1
+                    return f"{code_prefix}-{next_number:02d}"
+            return f"{chain_code}-01"
+        except (ValueError, AttributeError):
+            return f"{chain_code}-01"
 

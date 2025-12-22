@@ -104,6 +104,8 @@ class StoreEditDialog(QDialog):
         
         self.store_name_edit = QLineEdit()
         self.store_name_edit.setPlaceholderText("必須項目")
+        # 店舗名変更時に仕入れ先コードを自動生成
+        self.store_name_edit.textChanged.connect(self.on_store_name_changed)
         form_layout.addRow("店舗名:", self.store_name_edit)
 
         # 住所・電話番号の追加
@@ -168,7 +170,15 @@ class StoreEditDialog(QDialog):
         else:
             self.route_code_edit.clear()
         
-        # 仕入れ先コードを自動生成
+        # 店舗名から仕入れ先コードを自動生成（店舗名が入力されている場合）
+        store_name = self.store_name_edit.text().strip()
+        if store_name:
+            next_supplier_code = self.db.get_next_supplier_code_from_store_name(store_name)
+            if next_supplier_code:
+                self.supplier_code_edit.setText(next_supplier_code)
+                return
+        
+        # 店舗名がない場合は従来のルートコードベースの生成にフォールバック
         next_supplier_code = self.db.get_next_supplier_code_for_route(route_name)
         if next_supplier_code:
             self.supplier_code_edit.setText(next_supplier_code)
@@ -186,6 +196,21 @@ class StoreEditDialog(QDialog):
         if current_index >= 0:
             # 既存ルートが見つかった場合は選択状態にする
             self.affiliated_route_name_combo.setCurrentIndex(current_index)
+    
+    def on_store_name_changed(self, store_name: str):
+        """店舗名が変更された時に仕入れ先コードを自動生成（新規追加時のみ）"""
+        # 既存データの編集時は自動生成しない
+        if self.store_data:
+            return
+        
+        # 店舗名が入力されている場合のみ自動生成
+        if store_name and store_name.strip():
+            next_supplier_code = self.db.get_next_supplier_code_from_store_name(store_name.strip())
+            if next_supplier_code:
+                # 仕入れ先コードが既に入力されている場合は上書きしない
+                current_code = self.supplier_code_edit.text().strip()
+                if not current_code:
+                    self.supplier_code_edit.setText(next_supplier_code)
     
     def load_data(self):
         """既存データを読み込む"""

@@ -14,7 +14,8 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QLineEdit, QSpinBox, QCheckBox,
     QGroupBox, QTabWidget, QTextEdit, QFileDialog,
-    QMessageBox, QComboBox, QSlider
+    QMessageBox, QComboBox, QSlider, QTableWidget,
+    QTableWidgetItem, QHeaderView, QDialog
 )
 from PySide6.QtCore import Qt, QSettings, Signal
 from PySide6.QtGui import QFont
@@ -49,6 +50,7 @@ class SettingsWidget(QWidget):
         self.setup_api_tab(tab_widget)
         self.setup_display_tab(tab_widget)
         self.setup_advanced_tab(tab_widget)
+        self.setup_db_settings_tab(tab_widget)
         self.setup_about_tab(tab_widget)
         
         layout.addWidget(tab_widget)
@@ -326,6 +328,183 @@ class SettingsWidget(QWidget):
         
         layout.addStretch()
         parent.addTab(advanced_widget, "詳細設定")
+    
+    def setup_db_settings_tab(self, parent):
+        """DB設定タブ（チェーン店コードマッピング）"""
+        from database.store_db import StoreDatabase
+        
+        db_widget = QWidget()
+        layout = QVBoxLayout(db_widget)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+        
+        # 説明ラベル
+        info_label = QLabel("チェーン店名とコードのマッピングを設定します。店舗名に含まれる文字列をパターンとして登録できます。")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        # チェーン店コードマッピングテーブル
+        table_group = QGroupBox("チェーン店コードマッピング")
+        table_layout = QVBoxLayout(table_group)
+        
+        # テーブル
+        self.chain_mapping_table = QTableWidget()
+        self.chain_mapping_table.setColumnCount(5)
+        self.chain_mapping_table.setHorizontalHeaderLabels([
+            "ID", "チェーン店コード", "店舗名パターン", "優先度", "有効"
+        ])
+        self.chain_mapping_table.setAlternatingRowColors(True)
+        self.chain_mapping_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.chain_mapping_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        
+        # ヘッダー設定
+        header = self.chain_mapping_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # ID
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # コード
+        header.setSectionResizeMode(2, QHeaderView.Stretch)  # パターン
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # 優先度
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # 有効
+        
+        table_layout.addWidget(self.chain_mapping_table)
+        
+        # 操作ボタン
+        button_layout = QHBoxLayout()
+        
+        add_btn = QPushButton("追加")
+        add_btn.clicked.connect(lambda: self.add_chain_mapping())
+        button_layout.addWidget(add_btn)
+        
+        edit_btn = QPushButton("編集")
+        edit_btn.clicked.connect(lambda: self.edit_chain_mapping())
+        button_layout.addWidget(edit_btn)
+        
+        delete_btn = QPushButton("削除")
+        delete_btn.clicked.connect(lambda: self.delete_chain_mapping())
+        delete_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+            }
+        """)
+        button_layout.addWidget(delete_btn)
+        
+        refresh_btn = QPushButton("更新")
+        refresh_btn.clicked.connect(lambda: self.load_chain_mappings())
+        button_layout.addWidget(refresh_btn)
+        
+        button_layout.addStretch()
+        table_layout.addLayout(button_layout)
+        
+        layout.addWidget(table_group)
+        
+        # データベース接続
+        self.store_db = StoreDatabase()
+        
+        # データを読み込み
+        self.load_chain_mappings()
+        
+        layout.addStretch()
+        parent.addTab(db_widget, "DB設定")
+    
+    def load_chain_mappings(self):
+        """チェーン店コードマッピングを読み込む"""
+        mappings = self.store_db.list_chain_store_code_mappings()
+        
+        self.chain_mapping_table.setRowCount(len(mappings))
+        
+        for i, mapping in enumerate(mappings):
+            # ID
+            id_item = QTableWidgetItem(str(mapping.get('id', '')))
+            id_item.setData(Qt.UserRole, mapping.get('id'))
+            self.chain_mapping_table.setItem(i, 0, id_item)
+            
+            # チェーン店コード
+            code_item = QTableWidgetItem(mapping.get('chain_code', ''))
+            self.chain_mapping_table.setItem(i, 1, code_item)
+            
+            # 店舗名パターン（カンマ区切りで表示）
+            patterns = mapping.get('chain_name_patterns', [])
+            patterns_text = ', '.join(patterns) if patterns else ''
+            pattern_item = QTableWidgetItem(patterns_text)
+            self.chain_mapping_table.setItem(i, 2, pattern_item)
+            
+            # 優先度
+            priority_item = QTableWidgetItem(str(mapping.get('priority', 0)))
+            self.chain_mapping_table.setItem(i, 3, priority_item)
+            
+            # 有効/無効
+            is_active = mapping.get('is_active', 1)
+            active_item = QTableWidgetItem('有効' if is_active else '無効')
+            self.chain_mapping_table.setItem(i, 4, active_item)
+    
+    def add_chain_mapping(self):
+        """チェーン店コードマッピングを追加"""
+        from ui.chain_mapping_dialog import ChainMappingDialog
+        
+        dialog = ChainMappingDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            mapping_data = dialog.get_data()
+            try:
+                self.store_db.add_chain_store_code_mapping(mapping_data)
+                QMessageBox.information(self, "完了", "チェーン店コードマッピングを追加しました")
+                self.load_chain_mappings()
+            except Exception as e:
+                QMessageBox.critical(self, "エラー", f"追加に失敗しました:\n{str(e)}")
+    
+    def edit_chain_mapping(self):
+        """チェーン店コードマッピングを編集"""
+        selected = self.chain_mapping_table.selectionModel().selectedRows()
+        if not selected:
+            QMessageBox.warning(self, "警告", "編集するマッピングを選択してください")
+            return
+        
+        row = selected[0].row()
+        id_item = self.chain_mapping_table.item(row, 0)
+        mapping_id = id_item.data(Qt.UserRole)
+        
+        mapping_data = self.store_db.get_chain_store_code_mapping(mapping_id)
+        if not mapping_data:
+            QMessageBox.warning(self, "エラー", "マッピングデータが見つかりません")
+            return
+        
+        from ui.chain_mapping_dialog import ChainMappingDialog
+        dialog = ChainMappingDialog(self, mapping_data=mapping_data)
+        if dialog.exec() == QDialog.Accepted:
+            new_data = dialog.get_data()
+            try:
+                self.store_db.update_chain_store_code_mapping(mapping_id, new_data)
+                QMessageBox.information(self, "完了", "チェーン店コードマッピングを更新しました")
+                self.load_chain_mappings()
+            except Exception as e:
+                QMessageBox.critical(self, "エラー", f"更新に失敗しました:\n{str(e)}")
+    
+    def delete_chain_mapping(self):
+        """チェーン店コードマッピングを削除"""
+        selected = self.chain_mapping_table.selectionModel().selectedRows()
+        if not selected:
+            QMessageBox.warning(self, "警告", "削除するマッピングを選択してください")
+            return
+        
+        row = selected[0].row()
+        id_item = self.chain_mapping_table.item(row, 0)
+        mapping_id = id_item.data(Qt.UserRole)
+        chain_code = self.chain_mapping_table.item(row, 1).text()
+        
+        reply = QMessageBox.question(
+            self,
+            "削除確認",
+            f"チェーン店コードマッピング '{chain_code}' を削除しますか？",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                self.store_db.delete_chain_store_code_mapping(mapping_id)
+                QMessageBox.information(self, "完了", "チェーン店コードマッピングを削除しました")
+                self.load_chain_mappings()
+            except Exception as e:
+                QMessageBox.critical(self, "エラー", f"削除に失敗しました:\n{str(e)}")
         
     def setup_about_tab(self, parent):
         """アプリケーション情報タブ"""
