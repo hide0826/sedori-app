@@ -55,11 +55,20 @@ class ChainMappingDialog(QDialog):
         self.priority_spin.setValue(0)
         self.priority_spin.setToolTip("数値が大きいほど優先されます。同じチェーン店に複数のパターンがある場合に使用します。")
         form_layout.addRow("優先度:", self.priority_spin)
-        
+
         # 有効/無効
         self.is_active_check = QCheckBox("有効")
         self.is_active_check.setChecked(True)
         form_layout.addRow("状態:", self.is_active_check)
+
+        # その他（マッチしない店舗用デフォルト）
+        self.is_default_for_others_check = QCheckBox("このチェーンコードを「その他」として使う（パターンに当てはまらない店舗用）")
+        self.is_default_for_others_check.setChecked(False)
+        self.is_default_for_others_check.setToolTip(
+            "どの店舗名パターンにも一致しない場合に、自動的に割り当てるチェーンコードとして使用します。\n"
+            "※ 通常は1行のみチェックを付けてください。"
+        )
+        form_layout.addRow("その他:", self.is_default_for_others_check)
         
         layout.addWidget(form_group)
         
@@ -94,6 +103,7 @@ class ChainMappingDialog(QDialog):
         
         self.priority_spin.setValue(self.mapping_data.get('priority', 0))
         self.is_active_check.setChecked(bool(self.mapping_data.get('is_active', 1)))
+        self.is_default_for_others_check.setChecked(bool(self.mapping_data.get('is_default_for_others', 0)))
     
     def get_data(self) -> Dict[str, Any]:
         """入力データを取得"""
@@ -105,7 +115,8 @@ class ChainMappingDialog(QDialog):
             'chain_code': self.chain_code_edit.text().strip().upper(),  # 大文字に変換
             'chain_name_patterns': patterns,
             'priority': self.priority_spin.value(),
-            'is_active': 1 if self.is_active_check.isChecked() else 0
+            'is_active': 1 if self.is_active_check.isChecked() else 0,
+            'is_default_for_others': 1 if self.is_default_for_others_check.isChecked() else 0,
         }
     
     def validate(self) -> Tuple[bool, str]:
@@ -114,9 +125,11 @@ class ChainMappingDialog(QDialog):
         
         if not data['chain_code']:
             return False, "チェーン店コードを入力してください"
-        
-        if not data['chain_name_patterns']:
-            return False, "店舗名パターンを1つ以上入力してください"
+
+        # 「その他」として扱う場合は店舗名パターンは必須ではない
+        # （どのパターンにも当てはまらない店舗向けのデフォルトコードとして使用するため）
+        if not data['chain_name_patterns'] and not data['is_default_for_others']:
+            return False, "店舗名パターンを1つ以上入力するか、「その他」にチェックを入れてください"
         
         # チェーン店コードの形式チェック（英数字のみ）
         import re

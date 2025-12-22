@@ -255,6 +255,7 @@ class StoreEditDialog(QDialog):
             'store_name': self.store_name_edit.text().strip(),
             'address': self.address_edit.text().strip(),
             'phone': self.phone_edit.text().strip(),
+            'store_code': '',  # 店舗コードは自動付与されるため空でOK
             'custom_fields': {}
         }
         
@@ -599,6 +600,24 @@ class StoreListWidget(QWidget):
         """)
         route_layout.addWidget(recover_info_btn)
         
+        # 店舗コード再付番ボタン
+        assign_store_code_btn = QPushButton("店舗コード再付番")
+        assign_store_code_btn.clicked.connect(self.assign_store_codes)
+        assign_store_code_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+                min-width: 120px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #138496;
+            }
+        """)
+        route_layout.addWidget(assign_store_code_btn)
+        
         route_layout.addStretch()
         
         parent_layout.addWidget(route_group)
@@ -827,7 +846,7 @@ class StoreListWidget(QWidget):
         self.load_stores(self.search_edit.text())
     
     def recover_japanese_store_info(self):
-        """住所に'Japan'が含まれている店舗の情報を日本語で再取得して更新"""
+        """住所に'Japan'が含まれている店舗の情報を日本語で再取得して更新、および住所から「日本、」を削除"""
         # モジュールがインポートできていない場合
         if recover_store_info_with_japanese is None:
             QMessageBox.warning(
@@ -842,7 +861,8 @@ class StoreListWidget(QWidget):
         reply = QMessageBox.question(
             self,
             "確認",
-            "住所に'Japan'が含まれている店舗の情報を日本語で再取得しますか？\n"
+            "住所に'Japan'が含まれている店舗の情報を日本語で再取得し、\n"
+            "住所から「日本、」を削除しますか？\n"
             "（Google Maps APIを使用します）",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
@@ -864,16 +884,39 @@ class StoreListWidget(QWidget):
         try:
             result = recover_store_info_with_japanese(self.db)
             
+            # 住所から「日本、」を削除する処理
+            stores = self.db.list_stores()
+            removed_count = 0
+            
+            for store in stores:
+                address = store.get('address', '')
+                if address and address.startswith('日本、'):
+                    # 「日本、」を削除
+                    new_address = address.replace('日本、', '', 1).strip()
+                    if new_address != address:
+                        try:
+                            store_data = self.db.get_store(store['id'])
+                            if store_data:
+                                store_data['address'] = new_address
+                                self.db.update_store(store['id'], store_data)
+                                removed_count += 1
+                        except Exception as e:
+                            print(f"住所更新エラー (ID: {store['id']}): {e}")
+            
             progress.close()
             
             # 結果を表示
+            message = f"データリカバリーが完了しました。\n\n"
+            message += f"対象: {result['total']}件\n"
+            message += f"更新成功: {result['updated']}件\n"
+            message += f"失敗: {result['failed']}件"
+            if removed_count > 0:
+                message += f"\n\n住所から「日本、」を削除: {removed_count}件"
+            
             QMessageBox.information(
                 self,
                 "完了",
-                f"データリカバリーが完了しました。\n\n"
-                f"対象: {result['total']}件\n"
-                f"更新成功: {result['updated']}件\n"
-                f"失敗: {result['failed']}件"
+                message
             )
             
             # テーブルを再読み込み
@@ -885,6 +928,57 @@ class StoreListWidget(QWidget):
                 self,
                 "エラー",
                 f"データリカバリー中にエラーが発生しました:\n{str(e)}"
+            )
+    
+    def assign_store_codes(self):
+        """店舗コードが空の店舗に自動付与"""
+        # 確認ダイアログ
+        reply = QMessageBox.question(
+            self,
+            "確認",
+            "店舗コードが空の店舗に自動で店舗コードを付与しますか？\n"
+            "（設定タブのチェーン店コードマッピングを参照して連番で生成します）",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # プログレスダイアログを表示
+        progress = QProgressDialog("店舗コードを付与中...", "キャンセル", 0, 100, self)
+        progress.setWindowTitle("店舗コード再付番中")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        
+        QApplication.processEvents()  # UIを更新
+        
+        try:
+            # 店舗コード自動付与処理を実行
+            result = self.db.assign_store_codes_to_empty_stores()
+            
+            progress.close()
+            
+            # 結果を表示
+            QMessageBox.information(
+                self,
+                "完了",
+                f"店舗コード再付番が完了しました。\n\n"
+                f"対象: {result['total']}件\n"
+                f"更新成功: {result['updated']}件\n"
+                f"エラー: {result['errors']}件"
+            )
+            
+            # テーブルを再読み込み
+            self.load_stores(self.search_edit.text())
+            
+        except Exception as e:
+            progress.close()
+            QMessageBox.warning(
+                self,
+                "エラー",
+                f"店舗コード再付番中にエラーが発生しました:\n{str(e)}"
             )
     
     def setup_store_table(self, parent_layout):
@@ -946,7 +1040,7 @@ class StoreListWidget(QWidget):
         self.load_custom_fields()
         
         # 基本カラム + カスタムフィールドカラム
-        basic_columns = ["ID", "所属ルート名", "ルートコード", "仕入れ先コード", "店舗名", "住所", "電話番号", "備考"]
+        basic_columns = ["ID", "所属ルート名", "ルートコード", "店舗コード", "仕入れ先コード", "店舗名", "住所", "電話番号", "備考"]
         custom_columns = [field['display_name'] for field in self.custom_fields_def]
         columns = basic_columns + custom_columns
         
@@ -969,10 +1063,11 @@ class StoreListWidget(QWidget):
             id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)  # 編集不可
             self.store_table.setItem(i, 0, id_item)
             
-            # 編集不可のカラム（0-6列）
+            # 編集不可のカラム（1-7列）
             for col, value in enumerate([
                 store.get('affiliated_route_name', ''),
                 store.get('route_code', ''),
+                store.get('store_code', ''),  # 店舗コード
                 store.get('supplier_code', ''),
                 store.get('store_name', ''),
                 store.get('address', ''),
@@ -982,13 +1077,13 @@ class StoreListWidget(QWidget):
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)  # 編集不可
                 self.store_table.setItem(i, col, item)
             
-            # 備考欄（7列目）は編集可能
+            # 備考欄（8列目）は編集可能
             notes_text = store.get('notes', '') or ''
             notes_item = QTableWidgetItem(notes_text)
             notes_item.setData(Qt.UserRole, store_id)  # 店舗IDを保存（更新時に使用）
             notes_item.setToolTip(notes_text)  # ツールチップで全文表示
             # 編集可能（フラグはそのまま）
-            self.store_table.setItem(i, 7, notes_item)
+            self.store_table.setItem(i, 8, notes_item)
             
             # カスタムフィールド（編集不可）
             custom_fields = store.get('custom_fields', {})
@@ -1029,11 +1124,11 @@ class StoreListWidget(QWidget):
         # 列幅の自動調整
         self.store_table.resizeColumnsToContents()
         
-        # 備考カラム（7列目）の設定
-        if self.store_table.columnCount() > 7:
+        # 備考カラム（8列目）の設定
+        if self.store_table.columnCount() > 8:
             # 備考カラムはStretchモードで残りのスペースを使用
             header = self.store_table.horizontalHeader()
-            header.setSectionResizeMode(7, QHeaderView.Stretch)
+            header.setSectionResizeMode(8, QHeaderView.Stretch)
         
         # 行の高さを内容に合わせて自動調整（折り返しテキスト対応）
         self.store_table.resizeRowsToContents()
@@ -1048,8 +1143,8 @@ class StoreListWidget(QWidget):
     
     def on_store_cell_changed(self, row: int, column: int):
         """セルが変更されたときの処理（備考欄のみ保存）"""
-        # 備考欄（7列目）以外は無視
-        if column != 7:
+        # 備考欄（8列目）以外は無視
+        if column != 8:
             return
         
         try:
@@ -1174,6 +1269,11 @@ class StoreListWidget(QWidget):
             
             try:
                 data = dialog.get_data()
+                # 店舗コードが空の場合は自動生成
+                if not data.get('store_code'):
+                    store_name = data.get('store_name', '')
+                    if store_name:
+                        data['store_code'] = self.db.get_next_store_code_from_store_name(store_name)
                 self.db.add_store(data)
                 QMessageBox.information(self, "完了", "店舗を追加しました")
                 self.load_stores(self.search_edit.text())

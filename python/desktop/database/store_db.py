@@ -93,6 +93,14 @@ class StoreDatabase:
                 cursor.execute(ddl)
             except sqlite3.OperationalError:
                 pass
+        # store_codeカラムが存在しない場合は追加（マイグレーション）
+        # UNIQUE制約は後で追加する（既存データがある場合にエラーになるため）
+        try:
+            cursor.execute("ALTER TABLE stores ADD COLUMN store_code TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # カラムが既に存在する場合はスキップ
+            pass
         
         # routes テーブル作成（ルート情報管理）
         cursor.execute("""
@@ -170,10 +178,21 @@ class StoreDatabase:
                 chain_name_patterns TEXT NOT NULL,
                 is_active INTEGER DEFAULT 1,
                 priority INTEGER DEFAULT 0,
+                -- マッチしない店舗に付与する「その他」用フラグ（0 or 1）
+                is_default_for_others INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # 既存テーブルにis_default_for_othersカラムがない場合は追加（マイグレーション）
+        try:
+            cursor.execute(
+                "ALTER TABLE chain_store_code_mappings "
+                "ADD COLUMN is_default_for_others INTEGER DEFAULT 0"
+            )
+        except sqlite3.OperationalError:
+            # 既に存在する場合は無視
+            pass
         
         # chain_store_code_mappings の updated_at を自動更新するトリガー
         cursor.execute("""
@@ -206,8 +225,8 @@ class StoreDatabase:
         cursor.execute("""
             INSERT INTO stores (
                 affiliated_route_name, route_code, supplier_code, 
-                store_name, address, phone, custom_fields
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                store_name, address, phone, custom_fields, store_code
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             store_data.get('affiliated_route_name'),
             store_data.get('route_code'),
@@ -215,7 +234,8 @@ class StoreDatabase:
             store_data.get('store_name'),
             store_data.get('address'),
             store_data.get('phone'),
-            custom_fields_json
+            custom_fields_json,
+            store_data.get('store_code')
         ))
         
         conn.commit()
@@ -237,7 +257,8 @@ class StoreDatabase:
                 store_name = ?,
                 address = ?,
                 phone = ?,
-                custom_fields = ?
+                custom_fields = ?,
+                store_code = ?
             WHERE id = ?
         """, (
             store_data.get('affiliated_route_name'),
@@ -247,6 +268,7 @@ class StoreDatabase:
             store_data.get('address'),
             store_data.get('phone'),
             custom_fields_json,
+            store_data.get('store_code'),
             store_id
         ))
         
@@ -813,13 +835,14 @@ class StoreDatabase:
         
         cursor.execute("""
             INSERT INTO chain_store_code_mappings (
-                chain_code, chain_name_patterns, is_active, priority
-            ) VALUES (?, ?, ?, ?)
+                chain_code, chain_name_patterns, is_active, priority, is_default_for_others
+            ) VALUES (?, ?, ?, ?, ?)
         """, (
             mapping_data.get('chain_code'),
             patterns_json,
             mapping_data.get('is_active', 1),
-            mapping_data.get('priority', 0)
+            mapping_data.get('priority', 0),
+            mapping_data.get('is_default_for_others', 0),
         ))
         
         conn.commit()
@@ -837,13 +860,15 @@ class StoreDatabase:
                 chain_code = ?,
                 chain_name_patterns = ?,
                 is_active = ?,
-                priority = ?
+                priority = ?,
+                is_default_for_others = ?
             WHERE id = ?
         """, (
             mapping_data.get('chain_code'),
             patterns_json,
             mapping_data.get('is_active', 1),
             mapping_data.get('priority', 0),
+            mapping_data.get('is_default_for_others', 0),
             mapping_id
         ))
         
@@ -904,6 +929,10 @@ class StoreDatabase:
                 mapping_dict['chain_name_patterns'] = []
         else:
             mapping_dict['chain_name_patterns'] = []
+
+        # is_default_for_others が存在しない旧レコードの場合に備えてデフォルト値を設定
+        if 'is_default_for_others' not in mapping_dict or mapping_dict['is_default_for_others'] is None:
+            mapping_dict['is_default_for_others'] = 0
         
         return mapping_dict
     
@@ -935,7 +964,24 @@ class StoreDatabase:
                         return chain_code
             except json.JSONDecodeError:
                 continue
-        
+
+        # どのパターンにもマッチしなかった場合は「その他」用のチェーンコードがあればそれを返す
+        try:
+            cursor.execute(
+                """
+                SELECT chain_code FROM chain_store_code_mappings
+                WHERE is_active = 1 AND is_default_for_others = 1
+                ORDER BY priority DESC, chain_code ASC
+                LIMIT 1
+                """
+            )
+            default_row = cursor.fetchone()
+            if default_row:
+                return default_row[0]
+        except Exception:
+            # ここでのエラーは致命的ではないので黙ってフォールバックさせる
+            pass
+
         return None
     
     def get_max_supplier_code_for_prefix(self, prefix: str) -> Optional[str]:
@@ -1018,4 +1064,199 @@ class StoreDatabase:
             return f"{chain_code}-01"
         except (ValueError, AttributeError):
             return f"{chain_code}-01"
+    
+    # ==================== store_code 関連メソッド ====================
+    
+    def get_max_store_code_for_prefix(self, prefix: str) -> Optional[str]:
+        """指定プレフィックスの最大店舗コードを取得"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # store_codeカラムが存在するか確認し、なければ追加
+        try:
+            cursor.execute("SELECT store_code FROM stores LIMIT 1")
+        except sqlite3.OperationalError:
+            # カラムが存在しない場合は追加（UNIQUE制約なし）
+            try:
+                cursor.execute("ALTER TABLE stores ADD COLUMN store_code TEXT")
+                conn.commit()
+            except sqlite3.OperationalError:
+                # 既に追加されている場合やその他のエラーは無視
+                pass
+        
+        cursor.execute(
+            "SELECT store_code FROM stores WHERE store_code LIKE ? AND store_code IS NOT NULL AND store_code != ''",
+            (f"{prefix}-%",)
+        )
+        rows = cursor.fetchall()
+        
+        if not rows:
+            return None
+        
+        store_codes = [row[0] for row in rows if row[0]]
+        
+        if not store_codes:
+            return None
+        
+        # コードを数値部分でソート
+        def parse_store_code(code: str) -> tuple:
+            """店舗コードを解析（例: 'BO-01' -> ('BO', 1)）"""
+            try:
+                if '-' in code:
+                    code_prefix, number_part = code.rsplit('-', 1)
+                    if code_prefix == prefix:  # プレフィックスが一致する場合のみ
+                        return (code_prefix, int(number_part))
+            except (ValueError, AttributeError):
+                pass
+            return (prefix, 0)
+        
+        parsed_codes = [parse_store_code(code) for code in store_codes]
+        parsed_codes = [pc for pc in parsed_codes if pc[0] == prefix]  # プレフィックス一致のみ
+        if not parsed_codes:
+            return None
+        
+        parsed_codes.sort(key=lambda x: x[1])
+        max_prefix, max_number = parsed_codes[-1]
+        
+        return f"{max_prefix}-{max_number:02d}"
+    
+    def get_next_store_code_from_store_name(self, store_name: str) -> str:
+        """店舗名から次の店舗コードを生成"""
+        # チェーン店コードマッピングから検索
+        chain_code = self.find_chain_code_by_store_name(store_name)
+        
+        if not chain_code:
+            # マッピングが見つからない場合は、その他用のデフォルトコードを検索
+            chain_code = self.find_default_chain_code_for_others()
+            if not chain_code:
+                # その他用も見つからない場合は、店舗名から自動抽出
+                chain_code = self._extract_store_prefix(store_name)
+        
+        # 既存の最大コードを取得
+        max_code = self.get_max_store_code_for_prefix(chain_code)
+        
+        if not max_code:
+            return f"{chain_code}-01"
+        
+        try:
+            if '-' in max_code:
+                code_prefix, number_part = max_code.rsplit('-', 1)
+                if code_prefix == chain_code:
+                    next_number = int(number_part) + 1
+                    return f"{code_prefix}-{next_number:02d}"
+            return f"{chain_code}-01"
+        except (ValueError, AttributeError):
+            return f"{chain_code}-01"
+    
+    def find_default_chain_code_for_others(self) -> Optional[str]:
+        """その他用のデフォルトチェーンコードを取得"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # is_default_for_others = 1 かつ is_active = 1 のチェーンコードを取得
+        cursor.execute("""
+            SELECT chain_code 
+            FROM chain_store_code_mappings 
+            WHERE is_default_for_others = 1 AND is_active = 1 
+            ORDER BY priority DESC, chain_code ASC
+            LIMIT 1
+        """)
+        
+        row = cursor.fetchone()
+        return row[0] if row else None
+    
+    def update_store_code(self, store_id: int, store_code: str) -> bool:
+        """店舗コードを更新"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # store_codeカラムが存在するか確認し、なければ追加
+        try:
+            cursor.execute("SELECT store_code FROM stores LIMIT 1")
+        except sqlite3.OperationalError:
+            # カラムが存在しない場合は追加（UNIQUE制約なし）
+            try:
+                cursor.execute("ALTER TABLE stores ADD COLUMN store_code TEXT")
+                conn.commit()
+            except sqlite3.OperationalError:
+                # 既に追加されている場合やその他のエラーは無視
+                pass
+        
+        cursor.execute("""
+            UPDATE stores SET store_code = ? WHERE id = ?
+        """, (store_code, store_id))
+        
+        conn.commit()
+        return cursor.rowcount > 0
+    
+    def assign_store_codes_to_empty_stores(self) -> Dict[str, int]:
+        """店舗コードが空の店舗に自動付与"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # store_codeカラムが存在するか確認し、なければ追加
+        try:
+            cursor.execute("SELECT store_code FROM stores LIMIT 1")
+        except sqlite3.OperationalError as e:
+            # カラムが存在しない場合は追加（UNIQUE制約なし）
+            try:
+                cursor.execute("ALTER TABLE stores ADD COLUMN store_code TEXT")
+                conn.commit()
+                # カラム追加後、再度確認
+                cursor.execute("SELECT store_code FROM stores LIMIT 1")
+            except sqlite3.OperationalError as e2:
+                # カラム追加に失敗した場合はエラーを再発生
+                raise Exception(f"store_codeカラムの追加に失敗しました: {str(e2)}")
+        
+        # 店舗コードが空の店舗を取得
+        try:
+            cursor.execute("""
+                SELECT id, store_name FROM stores 
+                WHERE (store_code IS NULL OR store_code = '')
+                ORDER BY id
+            """)
+        except sqlite3.OperationalError as e:
+            raise Exception(f"店舗データの取得に失敗しました: {str(e)}")
+        
+        rows = cursor.fetchall()
+        updated_count = 0
+        error_count = 0
+        
+        for row in rows:
+            store_id = row[0]
+            store_name = row[1]
+            
+            if not store_name:
+                error_count += 1
+                continue
+            
+            try:
+                # 店舗名から店舗コードを生成
+                store_code = self.get_next_store_code_from_store_name(store_name)
+                
+                # 重複チェック（念のため）
+                cursor.execute("SELECT COUNT(*) FROM stores WHERE store_code = ?", (store_code,))
+                if cursor.fetchone()[0] > 0:
+                    # 重複している場合は連番を増やす
+                    max_code = self.get_max_store_code_for_prefix(store_code.split('-')[0])
+                    if max_code:
+                        prefix, number = max_code.rsplit('-', 1)
+                        store_code = f"{prefix}-{int(number) + 1:02d}"
+                    else:
+                        store_code = f"{store_code.split('-')[0]}-01"
+                
+                # 店舗コードを更新
+                cursor.execute("UPDATE stores SET store_code = ? WHERE id = ?", (store_code, store_id))
+                updated_count += 1
+            except Exception as e:
+                print(f"店舗コード付与エラー (ID: {store_id}): {e}")
+                error_count += 1
+        
+        conn.commit()
+        
+        return {
+            'total': len(rows),
+            'updated': updated_count,
+            'errors': error_count
+        }
 

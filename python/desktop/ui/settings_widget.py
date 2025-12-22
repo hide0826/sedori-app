@@ -349,9 +349,10 @@ class SettingsWidget(QWidget):
         
         # テーブル
         self.chain_mapping_table = QTableWidget()
-        self.chain_mapping_table.setColumnCount(5)
+        # ID / チェーン店コード / 店舗名パターン / 優先度 / 有効 / その他
+        self.chain_mapping_table.setColumnCount(6)
         self.chain_mapping_table.setHorizontalHeaderLabels([
-            "ID", "チェーン店コード", "店舗名パターン", "優先度", "有効"
+            "ID", "チェーン店コード", "店舗名パターン", "優先度", "有効", "その他"
         ])
         self.chain_mapping_table.setAlternatingRowColors(True)
         self.chain_mapping_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -365,8 +366,18 @@ class SettingsWidget(QWidget):
         header.setSectionResizeMode(2, QHeaderView.Stretch)  # パターン
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # 優先度
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # 有効
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)  # その他
         
         table_layout.addWidget(self.chain_mapping_table)
+
+        # 「その他」列の説明
+        others_info_label = QLabel(
+            "「その他」列が「はい」の行は、どのパターンにも当てはまらない店舗に付与するデフォルトのチェーンコードとして使われます。\n"
+            "※ 通常は1行のみ「はい」にすることを推奨します。"
+        )
+        others_info_label.setWordWrap(True)
+        others_info_label.setStyleSheet("color: #666; font-size: 9pt;")
+        table_layout.addWidget(others_info_label)
         
         # 操作ボタン
         button_layout = QHBoxLayout()
@@ -437,6 +448,12 @@ class SettingsWidget(QWidget):
             is_active = mapping.get('is_active', 1)
             active_item = QTableWidgetItem('有効' if is_active else '無効')
             self.chain_mapping_table.setItem(i, 4, active_item)
+
+            # その他（マッチしない店舗用デフォルト）
+            is_default_for_others = mapping.get('is_default_for_others', 0)
+            others_text = 'はい' if is_default_for_others else ''
+            others_item = QTableWidgetItem(others_text)
+            self.chain_mapping_table.setItem(i, 5, others_item)
     
     def add_chain_mapping(self):
         """チェーン店コードマッピングを追加"""
