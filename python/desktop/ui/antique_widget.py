@@ -693,14 +693,15 @@ class AntiqueWidget(QWidget):
                 
                 # 4. デフォルト（マッチしない場合は空文字のまま、後で「道具類」が設定される）
 
-                # 仕入先コード→店舗マスタ参照
+                # 仕入先コード/店舗コード → 店舗マスタ参照
                 supplier_code = str(name_s.iloc[i] or '').strip()
                 store_name = ""; address=""; phone=""; corp_name=""
                 try:
                     if supplier_code:
                         from desktop.database.store_db import StoreDatabase
                         sdb = StoreDatabase()
-                        st = sdb.get_store_by_supplier_code(supplier_code)
+                        # 店舗コード(store_code)を優先し、互換性のため仕入れ先コードも許容
+                        st = sdb.get_store_by_code(supplier_code)
                         if st:
                             store_name = st.get('store_name','')
                             address = st.get('address','')
@@ -861,14 +862,15 @@ class AntiqueWidget(QWidget):
                             cat = cat_name
                             break
                 
-                # 仕入先コード→店舗マスタ参照
+                # 仕入先コード/店舗コード → 店舗マスタ参照
                 supplier_code = str(name_s.iloc[i] or '').strip()
                 store_name = ""; address=""; phone=""; corp_name=""
                 try:
                     if supplier_code:
                         from desktop.database.store_db import StoreDatabase
                         sdb = StoreDatabase()
-                        st = sdb.get_store_by_supplier_code(supplier_code)
+                        # 店舗コード(store_code)を優先し、互換性のため仕入れ先コードも許容
+                        st = sdb.get_store_by_code(supplier_code)
                         if st:
                             store_name = st.get('store_name','')
                             address = st.get('address','')

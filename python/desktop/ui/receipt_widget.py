@@ -867,7 +867,8 @@ class ReceiptWidget(QWidget):
             for store in stores:
                 store_phone = store.get('phone') or ''
                 if store_phone and (phone_number in store_phone or store_phone in phone_number):
-                    matched_store_code = store.get('supplier_code')
+                    # 店舗コード優先、なければ仕入れ先コード（互換性のため）
+                    matched_store_code = store.get('store_code') or store.get('supplier_code')
                     break
         
         # 店舗名でも検索（電話番号で見つからない場合）
@@ -876,7 +877,8 @@ class ReceiptWidget(QWidget):
                 store_name = store.get('store_name') or ''
                 # 店舗名の部分一致チェック
                 if store_name and store_name_raw and (store_name_raw in store_name or store_name in store_name_raw):
-                    matched_store_code = store.get('supplier_code')
+                    # 店舗コード優先、なければ仕入れ先コード（互換性のため）
+                    matched_store_code = store.get('store_code') or store.get('supplier_code')
                     break
         
         if not matched_store_code:
@@ -1783,7 +1785,8 @@ class ReceiptWidget(QWidget):
         if code:
             if code not in self._store_name_cache:
                 try:
-                    store = self.store_db.get_store_by_supplier_code(code)
+                    # 店舗コード(store_code)を優先し、互換性のため仕入れ先コードも許容
+                    store = self.store_db.get_store_by_code(code)
                     self._store_name_cache[code] = (store.get("store_name") if store else "") or ""
                 except Exception:
                     self._store_name_cache[code] = ""
@@ -2104,13 +2107,9 @@ class ReceiptWidget(QWidget):
                 elif not current_store_code and matched_store_code:
                     # 店舗コードが空の場合、候補から店舗コードを設定
                     updates["store_code"] = matched_store_code
-                    # 店舗名も更新（店舗コードから店舗名を取得）
+                    # 店舗名も更新（店舗コードから店舗名を取得）※現状はOCR結果を優先するため更新しない
                     try:
-                        store = self.store_db.get_store_by_supplier_code(matched_store_code)
-                        if store:
-                            # store_name_rawは更新しない（OCR結果を保持）
-                            # 表示は_format_store_code_labelで「店舗コード＋店舗名」になる
-                            pass
+                        _ = self.store_db.get_store_by_code(matched_store_code)
                     except Exception:
                         pass
                 
@@ -4195,9 +4194,9 @@ class ReceiptWidget(QWidget):
                 selected_store_label = store_name_combo.currentText()
                 if selected_store_code:
                     updates['store_code'] = selected_store_code
-                    # 店舗名（生）は店舗マスタから取得
+                    # 店舗名（生）は店舗マスタから取得（store_code優先、互換性のため仕入れ先コードも許容）
                     try:
-                        store = self.store_db.get_store_by_supplier_code(selected_store_code)
+                        store = self.store_db.get_store_by_code(selected_store_code)
                         if store:
                             updates['store_name_raw'] = store.get('store_name', '') or selected_store_label
                     except Exception:

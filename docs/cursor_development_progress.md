@@ -723,6 +723,39 @@
 **最終更新**: 2025-12-20  
 **更新者**: Agentモード（実装）
 
+### 2025-12-23（店舗コード移行バッチタブ追加・store_code優先参照への変更）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. メインタブに「バッチ処理」タブを追加し、店舗マスタの店舗コード移行用ウィジェットを実装
+  2. 既存機能で `supplier_code` を店舗識別キーとして使っていた箇所を、`store_code` 優先＋`supplier_code` フォールバック参照へ順次変更
+- **実装完了**:
+  - `python/desktop/ui/store_code_batch_widget.py`:
+    - 「店舗マスタ状況を再読込」ボタンで stores テーブルの統計を表示（総店舗数 / store_code 未設定数 / supplier_code 未設定数）
+    - 「店舗コード一括付与（store_code 再付番）」ボタンで `StoreDatabase.assign_store_codes_to_empty_stores()` を実行し、結果サマリをダイアログ＋ログに表示
+    - ログ欄は常に末尾へ自動スクロール
+  - `python/desktop/ui/main_window.py`:
+    - メインタブに「バッチ処理」タブを追加し、`StoreCodeBatchWidget` を組み込み
+  - `python/desktop/database/store_db.py`:
+    - `get_store_by_code(code)` を新規実装（`store_code` → 見つからなければ `supplier_code` の順で検索）
+    - `list_stores` の検索条件に `store_code LIKE ?` を追加し、店舗コードでの検索に対応
+  - `python/desktop/services/receipt_matching_service.py`:
+    - レシート店舗名から店舗を推定する `_guess_store_code` で、戻り値を `store_code` 優先＋`supplier_code` フォールバックに変更
+  - `python/desktop/utils/template_generator.py`:
+    - ルートサマリーテンプレート生成時の「店舗コード」列に `store_code` を優先して出力し、なければ `supplier_code` を使用するように変更
+  - `python/desktop/ui/inventory_widget.py`:
+    - ルートテンプレート・メモ同期などで店舗マスタを参照する箇所を `get_store_by_code` に統一
+    - 仕入CSVの「仕入先」列から店舗情報を補完する際も、`get_store_by_code` を使用
+  - `python/desktop/ui/antique_widget.py`:
+    - 古物台帳生成時に、仕入データの「仕入先」から店舗マスタを引く処理を `get_store_by_code` ベースに変更
+  - `python/desktop/ui/receipt_widget.py`:
+    - 店舗コードのラベル表示 `_format_store_code_label` で、店舗名キャッシュの取得に `get_store_by_code` を使用
+    - 一括マッチ処理・編集ダイアログで、店舗コードから店舗名を補完する箇所を `get_store_by_code` に変更
+  - `python/desktop/ui/route_summary_widget.py`:
+    - テンプレート生成時の店舗コード・備考補完を `store_code` 優先＋`supplier_code` フォールバックに変更
+- **効果**:
+  - 店舗マスタの `store_code` を中心に、purchases / receipts / ルート関連テーブルが店舗コードで紐付けしやすい設計に近づいた
+  - 既存データとの互換性を維持しつつ、将来的に `supplier_code` を廃止しやすい構成になった
+
 ### 2025-12-20（店舗コード機能実装・データリカバリー機能拡張）
 - **チャット**: Agentモード（実装）
 - **内容**: 

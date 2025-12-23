@@ -42,6 +42,7 @@ from ui.purchase_ledger_widget import PurchaseLedgerWidget
 from ui.expense_ledger_widget import ExpenseLedgerWidget
 from ui.keepa_test_widget import KeepaTestWidget
 from ui.image_test_widget import ImageTestWidget
+from ui.store_code_batch_widget import StoreCodeBatchWidget
 
 
 class APIServerThread(QThread):
@@ -221,6 +222,10 @@ class MainWindow(QMainWindow):
         
         # メインタブに追加
         self.tab_widget.addTab(db_management_tabs, "データベース管理")
+        
+        # 店舗コード移行用バッチタブ
+        self.store_code_batch_widget = StoreCodeBatchWidget()
+        self.tab_widget.addTab(self.store_code_batch_widget, "バッチ処理")
         
         # 分析タブ
         self.analysis_widget = AnalysisWidget()

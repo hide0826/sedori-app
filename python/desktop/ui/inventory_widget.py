@@ -811,14 +811,14 @@ class InventoryWidget(QWidget):
                     route_db = RouteDatabase()
                     visits_from_db = route_db.get_store_visits_by_route(route_id)
                     
-                    # 店舗名を補完し、評価が無い場合は計算
+                # 店舗名を補完し、評価が無い場合は計算
                     visits = []
                     for visit in visits_from_db:
                         store_code = visit.get('store_code', '')
                         store_name = visit.get('store_name', '')
                         if not store_name and store_code:
-                            # 店舗マスタから店舗名を取得
-                            store_info = self.store_db.get_store_by_supplier_code(store_code)
+                            # 店舗マスタから店舗名を取得（store_code優先、互換性のため仕入れ先コードも許容）
+                            store_info = self.store_db.get_store_by_code(store_code)
                             if store_info:
                                 store_name = store_info.get('store_name', '')
                         visit['store_name'] = store_name
@@ -958,8 +958,8 @@ class InventoryWidget(QWidget):
             store_code = visit.get('store_code', '')
             memo_text = visit.get('store_notes', '')
             if store_code and not memo_text:
-                # 店舗マスタから備考を取得
-                store_info = self.store_db.get_store_by_supplier_code(store_code)
+                # 店舗マスタから備考を取得（store_code優先、互換性のため仕入れ先コードも許容）
+                store_info = self.store_db.get_store_by_code(store_code)
                 if store_info:
                     custom_fields = store_info.get('custom_fields', {})
                     memo_text = custom_fields.get('notes', '')
@@ -1001,8 +1001,8 @@ class InventoryWidget(QWidget):
             if not store_code or not memo_text:
                 continue
             
-            # 店舗マスタから現在の備考を取得
-            store_info = self.store_db.get_store_by_supplier_code(store_code)
+            # 店舗マスタから現在の備考を取得（store_code優先、互換性のため仕入れ先コードも許容）
+            store_info = self.store_db.get_store_by_code(store_code)
             if not store_info:
                 continue
             
@@ -2469,8 +2469,8 @@ class InventoryWidget(QWidget):
                 supplier_code = item.get('仕入先', '').strip()
                 
                 if supplier_code:
-                    # 店舗マスタから店舗情報を取得
-                    store_info = self.store_db.get_store_by_supplier_code(supplier_code)
+                    # 店舗マスタから店舗情報を取得（store_code優先、互換性のため仕入れ先コードも許容）
+                    store_info = self.store_db.get_store_by_code(supplier_code)
                     
                     if store_info:
                         # 店舗情報を追加

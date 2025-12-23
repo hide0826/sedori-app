@@ -1292,18 +1292,19 @@ class RouteSummaryWidget(QWidget):
                 stores = self.get_stores_for_route(route_name)
                 # 店舗マスタの備考欄を取得してstoresに追加
                 for store in stores:
-                    supplier_code = store.get('supplier_code')
-                    if supplier_code:
-                        store_info = self.store_db.get_store_by_supplier_code(supplier_code)
+                    # 店舗コード(store_code)を優先し、互換性のため仕入れ先コードも許容
+                    any_code = store.get('store_code') or store.get('supplier_code')
+                    if any_code:
+                        store_info = self.store_db.get_store_by_code(any_code)
                         if store_info:
                             custom_fields = store_info.get('custom_fields', {})
                             notes = custom_fields.get('notes', '')
                             # storesに備考を追加（テンプレート生成時に使用）
                             store['notes'] = notes
                 store_codes = [
-                    store.get('supplier_code')
+                    (store.get('store_code') or store.get('supplier_code'))
                     for store in stores
-                    if store.get('supplier_code')
+                    if store.get('store_code') or store.get('supplier_code')
                 ]
             
             if not TemplateGenerator:
@@ -1619,7 +1620,7 @@ class RouteSummaryWidget(QWidget):
                 route_name = self.route_code_combo.currentText().strip()
                 if route_name:
                     for s in self.get_stores_for_route(route_name):
-                        c = s.get('supplier_code')
+                        c = s.get('store_code') or s.get('supplier_code')
                         n = s.get('store_name')
                         if c and n:
                             code_to_name[c] = n
@@ -1638,7 +1639,8 @@ class RouteSummaryWidget(QWidget):
                     store_name = code_to_name.get(code, '')
                     if not store_name and code:
                         try:
-                            s = self.store_db.get_store_by_supplier_code(code)
+                            # 店舗コード(store_code)を優先し、互換性のため仕入れ先コードも許容
+                            s = self.store_db.get_store_by_code(code)
                             store_name = (s or {}).get('store_name','')
                         except Exception:
                             store_name = ''

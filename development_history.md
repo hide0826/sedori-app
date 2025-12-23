@@ -199,6 +199,44 @@
 
 ---
 
+## 2025-12-23: 店舗コード移行バッチタブ追加・store_code優先参照への変更
+
+- **タスク:** 店舗マスタの `store_code` を中心に据えるためのバッチタブ追加と、既存機能の `store_code` 優先参照化
+- **状況:** 完了
+- **作業時間:** 約2時間
+- **詳細:**
+    - `python/desktop/ui/store_code_batch_widget.py`
+        - 「バッチ処理」タブ用ウィジェットを新規作成
+        - 店舗マスタ（storesテーブル）の状況を表示（総店舗数 / store_code未設定件数 / supplier_code未設定件数）
+        - `assign_store_codes_to_empty_stores()` を呼び出す「店舗コード一括付与（store_code 再付番）」ボタンを実装し、結果（対象・更新・エラー件数）をダイアログとログに表示
+        - ログテキストは常に末尾へ自動スクロール
+    - `python/desktop/ui/main_window.py`
+        - メインタブに「バッチ処理」タブを追加し、`StoreCodeBatchWidget` を組み込み
+    - `python/desktop/database/store_db.py`
+        - `get_store_by_code(code)` を新規追加（まず `store_code`、見つからなければ `supplier_code` で検索）
+        - `list_stores` の検索条件に `store_code LIKE ?` を追加し、店舗コード検索に対応
+    - `python/desktop/services/receipt_matching_service.py`
+        - レシート店舗名から店舗コードを推定する `_guess_store_code` が `store_code` 優先で返すように変更（なければ `supplier_code`）
+    - `python/desktop/utils/template_generator.py`
+        - ルートサマリーテンプレート生成時の「店舗コード」列に `store_code` を優先して出力し、存在しない場合のみ `supplier_code` を使用
+    - `python/desktop/ui/inventory_widget.py`
+        - ルートテンプレート表示・メモ同期などで店舗マスタを参照する箇所を `get_store_by_code` に統一
+        - 仕入CSVの「仕入先」列から店舗情報（店舗名・ID）を補完する処理でも `get_store_by_code` を使用するよう変更
+    - `python/desktop/ui/antique_widget.py`
+        - 古物台帳タブで、仕入データの「仕入先」から店舗マスタを参照する処理を `get_store_by_code` ベースに変更
+        - これにより、将来的に「仕入先」列に store_code を直接入れてもそのまま連携可能に
+    - `python/desktop/ui/receipt_widget.py`
+        - 店舗コード表示ラベル `_format_store_code_label` が `get_store_by_code` を使って店舗名を取得するよう変更し、キャッシュも store_code ベースに
+        - 一括マッチ処理や編集ダイアログで店舗コードから店舗名を補完する箇所も `get_store_by_code` にリファクタリング
+    - `python/desktop/ui/route_summary_widget.py`
+        - ルートテンプレート生成時の店舗コード・備考補完ロジックを `store_code` 優先＋`supplier_code` フォールバックに変更
+        - store_visit_details からの読込時も、code→name の補完に `get_store_by_code` を使用
+- **効果:**
+    - 店舗マスタの `store_code` を中心に、仕入・レシート・ルート関連テーブルを横断して店舗を識別しやすくなった
+    - 既存の `supplier_code` との互換性を保ちつつ、将来的に `supplier_code` を非推奨／廃止に移行しやすい基盤が整った
+
+---
+
 ## 2025-11-28: ルートサマリーテンプレート生成・読み込みの改善
 
 - **タスク:** テンプレート生成で出発時刻等が固定行に配置され店舗データが抜ける問題を修正、読み込みも行番号指定から文字列検索に変更

@@ -310,13 +310,42 @@ class StoreDatabase:
         return None
     
     def get_store_by_supplier_code(self, supplier_code: str) -> Optional[Dict[str, Any]]:
-        """仕入れ先コードで店舗を取得"""
+        """仕入れ先コードで店舗を取得（後方互換用）
+
+        新しいコードでは get_store_by_code() の使用を推奨。
+        """
+        if not supplier_code:
+            return None
         conn = self._get_connection()
         cursor = conn.cursor()
         
         cursor.execute("SELECT * FROM stores WHERE supplier_code = ?", (supplier_code,))
         row = cursor.fetchone()
         
+        if row:
+            return self._row_to_dict(row)
+        return None
+
+    def get_store_by_code(self, code: str) -> Optional[Dict[str, Any]]:
+        """店舗コードまたは仕入れ先コードから店舗を取得
+
+        - まず store_code で一致を検索
+        - 見つからない場合は supplier_code で検索（旧データ互換）
+        """
+        if not code:
+            return None
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        # 1. store_code 優先
+        cursor.execute("SELECT * FROM stores WHERE store_code = ?", (code,))
+        row = cursor.fetchone()
+        if row:
+            return self._row_to_dict(row)
+
+        # 2. 互換性のため supplier_code も見る
+        cursor.execute("SELECT * FROM stores WHERE supplier_code = ?", (code,))
+        row = cursor.fetchone()
         if row:
             return self._row_to_dict(row)
         return None
@@ -332,10 +361,11 @@ class StoreDatabase:
                 SELECT * FROM stores 
                 WHERE store_name LIKE ? 
                    OR supplier_code LIKE ?
+                   OR store_code LIKE ?
                    OR affiliated_route_name LIKE ?
                    OR route_code LIKE ?
                 ORDER BY store_name
-            """, (search_pattern, search_pattern, search_pattern, search_pattern))
+            """, (search_pattern, search_pattern, search_pattern, search_pattern, search_pattern))
         else:
             cursor.execute("SELECT * FROM stores ORDER BY store_name")
         

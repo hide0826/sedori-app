@@ -77,7 +77,8 @@ class ReceiptMatchingService:
         for st in stores:
             name = (st.get('store_name') or '').lower()
             if name and raw_lower in name:
-                return st.get('supplier_code')
+                # 店舗コード優先、なければ互換性のため仕入れ先コード
+                return st.get('store_code') or st.get('supplier_code')
         return None
 
     @staticmethod
