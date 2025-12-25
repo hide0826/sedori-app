@@ -1290,3 +1290,102 @@ class StoreDatabase:
             'errors': error_count
         }
 
+    def reassign_store_codes_using_mappings(self) -> Dict[str, int]:
+        """
+        チェーン店コードマッピングを元に店舗コードを再付与する
+
+        - 店舗名からチェーン店コードを判定（find_chain_code_by_store_name）
+        - 既存の店舗コードがそのチェーン店コードで始まっていない場合、または空の場合にのみ再付与
+        - 既存コードとの重複を避けるため、プレフィックスごとに現在の最大番号から順に採番する
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        # store_code カラムの存在を保証
+        try:
+            cursor.execute("SELECT store_code FROM stores LIMIT 1")
+        except sqlite3.OperationalError:
+            try:
+                cursor.execute("ALTER TABLE stores ADD COLUMN store_code TEXT")
+                conn.commit()
+            except sqlite3.OperationalError:
+                # 追加に失敗した場合はそのまま終了
+                return {'total': 0, 'updated': 0, 'errors': 1}
+
+        # 全店舗を取得
+        cursor.execute("SELECT id, store_name, store_code FROM stores ORDER BY id")
+        rows = cursor.fetchall()
+
+        total = len(rows)
+        updated = 0
+        errors = 0
+
+        # プレフィックスごとの次採番番号キャッシュ
+        next_number_by_prefix: Dict[str, int] = {}
+
+        for row in rows:
+            store_id = row[0]
+            store_name = row[1]
+            current_code = row[2] or ""
+
+            if not store_name:
+                continue
+
+            try:
+                # 店舗名からチェーン店コード（プレフィックス）を取得
+                prefix = self.find_chain_code_by_store_name(store_name)
+                if not prefix:
+                    # マッピングがない場合はフォールバックとしてプレフィックスを抽出
+                    prefix = self._extract_store_prefix(store_name)
+
+                if not prefix:
+                    continue
+
+                # 既存コードが既にこのプレフィックスで始まっている場合はそのままにする
+                if current_code and str(current_code).startswith(f"{prefix}-"):
+                    continue
+
+                # このプレフィックスの次番号をキャッシュから取得（なければ最大値から計算）
+                if prefix not in next_number_by_prefix:
+                    max_code = self.get_max_store_code_for_prefix(prefix)
+                    if max_code and '-' in max_code:
+                        try:
+                            _, num_part = max_code.rsplit('-', 1)
+                            next_number_by_prefix[prefix] = int(num_part) + 1
+                        except Exception:
+                            next_number_by_prefix[prefix] = 1
+                    else:
+                        next_number_by_prefix[prefix] = 1
+
+                next_num = next_number_by_prefix[prefix]
+                new_code = f"{prefix}-{next_num:02d}"
+
+                # 念のため重複チェック
+                cursor.execute(
+                    "SELECT COUNT(*) FROM stores WHERE store_code = ?",
+                    (new_code,)
+                )
+                if cursor.fetchone()[0] > 0:
+                    # すでに存在する場合は次の番号を試す
+                    next_number_by_prefix[prefix] = next_num + 1
+                    continue
+
+                # 店舗コードを更新
+                cursor.execute(
+                    "UPDATE stores SET store_code = ? WHERE id = ?",
+                    (new_code, store_id)
+                )
+                updated += 1
+                next_number_by_prefix[prefix] = next_num + 1
+            except Exception as e:
+                print(f"店舗コード再付番エラー (ID: {store_id}): {e}")
+                errors += 1
+
+        conn.commit()
+
+        return {
+            'total': total,
+            'updated': updated,
+            'errors': errors
+        }
+

@@ -362,7 +362,11 @@ class RouteSummaryWidget(QWidget):
                     order_item = QTableWidgetItem(str(row + 1))
                     order_item.setFlags(order_item.flags() & ~Qt.ItemIsEditable)
                     self.store_visits_table.setItem(row, 0, order_item)
-                    self.store_visits_table.setItem(row, 1, QTableWidgetItem(store.get('supplier_code', '')))
+                    # 店舗コード列には店舗マスタの「店舗コード(store_code)」を優先して使用し、
+                    # 空の場合は仕入れ先コード（supplier_code）をフォールバックとして使用する
+                    store_code = (store.get('store_code') or '').strip()
+                    visit_code = store_code or (store.get('supplier_code') or '').strip()
+                    self.store_visits_table.setItem(row, 1, QTableWidgetItem(visit_code))
                     self.store_visits_table.setItem(row, 2, QTableWidgetItem(store.get('store_name', '')))
                     # 星評価初期化
                     star_widget = StarRatingWidget(self.store_visits_table, rating=0, star_size=14)
@@ -1735,6 +1739,16 @@ class RouteSummaryWidget(QWidget):
         # 変更前の状態を保存
         self.save_table_state()
         
+        # 店舗マスタから「店舗コード」として使う値を取得するヘルパー
+        # 優先: 店舗コード（store_code） → フォールバック: 仕入れ先コード
+        def _get_visit_store_code(store: dict) -> str:
+            # 1. 店舗コードを優先
+            code = (store.get('store_code') or '').strip()
+            if code:
+                return code
+            # 2. 店舗コードが空の場合だけ仕入れ先コードを使用
+            return (store.get('supplier_code') or '').strip()
+        
         try:
             route_name = self.route_code_combo.currentText().strip()
             if not route_name:
@@ -1759,7 +1773,7 @@ class RouteSummaryWidget(QWidget):
             # 追加する店舗をフィルタリング（重複を除外）
             stores_to_add = [
                 store for store in stores
-                if store.get('supplier_code') and store.get('supplier_code') not in existing_codes
+                if _get_visit_store_code(store) and _get_visit_store_code(store) not in existing_codes
             ]
             
             if not stores_to_add:
@@ -1778,8 +1792,8 @@ class RouteSummaryWidget(QWidget):
                 order_item = QTableWidgetItem(str(row + 1))
                 self.store_visits_table.setItem(row, 0, order_item)
                 
-                # 店舗コード
-                code_item = QTableWidgetItem(store.get('supplier_code', ''))
+                # 店舗コード（店舗マスタの「仕入れ先コード」を優先し、なければ店舗コードを使用）
+                code_item = QTableWidgetItem(_get_visit_store_code(store))
                 self.store_visits_table.setItem(row, 1, code_item)
                 
                 # 店舗名

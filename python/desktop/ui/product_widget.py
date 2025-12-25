@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QLabel, QTabWidget, QHeaderView, QFileDialog, QMenu, QApplication,
     QAbstractItemView, QComboBox
 )
-from PySide6.QtGui import QDrag, QPixmap, QDesktopServices, QCursor, QCursor
+from PySide6.QtGui import QDrag, QPixmap, QDesktopServices, QCursor
 
 from desktop.utils.ui_utils import (
     save_table_header_state, restore_table_header_state,
@@ -38,6 +38,7 @@ from database.product_db import ProductDatabase
 from database.warranty_db import WarrantyDatabase
 from database.product_purchase_db import ProductPurchaseDatabase
 from database.purchase_db import PurchaseDatabase  # 古物台帳情報の参照用
+from database.store_db import StoreDatabase
 
 class SortableDateItem(QTableWidgetItem):
     """日付ソート対応のQTableWidgetItem"""
@@ -301,6 +302,7 @@ class ProductWidget(QWidget):
         self.warranty_db = WarrantyDatabase()
         self.purchase_db = ProductPurchaseDatabase()  # スナップショット用
         self.purchase_history_db = PurchaseDatabase() # 古物台帳情報の参照用
+        self.store_db = StoreDatabase()
         
         from database.receipt_db import ReceiptDatabase
         self.receipt_db = ReceiptDatabase()
@@ -551,6 +553,18 @@ class ProductWidget(QWidget):
         self.view_ledger_button.clicked.connect(lambda: self.toggle_view_mode("ledger"))
         controls_layout.addWidget(self.view_ledger_button)
 
+        # 店舗コードバッチ更新ボタン（仕入先→新店舗コードへ一括変換）
+        self.update_store_codes_button = QPushButton("店舗コードバッチ")
+        self.update_store_codes_button.setToolTip("仕入DBの『仕入先』カラムを店舗マスタの新店舗コードに置き換えます")
+        self.update_store_codes_button.clicked.connect(self.batch_update_store_codes_from_master)
+        controls_layout.addWidget(self.update_store_codes_button)
+
+        # 仕入DB保存ボタン（手動変更を含めて確実にスナップショット保存）
+        self.save_purchase_button = QPushButton("仕入DB保存")
+        self.save_purchase_button.setToolTip("現在の仕入DBの内容（テーブル上の変更を含む）をスナップショットとして保存します")
+        self.save_purchase_button.clicked.connect(self.save_purchase_from_table)
+        controls_layout.addWidget(self.save_purchase_button)
+
         self.purchase_count_label = QLabel("保存件数: 0件")
         controls_layout.addWidget(self.purchase_count_label)
 
@@ -606,6 +620,198 @@ class ProductWidget(QWidget):
     def get_all_purchase_records(self) -> List[Dict[str, Any]]:
         """現在のすべての仕入レコードを返す"""
         return getattr(self, 'purchase_all_records', [])
+
+    def batch_update_store_codes_from_master(self):
+        """
+        仕入DBの「仕入先」カラムを店舗マスタの新店舗コードに置き換えるバッチ処理
+
+        - 現在の仕入DBレコード（purchase_all_records）を対象
+        - 各レコードの「仕入先」または「店舗コード」から店舗マスタを参照
+        - 店舗マスタの store_code が取得できた場合、その値で「仕入先」を上書き
+        - テーブル表示と内部キャッシュ（purchase_all_records）を同期
+        """
+        if not hasattr(self, "purchase_all_records") or not self.purchase_all_records:
+            QMessageBox.information(self, "情報", "仕入DBにデータがありません。")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "確認",
+            "仕入DBの「仕入先」カラムを店舗マスタの新店舗コードで置き換えますか？\n"
+            "（対応する店舗が見つかった行のみ変更されます）",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        updated = 0
+        skipped = 0
+
+        row_count = self.purchase_table.rowCount()
+
+        for row_idx in range(row_count):
+            # テーブルの並び順と内部リストの順序はソート操作でズレる可能性があるため、
+            # 行インデックスではなくSKUをキーに該当レコードを探す
+            record = None
+            try:
+                sku_item = self.purchase_table.item(row_idx, self.purchase_columns.index("SKU")) if "SKU" in self.purchase_columns else None
+            except ValueError:
+                sku_item = None
+
+            sku_key = sku_item.text().strip() if sku_item else ""
+
+            if sku_key and hasattr(self, "purchase_all_records"):
+                for r in self.purchase_all_records:
+                    r_sku = (r.get("SKU") or r.get("sku") or "").strip()
+                    if r_sku == sku_key:
+                        record = r
+                        break
+
+            # SKUで見つからなかった場合はフォールバックとしてインデックスを使用
+            if record is None:
+                try:
+                    record = self.purchase_all_records[row_idx]
+                except (AttributeError, IndexError):
+                    skipped += 1
+                    continue
+
+            # 既存のコード（旧仕入先コード or 旧店舗コード）を取得
+            raw_code = (
+                record.get("仕入先")
+                or record.get("店舗コード")
+                or record.get("store_code")
+                or ""
+            )
+            raw_code = str(raw_code).strip()
+            if not raw_code:
+                skipped += 1
+                continue
+
+            # 余分な店舗名などが含まれている場合は、空白の前までをコードとみなす
+            if " " in raw_code:
+                raw_code = raw_code.split(" ")[0]
+
+            # 店舗マスタから店舗情報を取得（store_code優先、互換性のため仕入れ先コードも許容）
+            try:
+                store = self.store_db.get_store_by_code(raw_code)
+            except Exception:
+                store = None
+
+            if not store:
+                skipped += 1
+                continue
+
+            new_store_code = (store.get("store_code") or "").strip()
+            if not new_store_code:
+                skipped += 1
+                continue
+
+            # 既に同じコードならスキップ
+            if new_store_code == record.get("仕入先"):
+                skipped += 1
+                continue
+
+            # 内部レコードを更新
+            record["仕入先"] = new_store_code
+            record["store_code"] = new_store_code  # 補助的に保持
+
+            # テーブルセル（「仕入先」列）を更新
+            if "仕入先" in self.purchase_columns:
+                col_idx = self.purchase_columns.index("仕入先")
+                item = self.purchase_table.item(row_idx, col_idx)
+                if not item:
+                    item = QTableWidgetItem()
+                    self.purchase_table.setItem(row_idx, col_idx, item)
+                item.setText(new_store_code)
+
+            updated += 1
+
+        # マスターキャッシュも更新（フィルタ時の整合性を保つ）
+        try:
+            self.purchase_all_records_master = copy.deepcopy(self.purchase_all_records)
+        except Exception:
+            pass
+
+        # スナップショットとして保存（次回起動時も新店舗コードが反映されるようにする）
+        try:
+            self.save_purchase_snapshot()
+        except Exception as e:
+            print(f"店舗コードバッチ後のスナップショット保存エラー: {e}")
+
+        # 結果をラベルとメッセージで表示
+        if hasattr(self, "purchase_count_label"):
+            self.purchase_count_label.setText(f"保存件数: {len(self.purchase_all_records)}件（コード更新 {updated}件）")
+
+        QMessageBox.information(
+            self,
+            "完了",
+            f"店舗コードバッチ更新が完了しました。\n\n"
+            f"更新: {updated}件\n"
+            f"スキップ: {skipped}件"
+        )
+
+    def save_purchase_from_table(self):
+        """
+        仕入DBテーブルの現在の状態を内部レコードに反映してスナップショット保存する
+
+        - 手動編集したセルの内容も含めて保存したい場合に使用
+        - SKU列をキーに purchase_all_records / master / purchase_records を更新
+        """
+        if not hasattr(self, "purchase_all_records") or not self.purchase_all_records:
+            QMessageBox.information(self, "情報", "保存する仕入DBデータがありません。")
+            return
+
+        # SKU列のインデックスを取得
+        sku_col_idx = None
+        if "SKU" in self.purchase_columns:
+            sku_col_idx = self.purchase_columns.index("SKU")
+
+        if sku_col_idx is None:
+            QMessageBox.warning(self, "エラー", "SKU列が見つからないため、保存できません。")
+            return
+
+        row_count = self.purchase_table.rowCount()
+        col_count = self.purchase_table.columnCount()
+
+        # SKUをキーに全レコードを更新
+        for row in range(row_count):
+            sku_item = self.purchase_table.item(row, sku_col_idx)
+            if not sku_item:
+                continue
+            sku_val = (sku_item.text() or "").strip()
+            if not sku_val:
+                continue
+
+            # テーブルの1行分の値を辞書にまとめる
+            row_data: Dict[str, Any] = {}
+            for col in range(col_count):
+                header = self.purchase_columns[col] if col < len(self.purchase_columns) else None
+                if not header:
+                    continue
+                cell_item = self.purchase_table.item(row, col)
+                value = cell_item.text() if cell_item else ""
+                row_data[header] = value
+
+            # 対象リストをすべて更新
+            for lst_name in ["purchase_all_records", "purchase_all_records_master", "purchase_records"]:
+                lst = getattr(self, lst_name, None)
+                if not lst:
+                    continue
+                for rec in lst:
+                    rec_sku = (rec.get("SKU") or rec.get("sku") or "").strip()
+                    if rec_sku == sku_val:
+                        # 既存キーを維持しつつ、テーブル側の値で上書き
+                        for key, val in row_data.items():
+                            rec[key] = val
+                        break
+
+        # スナップショット保存
+        try:
+            self.save_purchase_snapshot()
+            QMessageBox.information(self, "保存完了", "仕入DBの現在の内容を保存しました。")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"仕入DBの保存に失敗しました:\n{e}")
 
     # ===== 画像管理タブとの連携用ユーティリティ =====
 
@@ -1391,7 +1597,14 @@ class ProductWidget(QWidget):
         self.purchase_table.clearContents()
         self.purchase_table.setRowCount(len(records))
         self.purchase_table.setColumnCount(len(columns))
-        self.purchase_table.setHorizontalHeaderLabels(columns)
+        # 表示ラベルだけ「仕入先」→「店舗コード」に置き換え
+        display_columns = list(columns)
+        try:
+            idx = display_columns.index("仕入先")
+            display_columns[idx] = "店舗コード"
+        except ValueError:
+            pass
+        self.purchase_table.setHorizontalHeaderLabels(display_columns)
         
         # 列幅を変更可能にする設定（データ設定前に設定）
         header = self.purchase_table.horizontalHeader()

@@ -121,12 +121,13 @@ class StoreNameDelegate(QStyledItemDelegate):
         self.store_db = store_db
     
     def _get_store_options(self) -> list[tuple[str, str]]:
-        """店舗コード＋店舗名のリストを取得"""
+        """店舗コード＋店舗名のリストを取得（store_code優先・supplier_codeフォールバック）"""
         try:
             stores = self.store_db.list_stores()
             options = []
             for store in stores:
-                code = store.get('supplier_code', '') or ''
+                # 店舗コードを優先し、空の場合は仕入れ先コードをフォールバックとして使用
+                code = (store.get('store_code') or '').strip() or (store.get('supplier_code') or '').strip()
                 name = store.get('store_name', '') or ''
                 if code and name:
                     options.append((code, f"{code} {name}"))
@@ -1779,18 +1780,33 @@ class ReceiptWidget(QWidget):
             self.view_image_btn.setEnabled(False)
 
     def _format_store_code_label(self, store_code: Optional[str], fallback_name: str = "") -> str:
-        """店舗コードの表示ラベルを生成（コード + 店舗名）"""
-        code = (store_code or "").strip()
+        """店舗コードの表示ラベルを生成（新店舗コード + 店舗名）
+
+        引数 store_code には旧仕入先コードが渡ってくる場合もあるため、
+        DB から店舗情報を取得した際は stores.store_code を優先的に表示コードとして使用する。
+        """
+        original_code = (store_code or "").strip()
+        code = original_code
         name = ""
         if code:
             if code not in self._store_name_cache:
                 try:
                     # 店舗コード(store_code)を優先し、互換性のため仕入れ先コードも許容
                     store = self.store_db.get_store_by_code(code)
-                    self._store_name_cache[code] = (store.get("store_name") if store else "") or ""
+                    display_code = code
+                    display_name = ""
+                    if store:
+                        # 表示用コードは stores.store_code を優先（なければ元のコード）
+                        display_code = (store.get("store_code") or code).strip() or code
+                        display_name = (store.get("store_name") or "").strip()
+                    self._store_name_cache[code] = (display_code, display_name)
                 except Exception:
-                    self._store_name_cache[code] = ""
-            name = self._store_name_cache.get(code) or ""
+                    self._store_name_cache[code] = (code, "")
+            cached = self._store_name_cache.get(code)
+            if isinstance(cached, tuple):
+                code, name = cached
+            else:
+                name = cached or ""
         if not name:
             name = (fallback_name or "").strip()
         if code and name:
@@ -3517,8 +3533,9 @@ class ReceiptWidget(QWidget):
             try:
                 stores = self.store_db.list_stores()
                 for store in stores:
-                    code = store.get('supplier_code', '') or ''
-                    name = store.get('store_name', '') or ''
+                    # 店舗コードを優先し、空の場合は仕入れ先コードをフォールバックとして使用
+                    code = (store.get('store_code') or '').strip() or (store.get('supplier_code') or '').strip()
+                    name = (store.get('store_name') or '').strip()
                     if code and name:
                         label = f"{code} {name}"
                         store_name_combo.addItem(label, code)
@@ -3962,6 +3979,21 @@ class ReceiptWidget(QWidget):
                     QMessageBox.warning(None, "警告", "レシートの日付が設定されていません。")
                     return
                 
+                # レシートの店舗コード（優先表示用）を取得
+                receipt_store_code_raw = receipt_data.get('store_code', '') if receipt_data else ''
+                receipt_store_code_clean = str(receipt_store_code_raw).strip()
+                if " " in receipt_store_code_clean:
+                    receipt_store_code_clean = receipt_store_code_clean.split(" ")[0]
+                # 店舗マスタから正規の店舗コード（store_code）を取得して比較に使う
+                receipt_store_code_canon = receipt_store_code_clean
+                try:
+                    if receipt_store_code_clean:
+                        store = self.store_db.get_store_by_code(receipt_store_code_clean)
+                        if store:
+                            receipt_store_code_canon = (store.get("store_code") or receipt_store_code_clean).strip() or receipt_store_code_clean
+                except Exception:
+                    pass
+                
                 # レシートの日時をdatetimeオブジェクトに変換（比較用）
                 receipt_datetime = None
                 if purchase_time:
@@ -4097,37 +4129,66 @@ class ReceiptWidget(QWidget):
                             # 商品名を取得
                             product_name = record.get('商品名') or record.get('product_name') or ''
                             
-                            # 店舗コードを取得
-                            store_code = record.get('仕入先') or record.get('店舗コード') or record.get('store_code', '')
-                            if store_code and " " in str(store_code):
-                                store_code = str(store_code).split(" ")[0]
+                            # 店舗コードを取得（新しい店舗コードを優先、なければ旧仕入先コードをフォールバック）
+                            raw_store_code = (
+                                record.get('店舗コード')
+                                or record.get('store_code')
+                                or record.get('仕入先')
+                                or ''
+                            )
+                            # 店舗コードのクリーン版（比較用）
+                            record_store_code_clean = str(raw_store_code).strip()
+                            if " " in record_store_code_clean:
+                                record_store_code_clean = record_store_code_clean.split(" ")[0]
+                            # 店舗マスタから正規の店舗コード（store_code）を取得
+                            record_store_code_canon = record_store_code_clean
+                            try:
+                                if record_store_code_clean:
+                                    r_store = self.store_db.get_store_by_code(record_store_code_clean)
+                                    if r_store:
+                                        record_store_code_canon = (r_store.get("store_code") or record_store_code_clean).strip() or record_store_code_clean
+                            except Exception:
+                                pass
+                            # 表示ラベル（コード + 店舗名）を生成
+                            # ラベルにはクリーンなコード（旧コード含む）から、店舗マスタ経由で新店舗コードを反映する
+                            store_label = self._format_store_code_label(record_store_code_clean, "")
                             
                             candidate_skus_with_time.append({
                                 'sku': sku,
                                 'time_diff': time_diff_seconds,
                                 'price': total_amount,
                                 'product_name': product_name,
-                                'store_code': store_code,
+                                'store_label': store_label,
+                                # レシートの正規店舗コードと、仕入レコードの正規店舗コードが一致するかで優先度を決定
+                                'is_same_store': bool(
+                                    receipt_store_code_canon
+                                    and record_store_code_canon
+                                    and receipt_store_code_canon == record_store_code_canon
+                                ),
                                 'record_datetime': record_datetime.strftime("%Y/%m/%d %H:%M") if record_datetime else "時刻不明"
                             })
                     except Exception:
                         continue
                 
-                # 時間差が小さい順にソート（レシート時刻に近い順）
-                candidate_skus_with_time.sort(key=lambda x: x['time_diff'])
+                # 並び順:
+                #  1. レシートと同じ店舗コードのSKUを先に表示
+                #  2. その中で時間差が小さい順（レシート時刻に近い順）
+                candidate_skus_with_time.sort(
+                    key=lambda x: (0 if x.get('is_same_store') else 1, x['time_diff'])
+                )
                 
                 # 候補リストに表示
                 for sku_info in candidate_skus_with_time:
                     sku = sku_info['sku']
                     price = sku_info['price']
                     product_name = sku_info['product_name']
-                    store_code = sku_info['store_code']
+                    store_label = sku_info['store_label']
                     time_str = sku_info['record_datetime']
                     
                     # 表示テキストを作成
                     display_parts = [sku]
-                    if store_code:
-                        display_parts.append(f"[{store_code}]")
+                    if store_label:
+                        display_parts.append(f"[{store_label}]")
                     if product_name:
                         # 商品名が長い場合は切り詰め
                         name_display = product_name[:30] + "..." if len(product_name) > 30 else product_name

@@ -931,13 +931,18 @@ class StoreListWidget(QWidget):
             )
     
     def assign_store_codes(self):
-        """店舗コードが空の店舗に自動付与"""
+        """店舗コードを再付番
+
+        - 以前は「空の店舗コード」にのみ付与していたが、
+          チェーン店コードマッピング（設定タブ）を見直したあとに
+          変更が反映されるよう、必要な店舗には再付与を行う。
+        """
         # 確認ダイアログ
         reply = QMessageBox.question(
             self,
             "確認",
-            "店舗コードが空の店舗に自動で店舗コードを付与しますか？\n"
-            "（設定タブのチェーン店コードマッピングを参照して連番で生成します）",
+            "現在のチェーン店コードマッピングに基づいて、店舗コードを再付番しますか？\n"
+            "（プレフィックスが変更された店舗は新しいプレフィックスで再付与されます）",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
@@ -946,7 +951,7 @@ class StoreListWidget(QWidget):
             return
         
         # プログレスダイアログを表示
-        progress = QProgressDialog("店舗コードを付与中...", "キャンセル", 0, 100, self)
+        progress = QProgressDialog("店舗コードを再付番中...", "キャンセル", 0, 100, self)
         progress.setWindowTitle("店舗コード再付番中")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
@@ -955,8 +960,8 @@ class StoreListWidget(QWidget):
         QApplication.processEvents()  # UIを更新
         
         try:
-            # 店舗コード自動付与処理を実行
-            result = self.db.assign_store_codes_to_empty_stores()
+            # 店舗コード再付番処理を実行（マッピングを考慮）
+            result = self.db.reassign_store_codes_using_mappings()
             
             progress.close()
             

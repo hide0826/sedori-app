@@ -497,6 +497,8 @@ class InventoryWidget(QWidget):
         header.setSectionResizeMode(QHeaderView.Interactive)
         
         # 列の定義（17列対応・指定順序）
+        # DataFrame上の実際の列名は従来どおり「仕入先」を使用しつつ、
+        # 表示ラベルだけ「店舗コード」に差し替える（バックエンドとの互換性維持のため）
         self.column_headers = [
             "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
             "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
@@ -504,7 +506,14 @@ class InventoryWidget(QWidget):
         ]
         
         self.data_table.setColumnCount(len(self.column_headers))
-        self.data_table.setHorizontalHeaderLabels(self.column_headers)
+        # 表示用のヘッダーラベルを作成（「仕入先」→「店舗コード」に置き換え）
+        display_headers = list(self.column_headers)
+        try:
+            idx = display_headers.index("仕入先")
+            display_headers[idx] = "店舗コード"
+        except ValueError:
+            pass
+        self.data_table.setHorizontalHeaderLabels(display_headers)
         
         # 選択変更時の自動スクロール・ハイライト機能
         self.data_table.itemSelectionChanged.connect(self.on_data_selection_changed)
