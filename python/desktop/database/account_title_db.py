@@ -50,6 +50,10 @@ class AccountTitleDatabase:
         cur = self.conn.cursor()
         cur.execute("SELECT * FROM account_titles ORDER BY sort_order ASC, name ASC")
         return [dict(r) for r in cur.fetchall()]
+    
+    def get_all_titles(self) -> List[Dict[str, Any]]:
+        """list_titles()のエイリアス（互換性のため）"""
+        return self.list_titles()
 
     def add_title(self, name: str, note: str = "") -> int:
         if not name.strip():
@@ -72,6 +76,7 @@ class AccountTitleDatabase:
         if self.conn:
             self.conn.close()
             self.conn = None
+
 
 
 

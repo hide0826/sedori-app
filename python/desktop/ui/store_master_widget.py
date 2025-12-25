@@ -99,8 +99,8 @@ class StoreEditDialog(QDialog):
         self.route_code_edit.setReadOnly(True)  # 自動挿入なので読み取り専用
         form_layout.addRow("ルートコード:", self.route_code_edit)
         
-        self.supplier_code_edit = QLineEdit()
-        form_layout.addRow("仕入れ先コード:", self.supplier_code_edit)
+        self.store_code_edit = QLineEdit()
+        form_layout.addRow("店舗コード:", self.store_code_edit)
         
         self.store_name_edit = QLineEdit()
         self.store_name_edit.setPlaceholderText("必須項目")
@@ -160,7 +160,7 @@ class StoreEditDialog(QDialog):
         """ルート名が変更された時（プルダウン選択時）"""
         if not route_name:
             self.route_code_edit.clear()
-            self.supplier_code_edit.clear()
+            self.store_code_edit.clear()
             return
         
         # ルートコードを自動挿入
@@ -170,24 +170,20 @@ class StoreEditDialog(QDialog):
         else:
             self.route_code_edit.clear()
         
-        # 店舗名から仕入れ先コードを自動生成（店舗名が入力されている場合）
+        # 店舗名から店舗コードを自動生成（店舗名が入力されている場合）
         store_name = self.store_name_edit.text().strip()
         if store_name:
-            next_supplier_code = self.db.get_next_supplier_code_from_store_name(store_name)
-            if next_supplier_code:
-                self.supplier_code_edit.setText(next_supplier_code)
+            next_store_code = self.db.get_next_store_code_from_store_name(store_name)
+            if next_store_code:
+                self.store_code_edit.setText(next_store_code)
                 return
         
         # 店舗名がない場合は従来のルートコードベースの生成にフォールバック
-        next_supplier_code = self.db.get_next_supplier_code_for_route(route_name)
-        if next_supplier_code:
-            self.supplier_code_edit.setText(next_supplier_code)
+        # ルートコードが取得できた場合は初期コードを生成
+        if route_code:
+            self.store_code_edit.setText(f"{route_code}-001")
         else:
-            # ルートコードが取得できた場合は初期コードを生成
-            if route_code:
-                self.supplier_code_edit.setText(f"{route_code}-001")
-            else:
-                self.supplier_code_edit.clear()
+            self.store_code_edit.clear()
     
     def on_route_name_text_changed(self, text: str):
         """ルート名が入力された時（テキスト編集時）"""
@@ -198,19 +194,19 @@ class StoreEditDialog(QDialog):
             self.affiliated_route_name_combo.setCurrentIndex(current_index)
     
     def on_store_name_changed(self, store_name: str):
-        """店舗名が変更された時に仕入れ先コードを自動生成（新規追加時のみ）"""
+        """店舗名が変更された時に店舗コードを自動生成（新規追加時のみ）"""
         # 既存データの編集時は自動生成しない
         if self.store_data:
             return
         
         # 店舗名が入力されている場合のみ自動生成
         if store_name and store_name.strip():
-            next_supplier_code = self.db.get_next_supplier_code_from_store_name(store_name.strip())
-            if next_supplier_code:
-                # 仕入れ先コードが既に入力されている場合は上書きしない
-                current_code = self.supplier_code_edit.text().strip()
+            next_store_code = self.db.get_next_store_code_from_store_name(store_name.strip())
+            if next_store_code:
+                # 店舗コードが既に入力されている場合は上書きしない
+                current_code = self.store_code_edit.text().strip()
                 if not current_code:
-                    self.supplier_code_edit.setText(next_supplier_code)
+                    self.store_code_edit.setText(next_store_code)
     
     def load_data(self):
         """既存データを読み込む"""
@@ -230,7 +226,9 @@ class StoreEditDialog(QDialog):
             self.affiliated_route_name_combo.setCurrentText('')
         
         self.route_code_edit.setText(self.store_data.get('route_code', ''))
-        self.supplier_code_edit.setText(self.store_data.get('supplier_code', ''))
+        # store_codeを優先し、なければsupplier_codeをフォールバック（互換性のため）
+        store_code = self.store_data.get('store_code', '') or self.store_data.get('supplier_code', '')
+        self.store_code_edit.setText(store_code)
         self.store_name_edit.setText(self.store_data.get('store_name', ''))
         self.address_edit.setText(self.store_data.get('address', ''))
         self.phone_edit.setText(self.store_data.get('phone', ''))
@@ -248,14 +246,15 @@ class StoreEditDialog(QDialog):
         # 所属ルート名はQComboBoxから取得（編集可能なので現在のテキスト）
         route_name = self.affiliated_route_name_combo.currentText().strip()
         
+        store_code = self.store_code_edit.text().strip()
         data = {
             'affiliated_route_name': route_name,
             'route_code': self.route_code_edit.text().strip(),
-            'supplier_code': self.supplier_code_edit.text().strip(),
+            'store_code': store_code if store_code else None,
             'store_name': self.store_name_edit.text().strip(),
             'address': self.address_edit.text().strip(),
             'phone': self.phone_edit.text().strip(),
-            'store_code': '',  # 店舗コードは自動付与されるため空でOK
+            'supplier_code': None,  # 互換性のためNULL（store_codeを使用）
             'custom_fields': {}
         }
         
@@ -273,12 +272,12 @@ class StoreEditDialog(QDialog):
         if not data['store_name']:
             return False, "店舗名を入力してください"
         
-        # 仕入れ先コードの重複チェック
-        supplier_code = data['supplier_code']
-        if supplier_code:
+        # 店舗コードの重複チェック
+        store_code = data['store_code']
+        if store_code:
             exclude_id = self.store_data.get('id') if self.store_data else None
-            if self.db.check_supplier_code_exists(supplier_code, exclude_id):
-                return False, f"仕入れ先コード '{supplier_code}' は既に使用されています"
+            if self.db.check_store_code_exists(store_code, exclude_id):
+                return False, f"店舗コード '{store_code}' は既に使用されています"
         
         return True, ""
 
@@ -462,7 +461,7 @@ class StoreListWidget(QWidget):
         search_layout.addWidget(search_label)
         
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("店舗名、仕入れ先コード、ルート名で検索...")
+        self.search_edit.setPlaceholderText("店舗名、店舗コード、ルート名で検索...")
         self.search_edit.textChanged.connect(self.on_search_changed)
         search_layout.addWidget(self.search_edit)
         
@@ -1045,7 +1044,7 @@ class StoreListWidget(QWidget):
         self.load_custom_fields()
         
         # 基本カラム + カスタムフィールドカラム
-        basic_columns = ["ID", "所属ルート名", "ルートコード", "店舗コード", "仕入れ先コード", "店舗名", "住所", "電話番号", "備考"]
+        basic_columns = ["ID", "所属ルート名", "ルートコード", "店舗コード", "店舗名", "住所", "電話番号", "備考"]
         custom_columns = [field['display_name'] for field in self.custom_fields_def]
         columns = basic_columns + custom_columns
         
@@ -1069,11 +1068,12 @@ class StoreListWidget(QWidget):
             self.store_table.setItem(i, 0, id_item)
             
             # 編集不可のカラム（1-7列）
+            # store_codeを優先し、なければsupplier_codeをフォールバック（互換性のため）
+            store_code = store.get('store_code', '') or store.get('supplier_code', '')
             for col, value in enumerate([
                 store.get('affiliated_route_name', ''),
                 store.get('route_code', ''),
-                store.get('store_code', ''),  # 店舗コード
-                store.get('supplier_code', ''),
+                store_code,  # 店舗コード
                 store.get('store_name', ''),
                 store.get('address', ''),
                 store.get('phone', '')
@@ -1082,7 +1082,7 @@ class StoreListWidget(QWidget):
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)  # 編集不可
                 self.store_table.setItem(i, col, item)
             
-            # 備考欄（8列目）は編集可能
+            # 備考欄（7列目）は編集可能
             notes_text = store.get('notes', '') or ''
             notes_item = QTableWidgetItem(notes_text)
             notes_item.setData(Qt.UserRole, store_id)  # 店舗IDを保存（更新時に使用）

@@ -3488,17 +3488,28 @@ class ReceiptWidget(QWidget):
             try:
                 account_title_db = AccountTitleDatabase()
                 titles = account_title_db.get_all_titles()
-                for title in titles:
-                    account_title_combo.addItem(title.get('name', ''))
-                current_title = receipt_data.get('account_title', '')
-                if current_title:
-                    idx = account_title_combo.findText(current_title)
-                    if idx >= 0:
-                        account_title_combo.setCurrentIndex(idx)
-                    else:
-                        account_title_combo.setCurrentText(current_title)
-            except Exception:
-                pass
+                account_titles = [title.get('name', '') for title in titles if title.get('name')]
+                
+                # デフォルト科目「仕入」を追加（まだない場合）
+                default_title = "仕入"
+                if default_title not in account_titles:
+                    account_titles.insert(0, default_title)
+                
+                # プルダウンに科目を追加
+                for title in account_titles:
+                    account_title_combo.addItem(title)
+                
+                # 現在の科目を設定
+                current_title = receipt_data.get('account_title', '') or default_title
+                idx = account_title_combo.findText(current_title)
+                if idx >= 0:
+                    account_title_combo.setCurrentIndex(idx)
+                else:
+                    account_title_combo.setCurrentText(current_title)
+            except Exception as e:
+                # エラー時はデフォルト科目のみ追加
+                account_title_combo.addItem("仕入")
+                account_title_combo.setCurrentText("仕入")
             form_layout.addRow("科目:", account_title_combo)
             
             # レシートID
@@ -3586,9 +3597,35 @@ class ReceiptWidget(QWidget):
             
             right_layout.addWidget(form_group)
             
-            # SKU紐付けセクション
+            # SKU紐付けセクション（科目が「仕入」の場合のみ表示）
             sku_group = QGroupBox("紐付けSKU")
             sku_layout = QVBoxLayout(sku_group)
+            
+            # 科目が「仕入」かどうかを判定する関数
+            def is_purchase_account(title):
+                """科目が「仕入」かどうかを判定"""
+                return title and title.strip() == "仕入"
+            
+            # 初期表示状態を設定（科目が「仕入」の場合のみ表示）
+            current_account_title = account_title_combo.currentText()
+            sku_group.setVisible(is_purchase_account(current_account_title))
+            
+            # 科目変更時に紐付けSKUセクションの表示/非表示を切り替え
+            def on_account_title_changed(title):
+                """科目が変更された時の処理"""
+                is_purchase = is_purchase_account(title)
+                sku_group.setVisible(is_purchase)
+                
+                # 科目が「仕入」以外の場合、紐付けSKUをクリア
+                if not is_purchase:
+                    linked_skus_list.clear()
+                    # 差額表示も更新
+                    if hasattr(sku_group, 'total_label'):
+                        total_label = sku_group.findChild(QLabel, "sku_total_label")
+                        if total_label:
+                            total_label.setText("合計: ¥0 (差額: ¥0)")
+            
+            account_title_combo.currentTextChanged.connect(on_account_title_changed)
             
             # 現在の紐付けSKUリスト
             linked_skus_list = QListWidget()
@@ -3789,6 +3826,136 @@ class ReceiptWidget(QWidget):
             sku_layout.addWidget(QLabel("仕入DBの候補SKU:"))
             sku_layout.addWidget(candidate_skus_list)
             
+            # 時刻情報を取得する関数（sku_info_mapと同じロジック）
+            def get_time_from_record(record):
+                """レコードから時刻情報を取得"""
+                time_str = "時刻不明"
+                
+                # 1. 「仕入れ日」カラムから取得（優先）
+                purchase_date_str = record.get('仕入れ日') or record.get('purchase_date') or ""
+                if purchase_date_str:
+                    try:
+                        from datetime import datetime
+                        purchase_date_str_clean = str(purchase_date_str).strip()
+                        if ' ' in purchase_date_str_clean:
+                            try:
+                                dt = datetime.strptime(purchase_date_str_clean, "%Y/%m/%d %H:%M")
+                                time_str = dt.strftime("%Y/%m/%d %H:%M")
+                            except:
+                                try:
+                                    dt = datetime.strptime(purchase_date_str_clean, "%Y-%m-%d %H:%M")
+                                    time_str = dt.strftime("%Y/%m/%d %H:%M")
+                                except:
+                                    try:
+                                        dt = datetime.strptime(purchase_date_str_clean, "%Y/%m/%d %H:%M:%S")
+                                        time_str = dt.strftime("%Y/%m/%d %H:%M")
+                                    except:
+                                        try:
+                                            dt = datetime.strptime(purchase_date_str_clean, "%Y-%m-%d %H:%M:%S")
+                                            time_str = dt.strftime("%Y/%m/%d %H:%M")
+                                        except:
+                                            time_str = purchase_date_str_clean
+                    except Exception:
+                        pass
+                
+                # 2. 「日付/時間」または「日付/時刻」カラムから取得
+                if time_str == "時刻不明":
+                    datetime_str = record.get('日付/時間') or record.get('日付/時刻') or ""
+                    if datetime_str:
+                        try:
+                            from datetime import datetime
+                            datetime_str_clean = str(datetime_str).strip()
+                            if ' ' in datetime_str_clean:
+                                try:
+                                    dt = datetime.strptime(datetime_str_clean, "%Y/%m/%d %H:%M")
+                                    time_str = dt.strftime("%Y/%m/%d %H:%M")
+                                except:
+                                    try:
+                                        dt = datetime.strptime(datetime_str_clean, "%Y-%m-%d %H:%M")
+                                        time_str = dt.strftime("%Y/%m/%d %H:%M")
+                                    except:
+                                        time_str = datetime_str_clean
+                            elif 'T' in datetime_str_clean:
+                                try:
+                                    if datetime_str_clean.endswith('Z'):
+                                        datetime_str_clean = datetime_str_clean[:-1]
+                                    if len(datetime_str_clean) >= 19:
+                                        dt = datetime.strptime(datetime_str_clean[:19], "%Y-%m-%dT%H:%M:%S")
+                                        time_str = dt.strftime("%Y/%m/%d %H:%M")
+                                except:
+                                    pass
+                        except Exception:
+                            pass
+                
+                # 3. 「仕入れ時刻」または「purchase_time」カラムから取得
+                if time_str == "時刻不明":
+                    record_time = record.get('仕入れ時刻') or record.get('purchase_time') or ""
+                    if record_time:
+                        try:
+                            from datetime import datetime
+                            record_date = record.get('仕入れ日') or record.get('purchase_date', '')
+                            if record_date:
+                                date_str = str(record_date).strip()
+                                if " " in date_str:
+                                    date_str = date_str.split(" ")[0]
+                                if "T" in date_str:
+                                    date_str = date_str.split("T")[0]
+                                date_str = date_str.replace("/", "-")
+                                datetime_str = f"{date_str} {record_time}"
+                                try:
+                                    dt = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M")
+                                    time_str = dt.strftime("%Y/%m/%d %H:%M")
+                                except:
+                                    time_str = f"{date_str} {record_time}"
+                        except Exception:
+                            pass
+                
+                # 4. created_atから時刻を取得（最後のフォールバック）
+                if time_str == "時刻不明":
+                    record_created_at = record.get('created_at') or record.get('登録日時') or ""
+                    if record_created_at:
+                        try:
+                            from datetime import datetime
+                            if isinstance(record_created_at, str):
+                                record_created_at_clean = str(record_created_at).strip()
+                                if 'T' in record_created_at_clean:
+                                    if record_created_at_clean.endswith('Z'):
+                                        record_created_at_clean = record_created_at_clean[:-1]
+                                    if len(record_created_at_clean) >= 19:
+                                        dt = datetime.strptime(record_created_at_clean[:19], "%Y-%m-%dT%H:%M:%S")
+                                        time_str = dt.strftime("%Y/%m/%d %H:%M")
+                                elif ' ' in record_created_at_clean:
+                                    if len(record_created_at_clean) >= 19:
+                                        dt = datetime.strptime(record_created_at_clean[:19], "%Y-%m-%d %H:%M:%S")
+                                        time_str = dt.strftime("%Y/%m/%d %H:%M")
+                        except Exception:
+                            pass
+                
+                # 5. SKUコードから日付を抽出して時刻を推測（最後のフォールバック）
+                if time_str == "時刻不明":
+                    # SKUコードから日付を抽出（例: hmk-20251213-used2-033 → 20251213）
+                    sku_code = record.get('SKU') or record.get('sku', '')
+                    if sku_code:
+                        import re
+                        # YYYYMMDD形式の日付を抽出
+                        date_match = re.search(r'(\d{8})', str(sku_code))
+                        if date_match:
+                            date_str = date_match.group(1)
+                            try:
+                                from datetime import datetime
+                                # YYYYMMDD形式をYYYY/MM/DDに変換
+                                date_obj = datetime.strptime(date_str, "%Y%m%d")
+                                # レシートの時刻があれば使用、なければ日付のみ
+                                receipt_time = receipt_data.get('purchase_time', '') if receipt_data else ''
+                                if receipt_time:
+                                    time_str = f"{date_obj.strftime('%Y/%m/%d')} {receipt_time}"
+                                else:
+                                    time_str = date_obj.strftime('%Y/%m/%d')
+                            except Exception:
+                                pass
+                
+                return time_str
+            
             # 候補SKUを読み込み
             def load_candidate_skus():
                 candidate_skus_list.clear()
@@ -3812,7 +3979,32 @@ class ReceiptWidget(QWidget):
                         if record_receipt_id == image_file_name:
                             sku = record.get('SKU') or record.get('sku', '')
                             if sku and sku.strip() and sku not in existing_skus:
-                                candidate_skus_list.addItem(sku.strip())
+                                # 時刻情報を取得
+                                time_str = get_time_from_record(record)
+                                # 商品名を取得
+                                product_name = record.get('商品名') or record.get('product_name') or record.get('title') or ''
+                                # 金額を取得
+                                price = record.get('仕入れ価格') or record.get('仕入価格') or record.get('purchase_price') or record.get('cost', 0)
+                                quantity = record.get('仕入れ個数') or record.get('仕入個数') or record.get('quantity') or record.get('数量', 1)
+                                try:
+                                    price = float(price) if price else 0
+                                    quantity = float(quantity) if quantity else 1
+                                except (ValueError, TypeError):
+                                    price = 0
+                                    quantity = 1
+                                total_amount = price * quantity
+                                
+                                # 表示テキストを作成（SKUコードを必ず含める）
+                                if product_name:
+                                    display_text = f"{sku.strip()} - {product_name} - ¥{int(total_amount):,} - ({time_str})"
+                                else:
+                                    display_text = f"{sku.strip()} - ¥{int(total_amount):,} - ({time_str})"
+                                
+                                item = candidate_skus_list.addItem(display_text)
+                                # UserRoleにSKUを保存
+                                list_item = candidate_skus_list.item(candidate_skus_list.count() - 1)
+                                if list_item:
+                                    list_item.setData(Qt.UserRole, sku.strip())
                                 existing_skus.add(sku.strip())
                 
                 # 2. 日付と店舗コードで紐付けられたSKU（画像ファイル名がない場合のフォールバック）
@@ -3933,7 +4125,32 @@ class ReceiptWidget(QWidget):
                                             should_add = True
                                 
                                 if should_add and sku not in existing_skus:
-                                    candidate_skus_list.addItem(sku)
+                                    # 時刻情報を取得
+                                    time_str = get_time_from_record(record)
+                                    # 商品名を取得
+                                    product_name = record.get('商品名') or record.get('product_name') or record.get('title') or ''
+                                    # 金額を取得
+                                    price = record.get('仕入れ価格') or record.get('仕入価格') or record.get('purchase_price') or record.get('cost', 0)
+                                    quantity = record.get('仕入れ個数') or record.get('仕入個数') or record.get('quantity') or record.get('数量', 1)
+                                    try:
+                                        price = float(price) if price else 0
+                                        quantity = float(quantity) if quantity else 1
+                                    except (ValueError, TypeError):
+                                        price = 0
+                                        quantity = 1
+                                    total_amount = price * quantity
+                                    
+                                    # 表示テキストを作成（SKUコードを必ず含める）
+                                    if product_name:
+                                        display_text = f"{sku} - {product_name} - ¥{int(total_amount):,} - ({time_str})"
+                                    else:
+                                        display_text = f"{sku} - ¥{int(total_amount):,} - ({time_str})"
+                                    
+                                    item = candidate_skus_list.addItem(display_text)
+                                    # UserRoleにSKUを保存
+                                    list_item = candidate_skus_list.item(candidate_skus_list.count() - 1)
+                                    if list_item:
+                                        list_item.setData(Qt.UserRole, sku)
                                     existing_skus.add(sku)
                         except Exception:
                             # 日付比較に失敗した場合はスキップ
@@ -4241,6 +4458,9 @@ class ReceiptWidget(QWidget):
                 if account_title:
                     updates['account_title'] = account_title
                 
+                # 科目が「仕入」かどうかを判定
+                is_purchase = account_title and account_title.strip() == "仕入"
+                
                 # 日付
                 date = date_edit.date()
                 updates['purchase_date'] = date.toString("yyyy/MM/dd")
@@ -4284,84 +4504,90 @@ class ReceiptWidget(QWidget):
                 except ValueError:
                     pass
                 
-                # 紐付けSKU（UserRoleからSKUを取得）
-                linked_skus = []
-                sku_price_updates = {}  # SKUと価格のマッピング（仕入DB更新用）
-                for i in range(linked_skus_list.count()):
-                    item = linked_skus_list.item(i)
-                    if item:
-                        sku = item.data(Qt.UserRole)
-                        if not sku:
-                            # UserRoleがない場合は表示テキストからSKUを抽出
-                            text = item.text()
-                            if " - " in text:
-                                sku = text.split(" - ")[0].strip()
-                            else:
-                                sku = text.strip()
-                        
-                        if sku:
-                            linked_skus.append(sku)
-                            # 価格を取得（UserRole + 1に保存されている場合）
-                            new_price = item.data(Qt.UserRole + 1)
-                            if new_price is None:
-                                # UserRole + 1にない場合は表示テキストから抽出
+                # 紐付けSKUと差額計算は「仕入」科目の場合のみ処理
+                if is_purchase:
+                    # 紐付けSKU（UserRoleからSKUを取得）
+                    linked_skus = []
+                    sku_price_updates = {}  # SKUと価格のマッピング（仕入DB更新用）
+                    for i in range(linked_skus_list.count()):
+                        item = linked_skus_list.item(i)
+                        if item:
+                            sku = item.data(Qt.UserRole)
+                            if not sku:
+                                # UserRoleがない場合は表示テキストからSKUを抽出
                                 text = item.text()
-                                if " - ¥" in text:
-                                    try:
-                                        price_str = text.split(" - ¥")[1].replace(",", "").strip()
-                                        new_price = int(price_str)
-                                    except (ValueError, IndexError):
-                                        new_price = None
+                                if " - " in text:
+                                    sku = text.split(" - ")[0].strip()
+                                else:
+                                    sku = text.strip()
                             
-                            if new_price is not None:
-                                sku_price_updates[sku] = new_price
-                
-                updates['linked_skus'] = ','.join(linked_skus) if linked_skus else None
-                
-                # 差額を再計算（仕入れ個数 × 仕入れ価格）
-                sku_total = 0
-                if self.product_widget:
-                    purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
-                    for sku in linked_skus:
-                        for record in purchase_records:
-                            record_sku = record.get('SKU') or record.get('sku', '')
-                            if record_sku and record_sku.strip() == sku:
-                                # 価格を取得（更新後の価格を優先）
-                                price = sku_price_updates.get(sku)
-                                if price is None:
-                                    price = record.get('仕入れ価格') or record.get('仕入価格') or record.get('purchase_price') or record.get('cost', 0)
-                                try:
-                                    price = float(price) if price else 0
-                                except (ValueError, TypeError):
-                                    price = 0
-                                # 仕入れ個数を取得
-                                quantity = record.get('仕入れ個数') or record.get('仕入個数') or record.get('quantity') or record.get('数量', 1)
-                                try:
-                                    quantity = float(quantity) if quantity else 1
-                                except (ValueError, TypeError):
-                                    quantity = 1
-                                # 金額 = 仕入れ個数 × 仕入れ価格
-                                total_amount = price * quantity
-                                sku_total += total_amount
-                                break
-                
-                # レシートの合計金額を取得
-                receipt_total = updates.get('total_amount')
-                if receipt_total is None:
-                    try:
-                        receipt_total = int(total_edit.text()) if total_edit.text().strip() else 0
-                    except ValueError:
-                        receipt_total = 0
-                
-                # 差額を計算
-                difference = sku_total - receipt_total
-                if abs(difference) == 0:
-                    updates['price_difference'] = None  # 差額が0の場合はNoneに設定
+                            if sku:
+                                linked_skus.append(sku)
+                                # 価格を取得（UserRole + 1に保存されている場合）
+                                new_price = item.data(Qt.UserRole + 1)
+                                if new_price is None:
+                                    # UserRole + 1にない場合は表示テキストから抽出
+                                    text = item.text()
+                                    if " - ¥" in text:
+                                        try:
+                                            price_str = text.split(" - ¥")[1].replace(",", "").strip()
+                                            new_price = int(price_str)
+                                        except (ValueError, IndexError):
+                                            new_price = None
+                                
+                                if new_price is not None:
+                                    sku_price_updates[sku] = new_price
+                    
+                    updates['linked_skus'] = ','.join(linked_skus) if linked_skus else None
+                    
+                    # 差額を再計算（仕入れ個数 × 仕入れ価格）
+                    sku_total = 0
+                    if self.product_widget:
+                        purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
+                        for sku in linked_skus:
+                            for record in purchase_records:
+                                record_sku = record.get('SKU') or record.get('sku', '')
+                                if record_sku and record_sku.strip() == sku:
+                                    # 価格を取得（更新後の価格を優先）
+                                    price = sku_price_updates.get(sku)
+                                    if price is None:
+                                        price = record.get('仕入れ価格') or record.get('仕入価格') or record.get('purchase_price') or record.get('cost', 0)
+                                    try:
+                                        price = float(price) if price else 0
+                                    except (ValueError, TypeError):
+                                        price = 0
+                                    # 仕入れ個数を取得
+                                    quantity = record.get('仕入れ個数') or record.get('仕入個数') or record.get('quantity') or record.get('数量', 1)
+                                    try:
+                                        quantity = float(quantity) if quantity else 1
+                                    except (ValueError, TypeError):
+                                        quantity = 1
+                                    # 金額 = 仕入れ個数 × 仕入れ価格
+                                    total_amount = price * quantity
+                                    sku_total += total_amount
+                                    break
+                    
+                    # レシートの合計金額を取得
+                    receipt_total = updates.get('total_amount')
+                    if receipt_total is None:
+                        try:
+                            receipt_total = int(total_edit.text()) if total_edit.text().strip() else 0
+                        except ValueError:
+                            receipt_total = 0
+                    
+                    # 差額を計算
+                    difference = sku_total - receipt_total
+                    if abs(difference) == 0:
+                        updates['price_difference'] = None  # 差額が0の場合はNoneに設定
+                    else:
+                        updates['price_difference'] = int(difference)
                 else:
-                    updates['price_difference'] = int(difference)
+                    # 科目が「仕入」以外の場合は紐付けSKUと差額をクリア
+                    updates['linked_skus'] = None
+                    updates['price_difference'] = None
                 
-                # 仕入DBの価格を更新し、見込み利益・損益分岐点・利益率・ROIを再計算
-                if sku_price_updates and self.product_widget:
+                # 仕入DBの価格を更新し、見込み利益・損益分岐点・利益率・ROIを再計算（科目が「仕入」の場合のみ）
+                if is_purchase and sku_price_updates and self.product_widget:
                     try:
                         purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
                         updated_count = 0
@@ -4475,7 +4701,13 @@ class ReceiptWidget(QWidget):
             """)
             
             def recalculate_prices():
-                """再計算ボタンの処理"""
+                """再計算ボタンの処理（科目が「仕入」の場合のみ）"""
+                # 科目が「仕入」でない場合は処理しない
+                current_account_title = account_title_combo.currentText()
+                if not current_account_title or current_account_title.strip() != "仕入":
+                    QMessageBox.information(self, "情報", "再計算は「仕入」科目の場合のみ使用できます。")
+                    return
+                
                 try:
                     # レシート情報編集エリアの値を取得
                     receipt_total = int(total_edit.text()) if total_edit.text().strip() else 0
@@ -4484,7 +4716,16 @@ class ReceiptWidget(QWidget):
                     # 調整後の目標金額 = レシート合計 - 値引き
                     target_total = receipt_total - discount
                     
-                    # 現在のSKU価格の合計を計算
+                    # 仕入DBから価格情報を取得（元の金額を取得するため）
+                    sku_price_map = {}
+                    if self.product_widget:
+                        purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
+                        for record in purchase_records:
+                            sku = record.get('SKU') or record.get('sku', '')
+                            if sku and sku.strip():
+                                sku_price_map[sku.strip()] = record
+                    
+                    # 現在のSKU価格の合計を計算（仕入DBから元の金額を取得）
                     current_total = 0
                     sku_items = []
                     for i in range(linked_skus_list.count()):
@@ -4498,16 +4739,33 @@ class ReceiptWidget(QWidget):
                                 else:
                                     sku = text.strip()
                             
-                            # 現在の金額を取得（仕入れ個数 × 仕入れ価格）
-                            text = item.text()
-                            if " - ¥" in text:
+                            # 仕入DBから元の金額を取得（仕入れ個数 × 仕入れ価格）
+                            total_amount = 0
+                            if sku and sku.strip() and sku.strip() in sku_price_map:
+                                record = sku_price_map[sku.strip()]
+                                # 仕入れ価格を取得
+                                price = record.get('仕入れ価格') or record.get('仕入価格') or record.get('purchase_price') or record.get('cost', 0)
                                 try:
-                                    price_str = text.split(" - ¥")[1].replace(",", "").strip()
-                                    total_amount = int(price_str)  # これは既に「仕入れ個数 × 仕入れ価格」の合計
-                                except (ValueError, IndexError):
-                                    total_amount = 0
+                                    price = float(price) if price else 0
+                                except (ValueError, TypeError):
+                                    price = 0
+                                # 仕入れ個数を取得
+                                quantity = record.get('仕入れ個数') or record.get('仕入個数') or record.get('quantity') or record.get('数量', 1)
+                                try:
+                                    quantity = float(quantity) if quantity else 1
+                                except (ValueError, TypeError):
+                                    quantity = 1
+                                # 金額 = 仕入れ個数 × 仕入れ価格
+                                total_amount = price * quantity
                             else:
-                                total_amount = 0
+                                # 仕入DBにない場合は表示テキストから取得
+                                text = item.text()
+                                if " - ¥" in text:
+                                    try:
+                                        price_str = text.split(" - ¥")[1].replace(",", "").strip()
+                                        total_amount = int(price_str)
+                                    except (ValueError, IndexError):
+                                        total_amount = 0
                             
                             current_total += total_amount
                             sku_items.append((item, sku, total_amount))
@@ -4519,45 +4777,61 @@ class ReceiptWidget(QWidget):
                     # 差額を計算
                     difference = target_total - current_total
                     
-                    # 均等配分で価格を調整
-                    num_skus = len(sku_items)
-                    adjustment_per_sku = difference // num_skus  # 整数部分
-                    remainder = difference % num_skus  # 端数
+                    # 差額が30円以内の場合は最後のSKUで調整
+                    # 差額が30円以上の場合は全体の金額の割合で振り分け、端数は最後のSKUで調整
+                    new_total_amounts = []
                     
-                    # 10円以下の端数は最後のSKUに転嫁、それ以上は均等配分
-                    small_remainder = 0
-                    if abs(remainder) <= 10:
-                        # 10円以下の端数は最後のSKUに転嫁
-                        small_remainder = remainder
-                        remainder = 0
+                    if abs(difference) <= 30:
+                        # 30円以内：最後のSKUで調整
+                        for idx, (item, sku, old_total_amount) in enumerate(sku_items):
+                            if idx == len(sku_items) - 1:
+                                # 最後のSKUに差額を全て追加
+                                new_total_amount = old_total_amount + difference
+                            else:
+                                # 他のSKUは変更なし
+                                new_total_amount = old_total_amount
+                            
+                            if new_total_amount < 0:
+                                new_total_amount = 0
+                            new_total_amounts.append((item, sku, new_total_amount))
                     else:
-                        # 10円を超える端数は均等配分
-                        # 端数を10円単位で均等配分し、残りを最後のSKUに
-                        remainder_per_sku = remainder // num_skus
-                        small_remainder = remainder % num_skus
-                        adjustment_per_sku += remainder_per_sku
-                    
-                    # 仕入DBから価格情報を取得（更新用）
-                    sku_price_map = {}
-                    if self.product_widget:
-                        purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
-                        for record in purchase_records:
-                            sku = record.get('SKU') or record.get('sku', '')
-                            if sku and sku.strip():
-                                sku_price_map[sku.strip()] = record
+                        # 30円以上：全体の金額の割合で振り分け
+                        # 各SKUの現在の金額の割合を計算し、目標金額をその割合で分配
+                        ratios = []
+                        allocated_amounts = []
+                        total_allocated = 0
+                        
+                        # 各SKUの割合を計算
+                        for idx, (item, sku, old_total_amount) in enumerate(sku_items):
+                            if current_total > 0:
+                                # 各SKUの割合を計算
+                                ratio = old_total_amount / current_total
+                            else:
+                                # 現在の合計が0の場合は均等配分
+                                ratio = 1.0 / len(sku_items)
+                            
+                            ratios.append(ratio)
+                            # 目標金額を割合で分配（整数部分）
+                            allocated = int(target_total * ratio)
+                            allocated_amounts.append(allocated)
+                            total_allocated += allocated
+                        
+                        # 端数を計算（目標金額との差）
+                        remainder = target_total - total_allocated
+                        
+                        # 各SKUの金額を計算
+                        for idx, (item, sku, old_total_amount) in enumerate(sku_items):
+                            new_total_amount = allocated_amounts[idx]
+                            # 最後のSKUに端数を追加
+                            if idx == len(sku_items) - 1:
+                                new_total_amount += remainder
+                            
+                            if new_total_amount < 0:
+                                new_total_amount = 0
+                            new_total_amounts.append((item, sku, new_total_amount))
                     
                     # 各SKUの金額を更新（仕入れ個数 × 仕入れ価格）
-                    for idx, (item, sku, old_total_amount) in enumerate(sku_items):
-                        # 均等配分の調整額（合計金額に対する調整）
-                        adjustment = adjustment_per_sku
-                        # 最後のSKUに10円以下の端数を追加
-                        if idx == len(sku_items) - 1:
-                            adjustment += small_remainder
-                        
-                        new_total_amount = old_total_amount + adjustment
-                        if new_total_amount < 0:
-                            new_total_amount = 0
-                        
+                    for item, sku, new_total_amount in new_total_amounts:
                         # 仕入DBから仕入れ個数を取得して、仕入れ価格を計算
                         quantity = 1
                         if sku in sku_price_map:

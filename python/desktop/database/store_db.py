@@ -360,12 +360,11 @@ class StoreDatabase:
             cursor.execute("""
                 SELECT * FROM stores 
                 WHERE store_name LIKE ? 
-                   OR supplier_code LIKE ?
                    OR store_code LIKE ?
                    OR affiliated_route_name LIKE ?
                    OR route_code LIKE ?
                 ORDER BY store_name
-            """, (search_pattern, search_pattern, search_pattern, search_pattern, search_pattern))
+            """, (search_pattern, search_pattern, search_pattern, search_pattern))
         else:
             cursor.execute("SELECT * FROM stores ORDER BY store_name")
         
@@ -480,6 +479,32 @@ class StoreDatabase:
             )
         else:
             cursor.execute("SELECT COUNT(*) FROM stores WHERE supplier_code = ?", (supplier_code,))
+        
+        count = cursor.fetchone()[0]
+        return count > 0
+    
+    def check_store_code_exists(self, store_code: str, exclude_id: Optional[int] = None) -> bool:
+        """店舗コードの重複チェック"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # store_codeカラムが存在するか確認し、なければ追加
+        try:
+            cursor.execute("SELECT store_code FROM stores LIMIT 1")
+        except sqlite3.OperationalError:
+            try:
+                cursor.execute("ALTER TABLE stores ADD COLUMN store_code TEXT")
+                conn.commit()
+            except Exception:
+                pass
+        
+        if exclude_id:
+            cursor.execute(
+                "SELECT COUNT(*) FROM stores WHERE store_code = ? AND id != ?",
+                (store_code, exclude_id)
+            )
+        else:
+            cursor.execute("SELECT COUNT(*) FROM stores WHERE store_code = ?", (store_code,))
         
         count = cursor.fetchone()[0]
         return count > 0
