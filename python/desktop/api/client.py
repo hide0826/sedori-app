@@ -674,7 +674,7 @@ class APIClient:
         try:
             response = self.session.get(
                 f"{self.base_url}/repricer/config",
-                timeout=10
+                timeout=30  # タイムアウトを10秒から30秒に延長
             )
             
             if response.status_code == 200:
@@ -718,7 +718,7 @@ class APIClient:
             response = self.session.put(
                 f"{self.base_url}/repricer/config",
                 json=config_data,
-                timeout=10
+                timeout=30  # タイムアウトを10秒から30秒に延長
             )
             
             if response.status_code == 200:

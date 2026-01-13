@@ -10,8 +10,10 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+import traceback
 
 def create_app() -> FastAPI:
     app = FastAPI(title="HIRIO Sedori API", version="0.1.0")
@@ -23,6 +25,22 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    
+    # グローバルエラーハンドラーを追加
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        error_trace = traceback.format_exc()
+        print(f"[GLOBAL ERROR] ========== 予期しないエラー ==========")
+        print(f"[GLOBAL ERROR] パス: {request.url.path}")
+        print(f"[GLOBAL ERROR] メソッド: {request.method}")
+        print(f"[GLOBAL ERROR] エラーメッセージ: {str(exc)}")
+        print(f"[GLOBAL ERROR] エラータイプ: {type(exc).__name__}")
+        print(f"[GLOBAL ERROR] トレースバック:\n{error_trace}")
+        print(f"[GLOBAL ERROR] ======================================")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Internal Server Error: {str(exc)}"}
+        )
 
     @app.get("/health")
     def health():
@@ -36,7 +54,7 @@ def create_app() -> FastAPI:
 
     app.include_router(csv_router)
     app.include_router(ssot_router)
-    app.include_router(repricer_router)
+    app.include_router(repricer_router)  # プレフィックスはルーター内で既に設定済み
     app.include_router(inventory_router)
 
     # キャッシュ問題対策

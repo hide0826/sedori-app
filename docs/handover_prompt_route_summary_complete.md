@@ -1669,6 +1669,17 @@ Content-Type: application/json
 - **原因:** レコードのキーが"SKU"（大文字）ではなく"sku"（小文字）の場合、値が取得できなかった
 - **修正:** `populate_purchase_table()`メソッドで、列ヘッダーとレコードのキーの大文字小文字を無視して検索するように修正
 
+### 価格改定APIのエラー修正（2025-02-XX）
+- **問題:** 価格改定プレビュー/実行APIで「Out of range float values are not JSON compliant」エラーが発生
+- **原因:** 計算結果にInfinityやNaNが含まれ、JSONにシリアライズできない
+- **修正内容:**
+  - `python/routers/repricer.py` - Infinity/NaNを0に変換するクリーンアップ処理を追加
+  - `python/app.py` - グローバルエラーハンドラーを追加（詳細なエラーログ出力）
+  - `python/desktop/api/client.py` - 設定取得APIのタイムアウトを10秒→30秒に延長
+  - `python/desktop/ui/utils/copy_context_menu.py` - エラーハンドリングを追加（KeyboardInterrupt対策）
+  - `python/routers/repricer.py` - 構文エラー修正（tryブロックのインデント修正）
+- **Gitコミット:** `b9d7bb1` - "fix: 価格改定APIのJSONシリアライズエラー修正とエラーハンドリング強化"
+
 ### Gitコミット（2025-02-XX）
 - コミットハッシュ: `de87ae1`
 - コミットメッセージ: "feat: 画像管理機能とデータベース管理機能の拡張"
