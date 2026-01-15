@@ -471,9 +471,9 @@ class AmazonInventoryLoaderService:
             
             # データ書き込み位置の定義
             # SKU: A列 (column=1)
-            # 画像URL: O列(15)からT列(20)まで
+            # 画像URL: P列(16)からU列(21)まで
             sku_col = 1  # A列
-            image_cols = [15, 16, 17, 18, 19, 20]  # O, P, Q, R, S, T列
+            image_cols = [16, 17, 18, 19, 20, 21]  # P, Q, R, S, T, U列
             
             # 商品データを書き込む
             for idx, product in enumerate(products):

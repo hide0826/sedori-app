@@ -2841,12 +2841,12 @@ class ImageManagerWidget(QWidget):
                 f"商品数: {len(products)}件\n\n"
                 f"書き込まれたデータ:\n"
                 f"  - SKU: A7列から\n"
-                f"  - 画像URL: O7列から（1枚目）\n"
-                f"  - 画像URL: P7列から（2枚目）\n"
-                f"  - 画像URL: Q7列から（3枚目）\n"
-                f"  - 画像URL: R7列から（4枚目）\n"
-                f"  - 画像URL: S7列から（5枚目）\n"
-                f"  - 画像URL: T7列から（6枚目）\n\n"
+                f"  - 画像URL: P7列から（1枚目）\n"
+                f"  - 画像URL: Q7列から（2枚目）\n"
+                f"  - 画像URL: R7列から（3枚目）\n"
+                f"  - 画像URL: S7列から（4枚目）\n"
+                f"  - 画像URL: T7列から（5枚目）\n"
+                f"  - 画像URL: U7列から（6枚目）\n\n"
                 f"👉 このファイルをAmazon Seller Centralにアップロードしてください。"
             )
         
