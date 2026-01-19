@@ -322,6 +322,13 @@ class RouteSummaryWidget(QWidget):
         reorder_btn.setStyleSheet("background-color: #17a2b8; color: white;")
         button_layout.addWidget(reorder_btn)
         
+        # 訪問順序保存ボタン
+        save_order_btn = QPushButton("訪問順序保存")
+        save_order_btn.clicked.connect(self.save_visit_order_to_db)
+        save_order_btn.setToolTip("現在の訪問順序をデータベースに保存します。次回同じルートを呼び出した時に保存された順序で表示されます。")
+        save_order_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+        button_layout.addWidget(save_order_btn)
+        
         button_layout.addStretch()
         
         # Undo/Redoボタン
@@ -652,6 +659,82 @@ class RouteSummaryWidget(QWidget):
             return route_code or route_name  # ルートコードが見つからない場合はルート名を返す
         return ""
     
+    def get_stores_from_table(self) -> List[Dict[str, Any]]:
+        """テーブルから訪問順序に基づいて店舗一覧を取得"""
+        try:
+            stores = []
+            table = self.store_visits_table
+            
+            # テーブルの行数
+            row_count = table.rowCount()
+            if row_count == 0:
+                return []
+            
+            # 各行から訪問順序と店舗コードを取得
+            table_data = []
+            for row in range(row_count):
+                # 訪問順序（0列目）
+                visit_order_item = table.item(row, 0)
+                visit_order = None
+                if visit_order_item:
+                    try:
+                        visit_order = int(visit_order_item.text())
+                    except (ValueError, AttributeError):
+                        visit_order = row + 1  # デフォルト値
+                else:
+                    visit_order = row + 1
+                
+                # 店舗コード（1列目）
+                store_code_item = table.item(row, 1)
+                store_code = store_code_item.text().strip() if store_code_item else ''
+                
+                # 店舗名（2列目）
+                store_name_item = table.item(row, 2)
+                store_name = store_name_item.text().strip() if store_name_item else ''
+                
+                if store_code:  # 店舗コードがある行のみ処理
+                    table_data.append({
+                        'visit_order': visit_order,
+                        'store_code': store_code,
+                        'store_name': store_name,
+                        'row': row
+                    })
+            
+            # 訪問順序でソート
+            table_data.sort(key=lambda x: x['visit_order'])
+            
+            # 店舗マスタから詳細情報を取得
+            for data in table_data:
+                store_code = data['store_code']
+                store_info = self.store_db.get_store_by_code(store_code)
+                if store_info:
+                    # 店舗マスタの情報をコピー
+                    store = dict(store_info)
+                    # テーブルの店舗名を優先（ユーザーが変更している可能性があるため）
+                    if data['store_name']:
+                        store['store_name'] = data['store_name']
+                    # 店舗マスタの備考欄を取得
+                    custom_fields = store_info.get('custom_fields', {})
+                    notes = custom_fields.get('notes', '')
+                    store['notes'] = notes
+                    stores.append(store)
+                else:
+                    # 店舗マスタにない場合はテーブルの情報のみで作成
+                    store = {
+                        'store_code': store_code,
+                        'supplier_code': store_code,  # 互換性のため
+                        'store_name': data['store_name'],
+                        'notes': ''
+                    }
+                    stores.append(store)
+            
+            return stores
+        except Exception as e:
+            print(f"テーブルから店舗一覧取得エラー: {e}")
+            import traceback
+            print(traceback.format_exc())
+            return []
+    
     def get_stores_for_route(self, route_name: str) -> List[Dict[str, Any]]:
         """指定されたルートの店舗一覧を取得（表示順序でソート）"""
         try:
@@ -828,7 +911,7 @@ class RouteSummaryWidget(QWidget):
             self.store_visits_table.blockSignals(False)
     
     def save_store_order(self):
-        """現在の訪問順序をデータベースに保存"""
+        """現在の訪問順序をデータベースに保存（自動保存用）"""
         try:
             route_name = self.route_code_combo.currentText().strip()
             if not route_name:
@@ -849,6 +932,59 @@ class RouteSummaryWidget(QWidget):
                     self.store_db.update_store_display_order(route_name, store_orders)
         except Exception as e:
             print(f"訪問順序保存エラー: {e}")
+    
+    def save_visit_order_to_db(self):
+        """訪問順序をデータベースに保存（ボタンから明示的に呼び出し）"""
+        try:
+            route_name = self.route_code_combo.currentText().strip()
+            if not route_name:
+                QMessageBox.warning(self, "警告", "ルートが選択されていません。")
+                return
+            
+            # テーブルにデータがあるか確認
+            if self.store_visits_table.rowCount() == 0:
+                QMessageBox.warning(self, "警告", "保存する店舗データがありません。")
+                return
+            
+            # 現在の訪問順序を取得
+            store_orders = {}
+            for row in range(self.store_visits_table.rowCount()):
+                code_item = self.store_visits_table.item(row, 1)  # 店舗コード列
+                if code_item:
+                    store_code = code_item.text().strip()
+                    if store_code:
+                        store_orders[store_code] = row + 1  # 1始まりの順序
+            
+            if not store_orders:
+                QMessageBox.warning(self, "警告", "保存する店舗コードがありません。")
+                return
+            
+            # データベースに保存
+            if hasattr(self.store_db, 'update_store_display_order'):
+                success = self.store_db.update_store_display_order(route_name, store_orders)
+                if success:
+                    QMessageBox.information(
+                        self, 
+                        "保存完了", 
+                        f"訪問順序を保存しました。\n\n"
+                        f"ルート: {route_name}\n"
+                        f"保存件数: {len(store_orders)}件\n\n"
+                        f"次回同じルートを呼び出した時に、保存された順序で表示されます。"
+                    )
+                else:
+                    QMessageBox.warning(self, "エラー", "訪問順序の保存に失敗しました。")
+            else:
+                QMessageBox.warning(self, "エラー", "データベースに保存機能がありません。")
+        except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
+            print(f"訪問順序保存エラー: {e}")
+            print(f"エラー詳細:\n{error_detail}")
+            QMessageBox.critical(
+                self, 
+                "エラー", 
+                f"訪問順序の保存中にエラーが発生しました:\n{str(e)}\n\n詳細はコンソールを確認してください。"
+            )
     
     def load_template(self) -> Optional[str]:
         """
@@ -1293,23 +1429,35 @@ class RouteSummaryWidget(QWidget):
             stores = []
             store_codes = []
             if route_name:
-                stores = self.get_stores_for_route(route_name)
-                # 店舗マスタの備考欄を取得してstoresに追加
-                for store in stores:
-                    # 店舗コード(store_code)を優先し、互換性のため仕入れ先コードも許容
-                    any_code = store.get('store_code') or store.get('supplier_code')
-                    if any_code:
-                        store_info = self.store_db.get_store_by_code(any_code)
-                        if store_info:
-                            custom_fields = store_info.get('custom_fields', {})
-                            notes = custom_fields.get('notes', '')
-                            # storesに備考を追加（テンプレート生成時に使用）
-                            store['notes'] = notes
-                store_codes = [
-                    (store.get('store_code') or store.get('supplier_code'))
-                    for store in stores
-                    if store.get('store_code') or store.get('supplier_code')
-                ]
+                # テーブルから訪問順序を取得（テーブルにデータがある場合）
+                table_stores = self.get_stores_from_table()
+                if table_stores:
+                    # テーブルの訪問順序を使用
+                    stores = table_stores
+                    store_codes = [
+                        (store.get('store_code') or store.get('supplier_code'))
+                        for store in stores
+                        if store.get('store_code') or store.get('supplier_code')
+                    ]
+                else:
+                    # テーブルにデータがない場合はデータベースから取得
+                    stores = self.get_stores_for_route(route_name)
+                    # 店舗マスタの備考欄を取得してstoresに追加
+                    for store in stores:
+                        # 店舗コード(store_code)を優先し、互換性のため仕入れ先コードも許容
+                        any_code = store.get('store_code') or store.get('supplier_code')
+                        if any_code:
+                            store_info = self.store_db.get_store_by_code(any_code)
+                            if store_info:
+                                custom_fields = store_info.get('custom_fields', {})
+                                notes = custom_fields.get('notes', '')
+                                # storesに備考を追加（テンプレート生成時に使用）
+                                store['notes'] = notes
+                    store_codes = [
+                        (store.get('store_code') or store.get('supplier_code'))
+                        for store in stores
+                        if store.get('store_code') or store.get('supplier_code')
+                    ]
             
             if not TemplateGenerator:
                 QMessageBox.warning(self, "エラー", "テンプレート生成機能が利用できません")

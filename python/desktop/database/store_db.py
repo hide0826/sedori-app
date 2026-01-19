@@ -659,17 +659,22 @@ class StoreDatabase:
             return f"{max_code}-001"
     
     def update_store_display_order(self, route_name: str, store_orders: Dict[str, int]) -> bool:
-        """ルート内の店舗の表示順序を更新"""
+        """ルート内の店舗の表示順序を更新
+        
+        store_ordersのキーはstore_codeまたはsupplier_codeのいずれか
+        """
         conn = self._get_connection()
         cursor = conn.cursor()
         
         try:
-            for supplier_code, order in store_orders.items():
+            for code, order in store_orders.items():
+                # store_codeまたはsupplier_codeで検索
                 cursor.execute("""
                     UPDATE stores 
                     SET display_order = ? 
-                    WHERE affiliated_route_name = ? AND supplier_code = ?
-                """, (order, route_name, supplier_code))
+                    WHERE affiliated_route_name = ? 
+                      AND (store_code = ? OR supplier_code = ?)
+                """, (order, route_name, code, code))
             conn.commit()
             return True
         except Exception as e:

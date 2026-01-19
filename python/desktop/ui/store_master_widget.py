@@ -72,7 +72,7 @@ class StoreEditDialog(QDialog):
                     self.affiliated_route_name_combo.setCurrentIndex(idx)
                 else:
                     self.affiliated_route_name_combo.setCurrentText(self.initial_route_name)
-                # ルートコードと次の仕入れ先コードを自動設定
+                # ルートコードを自動設定（店舗コードは店舗名入力時に自動生成）
                 self.on_route_name_changed(self.initial_route_name)
     
     def setup_ui(self):
@@ -160,7 +160,9 @@ class StoreEditDialog(QDialog):
         """ルート名が変更された時（プルダウン選択時）"""
         if not route_name:
             self.route_code_edit.clear()
-            self.store_code_edit.clear()
+            # 店舗コードは店舗名が入力されるまで空のままにする
+            if not self.store_name_edit.text().strip():
+                self.store_code_edit.clear()
             return
         
         # ルートコードを自動挿入
@@ -170,20 +172,14 @@ class StoreEditDialog(QDialog):
         else:
             self.route_code_edit.clear()
         
-        # 店舗名から店舗コードを自動生成（店舗名が入力されている場合）
+        # 店舗名から店舗コードを自動生成（店舗名が入力されている場合のみ）
         store_name = self.store_name_edit.text().strip()
         if store_name:
             next_store_code = self.db.get_next_store_code_from_store_name(store_name)
             if next_store_code:
                 self.store_code_edit.setText(next_store_code)
-                return
-        
-        # 店舗名がない場合は従来のルートコードベースの生成にフォールバック
-        # ルートコードが取得できた場合は初期コードを生成
-        if route_code:
-            self.store_code_edit.setText(f"{route_code}-001")
-        else:
-            self.store_code_edit.clear()
+        # 店舗名がない場合は店舗コードを空のままにする
+        # （店舗名入力時にon_store_name_changedで自動生成される）
     
     def on_route_name_text_changed(self, text: str):
         """ルート名が入力された時（テキスト編集時）"""
