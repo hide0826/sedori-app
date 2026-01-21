@@ -71,7 +71,13 @@ def restore_table_column_widths(table_view: QTableView, settings_key: str):
         for col_idx, width in enumerate(widths):
             if col_idx < column_count:
                 try:
-                    header.resizeSection(col_idx, int(width))
+                    w = int(width)
+                    # 幅0（列を非表示にしていたときに保存されがち）を復元すると、
+                    # 列が表示されていても「見えない」状態になるためスキップする。
+                    # ※ユーザーが意図的に0幅にする運用は現実的にないので問題になりにくい。
+                    if w <= 0:
+                        continue
+                    header.resizeSection(col_idx, w)
                 except (ValueError, TypeError):
                     pass
 

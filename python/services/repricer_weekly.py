@@ -86,22 +86,52 @@ class RepriceOutputs(NamedTuple):
     items: List[Dict[str, Any]]
 
 def load_config():
-    with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-        config = json.load(f)
+    """設定ファイルを読み込む"""
+    import os
+    from pathlib import Path
     
-    # リスト形式のreprice_rulesを辞書形式に変換
-    if 'reprice_rules' in config and isinstance(config['reprice_rules'], list):
-        rules_dict = {}
-        for rule in config['reprice_rules']:
-            days_from = rule.get('days_from')
-            if days_from:
-                rules_dict[str(days_from)] = {
-                    'action': rule.get('action', 'maintain'),
-                    'priceTrace': rule.get('value', 0)  # valueフィールドをpriceTraceにマッピング
-                }
-        config['reprice_rules'] = rules_dict
-    
-    return config
+    try:
+        # 設定ファイルの存在確認
+        if not os.path.exists(CONFIG_PATH):
+            raise FileNotFoundError(f"設定ファイルが見つかりません: {CONFIG_PATH}")
+        
+        with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        
+        # 必須キーの確認
+        if 'reprice_rules' not in config:
+            raise ValueError("設定ファイルに'reprice_rules'が含まれていません")
+        
+        # リスト形式のreprice_rulesを辞書形式に変換
+        if isinstance(config['reprice_rules'], list):
+            rules_dict = {}
+            for rule in config['reprice_rules']:
+                days_from = rule.get('days_from')
+                if days_from:
+                    rules_dict[str(days_from)] = {
+                        'action': rule.get('action', 'maintain'),
+                        'priceTrace': rule.get('value', 0)  # valueフィールドをpriceTraceにマッピング
+                    }
+            config['reprice_rules'] = rules_dict
+        
+        # 空のルール辞書の場合はデフォルト値を設定
+        if not config.get('reprice_rules'):
+            config['reprice_rules'] = {}
+        
+        # excluded_skusが存在しない場合は空リストを設定
+        if 'excluded_skus' not in config:
+            config['excluded_skus'] = []
+        
+        return config
+    except FileNotFoundError as e:
+        print(f"[ERROR] 設定ファイルが見つかりません: {e}")
+        raise
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] 設定ファイルのJSON形式が正しくありません: {e}")
+        raise ValueError(f"設定ファイルのJSON形式が正しくありません: {e}")
+    except Exception as e:
+        print(f"[ERROR] 設定ファイルの読み込みエラー: {e}")
+        raise
 
 def get_days_since_listed(sku: str, today: datetime) -> int:
     """
@@ -152,12 +182,22 @@ def get_rule_for_days(days: int, rules: Dict[str, Dict[str, Any]]) -> Tuple[str,
     経過日数に応じたルールキーとルールデータを返す
     30日間隔設定システム対応
     """
+    # rulesが辞書形式でない場合はデフォルトルールを返す
+    if not isinstance(rules, dict):
+        print(f"[WARNING] rulesが辞書形式ではありません: {type(rules)}")
+        return "default", {"action": "maintain", "priceTrace": 0}
+    
     # 30日間隔でのルール検索: 30, 60, 90, ..., 360
     for days_key in [30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 360]:
         if days <= days_key:
             rule_key = str(days_key)
             if rule_key in rules:
-                return rule_key, rules[rule_key]
+                rule = rules[rule_key]
+                # ルールが辞書形式でない場合はデフォルトルールを返す
+                if not isinstance(rule, dict):
+                    print(f"[WARNING] ルール {rule_key} が辞書形式ではありません: {type(rule)}")
+                    return rule_key, {"action": "maintain", "priceTrace": 0}
+                return rule_key, rule
 
     # 365日超過の場合は対象外
     return "over_365", {"action": "exclude", "priceTrace": 0}
@@ -294,10 +334,21 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
             continue
 
         # ルール適用
-        rule_key, rule = get_rule_for_days(days_since_listed, rules)
-        action, reason, new_price, new_price_trace = calculate_new_price_and_trace(
-            price, akaji, rule, days_since_listed, config, price_trace
-        )
+        try:
+            rule_key, rule = get_rule_for_days(days_since_listed, rules)
+            if not rule:
+                # ルールが見つからない場合は維持
+                rule = {"action": "maintain", "priceTrace": 0}
+            action, reason, new_price, new_price_trace = calculate_new_price_and_trace(
+                price, akaji, rule, days_since_listed, config, price_trace
+            )
+        except Exception as e:
+            # ルール適用エラーの場合は維持
+            print(f"[WARNING] ルール適用エラー (SKU: {sku}): {e}")
+            action = "maintain"
+            reason = f"ルール適用エラー（維持）: {str(e)}"
+            new_price = price
+            new_price_trace = price_trace
 
         # ASINとTitleを取得
         asin = row.get("ASIN", "")

@@ -58,13 +58,18 @@ class APIServerThread(QThread):
         """FastAPIサーバーの起動"""
         try:
             # FastAPIサーバーを起動
+            # pythonディレクトリに移動してから起動
+            import os
+            project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+            python_dir = os.path.join(project_root, "python")
+            
             self.process = subprocess.Popen([
                 "python", "-m", "uvicorn", 
-                "python.app:app", 
+                "app:app", 
                 "--host", "localhost", 
                 "--port", "8000",
                 "--reload"
-            ], cwd="..")  # プロジェクトルートに移動
+            ], cwd=python_dir)  # pythonディレクトリに移動
             
             # サーバー起動待機
             time.sleep(3)

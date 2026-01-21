@@ -578,11 +578,12 @@ class ProductWidget(QWidget):
         self.purchase_table = DraggableTableWidget()  # ドラッグ対応テーブルに変更
         self.purchase_table.setAlternatingRowColors(True)
         self.purchase_table.setSelectionBehavior(QTableWidget.SelectRows)
-        # 編集トリガーを設定（ダブルクリック、選択＋クリック、F2キーで編集可能）
+        # 編集トリガーを設定（選択＋クリック、F2キーで編集可能）
+        # ダブルクリックでは編集モードに入らないようにして、
+        # 画像URL列のダブルクリックでブラウザを開けるようにする
         # ただし、ItemIsEditableフラグが設定されているセルのみ編集可能
         self.purchase_table.setEditTriggers(
-            QTableWidget.DoubleClicked | 
-            QTableWidget.SelectedClicked | 
+            QTableWidget.SelectedClicked |
             QTableWidget.EditKeyPressed
         )
         
@@ -592,8 +593,9 @@ class ProductWidget(QWidget):
         # カスタムコンテキストメニューを有効化
         self.purchase_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.purchase_table.customContextMenuRequested.connect(self._show_purchase_context_menu)
-        # セルクリック時の処理を追加（レシート画像をクリックしたときに画像を表示）
-        self.purchase_table.cellClicked.connect(self.on_purchase_table_cell_clicked)
+        # セルダブルクリック時の処理を追加
+        # （レシート画像や画像URLをダブルクリックしたときに画像/URLを開く）
+        self.purchase_table.cellDoubleClicked.connect(self.on_purchase_table_cell_clicked)
         self.purchase_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         
         layout.addWidget(self.purchase_table)
@@ -874,6 +876,7 @@ class ProductWidget(QWidget):
         image_paths: List[str],
         all_records: List[Dict[str, Any]],
         skip_existing: bool = True,
+        target_sku: Optional[str] = None,
     ) -> Tuple[bool, int, Optional[Dict[str, Any]]]:
         """
         指定JANに対応する仕入レコードへ画像パスを割り当てる
@@ -892,13 +895,25 @@ class ProductWidget(QWidget):
 
         jan_norm = str(jan).strip().upper()
 
-        # 対象レコードを探す（最初に見つかった1件を対象とする）
+        # 対象レコードを探す
         target_record: Optional[Dict[str, Any]] = None
+        target_sku_norm: Optional[str] = None
+        if target_sku:
+            target_sku_norm = str(target_sku).strip()
+
         for record in all_records:
             record_jan = str(
                 record.get("JAN") or record.get("jan") or ""
             ).strip().upper()
-            if record_jan == jan_norm:
+            record_sku = str(record.get("SKU") or record.get("sku") or "").strip()
+
+            # 1. SKU指定がある場合は SKU + JAN の両方が一致するレコードを優先
+            if target_sku_norm and record_sku and record_sku == target_sku_norm and record_jan == jan_norm:
+                target_record = record
+                break
+
+            # 2. SKU指定がない場合は、JAN が一致する最初のレコードを候補にする
+            if not target_sku_norm and record_jan == jan_norm:
                 target_record = record
                 break
 
@@ -1725,9 +1740,12 @@ class ProductWidget(QWidget):
                     image_url = value or ""
                     if image_url:
                         item = QTableWidgetItem(str(image_url))
-                        item.setToolTip(f"画像URL: {image_url}")
+                        item.setToolTip(f"画像URL: {image_url}\n（クリックでブラウザ表示）")
+                        # 編集モードに入らないようにする（ダブルクリックで文字列編集させない）
+                        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                     else:
                         item = QTableWidgetItem("")
+                        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 elif header == "想定利益率" or header == "想定ROI":
                     # 想定利益率・想定ROI列の処理：空欄の場合は再計算
                     value_str = str(value) if value else ""
@@ -2220,6 +2238,22 @@ class ProductWidget(QWidget):
                 # 編集モードに入る（少し遅延を入れて確実に編集モードに入るようにする）
                 QApplication.processEvents()
                 self.purchase_table.editItem(item)
+            return
+        if header_text.startswith("画像URL"):
+            # 画像URL列をクリックしたときはブラウザで開く
+            item = self.purchase_table.item(row, col)
+            if not item:
+                return
+            url = (item.text() or "").strip()
+            if not url:
+                QMessageBox.information(self, "情報", "画像URLが設定されていません。")
+                return
+            qurl = QUrl(url)
+            if not qurl.isValid():
+                QMessageBox.warning(self, "警告", f"URLが不正です:\n{url}")
+                return
+            if not QDesktopServices.openUrl(qurl):
+                QMessageBox.warning(self, "警告", f"ブラウザでURLを開けませんでした:\n{url}")
             return
         if header_text == "レシート画像":
             item = self.purchase_table.item(row, col)

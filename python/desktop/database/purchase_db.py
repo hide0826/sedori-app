@@ -167,20 +167,23 @@ class PurchaseDatabase:
             if img_field in purchase:
                 fields.append(img_field)
         
-        values = [purchase.get(k) for k in fields]
-
         cur = self.conn.cursor()
         if existing:
-            # 更新
-            set_clause = ",".join([f"{k}=?" for k in fields if k != "sku"]) + ", updated_at=CURRENT_TIMESTAMP"
-            update_values = [purchase.get(k) for k in fields if k != "sku"] + [purchase["sku"]]
+            # 更新（部分更新：指定されたキーのみ更新。未指定の列をNULLで上書きしない）
+            update_fields = [k for k in fields if k != "sku" and k in purchase]
+            if not update_fields:
+                return int(existing["id"])
+            set_clause = ",".join([f"{k}=?" for k in update_fields]) + ", updated_at=CURRENT_TIMESTAMP"
+            update_values = [purchase.get(k) for k in update_fields] + [purchase["sku"]]
             cur.execute(f"UPDATE purchases SET {set_clause} WHERE sku=?", update_values)
             purchase_id = existing["id"]
         else:
-            # 挿入
-            placeholders = ",".join(["?"] * len(fields))
+            # 挿入（指定されたキーのみ。skuは必須）
+            insert_fields = [k for k in fields if k == "sku" or k in purchase]
+            placeholders = ",".join(["?"] * len(insert_fields))
+            values = [purchase.get(k) for k in insert_fields]
             cur.execute(
-                f"INSERT INTO purchases ({','.join(fields)}) VALUES ({placeholders})",
+                f"INSERT INTO purchases ({','.join(insert_fields)}) VALUES ({placeholders})",
                 values,
             )
             purchase_id = cur.lastrowid

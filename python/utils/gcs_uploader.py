@@ -251,6 +251,65 @@ def upload_image_to_gcs(
             raise Exception(f"GCS upload failed: {str(e)}") from e
 
 
+def find_existing_public_url_for_local_file(
+    source_file_path: str,
+    prefix: str = "used_items/",
+) -> Optional[str]:
+    """
+    ローカル画像ファイル名でGCS上の既存ファイルを検索し、見つかれば公開URLを返す。
+
+    注意:
+    - 本プロジェクトのアップロード先は timestamp を含むため、完全一致ではなく「末尾が同じファイル名」のblobを探す。
+    - バケット内のオブジェクト数が非常に多い場合は検索が重くなる可能性がある。
+    """
+    if not GCS_AVAILABLE:
+        return None
+
+    source_path = Path(source_file_path)
+    if not source_path.exists():
+        return None
+
+    key_path = Path(KEY_PATH)
+    if not key_path.exists():
+        return None
+
+    file_name = source_path.name
+
+    try:
+        client = storage.Client.from_service_account_json(str(key_path))
+        bucket = client.bucket(BUCKET_NAME)
+
+        # prefix配下のblobを走査し、末尾がファイル名一致するものを探す
+        latest_blob = None
+        latest_updated = None
+        for blob in client.list_blobs(BUCKET_NAME, prefix=prefix):
+            if not getattr(blob, "name", ""):
+                continue
+            if not blob.name.endswith(file_name):
+                continue
+            updated = getattr(blob, "updated", None)
+            if latest_blob is None:
+                latest_blob = blob
+                latest_updated = updated
+            else:
+                # updatedが比較できる場合は新しい方を優先
+                try:
+                    if updated and (latest_updated is None or updated > latest_updated):
+                        latest_blob = blob
+                        latest_updated = updated
+                except Exception:
+                    # 比較に失敗したら最初に見つかったものを維持
+                    pass
+
+        if latest_blob is None:
+            return None
+
+        return f"https://storage.googleapis.com/{BUCKET_NAME}/{latest_blob.name}"
+    except Exception as e:
+        logger.warning(f"Failed to find existing blob for {source_file_path}: {e}")
+        return None
+
+
 if __name__ == "__main__":
     # 動作確認用のダミーファイルパス
     # 実際のファイルパスに置き換えてテストしてください

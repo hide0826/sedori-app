@@ -519,11 +519,27 @@ class ImageManagerWidget(QWidget):
         self.scan_unknown_btn.clicked.connect(self.scan_unknown_jan_images)
         self.scan_unknown_btn.setEnabled(False)
         
+        self.clear_images_btn = QPushButton("画像クリア")
+        self.clear_images_btn.clicked.connect(self.clear_jan_groups)
+        self.clear_images_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                border: none;
+                padding: 5px 10px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #c82333;
+            }
+        """)
+        
         folder_layout.addWidget(folder_label)
         folder_layout.addWidget(self.folder_path_label, stretch=1)
         folder_layout.addWidget(self.select_folder_btn)
         folder_layout.addWidget(self.scan_btn)
         folder_layout.addWidget(self.scan_unknown_btn)
+        folder_layout.addWidget(self.clear_images_btn)
         
         layout.addWidget(folder_group)
         
@@ -900,6 +916,48 @@ class ImageManagerWidget(QWidget):
         has_valid_groups = any(g.jan != "unknown" for g in self.jan_groups)
         self.rename_btn.setEnabled(has_valid_groups)
     
+    def clear_jan_groups(self):
+        """JANグループエリアに展開されている画像をクリア"""
+        if not self.jan_groups:
+            QMessageBox.information(self, "情報", "クリアする画像がありません。")
+            return
+        
+        # 確認ダイアログ
+        reply = QMessageBox.question(
+            self,
+            "確認",
+            f"JANグループエリアに展開されている画像（{len(self.jan_groups)}グループ）をクリアしますか？\n"
+            "この操作は画像ファイル自体を削除するものではありません。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # JANグループツリーをクリア
+            self.tree_widget.clear()
+            
+            # JANグループデータをクリア
+            self.jan_groups = []
+            self.selected_group = None
+            
+            # 画像一覧をクリア
+            self.image_list.clear()
+            
+            # 詳細パネルをクリア
+            self.preview_label.clear()
+            self.preview_label.setText("画像を選択してください")
+            self.jan_edit.clear()
+            self.capture_time_label.setText("-")
+            self.file_name_label.setText("-")
+            self.file_size_label.setText("-")
+            self.selected_image_path = None
+            
+            # ボタンの状態を更新
+            self.rename_btn.setEnabled(False)
+            self.confirm_btn.setEnabled(False)
+            
+            QMessageBox.information(self, "完了", "JANグループエリアの画像をクリアしました。")
+    
     def on_tree_selection_changed(self):
         """ツリー選択変更時の処理"""
         selected_items = self.tree_widget.selectedItems()
@@ -917,10 +975,11 @@ class ImageManagerWidget(QWidget):
             self.selected_group = group
             if group.jan != "unknown":
                 # JANコードがあるグループの場合、そのグループの画像のみ表示
-                self.update_image_list(group.images, show_progress=True)
+                # 画像読み込みダイアログは不要なため、プログレス表示なしで更新
+                self.update_image_list(group.images, show_progress=False)
             else:
                 # JAN不明グループの場合は全画像を表示
-                self.update_image_list(self.image_records, show_progress=True)
+                self.update_image_list(self.image_records, show_progress=False)
         else:
             # 個別の画像が選択された
             image_path = item.data(0, Qt.UserRole)
@@ -1225,7 +1284,7 @@ class ImageManagerWidget(QWidget):
             if jan and self.product_widget:
                 sku_candidates = self._search_sku_candidates_by_jan(jan)
             
-            # メッセージ表示
+            # メッセージ表示用のベース文言を組み立て
             message = f"JANコードを保存しました。\n"
             if updated_count > 0:
                 message += f"JAN画像の後3分以内に撮影された{updated_count}件の画像を同じグループに追加しました。\n"
@@ -1238,8 +1297,54 @@ class ImageManagerWidget(QWidget):
                     message += f"{i}. {sku} - {product_name}\n"
                 if len(sku_candidates) > 5:
                     message += f"... 他{len(sku_candidates) - 5}件"
-            
+
             QMessageBox.information(self, "完了", message)
+
+            # SKU候補が複数ある場合は、ユーザーにどの仕入レコードと紐付けるか選択してもらう
+            if jan and sku_candidates and self.product_widget:
+                # 現在のJANグループを特定
+                current_group = None
+                for group in self.jan_groups:
+                    if group.jan == jan:
+                        # 選択中の画像を含むグループを優先
+                        if any(img.path == self.selected_image_path for img in group.images):
+                            current_group = group
+                            break
+                        if current_group is None:
+                            current_group = group
+
+                if current_group and current_group.images:
+                    # 選択画像の撮影日時を基準日時として使用
+                    base_dt = selected_capture_dt
+
+                    # SKU候補選択ダイアログを表示
+                    dialog = PurchaseCandidateDialog(current_group, base_dt, sku_candidates, parent=self)
+                    if dialog.exec_() == QDialog.Accepted and dialog.selected_record:
+                        selected_record = dialog.selected_record
+                        target_sku = str(
+                            selected_record.get("SKU") or selected_record.get("sku") or ""
+                        ).strip()
+
+                        if target_sku:
+                            try:
+                                all_records = self.product_widget.get_all_purchase_records()
+                                image_paths = [img.path for img in current_group.images]
+                                success, added_count, record_snapshot = self.product_widget.update_image_paths_for_jan(
+                                    jan,
+                                    image_paths,
+                                    all_records,
+                                    skip_existing=True,
+                                    target_sku=target_sku,
+                                )
+                                if success and added_count > 0 and record_snapshot:
+                                    # 画像登録タブ用の一覧に1件追加
+                                    self.add_registration_entry(record_snapshot)
+                            except Exception as e:
+                                QMessageBox.critical(
+                                    self,
+                                    "エラー",
+                                    f"仕入DBへの画像紐付け中にエラーが発生しました:\n{str(e)}",
+                                )
             
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"保存中にエラーが発生しました:\n{str(e)}")
@@ -1701,8 +1806,15 @@ class ImageManagerWidget(QWidget):
         button_layout.addWidget(self.load_registration_snapshot_btn)
 
         self.clear_registration_btn = QPushButton("一覧をクリア")
+        self.clear_registration_btn.setToolTip("画像登録リストをすべて削除します")
         self.clear_registration_btn.clicked.connect(self.clear_registration_records)
         button_layout.addWidget(self.clear_registration_btn)
+
+        # 選択行の削除ボタン
+        self.delete_registration_row_btn = QPushButton("選択行を削除")
+        self.delete_registration_row_btn.setToolTip("選択されている行だけを画像登録リストから削除します")
+        self.delete_registration_row_btn.clicked.connect(self.delete_selected_registration_rows)
+        button_layout.addWidget(self.delete_registration_row_btn)
 
         self.upload_to_gcs_btn = QPushButton("GCSアップロード")
         self.upload_to_gcs_btn.setToolTip("選択行（未選択の場合は確認後に全行）の商品画像をGCSにアップロードします")
@@ -1720,6 +1832,12 @@ class ImageManagerWidget(QWidget):
         self.check_existing_gcs_btn.setToolTip("GCSに既に存在する画像があれば検索し、画像URL欄に自動入力します（ファイル名で検索）")
         self.check_existing_gcs_btn.clicked.connect(self.check_existing_images_in_gcs)
         button_layout.addWidget(self.check_existing_gcs_btn)
+
+        # 仕入DBに保存ボタン（画像URL1〜6を永続化）
+        self.save_to_db_btn = QPushButton("DBに保存")
+        self.save_to_db_btn.setToolTip("一覧のSKUごとに、画像URL1〜6を仕入DBに保存します")
+        self.save_to_db_btn.clicked.connect(self.save_registration_to_purchase_db)
+        button_layout.addWidget(self.save_to_db_btn)
 
         # AmazonテンプレートExcelに書き込み
         self.write_amazon_template_btn = QPushButton("amazon（出品ファイルL）テンプレートに書き込み")
@@ -1878,6 +1996,166 @@ class ImageManagerWidget(QWidget):
             self.registration_table.setRowCount(0)
             self._set_registration_preview(None)
 
+    def delete_selected_registration_rows(self):
+        """選択されている行だけを画像登録リストから削除"""
+        if not self.registration_records:
+            QMessageBox.information(self, "情報", "削除する行がありません。")
+            return
+
+        selected_rows = set()
+        for item in self.registration_table.selectedItems():
+            selected_rows.add(item.row())
+
+        if not selected_rows:
+            QMessageBox.information(self, "情報", "削除する行が選択されていません。")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "確認",
+            f"選択されている {len(selected_rows)} 行を画像登録リストから削除しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # インデックスがずれないように降順で削除
+        for row in sorted(selected_rows, reverse=True):
+            if row < len(self.registration_records):
+                del self.registration_records[row]
+
+        # テーブルを再描画
+        self.update_registration_table()
+        self._set_registration_preview(None)
+
+    def save_registration_to_purchase_db(self):
+        """
+        画像登録タブの内容を仕入DB（PurchaseDatabase）に保存する。
+
+        - SKUごとに image_url_1〜image_url_6 を更新（PurchaseDatabase）
+        - さらに、最新の仕入DBスナップショット（ProductPurchaseDatabase）にも
+          画像URL1〜6を反映し、新しいスナップショットとして保存する
+        """
+        if not self.registration_records:
+            QMessageBox.information(self, "情報", "保存するデータがありません。")
+            return
+
+        try:
+            from database.purchase_db import PurchaseDatabase
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "エラー",
+                f"仕入DBモジュールの読み込みに失敗しました:\n{e}",
+            )
+            return
+
+        purchase_db = PurchaseDatabase()
+
+        # 商品マスタ（products）にも画像パス・URLを保存するためにProductDatabaseを使用
+        try:
+            from database.product_db import ProductDatabase
+            product_db = ProductDatabase()
+        except Exception as e:
+            product_db = None
+            logger.warning(f"ProductDatabaseの初期化に失敗しました（商品DBへの画像保存はスキップされます）: {e}")
+        updated_count = 0
+        skipped_count = 0
+
+        # SKU -> image_urls / image_paths のマップを作成（後でスナップショットにも反映）
+        sku_to_image_urls: Dict[str, List[str]] = {}
+        sku_to_image_paths: Dict[str, List[str]] = {}
+
+        for entry in self.registration_records:
+            sku = (entry.get("sku") or "").strip()
+            if not sku:
+                skipped_count += 1
+                continue
+
+            image_urls = entry.get("image_urls", []) or []
+
+            # 商品画像パス（バーコード以外の画像1〜6）
+            image_paths_raw = entry.get("product_images") or entry.get("images") or []
+            # 最大6件に正規化
+            norm_paths: List[str] = []
+            for i in range(6):
+                norm_paths.append(image_paths_raw[i] if i < len(image_paths_raw) else "")
+
+            # image_url_1〜6 を構築（不足分は空文字）
+            update_data: Dict[str, Any] = {"sku": sku}
+            for i in range(6):
+                key = f"image_url_{i + 1}"
+                if i < len(image_urls) and image_urls[i]:
+                    update_data[key] = image_urls[i]
+                else:
+                    update_data[key] = ""
+
+            sku_to_image_urls[sku] = [update_data[f"image_url_{i+1}"] for i in range(6)]
+            sku_to_image_paths[sku] = norm_paths
+
+            try:
+                purchase_db.upsert(update_data)
+                updated_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to save image URLs to purchase DB for SKU {sku}: {e}")
+                skipped_count += 1
+
+            # products テーブルの image_1〜6 / image_url_1〜6 も更新
+            if product_db is not None:
+                try:
+                    product_db.update_images_and_urls(sku, sku_to_image_paths[sku], sku_to_image_urls[sku])
+                except Exception as e:
+                    logger.warning(f"Failed to update products table images for SKU {sku}: {e}")
+
+        # 商品DBタブの仕入DBスナップショットにも反映
+        snapshot_updated = False
+        try:
+            from database.product_purchase_db import ProductPurchaseDatabase
+
+            pp_db = ProductPurchaseDatabase()
+            snapshots = pp_db.list_snapshots()
+            if snapshots:
+                latest_id = snapshots[0]["id"]
+                snapshot = pp_db.get_snapshot(latest_id)
+                if snapshot and isinstance(snapshot.get("data"), list):
+                    data = snapshot["data"]
+                    for row in data:
+                        sku = (row.get("SKU") or row.get("sku") or "").strip()
+                        if not sku:
+                            continue
+
+                        # 画像URL1〜6
+                        urls = sku_to_image_urls.get(sku)
+                        if urls:
+                            for i in range(6):
+                                col_name = f"画像URL{i + 1}"
+                                url_val = urls[i] if i < len(urls) else ""
+                                row[col_name] = url_val
+
+                        # 画像1〜6（ファイル名）もスナップショットに直接保存
+                        paths = sku_to_image_paths.get(sku)
+                        if paths:
+                            for i in range(6):
+                                col_name = f"画像{i + 1}"
+                                path_val = paths[i] if i < len(paths) else ""
+                                row[col_name] = path_val
+
+                    # 新しいスナップショットとして保存（最新が自動的に使われる）
+                    pp_db.save_snapshot("image_urls_synced", data)
+                    snapshot_updated = True
+        except Exception as e:
+            logger.warning(f"Failed to update purchase snapshot DB with image URLs: {e}")
+
+        QMessageBox.information(
+            self,
+            "DBに保存",
+            f"仕入DBへの保存が完了しました。\n\n"
+            f"更新されたSKU: {updated_count}件\n"
+            f"スキップ/エラー: {skipped_count}件\n"
+            f"スナップショット更新: {'あり' if snapshot_updated else 'なし'}",
+        )
+
     def save_registration_snapshot(self):
         """画像登録タブの現在の一覧をJSONファイルにスナップ保存（テスト用）"""
         if not self.registration_records:
@@ -2015,7 +2293,9 @@ class ImageManagerWidget(QWidget):
         col_offset = 11  # 既存カラム数（コンディション、SKU、ASIN、JAN、商品名、画像1～6）
         
         # 編集可能なカラムのみ更新
-        if column == 3:  # JAN
+        if column == 1:  # SKU（将来の直接編集にも対応）
+            entry["sku"] = item.text()
+        elif column == 3:  # JAN
             entry["jan"] = item.text()
         elif col_offset <= column <= col_offset + 4:  # 画像URL1～5
             idx = column - col_offset
@@ -2030,28 +2310,458 @@ class ImageManagerWidget(QWidget):
         item = self.registration_table.itemAt(pos)
         if not item:
             return
-        
         row = item.row()
         column = item.column()
-        
-        # 画像URL1～5の列（11～15）のみメニュー表示
+
+        # SKU列（1）: JANから仕入DB検索してSKU候補を選択
+        if column == 1:
+            self.change_sku_for_registration_row(row)
+            return
+
+        # 画像1～6の列（5～10）: 右クリックでローカル画像操作メニュー
+        if 5 <= column <= 10:
+            image_idx = column - 5  # 0～5
+            menu = QMenu(self)
+            delete_local_action = menu.addAction("この画像を削除（後続の画像をスライド）")
+            force_action = menu.addAction("この画像をGCSに強制アップロード（バーコード判定を無視）")
+            action = menu.exec_(self.registration_table.viewport().mapToGlobal(pos))
+            if action == delete_local_action:
+                self.delete_and_slide_local_image(row, image_idx)
+            elif action == force_action:
+                self.force_upload_single_image_to_gcs(row, image_idx)
+            return
+
+        # 画像URL1～5の列（11～15）のみURL編集メニュー表示
         col_offset = 11  # 画像URL1の列インデックス
         if not (col_offset <= column <= col_offset + 4):
             return
-        
+
         url_idx = column - col_offset  # 0～4
         url_label = f"画像URL{url_idx + 1}"
-        
+
         menu = QMenu(self)
         delete_action = menu.addAction(f"{url_label} を削除（後続URLをスライド）")
         clear_action = menu.addAction(f"{url_label} をクリア（スライドなし）")
-        
+
         action = menu.exec_(self.registration_table.viewport().mapToGlobal(pos))
-        
+
         if action == delete_action:
             self._delete_and_slide_image_url(row, url_idx)
         elif action == clear_action:
             self._clear_image_url(row, url_idx)
+
+    def force_upload_single_image_to_gcs(self, row: int, image_idx: int):
+        """
+        画像1〜6セルを右クリックしたときに呼び出される、
+        単一画像のGCS「強制」アップロード処理。
+
+        - バーコードかどうかの判定は一切行わない
+        - 既にURLが入っていても上書きしたい場合に使える
+        """
+        if row >= len(self.registration_records):
+            return
+
+        # 対象セルからローカル画像パスを取得
+        column = 5 + image_idx  # 画像1〜6列
+        item = self.registration_table.item(row, column)
+        if not item:
+            QMessageBox.warning(self, "エラー", "画像パスが見つかりません。")
+            return
+
+        image_path = item.data(Qt.UserRole)
+        if not image_path:
+            QMessageBox.warning(self, "エラー", "画像パスが設定されていません。")
+            return
+
+        image_path = str(image_path)
+        if not Path(image_path).exists():
+            QMessageBox.warning(self, "エラー", f"画像ファイルが見つかりません:\n{image_path}")
+            return
+
+        entry = self.registration_records[row]
+        sku = entry.get("sku") or ""
+
+        # 確認ダイアログ
+        reply = QMessageBox.question(
+            self,
+            "GCS強制アップロード",
+            f"この画像をGCSに強制アップロードしますか？\n\n"
+            f"SKU: {sku or '（未設定）'}\n"
+            f"画像: {Path(image_path).name}\n\n"
+            f"※ バーコード画像かどうかに関係なくアップロードします。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # gcs_uploaderの読み込み（通常アップロードと同等の処理を簡略化）
+        try:
+            import sys
+            import os
+            import importlib.util
+
+            current_file_dir = os.path.dirname(os.path.abspath(__file__))
+            python_dir = os.path.abspath(os.path.join(current_file_dir, "..", ".."))
+            candidate_paths = [python_dir, os.path.join(python_dir, "python")]
+
+            found_path = None
+            for candidate in candidate_paths:
+                gcs_uploader_path = os.path.join(candidate, "utils", "gcs_uploader.py")
+                if os.path.exists(gcs_uploader_path):
+                    found_path = candidate
+                    break
+
+            if found_path:
+                if found_path in sys.path:
+                    sys.path.remove(found_path)
+                sys.path.insert(0, found_path)
+                sys.path[0] = found_path
+
+                gcs_uploader_file = os.path.join(found_path, "utils", "gcs_uploader.py")
+                if not os.path.exists(gcs_uploader_file):
+                    raise ImportError(f"gcs_uploader.py not found at {gcs_uploader_file}")
+
+                spec = importlib.util.spec_from_file_location("gcs_uploader", gcs_uploader_file)
+                gcs_uploader_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(gcs_uploader_module)
+                upload_image_to_gcs = gcs_uploader_module.upload_image_to_gcs
+                GCS_AVAILABLE = gcs_uploader_module.GCS_AVAILABLE
+                check_gcs_authentication = gcs_uploader_module.check_gcs_authentication
+                find_existing_public_url_for_local_file = getattr(
+                    gcs_uploader_module, "find_existing_public_url_for_local_file", None
+                )
+            else:
+                from utils.gcs_uploader import upload_image_to_gcs, GCS_AVAILABLE, check_gcs_authentication
+                try:
+                    from utils.gcs_uploader import find_existing_public_url_for_local_file
+                except Exception:
+                    find_existing_public_url_for_local_file = None
+
+            if not GCS_AVAILABLE:
+                QMessageBox.critical(
+                    self,
+                    "エラー",
+                    "google-cloud-storageがインストールされていません。\n"
+                    "pip install google-cloud-storage を実行してください。",
+                )
+                return
+
+            auth_success, auth_error = check_gcs_authentication()
+            if not auth_success:
+                QMessageBox.critical(
+                    self,
+                    "認証エラー",
+                    f"GCSへの認証に失敗しました。\n\n{auth_error}\n\n"
+                    f"サービスアカウントキーの設定を確認してください。",
+                )
+                return
+        except ImportError as e:
+            QMessageBox.critical(
+                self,
+                "エラー",
+                f"GCSアップロード機能の読み込みに失敗しました:\n\n{str(e)}",
+            )
+            return
+
+        # 実際のアップロード処理（既存URLチェックも実施）
+        try:
+            if find_existing_public_url_for_local_file:
+                try:
+                    existing_url = find_existing_public_url_for_local_file(image_path)
+                except Exception:
+                    existing_url = None
+                if existing_url:
+                    public_url = existing_url
+                else:
+                    public_url = upload_image_to_gcs(image_path)
+            else:
+                public_url = upload_image_to_gcs(image_path)
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "アップロード失敗",
+                f"GCSへのアップロードに失敗しました:\n{e}",
+            )
+            logger.error(f"Force upload failed for {image_path}: {e}", exc_info=True)
+            return
+
+        # registration_records の image_urls を更新
+        if "image_urls" not in entry:
+            entry["image_urls"] = [""] * 5
+        while len(entry["image_urls"]) <= image_idx:
+            entry["image_urls"].append("")
+        entry["image_urls"][image_idx] = public_url
+
+        # テーブル（画像URL列）にも反映
+        url_col_offset = 11
+        url_col = url_col_offset + image_idx
+        if url_col < self.registration_table.columnCount():
+            url_item = self.registration_table.item(row, url_col)
+            if url_item:
+                url_item.setText(public_url)
+            else:
+                url_item = QTableWidgetItem(public_url)
+                url_item.setFlags(url_item.flags() | Qt.ItemIsEditable)
+                self.registration_table.setItem(row, url_col, url_item)
+
+        # 仕入DB（purchase_db）の image_url_n も更新
+        try:
+            if sku:
+                from database.purchase_db import PurchaseDatabase
+
+                purchase_db = PurchaseDatabase()
+                purchase_record = purchase_db.get_by_sku(sku)
+
+                image_url_key = f"image_url_{image_idx + 1}"
+                if purchase_record:
+                    update_data = dict(purchase_record)
+                    update_data[image_url_key] = public_url
+                    purchase_db.upsert(update_data)
+                else:
+                    new_data = {"sku": sku, image_url_key: public_url}
+                    purchase_db.upsert(new_data)
+        except Exception as e:
+            logger.warning(f"Failed to update purchase DB for SKU {sku or 'N/A'}: {e}")
+
+        QMessageBox.information(
+            self,
+            "アップロード完了",
+            f"画像をGCSにアップロードしました。\n\n"
+            f"SKU: {sku or '（未設定）'}\n"
+            f"画像URL: {public_url}",
+        )
+
+    def delete_and_slide_local_image(self, row: int, image_idx: int):
+        """
+        画像1〜6のセルで選択された画像を削除し、
+        後ろの画像を左にスライドさせる。
+
+        - registration_records.product_images を編集
+        - 対応する image_urls もスライド
+        - テーブルの画像1〜6 / 画像URL1〜5 を更新
+        - 仕入DB（purchase_db）の image_url_n も反映
+        """
+        if row >= len(self.registration_records):
+            return
+
+        entry = self.registration_records[row]
+        product_images = entry.get("product_images", [])
+
+        if image_idx >= len(product_images):
+            QMessageBox.information(self, "情報", "削除対象の画像がありません。")
+            return
+
+        target_path = product_images[image_idx]
+        file_name = Path(target_path).name if target_path else f"画像{image_idx + 1}"
+
+        reply = QMessageBox.question(
+            self,
+            "画像削除の確認",
+            f"画像{image_idx + 1} を削除して、後ろの画像を左に詰めますか？\n\n"
+            f"対象: {file_name}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # product_images をスライド
+        if product_images:
+            del product_images[image_idx]
+        # 最大6枚に制限しておく
+        while len(product_images) < 6:
+            product_images.append("")
+        entry["product_images"] = product_images[:6]
+
+        # image_urls も同じようにスライド
+        image_urls = entry.get("image_urls", [])
+        if image_idx < len(image_urls):
+            del image_urls[image_idx]
+        while len(image_urls) < 5:
+            image_urls.append("")
+        entry["image_urls"] = image_urls[:5]
+
+        # テーブル上の画像1〜6 / 画像URL1〜5 を更新
+        # 画像1〜6列は5〜10、画像URL1〜5列は11〜15
+        for idx in range(6):
+            col = 5 + idx
+            if col >= self.registration_table.columnCount():
+                continue
+            img_path = entry["product_images"][idx] if idx < len(entry["product_images"]) else ""
+            item = self.registration_table.item(row, col)
+            if img_path:
+                file_name = Path(img_path).name
+                if not item:
+                    item = QTableWidgetItem(file_name)
+                    self.registration_table.setItem(row, col, item)
+                else:
+                    item.setText(file_name)
+                item.setData(Qt.UserRole, img_path)
+                item.setToolTip(img_path)
+            else:
+                if item:
+                    item.setText("")
+                    item.setData(Qt.UserRole, "")
+                    item.setToolTip("")
+
+        for idx in range(5):
+            col = 11 + idx
+            if col >= self.registration_table.columnCount():
+                continue
+            url = entry["image_urls"][idx] if idx < len(entry["image_urls"]) else ""
+            item = self.registration_table.item(row, col)
+            if url:
+                if not item:
+                    item = QTableWidgetItem(url)
+                    item.setFlags(item.flags() | Qt.ItemIsEditable)
+                    self.registration_table.setItem(row, col, item)
+                else:
+                    item.setText(url)
+            else:
+                if item:
+                    item.setText("")
+
+        # 仕入DBの image_url_n を更新
+        try:
+            sku = entry.get("sku")
+            if sku:
+                from database.purchase_db import PurchaseDatabase
+
+                purchase_db = PurchaseDatabase()
+                purchase_record = purchase_db.get_by_sku(sku)
+                update_data = {}
+
+                # 現在の image_urls から image_url_1〜6 を再構築
+                for i in range(6):
+                    key = f"image_url_{i + 1}"
+                    if i < len(entry["image_urls"]) and entry["image_urls"][i]:
+                        update_data[key] = entry["image_urls"][i]
+                    else:
+                        update_data[key] = ""
+
+                if purchase_record:
+                    base = dict(purchase_record)
+                    base.update(update_data)
+                    base["sku"] = sku
+                    purchase_db.upsert(base)
+                else:
+                    update_data["sku"] = sku
+                    purchase_db.upsert(update_data)
+        except Exception as e:
+            logger.warning(f"Failed to update purchase DB after local image delete for SKU {entry.get('sku', 'N/A')}: {e}")
+
+        QMessageBox.information(self, "削除完了", "画像を削除し、後続の画像をスライドしました。")
+
+    def change_sku_for_registration_row(self, row: int):
+        """
+        SKU列を右クリックしたときに、JANから仕入DBを検索して
+        SKU候補を一覧表示し、選択または直接入力できるようにする。
+        """
+        if row >= len(self.registration_records):
+            return
+
+        entry = self.registration_records[row]
+        jan = (entry.get("jan") or "").strip()
+        if not jan:
+            # テーブルのJANセルからも試す
+            item = self.registration_table.item(row, 3)
+            if item:
+                jan = (item.text() or "").strip()
+
+        if not jan:
+            QMessageBox.warning(self, "エラー", "JANコードが設定されていないため、SKU候補を検索できません。")
+            return
+
+        # 仕入DBからJANで候補検索
+        sku_candidates = self._search_sku_candidates_by_jan(jan)
+        if not sku_candidates:
+            # 候補がない場合は手入力のみ
+            sku, ok = QInputDialog.getText(
+                self,
+                "SKU変更",
+                f"JAN {jan} に対応するSKU候補が見つかりませんでした。\n"
+                f"手動でSKUを入力してください：",
+            )
+            if not ok or not sku:
+                return
+            sku = sku.strip()
+        else:
+            # 「SKU - 商品名」を一覧表示
+            items = []
+            sku_map: Dict[str, Dict[str, Any]] = {}
+            for record in sku_candidates:
+                cand_sku = str(record.get("SKU") or record.get("sku") or "").strip()
+                if not cand_sku:
+                    continue
+                name = (
+                    record.get("商品名")
+                    or record.get("product_name")
+                    or record.get("title")
+                    or ""
+                )
+                label = cand_sku if not name else f"{cand_sku} - {name}"
+                if label not in sku_map:
+                    items.append(label)
+                    sku_map[label] = record
+
+            dlg = QInputDialog(self)
+            dlg.setWindowTitle("SKU変更")
+            dlg.setLabelText(
+                f"JAN {jan} に対応するSKU候補を選択するか、直接SKUを入力してください："
+            )
+            dlg.setComboBoxEditable(True)
+            dlg.setComboBoxItems(items)
+            dlg.setStyleSheet(
+                "QComboBox, QLineEdit, QListView {"
+                "  color: black;"
+                "  background-color: white;"
+                "}"
+                "QListView::item:selected {"
+                "  color: black;"
+                "  background-color: #cce4ff;"
+                "}"
+            )
+
+            if dlg.exec_() != QDialog.Accepted:
+                return
+
+            selected_text = dlg.textValue().strip()
+            if selected_text in sku_map:
+                sku = str(sku_map[selected_text].get("SKU") or sku_map[selected_text].get("sku") or "").strip()
+                # 商品名が空なら、候補の名称を登録しておく
+                if not entry.get("product_name"):
+                    name = (
+                        sku_map[selected_text].get("商品名")
+                        or sku_map[selected_text].get("product_name")
+                        or sku_map[selected_text].get("title")
+                        or ""
+                    )
+                    entry["product_name"] = name
+                    name_item = self.registration_table.item(row, 4)
+                    if name_item:
+                        name_item.setText(name)
+            else:
+                # 直接入力されたとみなす
+                sku = selected_text.split()[0] if selected_text else ""
+
+        if not sku:
+            QMessageBox.warning(self, "エラー", "有効なSKUが入力されませんでした。")
+            return
+
+        # registration_records と テーブルを更新
+        entry["sku"] = sku
+        sku_item = self.registration_table.item(row, 1)
+        if sku_item:
+            sku_item.setText(sku)
+        else:
+            self.registration_table.setItem(row, 1, QTableWidgetItem(sku))
+
+        QMessageBox.information(
+            self,
+            "SKU変更",
+            f"SKUを「{sku}」に変更しました。",
+        )
 
     def _delete_and_slide_image_url(self, row: int, url_idx: int):
         """指定した画像URLを削除し、後続URLを前にスライド"""
@@ -2936,6 +3646,10 @@ class ImageManagerWidget(QWidget):
             link_action = menu.addAction("仕入DB候補を表示して紐付け")
             link_action.triggered.connect(lambda: self.show_purchase_candidates_for_group(group))
 
+            # SKUを指定してこのグループの画像をリネーム
+            rename_with_sku_action = menu.addAction("SKUを指定してこのJANグループの画像をリネーム")
+            rename_with_sku_action.triggered.connect(lambda: self.rename_images_for_group_with_sku(group))
+
             menu.addSeparator()
 
             delete_action = menu.addAction("JANグループを削除")
@@ -2976,6 +3690,213 @@ class ImageManagerWidget(QWidget):
             assign_menu.setEnabled(False)
         
         menu.exec_(self.image_list.mapToGlobal(position))
+
+    def rename_images_for_group_with_sku(self, group: JanGroup):
+        """
+        指定したJANグループ内の画像を、ユーザーが入力したSKUベースでリネームする
+
+        例: SKUが hmk-20251108-used2-029 の場合
+            hmk-20251108-used2-029_1.jpg, hmk-20251108-used2-029_2.jpg, ...
+        """
+        if not group or not group.images:
+            QMessageBox.information(self, "情報", "画像が含まれていないJANグループです。")
+            return
+
+        # まずJANコードから仕入DBのSKU候補を検索
+        sku = ""
+        candidates = []
+        if group.jan and group.jan != "unknown":
+            candidates = self._search_sku_candidates_by_jan(group.jan)
+
+        if candidates:
+            # 「SKU - 商品名」の形で候補リストを作成
+            items = []
+            sku_map: Dict[str, str] = {}
+            for record in candidates:
+                cand_sku = str(record.get("SKU") or record.get("sku") or "").strip()
+                if not cand_sku:
+                    continue
+                name = (
+                    record.get("商品名")
+                    or record.get("product_name")
+                    or record.get("title")
+                    or ""
+                )
+                label = cand_sku if not name else f"{cand_sku} - {name}"
+                if label not in sku_map:
+                    items.append(label)
+                    sku_map[label] = cand_sku
+
+            if items:
+                # QInputDialogインスタンスを使って、選択時の文字色が見えるように明示的にスタイルを指定
+                dlg = QInputDialog(self)
+                dlg.setWindowTitle("SKU指定リネーム")
+                dlg.setLabelText("JANコードから見つかったSKU候補を選択するか、直接SKUを入力してください：")
+                dlg.setComboBoxEditable(True)
+                dlg.setComboBoxItems(items)
+                # ダークテーマでも選択文字が見えるように白背景＋黒文字を強制
+                dlg.setStyleSheet(
+                    "QComboBox, QLineEdit, QListView {"
+                    "  color: black;"
+                    "  background-color: white;"
+                    "}"
+                    "QListView::item:selected {"
+                    "  color: black;"
+                    "  background-color: #cce4ff;"
+                    "}"
+                )
+
+                if dlg.exec_() != QDialog.Accepted:
+                    return
+
+                selected_text = dlg.textValue().strip()
+                if selected_text in sku_map:
+                    sku = sku_map[selected_text]
+                else:
+                    # 「SKU - 商品名」形式でない場合は、先頭の単語をSKUとみなす
+                    sku = selected_text.split()[0]
+            else:
+                # 候補があってもSKUが空なら手入力にフォールバック
+                sku, ok = QInputDialog.getText(
+                    self,
+                    "SKU指定リネーム",
+                    "このJANグループの画像に使用するSKUを入力してください：",
+                )
+                if not ok or not sku:
+                    return
+        else:
+            # 候補がない場合はSKUを直接入力
+            sku, ok = QInputDialog.getText(
+                self,
+                "SKU指定リネーム",
+                "このJANグループの画像に使用するSKUを入力してください：",
+            )
+            if not ok or not sku:
+                return
+
+        sku = sku.strip()
+        if not sku:
+            QMessageBox.warning(self, "エラー", "SKUが入力されていません。")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "リネーム確認",
+            f"JANグループ「{group.jan}」の画像を\nSKU「{sku}」ベースの名前にリネームしますか？\n"
+            "（既にこのSKU名パターンでリネーム済みのファイルはスキップされます）",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # 撮影日時順にソートしてリネーム順を決定
+        sorted_images = sorted(group.images, key=lambda r: r.capture_dt if r.capture_dt else datetime.min)
+
+        rename_operations: List[Tuple[ImageRecord, str]] = []
+        for i, record in enumerate(sorted_images):
+            original_path = Path(record.path)
+            extension = original_path.suffix
+
+            # 既にこのSKUパターンでリネーム済みならスキップ
+            if re.match(f"^{re.escape(sku)}_\\d+{re.escape(extension)}$", original_path.name):
+                continue
+
+            new_name = f"{sku}_{i + 1}{extension}"
+            new_path = original_path.parent / new_name
+            if str(original_path) != str(new_path):
+                rename_operations.append((record, str(new_path)))
+
+        if not rename_operations:
+            QMessageBox.information(self, "情報", "リネーム対象のファイルはありませんでした。")
+            return
+
+        # 実際のリネーム処理
+        progress = QProgressDialog("リネーム処理中...", "キャンセル", 0, len(rename_operations), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        renamed_count = 0
+        new_records_map: Dict[str, ImageRecord] = {}
+
+        for i, (record, new_path_str) in enumerate(rename_operations):
+            progress.setValue(i)
+            if progress.wasCanceled():
+                break
+
+            old_path_str = record.path
+            try:
+                os.rename(old_path_str, new_path_str)
+
+                # DBレコードを更新
+                db_record = self.image_db.get_by_file_path(old_path_str)
+                if db_record:
+                    self.image_db.delete_by_file_path(old_path_str)
+                    db_record["file_path"] = new_path_str
+                    self.image_db.upsert(db_record)
+
+                # メモリ上のレコードを差し替え
+                new_record_data = record._asdict()
+                new_record_data["path"] = new_path_str
+                new_records_map[old_path_str] = ImageRecord(**new_record_data)
+
+                renamed_count += 1
+            except Exception as e:
+                logger.error(f"SKU指定リネームエラー: {old_path_str} -> {new_path_str}: {e}")
+
+        progress.close()
+
+        # image_records を更新
+        if new_records_map:
+            updated_image_records: List[ImageRecord] = []
+            for rec in self.image_records:
+                if rec.path in new_records_map:
+                    updated_image_records.append(new_records_map[rec.path])
+                else:
+                    updated_image_records.append(rec)
+            self.image_records = updated_image_records
+
+        # JANグループを再構築してUI反映
+        self.jan_groups = self.image_service.group_by_jan(self.image_records)
+        self.update_tree_widget()
+        self.update_image_list(self.image_records)
+
+        # 仕入DBへの紐付け処理
+        linked_count = 0
+        if self.product_widget and group.jan != "unknown":
+            try:
+                # リネーム後の新しい画像パスを取得（グループ内の全画像）
+                updated_group = next((g for g in self.jan_groups if g.jan == group.jan), None)
+                if updated_group:
+                    # リネーム後の新しいパスを取得
+                    new_image_paths = [img.path for img in updated_group.images]
+                    
+                    # 仕入DBの全レコードを取得
+                    all_records = self.product_widget.get_all_purchase_records()
+                    
+                    # 指定したSKUのレコードに画像パスを紐付け
+                    success, added_count, record_snapshot = self.product_widget.update_image_paths_for_jan(
+                        group.jan,
+                        new_image_paths,
+                        all_records,
+                        skip_existing=False,  # 既存の画像を上書きする
+                        target_sku=sku,
+                    )
+                    
+                    if success and added_count > 0:
+                        linked_count = added_count
+                        # 画像登録タブに追加（Amazon画像更新ワークフロー用）
+                        if record_snapshot:
+                            self.add_registration_entry(record_snapshot)
+            except Exception as e:
+                logger.error(f"SKU指定リネーム後の紐付けエラー: {e}")
+                # エラーが出てもリネームは成功しているので続行
+
+        # 完了メッセージ
+        message = f"{renamed_count}件の画像をSKU「{sku}」でリネームしました。"
+        if linked_count > 0:
+            message += f"\n仕入DBのSKU「{sku}」に{linked_count}件の画像を紐付けました。"
+        QMessageBox.information(self, "完了", message)
 
     def show_purchase_candidates_for_group(self, group: JanGroup):
         """
@@ -3029,6 +3950,7 @@ class ImageManagerWidget(QWidget):
 
         selected = dialog.selected_record
         target_jan = str(selected.get("JAN") or selected.get("jan") or "").strip()
+        target_sku = str(selected.get("SKU") or selected.get("sku") or "").strip()
 
         if not target_jan:
             reply = QMessageBox.question(
@@ -3052,6 +3974,7 @@ class ImageManagerWidget(QWidget):
                 image_paths,
                 all_records,
                 skip_existing=True,
+                target_sku=target_sku or None,
             )
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"画像パスの紐付け中にエラーが発生しました:\n{e}")

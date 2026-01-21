@@ -94,6 +94,13 @@ class ProductDatabase:
             ("image_4", "TEXT"),
             ("image_5", "TEXT"),
             ("image_6", "TEXT"),
+            # 画像URLカラム（画像登録タブからの保存用）
+            ("image_url_1", "TEXT"),
+            ("image_url_2", "TEXT"),
+            ("image_url_3", "TEXT"),
+            ("image_url_4", "TEXT"),
+            ("image_url_5", "TEXT"),
+            ("image_url_6", "TEXT"),
         ):
             _ensure_column("products", name, ctype)
 
@@ -187,6 +194,47 @@ class ProductDatabase:
 
         set_sql = ", ".join(set_parts) + ", updated_at=CURRENT_TIMESTAMP"
         params.append(sku)
+        cur.execute(f"UPDATE products SET {set_sql} WHERE sku = ?", params)
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def update_images_and_urls(
+        self,
+        sku: str,
+        image_paths: Optional[List[str]] = None,
+        image_urls: Optional[List[str]] = None,
+    ) -> bool:
+        """
+        画像1〜6および画像URL1〜6だけを部分更新する。
+        他のカラムは一切変更しない。
+        """
+        if not sku:
+            return False
+
+        set_parts: List[str] = []
+        params: List[Any] = []
+
+        if image_paths is not None:
+            for i in range(6):
+                key = f"image_{i + 1}"
+                val = image_paths[i] if i < len(image_paths) else ""
+                set_parts.append(f"{key} = ?")
+                params.append(val)
+
+        if image_urls is not None:
+            for i in range(6):
+                key = f"image_url_{i + 1}"
+                val = image_urls[i] if i < len(image_urls) else ""
+                set_parts.append(f"{key} = ?")
+                params.append(val)
+
+        if not set_parts:
+            return False
+
+        set_sql = ", ".join(set_parts) + ", updated_at=CURRENT_TIMESTAMP"
+        params.append(sku)
+
+        cur = self.conn.cursor()
         cur.execute(f"UPDATE products SET {set_sql} WHERE sku = ?", params)
         self.conn.commit()
         return cur.rowcount > 0
