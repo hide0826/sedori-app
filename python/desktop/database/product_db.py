@@ -113,6 +113,23 @@ class ProductDatabase:
         # 既存判定
         exists = self.get_by_sku(product["sku"]) is not None
 
+        # JANコードの.0を削除（数値として読み込まれた場合の正規化）
+        def normalize_jan(jan_value):
+            """JANコードから.0を削除して文字列に変換"""
+            if not jan_value:
+                return None
+            jan_str = str(jan_value).strip()
+            # .0で終わる場合は削除（例: 4970381506544.0 → 4970381506544）
+            if jan_str.endswith(".0"):
+                jan_str = jan_str[:-2]
+            # 数字以外の文字を除去（念のため）
+            jan_str = ''.join(c for c in jan_str if c.isdigit())
+            return jan_str if jan_str else None
+        
+        # JANコードを正規化
+        if "jan" in product and product["jan"]:
+            product["jan"] = normalize_jan(product["jan"])
+
         fields = [
             "sku","jan","asin","product_name","purchase_date","purchase_price","quantity",
             "store_code","store_name","receipt_id","warranty_period_days","warranty_until",

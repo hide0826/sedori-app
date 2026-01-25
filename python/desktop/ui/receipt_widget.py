@@ -1469,10 +1469,24 @@ class ReceiptWidget(QWidget):
             else:
                 # productsテーブルに存在しない場合は、仕入DBのデータからproductsテーブルに登録
                 try:
+                    # JANコードの.0を削除（数値として読み込まれた場合の正規化）
+                    def normalize_jan(jan_value):
+                        """JANコードから.0を削除して文字列に変換"""
+                        if not jan_value:
+                            return None
+                        jan_str = str(jan_value).strip()
+                        # .0で終わる場合は削除（例: 4970381506544.0 → 4970381506544）
+                        if jan_str.endswith(".0"):
+                            jan_str = jan_str[:-2]
+                        # 数字以外の文字を除去（念のため）
+                        jan_str = ''.join(c for c in jan_str if c.isdigit())
+                        return jan_str if jan_str else None
+                    
                     # 仕入DBのデータから商品情報を構築
+                    jan_value = record.get('JAN') or record.get('jan') or None
                     product_data = {
                         "sku": sku,
-                        "jan": record.get('JAN') or record.get('jan') or None,
+                        "jan": normalize_jan(jan_value),
                         "asin": record.get('ASIN') or record.get('asin') or None,
                         "product_name": record.get('商品名') or record.get('product_name') or None,
                         "purchase_date": record_date_only,
@@ -5531,32 +5545,38 @@ class ReceiptWidget(QWidget):
                     
                     updates['linked_skus'] = ','.join(linked_skus) if linked_skus else None
                     
-                    # 差額を再計算（仕入れ個数 × 仕入れ価格）
+                    # 差額を再計算（表示テキストから直接合計金額を取得：再計算後の価格を反映）
                     sku_total = 0
-                    if self.product_widget:
-                        purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
-                        for sku in linked_skus:
-                            for record in purchase_records:
-                                record_sku = record.get('SKU') or record.get('sku', '')
-                                if record_sku and record_sku.strip() == sku:
-                                    # 価格を取得（更新後の価格を優先）
-                                    price = sku_price_updates.get(sku)
-                                    if price is None:
-                                        price = record.get('仕入れ価格') or record.get('仕入価格') or record.get('purchase_price') or record.get('cost', 0)
-                                    try:
-                                        price = float(price) if price else 0
-                                    except (ValueError, TypeError):
-                                        price = 0
-                                    # 仕入れ個数を取得
-                                    quantity = record.get('仕入れ個数') or record.get('仕入個数') or record.get('quantity') or record.get('数量', 1)
-                                    try:
-                                        quantity = float(quantity) if quantity else 1
-                                    except (ValueError, TypeError):
-                                        quantity = 1
-                                    # 金額 = 仕入れ個数 × 仕入れ価格
-                                    total_amount = price * quantity
-                                    sku_total += total_amount
-                                    break
+                    for i in range(linked_skus_list.count()):
+                        item = linked_skus_list.item(i)
+                        if item:
+                            # 表示テキストから合計金額を抽出（再計算後の価格が反映されている）
+                            text = item.text()
+                            total_amount = 0
+                            
+                            if " - ¥" in text:
+                                try:
+                                    # 「 - ¥金額 - (時刻)」または「 - ¥金額」形式から金額を抽出
+                                    price_part = text.split(" - ¥")[1]
+                                    # 時刻部分を除去（「 - (時刻)」がある場合）
+                                    if " - (" in price_part:
+                                        price_str = price_part.split(" - (")[0].replace(",", "").strip()
+                                    else:
+                                        price_str = price_part.replace(",", "").strip()
+                                    total_amount = int(price_str)
+                                except (ValueError, IndexError):
+                                    total_amount = 0
+                            elif "¥" in text:
+                                # フォールバック: 「¥金額」形式を直接検索
+                                try:
+                                    price_parts = text.split("¥")
+                                    if len(price_parts) > 1:
+                                        price_str = price_parts[1].split()[0].replace(",", "").strip()
+                                        total_amount = int(price_str)
+                                except (ValueError, IndexError):
+                                    total_amount = 0
+                            
+                            sku_total += total_amount
                     
                     # レシートの合計金額を取得
                     receipt_total = updates.get('total_amount')
@@ -5566,8 +5586,14 @@ class ReceiptWidget(QWidget):
                         except ValueError:
                             receipt_total = 0
                     
-                    # 差額を計算
-                    difference = sku_total - receipt_total
+                    # 値引きを考慮
+                    discount = updates.get('discount_amount', 0)
+                    if discount is None:
+                        discount = 0
+                    receipt_total_after_discount = receipt_total - discount
+                    
+                    # 差額を計算（SKU合計 - レシート合計（値引き後））
+                    difference = sku_total - receipt_total_after_discount
                     if abs(difference) == 0:
                         updates['price_difference'] = None  # 差額が0の場合はNoneに設定
                     else:
@@ -5656,6 +5682,40 @@ class ReceiptWidget(QWidget):
                                 QMessageBox.warning(self, "警告", f"スナップショットの保存中にエラーが発生しました: {str(e)}")
                     except Exception as e:
                         QMessageBox.warning(self, "警告", f"仕入DBの更新中にエラーが発生しました: {str(e)}")
+                
+                # レシート画像を仕入DBに反映（科目が「仕入」でSKUが紐付けられている場合）
+                if is_purchase and linked_skus and self.product_widget:
+                    try:
+                        # レシート情報から画像ファイル名を取得
+                        receipt_info = self.receipt_db.get_receipt(receipt_id)
+                        if receipt_info:
+                            # 画像ファイルパスを取得（original_file_pathを優先、なければfile_path）
+                            file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path', '')
+                            if file_path:
+                                from pathlib import Path
+                                image_file = Path(file_path)
+                                if image_file.exists():
+                                    # ファイル名（拡張子なし）を取得（表示用）
+                                    image_file_name = image_file.stem
+                                    
+                                    # 各SKUに対してレシート画像を反映
+                                    purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
+                                    for sku in linked_skus:
+                                        for record in purchase_records:
+                                            record_sku = str(record.get('SKU') or record.get('sku') or '').strip()
+                                            if record_sku == sku:
+                                                # レシート画像を更新
+                                                record['レシート画像'] = image_file_name
+                                                record['レシート画像パス'] = str(image_file.resolve())
+                                                
+                                                # ProductDatabaseにも反映（永続化）
+                                                product = self.product_widget.db.get_by_sku(sku)
+                                                if product:
+                                                    product['receipt_id'] = image_file_name
+                                                    self.product_widget.db.upsert(product)
+                                                break
+                    except Exception as e:
+                        QMessageBox.warning(self, "警告", f"レシート画像の反映中にエラーが発生しました: {str(e)}")
                 
                 # DB更新
                 if updates and receipt_id:

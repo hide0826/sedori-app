@@ -1841,6 +1841,22 @@ class InventoryWidget(QWidget):
             # 空の場合は「未実装」に設定
             new_df["SKU"] = new_df["SKU"].apply(lambda x: "未実装" if x == "" or pd.isna(x) else x)
         
+        # JANコードの.0を削除（数値として読み込まれた場合の正規化）
+        if "JAN" in new_df.columns:
+            def normalize_jan(value):
+                """JANコードから.0を削除して文字列に変換"""
+                if pd.isna(value) or value == "":
+                    return ""
+                # 文字列に変換
+                jan_str = str(value).strip()
+                # .0で終わる場合は削除（例: 4970381506544.0 → 4970381506544）
+                if jan_str.endswith(".0"):
+                    jan_str = jan_str[:-2]
+                # 数字以外の文字を除去（念のため）
+                jan_str = ''.join(c for c in jan_str if c.isdigit())
+                return jan_str
+            new_df["JAN"] = new_df["JAN"].apply(normalize_jan)
+        
         # 利益率とROIを計算
         new_df = self._calculate_margin_and_roi(new_df)
         

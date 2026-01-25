@@ -235,7 +235,16 @@ class ProductEditDialog(QDialog):
     def load_data(self):
         self.sku_edit.setText(self.product.get("sku") or "")
         self.sku_edit.setReadOnly(True)
-        self.jan_edit.setText(self.product.get("jan") or "")
+        # JANコードの.0を削除（表示用の正規化）
+        jan_value = self.product.get("jan") or ""
+        if jan_value:
+            jan_str = str(jan_value).strip()
+            # .0で終わる場合は削除（例: 4970381506544.0 → 4970381506544）
+            if jan_str.endswith(".0"):
+                jan_str = jan_str[:-2]
+        else:
+            jan_str = ""
+        self.jan_edit.setText(jan_str)
         self.asin_edit.setText(self.product.get("asin") or "")
         self.name_edit.setText(self.product.get("product_name") or "")
         self.purchase_date_edit.setText(self.product.get("purchase_date") or "")
@@ -267,9 +276,18 @@ class ProductEditDialog(QDialog):
             except ValueError:
                 return None
 
+        # JANコードの.0を削除（保存用の正規化）
+        jan_text = self.jan_edit.text().strip()
+        if jan_text:
+            # .0で終わる場合は削除（例: 4970381506544.0 → 4970381506544）
+            if jan_text.endswith(".0"):
+                jan_text = jan_text[:-2]
+            # 数字以外の文字を除去（念のため）
+            jan_text = ''.join(c for c in jan_text if c.isdigit())
+        
         result = {
             "sku": sku,
-            "jan": self.jan_edit.text().strip() or None,
+            "jan": jan_text if jan_text else None,
             "asin": self.asin_edit.text().strip() or None,
             "product_name": self.name_edit.text().strip() or None,
             "purchase_date": self.purchase_date_edit.text().strip() or None,
@@ -857,6 +875,15 @@ class ProductWidget(QWidget):
             if diff_days <= days_window:
                 rec_copy = dict(record)
                 rec_copy["_date_diff"] = diff_days
+                # JANコードの.0を削除（正規化）
+                jan_keys = ['JAN', 'jan', 'JANコード', 'jan_code']
+                for key in jan_keys:
+                    if key in rec_copy and rec_copy[key]:
+                        jan_str = str(rec_copy[key]).strip()
+                        if jan_str.endswith(".0"):
+                            jan_str = jan_str[:-2]
+                        jan_str = ''.join(c for c in jan_str if c.isdigit())
+                        rec_copy[key] = jan_str if jan_str else None
                 candidates.append(rec_copy)
 
         # 日差 → 仕入日 → SKU の順でソート
@@ -988,7 +1015,16 @@ class ProductWidget(QWidget):
             for i, product in enumerate(products):
                 self.table.setItem(i, 0, QTableWidgetItem(product.get("sku") or ""))
                 self.table.setItem(i, 1, QTableWidgetItem(product.get("product_name") or ""))
-                self.table.setItem(i, 2, QTableWidgetItem(product.get("jan") or ""))
+                # JANコードの.0を削除（表示用の正規化）
+                jan_value = product.get("jan") or ""
+                if jan_value:
+                    jan_str = str(jan_value).strip()
+                    # .0で終わる場合は削除（例: 4970381506544.0 → 4970381506544）
+                    if jan_str.endswith(".0"):
+                        jan_str = jan_str[:-2]
+                else:
+                    jan_str = ""
+                self.table.setItem(i, 2, QTableWidgetItem(jan_str))
                 self.table.setItem(i, 3, QTableWidgetItem(product.get("asin") or ""))
                 self.table.setItem(i, 4, QTableWidgetItem(product.get("purchase_date") or ""))
                 self.table.setItem(i, 5, QTableWidgetItem(str(product.get("purchase_price") or "")))
@@ -1632,6 +1668,15 @@ class ProductWidget(QWidget):
                 if value is None:
                     value = ""
                 
+                # JANコードの.0を削除（表示用の正規化）
+                if header == "JAN" or header == "jan":
+                    if value:
+                        jan_str = str(value).strip()
+                        # .0で終わる場合は削除（例: 4970381506544.0 → 4970381506544）
+                        if jan_str.endswith(".0"):
+                            jan_str = jan_str[:-2]
+                        value = jan_str
+                
                 if header == "商品名":
                     full_text = "" if value is None else str(value)
                     display_text = self._truncate_text(full_text, PRODUCT_NAME_DISPLAY_LIMIT)
@@ -2158,6 +2203,21 @@ class ProductWidget(QWidget):
     def _show_purchase_context_menu(self, position):
         """コンテキストメニューを表示"""
         menu = QMenu()
+        
+        # クリックされたセルの列を取得
+        item = self.purchase_table.itemAt(position)
+        if item:
+            row = item.row()
+            col = item.column()
+            header = self.purchase_table.horizontalHeaderItem(col)
+            header_text = header.text() if header else ""
+            
+            # レシート画像カラムの場合、レシート画像を紐付けするメニューを追加
+            if header_text == "レシート画像":
+                link_receipt_action = menu.addAction("レシート画像を紐付け")
+                link_receipt_action.triggered.connect(lambda: self._link_receipt_image_to_sku(row))
+                menu.addSeparator()
+        
         copy_action = menu.addAction("選択範囲をコピー")
         copy_action.triggered.connect(self._copy_selection_to_clipboard)
         menu.addSeparator()
@@ -2222,6 +2282,129 @@ class ProductWidget(QWidget):
         asin = self._get_value_from_row(row, ["ASIN", "asin"])
         if asin:
             QApplication.clipboard().setText(asin)
+    
+    def _link_receipt_image_to_sku(self, row: int):
+        """レシート画像をSKUに紐付けする"""
+        from PySide6.QtWidgets import QFileDialog
+        
+        # SKUを取得
+        sku = self._get_value_from_row(row, ["SKU", "sku"])
+        if not sku:
+            QMessageBox.warning(self, "エラー", "SKUが見つかりません。")
+            return
+        
+        # レシートDBからレシート一覧を取得
+        all_receipts = self.receipt_db.find_by_date_and_store(None, None)
+        if not all_receipts:
+            QMessageBox.information(self, "情報", "レシートが登録されていません。")
+            return
+        
+        # レシート選択ダイアログを表示
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QDialogButtonBox
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("レシート画像を選択")
+        dialog.resize(600, 400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        label = QLabel(f"SKU: {sku} に紐付けるレシート画像を選択してください。")
+        layout.addWidget(label)
+        
+        receipt_list = QListWidget()
+        receipt_list.setSelectionMode(QListWidget.SingleSelection)
+        
+        # レシート一覧を表示（日付、店舗名、ファイル名）
+        for receipt in all_receipts:
+            receipt_id = receipt.get('id')
+            purchase_date = receipt.get('purchase_date', '')
+            store_name = receipt.get('store_name_raw', '') or receipt.get('store_name', '')
+            file_path = receipt.get('original_file_path') or receipt.get('file_path', '')
+            file_name = Path(file_path).name if file_path else ''
+            
+            display_text = f"{purchase_date} - {store_name} - {file_name}"
+            receipt_list.addItem(display_text)
+            # UserRoleにレシート情報を保存
+            receipt_list.item(receipt_list.count() - 1).setData(Qt.UserRole, receipt)
+        
+        layout.addWidget(receipt_list)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        
+        # 選択されたレシートを取得
+        selected_items = receipt_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "エラー", "レシートが選択されていません。")
+            return
+        
+        selected_receipt = selected_items[0].data(Qt.UserRole)
+        if not selected_receipt:
+            QMessageBox.warning(self, "エラー", "レシート情報の取得に失敗しました。")
+            return
+        
+        # レシート画像を仕入DBに反映
+        try:
+            # 画像ファイルパスを取得
+            file_path = selected_receipt.get('original_file_path') or selected_receipt.get('file_path', '')
+            if not file_path:
+                QMessageBox.warning(self, "エラー", "レシート画像のファイルパスが見つかりません。")
+                return
+            
+            image_file = Path(file_path)
+            if not image_file.exists():
+                QMessageBox.warning(self, "エラー", f"レシート画像ファイルが見つかりません:\n{file_path}")
+                return
+            
+            # ファイル名（拡張子なし）を取得（表示用）
+            image_file_name = image_file.stem
+            
+            # purchase_all_recordsを更新
+            found = False
+            if hasattr(self, 'purchase_all_records') and self.purchase_all_records:
+                for record in self.purchase_all_records:
+                    record_sku = str(record.get('SKU') or record.get('sku') or '').strip()
+                    if record_sku == sku:
+                        # レシート画像を更新
+                        record['レシート画像'] = image_file_name
+                        record['レシート画像パス'] = str(image_file.resolve())
+                        found = True
+                        break
+            
+            # ProductDatabaseにも反映（永続化）
+            product = self.db.get_by_sku(sku)
+            if product:
+                product['receipt_id'] = image_file_name
+                self.db.upsert(product)
+            else:
+                # ProductDatabaseに商品がない場合は、最小限の情報で作成
+                product_data = {
+                    'sku': sku,
+                    'receipt_id': image_file_name,
+                }
+                self.db.upsert(product_data)
+            
+            # レシートDBのlinked_skusにも追加（既存のSKUに追加、重複を避ける）
+            receipt_id = selected_receipt.get('id')
+            if receipt_id:
+                existing_skus_text = selected_receipt.get('linked_skus', '') or ''
+                existing_skus = [s.strip() for s in existing_skus_text.split(',') if s.strip()] if existing_skus_text else []
+                if sku not in existing_skus:
+                    existing_skus.append(sku)
+                    self.receipt_db.update_receipt(receipt_id, {'linked_skus': ','.join(existing_skus)})
+            
+            # テーブルを更新
+            if hasattr(self, 'purchase_all_records') and self.purchase_all_records:
+                self.populate_purchase_table(self.purchase_all_records)
+            
+            QMessageBox.information(self, "完了", f"レシート画像をSKU {sku} に紐付けました。")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"レシート画像の紐付け中にエラーが発生しました:\n{str(e)}")
 
     def on_purchase_table_cell_clicked(self, row: int, col: int):
         """仕入DBテーブルのセルクリック時の処理（レシート画像をクリックしたときに画像を表示、ステータス理由をクリックしたときに編集モードに入る）"""

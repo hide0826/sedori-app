@@ -14,6 +14,46 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 
+def normalize_jan_in_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    レコード内のJANコードから.0を削除して正規化
+    
+    Args:
+        record: 仕入データのレコード（辞書）
+    
+    Returns:
+        JANコードが正規化されたレコード
+    """
+    # JANコードのキー名の候補（大文字小文字両方に対応）
+    jan_keys = ['JAN', 'jan', 'JANコード', 'jan_code']
+    
+    for key in jan_keys:
+        if key in record and record[key]:
+            jan_value = record[key]
+            jan_str = str(jan_value).strip()
+            # .0で終わる場合は削除（例: 4970381506544.0 → 4970381506544）
+            if jan_str.endswith(".0"):
+                jan_str = jan_str[:-2]
+            # 数字以外の文字を除去（念のため）
+            jan_str = ''.join(c for c in jan_str if c.isdigit())
+            record[key] = jan_str if jan_str else None
+    
+    return record
+
+
+def normalize_jan_in_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    レコードリスト内の全JANコードから.0を削除して正規化
+    
+    Args:
+        records: 仕入データのレコードリスト
+    
+    Returns:
+        JANコードが正規化されたレコードリスト
+    """
+    return [normalize_jan_in_record(record.copy()) for record in records]
+
+
 class InventoryDatabase:
     """仕入データデータベース操作クラス"""
     
@@ -77,9 +117,12 @@ class InventoryDatabase:
         conn = self._get_connection()
         cursor = conn.cursor()
         
+        # JANコードの.0を削除してから保存
+        normalized_data = normalize_jan_in_records(data)
+        
         # データをJSON文字列に変換
-        data_json = json.dumps(data, ensure_ascii=False, default=str)
-        item_count = len(data)
+        data_json = json.dumps(normalized_data, ensure_ascii=False, default=str)
+        item_count = len(normalized_data)
         
         # データを挿入
         cursor.execute("""
@@ -167,11 +210,14 @@ class InventoryDatabase:
         # JSONデータをパース
         data = json.loads(row['data']) if row['data'] else []
         
+        # JANコードの.0を削除してから返す
+        normalized_data = normalize_jan_in_records(data)
+        
         return {
             'id': row['id'],
             'snapshot_name': row['snapshot_name'],
             'item_count': row['item_count'],
-            'data': data,
+            'data': normalized_data,
             'created_at': row['created_at_local'] or row['created_at'],
             'updated_at': row['updated_at_local'] or row['updated_at']
         }

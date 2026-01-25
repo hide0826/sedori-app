@@ -191,7 +191,13 @@ class PurchaseCandidateDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        jan_text = self.jan_group.jan if self.jan_group.jan != "unknown" else "（JAN不明）"
+        # JANコードの.0を削除（表示用の正規化）
+        if self.jan_group.jan != "unknown":
+            jan_text = str(self.jan_group.jan).strip()
+            if jan_text.endswith(".0"):
+                jan_text = jan_text[:-2]
+        else:
+            jan_text = "（JAN不明）"
         info_label = QLabel(
             f"JANグループ: {jan_text}\n"
             f"基準日時: {self.base_dt.strftime('%Y/%m/%d %H:%M:%S')} 付近の仕入データ候補を表示しています。"
@@ -230,7 +236,13 @@ class PurchaseCandidateDialog(QDialog):
             purchase_date = str(record.get("仕入れ日") or record.get("purchase_date") or "")
             sku = str(record.get("SKU") or record.get("sku") or "")
             asin = str(record.get("ASIN") or record.get("asin") or "")
-            jan = str(record.get("JAN") or record.get("jan") or "")
+            # JANコードの.0を削除（表示用の正規化）
+            jan_raw = record.get("JAN") or record.get("jan") or ""
+            jan = str(jan_raw) if jan_raw else ""
+            if jan:
+                # .0で終わる場合は削除（例: 4970381506544.0 → 4970381506544）
+                if jan.endswith(".0"):
+                    jan = jan[:-2]
             title = str(record.get("商品名") or record.get("product_name") or record.get("title") or "")
             store = str(record.get("仕入先") or record.get("store_name") or "")
             price = str(record.get("仕入れ価格") or record.get("purchase_price") or "")
@@ -897,7 +909,13 @@ class ImageManagerWidget(QWidget):
         
         for group in self.jan_groups:
             # 親ノード（JANグループ）
-            jan_text = group.jan if group.jan != "unknown" else "（JAN不明）"
+            if group.jan != "unknown":
+                # JANコードの.0を削除（表示用の正規化）
+                jan_text = str(group.jan).strip()
+                if jan_text.endswith(".0"):
+                    jan_text = jan_text[:-2]
+            else:
+                jan_text = "（JAN不明）"
             title = self._get_product_title_by_jan(group.jan) if group.jan != "unknown" else ""
             title_text = f" - {title}" if title else ""
             parent_item = QTreeWidgetItem([f"{jan_text}{title_text} ({len(group.images)}枚)"])
@@ -1530,10 +1548,51 @@ class ImageManagerWidget(QWidget):
             if group.jan == "unknown":
                 continue
 
+            # 画像の撮影日時を取得（最も古い画像の日時を基準にする）
+            image_capture_times = []
+            for record in group.images:
+                if record.capture_dt:
+                    image_capture_times.append(record.capture_dt)
+            base_capture_dt = min(image_capture_times) if image_capture_times else None
+            
             sku_candidates = self._search_sku_candidates_by_jan(group.jan)
             if not sku_candidates or not (sku_candidates[0].get("SKU") or sku_candidates[0].get("sku")):
                 failed_skus.add(group.jan)
                 continue
+            
+            # 画像の撮影日時に近いSKUを選択
+            if base_capture_dt and len(sku_candidates) > 1:
+                # 各候補の仕入れ日と画像の撮影日時の差を計算
+                for candidate in sku_candidates:
+                    purchase_date_str = str(candidate.get("仕入れ日") or candidate.get("purchase_date") or "")
+                    if purchase_date_str:
+                        try:
+                            # 日付文字列をパース
+                            date_str_clean = purchase_date_str.strip()
+                            if " " in date_str_clean:
+                                date_part, time_part = date_str_clean.split(" ", 1)
+                                date_part = date_part.replace("/", "-")
+                                datetime_str = f"{date_part} {time_part}"
+                                try:
+                                    purchase_dt = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M")
+                                except:
+                                    purchase_dt = datetime.strptime(date_part, "%Y-%m-%d")
+                            else:
+                                date_part = date_str_clean.replace("/", "-")
+                                purchase_dt = datetime.strptime(date_part, "%Y-%m-%d")
+                            
+                            # 画像の撮影日時との差を計算（絶対値）
+                            time_diff = abs((purchase_dt - base_capture_dt).total_seconds())
+                            candidate["_time_diff"] = time_diff
+                        except Exception:
+                            # パースに失敗した場合は大きな値を設定（優先度を下げる）
+                            candidate["_time_diff"] = float('inf')
+                    else:
+                        # 仕入れ日がない場合は大きな値を設定
+                        candidate["_time_diff"] = float('inf')
+                
+                # 時間差が小さい順にソート
+                sku_candidates.sort(key=lambda x: x.get("_time_diff", float('inf')))
             
             sku = sku_candidates[0].get("SKU") or sku_candidates[0].get("sku")
 
