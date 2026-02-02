@@ -242,35 +242,65 @@ class StoreDatabase:
         return cursor.lastrowid
     
     def update_store(self, store_id: int, store_data: Dict[str, Any]) -> bool:
-        """店舗を更新"""
+        """店舗を更新（部分更新対応：指定されたフィールドのみ更新）"""
         conn = self._get_connection()
         cursor = conn.cursor()
         
-        # custom_fieldsをJSON文字列に変換
-        custom_fields_json = json.dumps(store_data.get('custom_fields', {}), ensure_ascii=False)
+        # 既存の店舗データを取得
+        existing_store = self.get_store(store_id)
+        if not existing_store:
+            return False
         
-        cursor.execute("""
-            UPDATE stores SET
-                affiliated_route_name = ?,
-                route_code = ?,
-                supplier_code = ?,
-                store_name = ?,
-                address = ?,
-                phone = ?,
-                custom_fields = ?,
-                store_code = ?
-            WHERE id = ?
-        """, (
-            store_data.get('affiliated_route_name'),
-            store_data.get('route_code'),
-            store_data.get('supplier_code'),
-            store_data.get('store_name'),
-            store_data.get('address'),
-            store_data.get('phone'),
-            custom_fields_json,
-            store_data.get('store_code'),
-            store_id
-        ))
+        # 更新するフィールドを構築（指定されたフィールドのみ更新、指定されていない場合は既存値を保持）
+        update_fields = []
+        update_values = []
+        
+        # 各フィールドをチェック（Noneが明示的に指定された場合のみ更新）
+        if 'affiliated_route_name' in store_data:
+            update_fields.append('affiliated_route_name = ?')
+            update_values.append(store_data.get('affiliated_route_name'))
+        
+        if 'route_code' in store_data:
+            update_fields.append('route_code = ?')
+            update_values.append(store_data.get('route_code'))
+        
+        if 'supplier_code' in store_data:
+            update_fields.append('supplier_code = ?')
+            update_values.append(store_data.get('supplier_code'))
+        
+        if 'store_name' in store_data:
+            update_fields.append('store_name = ?')
+            update_values.append(store_data.get('store_name'))
+        
+        if 'address' in store_data:
+            update_fields.append('address = ?')
+            update_values.append(store_data.get('address'))
+        
+        if 'phone' in store_data:
+            update_fields.append('phone = ?')
+            update_values.append(store_data.get('phone'))
+        
+        if 'custom_fields' in store_data:
+            custom_fields_json = json.dumps(store_data.get('custom_fields', {}), ensure_ascii=False)
+            update_fields.append('custom_fields = ?')
+            update_values.append(custom_fields_json)
+        
+        if 'store_code' in store_data:
+            update_fields.append('store_code = ?')
+            update_values.append(store_data.get('store_code'))
+        
+        if not update_fields:
+            return False  # 更新するフィールドがない
+        
+        # updated_atを追加
+        update_fields.append('updated_at = CURRENT_TIMESTAMP')
+        
+        # WHERE句を追加
+        update_values.append(store_id)
+        
+        # SQLを実行
+        sql = f"UPDATE stores SET {', '.join(update_fields)} WHERE id = ?"
+        cursor.execute(sql, update_values)
         
         conn.commit()
         return cursor.rowcount > 0
@@ -528,13 +558,31 @@ class StoreDatabase:
         }
     
     def get_route_names(self) -> List[str]:
-        """既存のルート名一覧を取得（重複除去、ソート済み）"""
+        """既存のルート名一覧を取得（重複除去、ソート済み）
+        
+        storesテーブルとroutesテーブルの両方から取得
+        """
         conn = self._get_connection()
         cursor = conn.cursor()
         
-        cursor.execute("SELECT DISTINCT affiliated_route_name FROM stores WHERE affiliated_route_name IS NOT NULL AND affiliated_route_name != '' ORDER BY affiliated_route_name")
+        route_names = set()
+        
+        # storesテーブルから取得
+        cursor.execute("SELECT DISTINCT affiliated_route_name FROM stores WHERE affiliated_route_name IS NOT NULL AND affiliated_route_name != ''")
         rows = cursor.fetchall()
-        return [row[0] for row in rows]
+        for row in rows:
+            if row[0]:
+                route_names.add(row[0])
+        
+        # routesテーブルから取得（店舗が紐付けられていないルートも含む）
+        cursor.execute("SELECT DISTINCT route_name FROM routes WHERE route_name IS NOT NULL AND route_name != ''")
+        rows = cursor.fetchall()
+        for row in rows:
+            if row[0]:
+                route_names.add(row[0])
+        
+        # ソートして返す
+        return sorted(list(route_names))
     
     def get_route_code_by_name(self, route_name: str) -> Optional[str]:
         """ルート名からルートコードを取得（最初に見つかったものを返す）"""
@@ -741,6 +789,43 @@ class StoreDatabase:
             })
         
         return routes
+    
+    def get_store_by_id(self, store_id: int) -> Optional[Dict[str, Any]]:
+        """IDで店舗を取得（get_storeのエイリアス）"""
+        return self.get_store(store_id)
+    
+    def upsert_route(self, route_name: str, route_code: str, google_map_url: Optional[str] = None) -> bool:
+        """ルート情報を挿入または更新"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # 既存ルートを確認
+            cursor.execute("SELECT id FROM routes WHERE route_name = ? OR route_code = ?", (route_name, route_code))
+            existing = cursor.fetchone()
+            
+            if existing:
+                # 更新
+                cursor.execute("""
+                    UPDATE routes 
+                    SET route_name = ?, route_code = ?, 
+                        google_map_url = COALESCE(?, google_map_url),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (route_name, route_code, google_map_url, existing[0]))
+            else:
+                # 新規挿入
+                cursor.execute("""
+                    INSERT INTO routes (route_name, route_code, google_map_url)
+                    VALUES (?, ?, ?)
+                """, (route_name, route_code, google_map_url))
+            
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"ルート保存エラー: {e}")
+            conn.rollback()
+            return False
     
     def update_route_google_map_url(self, route_name: str, google_map_url: str) -> bool:
         """ルートの Google Map URL を更新"""

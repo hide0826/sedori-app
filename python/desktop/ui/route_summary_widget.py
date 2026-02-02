@@ -351,7 +351,14 @@ class RouteSummaryWidget(QWidget):
         except Exception:
             pass
         return widget
-
+    
+    def showEvent(self, event):
+        """ウィジェットが表示されたときにルートコード一覧を更新"""
+        super().showEvent(event)
+        # ルートコード一覧を最新の状態に更新
+        if hasattr(self, 'route_code_combo') and self.route_code_combo:
+            self.update_route_codes()
+    
     def add_store_from_master(self):
         """店舗マスタ一覧から選択して店舗を追加"""
         try:

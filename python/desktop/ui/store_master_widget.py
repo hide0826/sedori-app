@@ -15,11 +15,12 @@ from PySide6.QtWidgets import (
     QMessageBox, QDialog, QFormLayout, QLineEdit,
     QLabel, QGroupBox, QFileDialog, QTextEdit,
     QComboBox, QCheckBox, QDialogButtonBox, QTabWidget,
-    QProgressDialog, QApplication
+    QProgressDialog, QApplication, QListWidget, QListWidgetItem,
+    QSplitter
 )
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
-from typing import Tuple
+from PySide6.QtCore import Qt, Signal, QMimeData
+from PySide6.QtGui import QColor, QDrag
+from typing import Tuple, List, Dict, Any, Optional
 import sys
 import os
 import webbrowser
@@ -278,6 +279,330 @@ class StoreEditDialog(QDialog):
         return True, ""
 
 
+class DraggableStoreListWidget(QListWidget):
+    """ドラッグ&ドロップ対応の店舗リストウィジェット"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragDropMode(QListWidget.DragDrop)
+        self.setDefaultDropAction(Qt.MoveAction)
+    
+    def startDrag(self, supportedActions):
+        """ドラッグ開始時の処理"""
+        items = self.selectedItems()
+        if not items:
+            return
+        
+        drag = QDrag(self)
+        mime_data = QMimeData()
+        # 選択されたアイテムのデータを保存
+        item_data = []
+        for item in items:
+            store_data = item.data(Qt.UserRole)
+            if store_data:
+                item_data.append(store_data)
+        mime_data.setProperty("store_data", item_data)
+        drag.setMimeData(mime_data)
+        drag.exec_(supportedActions)
+
+
+class RouteManagementDialog(QDialog):
+    """ルート管理ダイアログ（新規作成・編集）"""
+    
+    def __init__(self, parent=None, db: StoreDatabase = None, route_name: Optional[str] = None):
+        super().__init__(parent)
+        self.db = db or StoreDatabase()
+        self.route_name = route_name  # Noneの場合は新規作成、指定されている場合は編集
+        self.is_edit_mode = route_name is not None
+        
+        self.setWindowTitle("ルート編集" if self.is_edit_mode else "新規ルート作成")
+        self.setMinimumSize(900, 600)
+        self.setup_ui()
+        
+        if self.is_edit_mode:
+            self.load_route_data()
+    
+    def setup_ui(self):
+        """UIの設定"""
+        layout = QVBoxLayout(self)
+        
+        # ルート名入力
+        route_name_group = QGroupBox("ルート情報")
+        route_name_layout = QFormLayout(route_name_group)
+        
+        self.route_name_edit = QLineEdit()
+        self.route_name_edit.setPlaceholderText("ルート名を入力してください")
+        route_name_layout.addRow("ルート名:", self.route_name_edit)
+        
+        self.route_code_edit = QLineEdit()
+        self.route_code_edit.setReadOnly(True)
+        self.route_code_edit.setPlaceholderText("ルートコード（自動生成）")
+        route_name_layout.addRow("ルートコード:", self.route_code_edit)
+        
+        layout.addWidget(route_name_group)
+        
+        # 店舗選択エリア（左右分割）
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # 左側：選択された店舗リスト
+        left_group = QGroupBox("このルートに所属する店舗")
+        left_layout = QVBoxLayout(left_group)
+        
+        self.selected_stores_list = DraggableStoreListWidget(self)
+        self.selected_stores_list.setDragDropMode(QListWidget.InternalMove)
+        left_layout.addWidget(self.selected_stores_list)
+        
+        # 左側の操作ボタン
+        left_buttons = QHBoxLayout()
+        remove_btn = QPushButton("選択店舗を削除")
+        remove_btn.clicked.connect(self.remove_selected_store)
+        left_buttons.addWidget(remove_btn)
+        left_buttons.addStretch()
+        left_layout.addLayout(left_buttons)
+        
+        splitter.addWidget(left_group)
+        
+        # 右側：全店舗リスト
+        right_group = QGroupBox("店舗一覧")
+        right_layout = QVBoxLayout(right_group)
+        
+        # 検索フィールド
+        search_layout = QHBoxLayout()
+        search_label = QLabel("検索:")
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("店舗名、店舗コードで検索...")
+        self.search_edit.textChanged.connect(self.filter_stores)
+        search_layout.addWidget(search_label)
+        search_layout.addWidget(self.search_edit)
+        right_layout.addLayout(search_layout)
+        
+        self.all_stores_list = DraggableStoreListWidget(self)
+        self.all_stores_list.setDragDropMode(QListWidget.DragOnly)
+        right_layout.addWidget(self.all_stores_list)
+        
+        # 右側の操作ボタン
+        right_buttons = QHBoxLayout()
+        add_btn = QPushButton("選択店舗を追加")
+        add_btn.clicked.connect(self.add_selected_store)
+        right_buttons.addWidget(add_btn)
+        right_buttons.addStretch()
+        right_layout.addLayout(right_buttons)
+        
+        splitter.addWidget(right_group)
+        
+        # 分割比率を設定（左:右 = 1:1）
+        splitter.setSizes([450, 450])
+        
+        layout.addWidget(splitter)
+        
+        # ボタン
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+        
+        # 店舗一覧を読み込み
+        self.load_all_stores()
+    
+    def load_all_stores(self):
+        """全店舗を読み込み"""
+        stores = self.db.list_stores()
+        self.all_stores_list.clear()
+        
+        for store in stores:
+            store_code = store.get('store_code') or store.get('supplier_code') or ''
+            store_name = store.get('store_name') or ''
+            current_route = store.get('affiliated_route_name') or ''
+            
+            # 編集モードの場合、既にこのルートに所属している店舗は右側に表示しない
+            if self.is_edit_mode and current_route == self.route_name:
+                continue
+            
+            display_text = f"{store_code} - {store_name}"
+            if current_route:
+                display_text += f" [{current_route}]"
+            
+            item = QListWidgetItem(display_text)
+            item.setData(Qt.UserRole, store)
+            self.all_stores_list.addItem(item)
+    
+    def load_route_data(self):
+        """既存ルートのデータを読み込み"""
+        if not self.route_name:
+            return
+        
+        # ルート名を設定
+        self.route_name_edit.setText(self.route_name)
+        
+        # ルートコードを取得
+        route_code = self.db.get_route_code_by_name(self.route_name)
+        if route_code:
+            self.route_code_edit.setText(route_code)
+        
+        # このルートに所属する店舗を読み込み
+        stores = self.db.list_stores()
+        self.selected_stores_list.clear()
+        
+        for store in stores:
+            store_route_name = store.get('affiliated_route_name') or ''
+            if store_route_name == self.route_name:
+                store_code = store.get('store_code') or store.get('supplier_code') or ''
+                store_name = store.get('store_name') or ''
+                display_text = f"{store_code} - {store_name}"
+                
+                item = QListWidgetItem(display_text)
+                item.setData(Qt.UserRole, store)
+                self.selected_stores_list.addItem(item)
+        
+        # 右側の店舗一覧を再読み込み（このルートに所属する店舗を除外）
+        self.load_all_stores()
+    
+    def filter_stores(self):
+        """店舗一覧をフィルタリング"""
+        search_term = self.search_edit.text().lower()
+        
+        for i in range(self.all_stores_list.count()):
+            item = self.all_stores_list.item(i)
+            if item:
+                text = item.text().lower()
+                item.setHidden(search_term not in text)
+    
+    def add_selected_store(self):
+        """選択された店舗を左側のリストに追加"""
+        selected_items = self.all_stores_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "警告", "追加する店舗を選択してください。")
+            return
+        
+        for item in selected_items:
+            store = item.data(Qt.UserRole)
+            if not store:
+                continue
+            
+            # 既に左側のリストに存在するかチェック
+            store_id = store.get('id')
+            exists = False
+            for i in range(self.selected_stores_list.count()):
+                existing_item = self.selected_stores_list.item(i)
+                if existing_item:
+                    existing_store = existing_item.data(Qt.UserRole)
+                    if existing_store and existing_store.get('id') == store_id:
+                        exists = True
+                        break
+            
+            if not exists:
+                store_code = store.get('store_code') or store.get('supplier_code') or ''
+                store_name = store.get('store_name') or ''
+                display_text = f"{store_code} - {store_name}"
+                
+                new_item = QListWidgetItem(display_text)
+                new_item.setData(Qt.UserRole, store)
+                self.selected_stores_list.addItem(new_item)
+                
+                # 右側のリストから削除
+                self.all_stores_list.takeItem(self.all_stores_list.row(item))
+    
+    def remove_selected_store(self):
+        """選択された店舗を左側のリストから削除"""
+        selected_items = self.selected_stores_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "警告", "削除する店舗を選択してください。")
+            return
+        
+        for item in selected_items:
+            store = item.data(Qt.UserRole)
+            if store:
+                # 右側のリストに戻す
+                store_code = store.get('store_code') or store.get('supplier_code') or ''
+                store_name = store.get('store_name') or ''
+                current_route = store.get('affiliated_route_name') or ''
+                
+                display_text = f"{store_code} - {store_name}"
+                if current_route:
+                    display_text += f" [{current_route}]"
+                
+                new_item = QListWidgetItem(display_text)
+                new_item.setData(Qt.UserRole, store)
+                self.all_stores_list.addItem(new_item)
+            
+            # 左側のリストから削除
+            self.selected_stores_list.takeItem(self.selected_stores_list.row(item))
+    
+    def accept(self):
+        """OKボタンがクリックされたときの処理"""
+        route_name = self.route_name_edit.text().strip()
+        if not route_name:
+            QMessageBox.warning(self, "警告", "ルート名を入力してください。")
+            return
+        
+        try:
+            # ルートコードを生成または取得
+            route_code = self.route_code_edit.text().strip()
+            if not route_code:
+                # ルートコードを自動生成（既存のルートコードの最大値+1）
+                existing_routes = self.db.list_routes_with_store_count()
+                max_code_num = 0
+                for route in existing_routes:
+                    route_code_str = route.get('route_code', '')
+                    if route_code_str:
+                        # ルートコードから数値部分を抽出（例: "R001" -> 1）
+                        import re
+                        match = re.search(r'(\d+)', route_code_str)
+                        if match:
+                            code_num = int(match.group(1))
+                            max_code_num = max(max_code_num, code_num)
+                route_code = f"R{max_code_num + 1:03d}"
+            
+            # 選択された店舗のIDを取得
+            selected_store_ids = []
+            for i in range(self.selected_stores_list.count()):
+                item = self.selected_stores_list.item(i)
+                if item:
+                    store = item.data(Qt.UserRole)
+                    if store and store.get('id'):
+                        selected_store_ids.append(store.get('id'))
+            
+            # 店舗のルート情報を更新
+            for store_id in selected_store_ids:
+                store = self.db.get_store(store_id)
+                if store:
+                    # 既に別のルートに所属している場合は、ルートコードを更新
+                    old_route = store.get('affiliated_route_name')
+                    if old_route and old_route != route_name:
+                        # 店舗のルート情報を更新（別ルートから移動）
+                        self.db.update_store(store_id, {
+                            'affiliated_route_name': route_name,
+                            'route_code': route_code
+                        })
+                    else:
+                        # 新規追加または同じルート
+                        self.db.update_store(store_id, {
+                            'affiliated_route_name': route_name,
+                            'route_code': route_code
+                        })
+            
+            # このルートから外れた店舗のルート情報をクリア
+            if self.is_edit_mode:
+                all_stores = self.db.list_stores()
+                for store in all_stores:
+                    if store.get('affiliated_route_name') == self.route_name:
+                        store_id = store.get('id')
+                        if store_id and store_id not in selected_store_ids:
+                            # ルート情報をクリア
+                            self.db.update_store(store_id, {
+                                'affiliated_route_name': None,
+                                'route_code': None
+                            })
+            
+            # routesテーブルにルート情報を保存
+            self.db.upsert_route(route_name, route_code)
+            
+            QMessageBox.information(self, "完了", "ルートを保存しました。")
+            super().accept()
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"ルートの保存に失敗しました:\n{str(e)}")
+
+
 class CustomFieldEditDialog(QDialog):
     """カスタムフィールド編集ダイアログ"""
     
@@ -445,6 +770,32 @@ class StoreListWidget(QWidget):
         custom_fields_btn = QPushButton("カスタムフィールド管理")
         custom_fields_btn.clicked.connect(self.manage_custom_fields)
         button_layout.addWidget(custom_fields_btn)
+        
+        # 新規ルート作成ボタン
+        new_route_btn = QPushButton("新規ルート作成")
+        new_route_btn.clicked.connect(self.create_new_route)
+        new_route_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+        """)
+        button_layout.addWidget(new_route_btn)
+        
+        # ルート編集ボタン
+        edit_route_btn = QPushButton("ルート編集")
+        edit_route_btn.clicked.connect(self.edit_route)
+        edit_route_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ffc107;
+                color: black;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+        """)
+        button_layout.addWidget(edit_route_btn)
         
         parent_layout.addWidget(button_group)
     
@@ -1361,6 +1712,38 @@ class StoreListWidget(QWidget):
         dialog = CustomFieldsDialog(self, self.db)
         dialog.exec()
         self.load_stores(self.search_edit.text())  # カスタムフィールドが変わったので再読み込み
+    
+    def create_new_route(self):
+        """新規ルート作成"""
+        dialog = RouteManagementDialog(self, self.db, route_name=None)
+        if dialog.exec() == QDialog.Accepted:
+            # ルート一覧を再読み込み
+            self.load_routes()
+            # 店舗一覧を再読み込み
+            self.load_stores(self.search_edit.text())
+    
+    def edit_route(self):
+        """ルート編集"""
+        # ルート選択プルダウンから選択中のルートを取得
+        current_index = self.route_combo.currentIndex()
+        if current_index < 0:
+            QMessageBox.warning(self, "警告", "編集するルートを選択してください。")
+            return
+        
+        # route_dataから実際のルート名を取得
+        route_names = list(self.route_data.keys())
+        if current_index >= len(route_names):
+            QMessageBox.warning(self, "警告", "選択されたルートが見つかりません。")
+            return
+        
+        selected_route_name = route_names[current_index]
+        
+        dialog = RouteManagementDialog(self, self.db, route_name=selected_route_name)
+        if dialog.exec() == QDialog.Accepted:
+            # ルート一覧を再読み込み
+            self.load_routes()
+            # 店舗一覧を再読み込み
+            self.load_stores(self.search_edit.text())
 
 
 class StoreMasterWidget(QWidget):

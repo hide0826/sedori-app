@@ -13,8 +13,11 @@ from __future__ import annotations
 import os
 import re
 import sys
+import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
@@ -5193,19 +5196,45 @@ class ReceiptWidget(QWidget):
                     QMessageBox.warning(None, "警告", "仕入DBにデータがありません。")
                     return
                 
-                # レシートの日付を取得
-                purchase_date = receipt_data.get('purchase_date', '') if receipt_data else ''
-                purchase_time = receipt_data.get('purchase_time', '') if receipt_data else ''  # HH:MM形式
+                # レシートの日付を取得（日付フィールドから最新の値を取得）
+                # まず、日付フィールドから直接取得を試みる（クロージャ経由でアクセス可能）
+                purchase_date = ''
+                purchase_time = ''
+                try:
+                    # 日付フィールドから最新の日付を取得
+                    date_val = date_edit.date()
+                    if date_val.isValid():
+                        purchase_date = date_val.toString("yyyy/MM/dd")
+                    # 時刻フィールドから最新の時刻を取得
+                    purchase_time = time_edit.text().strip()
+                except (NameError, AttributeError):
+                    # フィールドから取得できない場合は、receipt_dataから取得
+                    purchase_date = receipt_data.get('purchase_date', '') if receipt_data else ''
+                    purchase_time = receipt_data.get('purchase_time', '') if receipt_data else ''
                 
                 if not purchase_date:
                     QMessageBox.warning(None, "警告", "レシートの日付が設定されていません。")
                     return
                 
                 # レシートの店舗コード（優先表示用）を取得
-                receipt_store_code_raw = receipt_data.get('store_code', '') if receipt_data else ''
+                # まず、レシート情報編集画面の店舗コードフィールドから直接取得を試みる
+                # store_code_displayは_show_image_popup関数内のローカル変数なので、クロージャ経由でアクセス可能
+                receipt_store_code_raw = ''
+                try:
+                    # クロージャ内でstore_code_displayを直接参照（Pythonのクロージャの仕組みにより可能）
+                    receipt_store_code_raw = store_code_display.text().strip()
+                except (NameError, AttributeError):
+                    # store_code_displayが存在しない場合は、receipt_dataから取得
+                    receipt_store_code_raw = receipt_data.get('store_code', '') if receipt_data else ''
+                
+                # フィールドから取得できない場合は、receipt_dataから取得
+                if not receipt_store_code_raw:
+                    receipt_store_code_raw = receipt_data.get('store_code', '') if receipt_data else ''
+                
                 receipt_store_code_clean = str(receipt_store_code_raw).strip()
                 if " " in receipt_store_code_clean:
                     receipt_store_code_clean = receipt_store_code_clean.split(" ")[0]
+                
                 # 店舗マスタから正規の店舗コード（store_code）を取得して比較に使う
                 receipt_store_code_canon = receipt_store_code_clean
                 try:
@@ -5215,6 +5244,9 @@ class ReceiptWidget(QWidget):
                             receipt_store_code_canon = (store.get("store_code") or receipt_store_code_clean).strip() or receipt_store_code_clean
                 except Exception:
                     pass
+                
+                # デバッグ: 店舗コードの取得状況を確認
+                logger.debug(f"店舗コード取得: raw={receipt_store_code_raw}, clean={receipt_store_code_clean}, canon={receipt_store_code_canon}")
                 
                 # レシートの日時をdatetimeオブジェクトに変換（比較用）
                 receipt_datetime = None
@@ -5375,28 +5407,97 @@ class ReceiptWidget(QWidget):
                             # ラベルにはクリーンなコード（旧コード含む）から、店舗マスタ経由で新店舗コードを反映する
                             store_label = self._format_store_code_label(record_store_code_clean, "")
                             
+                            # SKU文字列内に店舗コードが含まれているかをチェック
+                            # SKU形式: YYYYMMDD-STORE_CODE-NNN の形式を想定
+                            # 例: 20260117-OF-08-027 の場合、店舗コード OF-08 が含まれている
+                            sku_contains_store_code = False
+                            if receipt_store_code_canon and sku:
+                                # 店舗コードを正規化（大文字小文字を無視、ハイフンの有無を考慮）
+                                receipt_code_normalized = receipt_store_code_canon.strip().upper()
+                                
+                                # 方法1: SKU文字列内に店舗コードが直接含まれているかチェック（大文字小文字を無視）
+                                sku_upper = sku.upper()
+                                if receipt_code_normalized in sku_upper:
+                                    sku_contains_store_code = True
+                                else:
+                                    # 方法2: SKUを分割して、日付と連番の間の部分をチェック
+                                    sku_parts = sku.split('-')
+                                    if len(sku_parts) >= 3:
+                                        # 日付（最初の部分）と連番（最後の部分）の間の部分を結合
+                                        # 例: 20260117-OF-08-027 → ['20260117', 'OF', '08', '027']
+                                        # 中間部分: 'OF-08' を生成
+                                        middle_parts = sku_parts[1:-1]  # 最初と最後を除く
+                                        if middle_parts:
+                                            middle_combined = '-'.join(middle_parts)
+                                            middle_combined_upper = middle_combined.upper()
+                                            
+                                            # 店舗コードと一致するか、または店舗コードが含まれているかチェック
+                                            if receipt_code_normalized == middle_combined_upper or receipt_code_normalized in middle_combined_upper:
+                                                sku_contains_store_code = True
+                                            else:
+                                                # ハイフンなしで比較（例: OF08）
+                                                receipt_code_no_hyphen = receipt_code_normalized.replace('-', '')
+                                                middle_no_hyphen = ''.join(middle_parts).upper()
+                                                if receipt_code_no_hyphen == middle_no_hyphen or receipt_code_no_hyphen in middle_no_hyphen:
+                                                    sku_contains_store_code = True
+                                            
+                                            # 追加チェック: 店舗コードの各部分が中間部分に含まれているか
+                                            if not sku_contains_store_code:
+                                                receipt_code_parts = receipt_code_normalized.split('-')
+                                                if len(receipt_code_parts) >= 2:
+                                                    # 例: OF-08 → ['OF', '08'] が ['OF', '08'] に含まれているか
+                                                    all_parts_match = all(
+                                                        any(part.upper() == middle_part.upper() for middle_part in middle_parts)
+                                                        for part in receipt_code_parts
+                                                    )
+                                                    if all_parts_match:
+                                                        sku_contains_store_code = True
+                            
+                            # レシートの正規店舗コードと、仕入レコードの正規店舗コードが一致するかで優先度を決定
+                            is_same_store = bool(
+                                receipt_store_code_canon
+                                and record_store_code_canon
+                                and receipt_store_code_canon == record_store_code_canon
+                            )
+                            
                             candidate_skus_with_time.append({
                                 'sku': sku,
                                 'time_diff': time_diff_seconds,
                                 'price': total_amount,
                                 'product_name': product_name,
                                 'store_label': store_label,
+                                # SKU文字列内に店舗コードが含まれている場合は最優先
+                                'sku_contains_store_code': sku_contains_store_code,
                                 # レシートの正規店舗コードと、仕入レコードの正規店舗コードが一致するかで優先度を決定
-                                'is_same_store': bool(
-                                    receipt_store_code_canon
-                                    and record_store_code_canon
-                                    and receipt_store_code_canon == record_store_code_canon
-                                ),
+                                'is_same_store': is_same_store,
                                 'record_datetime': record_datetime.strftime("%Y/%m/%d %H:%M") if record_datetime else "時刻不明"
                             })
                     except Exception:
                         continue
                 
                 # 並び順:
-                #  1. レシートと同じ店舗コードのSKUを先に表示
-                #  2. その中で時間差が小さい順（レシート時刻に近い順）
+                #  1. SKU文字列内に店舗コードが含まれているSKUを最優先（一番上）
+                #  2. レシートと同じ店舗コードのSKUを次に優先
+                #  3. その中で時間差が小さい順（レシート時刻に近い順）
+                
+                # デバッグ: 店舗コードとSKUのマッチング状況を確認
+                if receipt_store_code_canon:
+                    logger.debug(f"レシート店舗コード: {receipt_store_code_canon}")
+                    matched_skus = [x['sku'] for x in candidate_skus_with_time if x.get('sku_contains_store_code')]
+                    if matched_skus:
+                        logger.debug(f"店舗コードを含むSKU: {matched_skus}")
+                    else:
+                        logger.debug(f"店舗コードを含むSKUが見つかりませんでした。候補数: {len(candidate_skus_with_time)}")
+                        # 最初の数件のSKUをログ出力
+                        for i, item in enumerate(candidate_skus_with_time[:5]):
+                            logger.debug(f"  候補{i+1}: {item['sku']}, 店舗コード含む: {item.get('sku_contains_store_code')}")
+                
                 candidate_skus_with_time.sort(
-                    key=lambda x: (0 if x.get('is_same_store') else 1, x['time_diff'])
+                    key=lambda x: (
+                        0 if x.get('sku_contains_store_code') else 1,  # SKU内に店舗コードが含まれている場合は最優先
+                        0 if x.get('is_same_store') else 1,  # 次に店舗コードが一致するもの
+                        x['time_diff']  # 最後に時間差でソート
+                    )
                 )
                 
                 # 候補リストに表示
@@ -5727,8 +5828,7 @@ class ReceiptWidget(QWidget):
                     # レシート一覧を更新（差額も再計算される）
                     self.refresh_receipt_list()
                     QMessageBox.information(self, "完了", "変更を保存しました。")
-                    # ウインドウを閉じる
-                    dialog.close()
+                    # ウインドウは閉じない（変更を保存しても閉じない）
                 else:
                     QMessageBox.information(self, "情報", "変更がありません。")
             
@@ -5917,6 +6017,24 @@ class ReceiptWidget(QWidget):
             
             save_btn.clicked.connect(save_changes)
             button_layout.addWidget(save_btn)
+            
+            # 閉じるボタンを追加
+            close_btn = QPushButton("閉じる")
+            close_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #6c757d;
+                    color: white;
+                    border: none;
+                    padding: 8px 16px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #5a6268;
+                }
+            """)
+            close_btn.clicked.connect(dialog.close)
+            button_layout.addWidget(close_btn)
             
             right_layout.addLayout(button_layout)
             

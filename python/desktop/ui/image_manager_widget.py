@@ -1673,6 +1673,107 @@ class ImageManagerWidget(QWidget):
             message += f"\n\n以下のJANコードに対応するSKUが見つからず、関連するグループはスキップされました:\n" + ", ".join(failed_skus)
         QMessageBox.information(self, "完了", message)
 
+    def _extract_sku_from_image_path(self, image_path: str) -> Optional[str]:
+        """
+        画像ファイル名からSKUを抽出する
+        
+        Args:
+            image_path: 画像ファイルのパス
+            
+        Returns:
+            抽出されたSKU、またはNone
+        """
+        try:
+            file_name = Path(image_path).stem  # 拡張子を除いたファイル名
+            # SKU_数字 の形式を想定（例: 20260124-SS-22-027_1）
+            match = re.match(r"^(.+?)_\d+$", file_name)
+            if match:
+                sku = match.group(1)
+                # SKUとして妥当かチェック（空でない、適切な長さなど）
+                if sku and len(sku) > 0:
+                    return sku
+        except Exception as e:
+            logger.debug(f"SKU抽出エラー ({image_path}): {e}")
+        return None
+
+    def _get_target_sku_for_group(self, group: JanGroup, all_records: List[Dict[str, Any]]) -> Optional[str]:
+        """
+        JANグループに対応するSKUを取得する
+        
+        1. 画像ファイル名からSKUを抽出を試みる
+        2. 抽出できない場合は、仕入DBからJANで検索して、画像の撮影日時に最も近いSKUを取得
+        
+        Args:
+            group: JANグループ
+            all_records: 仕入DBの全レコード
+            
+        Returns:
+            対象SKU、またはNone
+        """
+        jan_norm = str(group.jan).strip().upper()
+        
+        # 1. 画像ファイル名からSKUを抽出を試みる
+        for img in group.images:
+            sku = self._extract_sku_from_image_path(img.path)
+            if sku:
+                # 抽出したSKUが仕入DBに存在するか確認
+                for record in all_records:
+                    record_jan = str(record.get("JAN") or record.get("jan") or "").strip().upper()
+                    record_sku = str(record.get("SKU") or record.get("sku") or "").strip()
+                    if record_sku == sku and record_jan == jan_norm:
+                        return sku
+        
+        # 2. 画像ファイル名から抽出できない場合は、仕入DBからJANで検索
+        # まず、JANで直接検索を試みる
+        matching_records = []
+        for record in all_records:
+            record_jan = str(record.get("JAN") or record.get("jan") or "").strip().upper()
+            if record_jan == jan_norm:
+                record_sku = str(record.get("SKU") or record.get("sku") or "").strip()
+                if record_sku:
+                    matching_records.append(record)
+        
+        if matching_records:
+            # 画像の撮影日時を基準に最も近いレコードを選択
+            if group.images:
+                base_capture_dt = None
+                for img in group.images:
+                    if img.capture_dt:
+                        if base_capture_dt is None or img.capture_dt < base_capture_dt:
+                            base_capture_dt = img.capture_dt
+                
+                if base_capture_dt:
+                    # 撮影日時に最も近いレコードを選択
+                    best_record = None
+                    min_time_diff = None
+                    
+                    for record in matching_records:
+                        purchase_date_str = record.get("仕入日") or record.get("purchase_date") or ""
+                        if purchase_date_str:
+                            try:
+                                purchase_dt = datetime.strptime(str(purchase_date_str), "%Y-%m-%d")
+                                time_diff = abs((base_capture_dt - purchase_dt).total_seconds())
+                                if min_time_diff is None or time_diff < min_time_diff:
+                                    min_time_diff = time_diff
+                                    best_record = record
+                            except Exception:
+                                pass
+                    
+                    if best_record:
+                        target_sku = str(best_record.get("SKU") or best_record.get("sku") or "").strip()
+                        if target_sku:
+                            return target_sku
+            
+            # 撮影日時が取得できない、または時間差で判定できない場合は最初のレコードを使用
+            if matching_records:
+                target_sku = str(
+                    matching_records[0].get("SKU") or matching_records[0].get("sku") or ""
+                ).strip()
+                if target_sku:
+                    return target_sku
+        
+        return None
+
     def confirm_image_links(self):
         """JANグループエリアに登録されている全てのJANグループの画像パスを仕入DBに登録（既に登録済みはスキップ）"""
         if not self.product_widget:
@@ -1714,9 +1815,12 @@ class ImageManagerWidget(QWidget):
                     continue
 
                 try:
+                    # 対象SKUを取得
+                    target_sku = self._get_target_sku_for_group(group, all_records)
+                    
                     # 更新処理を実行（既存画像はスキップ）
                     success, added_count, record_snapshot = self.product_widget.update_image_paths_for_jan(
-                        jan, image_paths, all_records, skip_existing=True
+                        jan, image_paths, all_records, skip_existing=True, target_sku=target_sku
                     )
 
                     if success:
@@ -1978,19 +2082,32 @@ class ImageManagerWidget(QWidget):
         entry["product_images"] = product_images
         entry["barcode_image"] = barcode_image
         
-        # 仕入DBから画像URLを取得（既にアップロード済みの場合）
-        if entry["sku"]:
+        # 画像URLを取得（優先順位: record > 仕入DB）
+        # 1. まずrecordから画像URLを取得（確定処理直後の場合）
+        image_urls_from_record = []
+        for i in range(1, 7):
+            img_url_key = f"画像URL{i}"
+            img_url_alt_key = f"image_url_{i}"
+            img_url = record.get(img_url_key) or record.get(img_url_alt_key)
+            image_urls_from_record.append(img_url if img_url else "")
+        
+        # 2. recordに画像URLがない場合は、仕入DBから取得
+        if not any(image_urls_from_record) and entry["sku"]:
             try:
                 from database.purchase_db import PurchaseDatabase
                 purchase_db = PurchaseDatabase()
                 purchase_record = purchase_db.get_by_sku(entry["sku"])
                 if purchase_record:
-                    for i in range(1, 6):
+                    # image_url_1からimage_url_6まで取得
+                    for i in range(1, 7):
                         img_url = purchase_record.get(f"image_url_{i}")
                         if img_url:
-                            entry["image_urls"].append(img_url)
+                            image_urls_from_record[i - 1] = img_url
             except Exception as e:
                 logger.debug(f"Failed to get image URLs from purchase DB: {e}")
+        
+        # 画像URLリストを設定（空文字列を除く）
+        entry["image_urls"] = [url for url in image_urls_from_record if url]
 
         self.registration_records.append(entry)
         self.update_registration_table()
@@ -2132,7 +2249,19 @@ class ImageManagerWidget(QWidget):
                 skipped_count += 1
                 continue
 
-            image_urls = entry.get("image_urls", []) or []
+            # 仕入DBから最新の画像URLを取得（常に最新の状態を反映）
+            image_urls = []
+            try:
+                purchase_record = purchase_db.get_by_sku(sku)
+                if purchase_record:
+                    for i in range(1, 7):
+                        img_url = purchase_record.get(f"image_url_{i}")
+                        if img_url:
+                            image_urls.append(img_url)
+            except Exception as e:
+                logger.debug(f"Failed to get image URLs from purchase DB for SKU {sku}: {e}")
+                # エラー時はentryから取得を試みる
+                image_urls = entry.get("image_urls", []) or []
 
             # 商品画像パス（バーコード以外の画像1〜6）
             image_paths_raw = entry.get("product_images") or entry.get("images") or []
