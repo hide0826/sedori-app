@@ -106,6 +106,7 @@ class ReceiptDatabase:
             ("account_title", "TEXT"),      # レシートに紐付く勘定科目
             ("plastic_bag_amount", "INTEGER"),  # レジ袋金額（複数ある場合は合計）
             ("linked_skus", "TEXT"),        # 紐付けSKU（カンマ区切り）
+            ("registration_number", "TEXT"),  # 適格請求書 登録番号 (T + 13桁)
         ):
             _ensure_column("receipts", name, ctype)
 
@@ -114,7 +115,7 @@ class ReceiptDatabase:
         fields = [
             "file_path","purchase_date","purchase_time","store_name_raw","phone_number","store_code","subtotal","tax",
             "discount_amount","total_amount","paid_amount","items_count","currency","ocr_provider","ocr_text",
-            "original_file_path","plastic_bag_amount","linked_skus",
+            "original_file_path","plastic_bag_amount","linked_skus","registration_number",
         ]
         placeholders = ",".join(["?"] * len(fields))
         cur = self.conn.cursor()

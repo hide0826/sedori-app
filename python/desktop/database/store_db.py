@@ -57,6 +57,7 @@ class StoreDatabase:
                 store_name TEXT NOT NULL,
                 address TEXT,
                 phone TEXT,
+                registration_number TEXT,
                 custom_fields TEXT,  -- JSON形式
                 display_order INTEGER DEFAULT 0,  -- 訪問順序（追加）
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -93,6 +94,12 @@ class StoreDatabase:
                 cursor.execute(ddl)
             except sqlite3.OperationalError:
                 pass
+        # registration_number カラムが存在しない場合は追加（マイグレーション）
+        try:
+            cursor.execute("ALTER TABLE stores ADD COLUMN registration_number TEXT")
+        except sqlite3.OperationalError:
+            # カラムが既に存在する場合はスキップ
+            pass
         # store_codeカラムが存在しない場合は追加（マイグレーション）
         # UNIQUE制約は後で追加する（既存データがある場合にエラーになるため）
         try:
@@ -313,6 +320,18 @@ class StoreDatabase:
         cursor.execute("""
             UPDATE stores SET notes = ? WHERE id = ?
         """, (notes, store_id))
+        
+        conn.commit()
+        return cursor.rowcount > 0
+    
+    def update_registration_number(self, store_id: int, registration_number: str) -> bool:
+        """店舗の登録番号のみを更新"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            UPDATE stores SET registration_number = ? WHERE id = ?
+        """, (registration_number, store_id))
         
         conn.commit()
         return cursor.rowcount > 0

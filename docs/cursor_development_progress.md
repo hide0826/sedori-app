@@ -892,6 +892,48 @@
 - **Gitコミット**: 
   - feat: 画像登録タブと仕入DBの画像連携・ブラウザ表示改善
 
+### 2026-02-05（画像URL保存・SKUテンプレ・登録番号連携の改善）
+- **チャット**: Agentモード（実装）
+- **内容**: 画像URL1〜6保存ロジックの修正、SKUテンプレートに仕入れ価格トークン追加、レシート登録番号と店舗マスタ登録番号の連携
+- **実装完了**:
+  - **画像登録タブ → 仕入DBの画像URL1〜6保存ロジック修正**
+    - `python/desktop/ui/image_manager_widget.py`:
+      - `save_registration_to_purchase_db()` を修正し、画面で編集した `entry["image_urls"]` を常に優先して保存
+      - 仕入DB側の `image_url_1〜6` は、画面が空欄の場合のみ補完として使用するように変更
+      - 画像登録一覧に同じSKUがある場合は既存エントリを上書きし、重複行が増えないように変更
+  - **SKUテンプレート設定に「仕入れ価格」を追加**
+    - `python/desktop/ui/inventory_widget.py`:
+      - SKUテンプレート設定パネルのプルダウンに「仕入れ価格」を追加
+      - スロットで「仕入れ価格」を選択した場合に `{purchasePrice}` トークンをテンプレートへ埋め込むように実装
+    - `python/services/sku_template.py`:
+      - `{purchasePrice}` / `{price}` トークンを解決し、`purchase_price`／「仕入れ価格」／`cost` から数値を取得してSKUに埋め込むロジックを追加
+  - **店舗マスタに登録番号カラムを追加し、編集可能に**
+    - `python/desktop/database/store_db.py`:
+      - `stores` テーブルに `registration_number TEXT` カラムを追加（マイグレーション対応）
+      - `update_registration_number(store_id, registration_number)` メソッドを追加
+    - `python/desktop/ui/store_master_widget.py`:
+      - 店舗一覧テーブルに「登録番号」カラムを追加し、「店舗名」の右側に表示
+      - 登録番号セルのみ編集可能とし、変更時に `StoreDatabase.update_registration_number()` でDBへ保存するように実装
+  - **レシートの登録番号（T+13桁）のOCR取得と編集・連携**
+    - `python/desktop/database/receipt_db.py`:
+      - `receipts` テーブルに `registration_number TEXT` カラムを追加し、`insert_receipt()` で保存するように修正
+    - `python/desktop/services/receipt_service.py`:
+      - OCRテキストから `登録番号 TXXXXXXXXXXXXX` を正規表現で抽出し、`receipt_data["registration_number"]` として保存
+    - `python/desktop/ui/receipt_widget.py`:
+      - レシート一覧テーブルに「登録番号」カラムを追加し、「店舗コード」の右に表示（ヘッダー: `登録番号`）
+      - レシート情報編集ダイアログに「登録番号」入力欄を追加し、手動で編集・保存できるように実装
+      - 「変更を保存」時に `updates["registration_number"]` を `ReceiptDatabase` に反映
+      - 変更保存時、`store_code` が設定されていて店舗マスタ側の `registration_number` が空の場合、
+        `StoreDatabase.update_registration_number()` で店舗マスタにも登録番号を自動反映
+- **動作確認**:
+  - 画像登録タブで画像URL1〜5を編集し「DBに保存」を押したあと、アプリ再起動後も仕入DBタブの `画像URL1〜6` に反映されていることを確認
+  - SKUテンプレート設定で「仕入れ価格」を含むテンプレートを保存し、SKU自動生成時に仕入れ価格がSKU文字列に反映されることを確認
+  - 店舗マスタの店舗一覧で「登録番号」カラムが表示され、直接編集した値が再起動後も保持されることを確認
+  - レシートOCR（単体・全件OCR）で「登録番号 TXXXXXXXXXXXXX」が自動取得され、レシート一覧の「登録番号」列とレシート情報編集ダイアログに反映されることを確認
+  - レシート情報編集で登録番号を入力し保存すると、対応する店舗コードの店舗マスタ側「登録番号」が空の場合に自動で埋まることを確認
+- **Gitコミット**:
+  - feat: improve image URL saving, SKU template, and registration number linkage between receipts and store master
+
 ### 2025-01-26（画像管理・証憑管理・ルート管理機能の改善）
 - **チャット**: Agentモード（実装）
 - **内容**: 画像管理タブの確定処理改善、証憑管理タブの機能拡張、ルート管理機能の追加

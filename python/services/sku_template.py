@@ -83,6 +83,26 @@ class SKUTemplateRenderer:
             v = self._get_cond_code(c)
             return v or ""
 
+        # {purchasePrice} / {price} - 仕入れ価格
+        if token in ("purchasePrice", "price", "purchase_price"):
+            val = (
+                p.get("purchase_price")
+                or p.get("仕入れ価格")
+                or p.get("仕入価格")
+                or p.get("cost")
+            )
+            if val is None:
+                return ""
+            try:
+                # 数値の場合は整数化してから文字列に
+                num = float(val)
+                if num.is_integer():
+                    return str(int(num))
+                return str(num)
+            except Exception:
+                # 数値変換できない場合はそのまま文字列化
+                return str(val)
+
         # {ship}
         if token == "ship":
             return str(p.get("shippingMethod") or p.get("発送方法") or "")

@@ -1809,7 +1809,20 @@ class ImageManagerWidget(QWidget):
                 QApplication.processEvents()
 
                 jan = group.jan
-                image_paths = [img.path for img in group.images]
+                # リネーム後のパスを取得（group.imagesはリネーム後に更新されているはず）
+                # 念のため、ファイルが存在しない場合はimage_dbから最新のパスを取得
+                image_paths = []
+                for img in group.images:
+                    img_path = img.path
+                    # ファイルが存在しない場合は、image_dbから最新のパスを取得
+                    if not Path(img_path).exists():
+                        # image_dbから最新のパスを取得（リネーム後のパスがDBに保存されている）
+                        db_record = self.image_db.get_by_file_path(img_path)
+                        if db_record and db_record['file_path'] != img_path:
+                            # DBにリネーム後のパスが保存されている場合
+                            img_path = db_record['file_path']
+                        # それでも存在しない場合は、元のパスを使用（エラーは後で検出される）
+                    image_paths.append(img_path)
 
                 if not image_paths:
                     continue
@@ -1831,6 +1844,7 @@ class ImageManagerWidget(QWidget):
                                 skipped_count += skipped
                         else:
                             skipped_count += len(image_paths)
+                        # 既に登録済みでも画像登録タブに反映するため、record_snapshotがあれば追加
                         if record_snapshot:
                             self.add_registration_entry(record_snapshot)
                     else:
@@ -2109,7 +2123,23 @@ class ImageManagerWidget(QWidget):
         # 画像URLリストを設定（空文字列を除く）
         entry["image_urls"] = [url for url in image_urls_from_record if url]
 
-        self.registration_records.append(entry)
+        # 既に同じSKUが登録されている場合は更新、なければ追加
+        entry_sku = entry.get("sku", "").strip()
+        existing_index = -1
+        if entry_sku:
+            for idx, existing_entry in enumerate(self.registration_records):
+                existing_sku = existing_entry.get("sku", "").strip()
+                if existing_sku == entry_sku:
+                    existing_index = idx
+                    break
+        
+        if existing_index >= 0:
+            # 既存エントリを更新（最新の情報を反映）
+            self.registration_records[existing_index] = entry
+        else:
+            # 新規追加
+            self.registration_records.append(entry)
+        
         self.update_registration_table()
 
     def update_registration_table(self):
@@ -2249,19 +2279,30 @@ class ImageManagerWidget(QWidget):
                 skipped_count += 1
                 continue
 
-            # 仕入DBから最新の画像URLを取得（常に最新の状態を反映）
-            image_urls = []
+            # 画像URLリストを構築
+            # 1. まず現在のエントリ（画面で編集された内容）を優先
+            image_urls: List[str] = list(entry.get("image_urls", []) or [])
+
+            # 2. purchase_db側に既存のURLがあれば、空欄だけ補完する
             try:
                 purchase_record = purchase_db.get_by_sku(sku)
                 if purchase_record:
                     for i in range(1, 7):
-                        img_url = purchase_record.get(f"image_url_{i}")
-                        if img_url:
+                        img_url = purchase_record.get(f"image_url_{i}") or ""
+                        idx = i - 1
+                        if idx < len(image_urls):
+                            # 画面側が空でDBに値がある場合だけ補完
+                            if (not image_urls[idx]) and img_url:
+                                image_urls[idx] = img_url
+                        else:
                             image_urls.append(img_url)
             except Exception as e:
                 logger.debug(f"Failed to get image URLs from purchase DB for SKU {sku}: {e}")
-                # エラー時はentryから取得を試みる
-                image_urls = entry.get("image_urls", []) or []
+                # 取得に失敗しても、画面側のimage_urlsはそのまま使う
+
+            # 長さを6に正規化（不足分は空文字）
+            while len(image_urls) < 6:
+                image_urls.append("")
 
             # 商品画像パス（バーコード以外の画像1〜6）
             image_paths_raw = entry.get("product_images") or entry.get("images") or []
@@ -2274,10 +2315,7 @@ class ImageManagerWidget(QWidget):
             update_data: Dict[str, Any] = {"sku": sku}
             for i in range(6):
                 key = f"image_url_{i + 1}"
-                if i < len(image_urls) and image_urls[i]:
-                    update_data[key] = image_urls[i]
-                else:
-                    update_data[key] = ""
+                update_data[key] = image_urls[i] if i < len(image_urls) else ""
 
             sku_to_image_urls[sku] = [update_data[f"image_url_{i+1}"] for i in range(6)]
             sku_to_image_paths[sku] = norm_paths

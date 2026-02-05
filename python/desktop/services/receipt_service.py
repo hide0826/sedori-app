@@ -654,6 +654,19 @@ class ReceiptService:
             # ログ出力に失敗しても本処理には影響させない
             pass
 
+        # OCRテキストから登録番号(T + 13桁)を抽出
+        registration_number = None
+        if raw_text:
+            try:
+                import re as _re2
+                m = _re2.search(r"登録番号[:：]?\s*(T\d{13})", raw_text)
+                if not m:
+                    m = _re2.search(r"\b(T\d{13})\b", raw_text)
+                if m:
+                    registration_number = m.group(1)
+            except Exception:
+                registration_number = None
+
         receipt_data = {
             "file_path": str(saved),
             "original_file_path": str(original_path) if original_path else None,  # 元のファイルパス
@@ -672,6 +685,7 @@ class ReceiptService:
             "currency": currency,
             "ocr_provider": ocr_provider,
             "ocr_text": raw_text,
+            "registration_number": registration_number,
         }
         receipt_id = self.db.insert_receipt(receipt_data)
         receipt_data["id"] = receipt_id

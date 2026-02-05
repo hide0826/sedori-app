@@ -1391,7 +1391,8 @@ class StoreListWidget(QWidget):
         self.load_custom_fields()
         
         # 基本カラム + カスタムフィールドカラム
-        basic_columns = ["ID", "所属ルート名", "ルートコード", "店舗コード", "店舗名", "住所", "電話番号", "備考"]
+        # 「登録番号」カラムを追加
+        basic_columns = ["ID", "所属ルート名", "ルートコード", "店舗コード", "店舗名", "住所", "電話番号", "登録番号", "備考"]
         custom_columns = [field['display_name'] for field in self.custom_fields_def]
         columns = basic_columns + custom_columns
         
@@ -1414,28 +1415,37 @@ class StoreListWidget(QWidget):
             id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)  # 編集不可
             self.store_table.setItem(i, 0, id_item)
             
-            # 編集不可のカラム（1-7列）
+            # 編集不可のカラム（登録番号以外）＋ 登録番号カラム（編集可）
             # store_codeを優先し、なければsupplier_codeをフォールバック（互換性のため）
             store_code = store.get('store_code', '') or store.get('supplier_code', '')
+            registration_col_index = basic_columns.index("登録番号")
             for col, value in enumerate([
                 store.get('affiliated_route_name', ''),
                 store.get('route_code', ''),
                 store_code,  # 店舗コード
                 store.get('store_name', ''),
                 store.get('address', ''),
-                store.get('phone', '')
+                store.get('phone', ''),
+                store.get('registration_number', '')
             ], start=1):
                 item = QTableWidgetItem(str(value) if value else '')
-                item.setFlags(item.flags() & ~Qt.ItemIsEditable)  # 編集不可
+                if col == registration_col_index:
+                    # 登録番号カラムは編集可能 + store_idをUserRoleに保持
+                    item.setData(Qt.UserRole, store_id)
+                else:
+                    # それ以外は編集不可
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self.store_table.setItem(i, col, item)
             
-            # 備考欄（7列目）は編集可能
+            # 備考欄（最後の基本カラム）は編集可能
             notes_text = store.get('notes', '') or ''
             notes_item = QTableWidgetItem(notes_text)
             notes_item.setData(Qt.UserRole, store_id)  # 店舗IDを保存（更新時に使用）
             notes_item.setToolTip(notes_text)  # ツールチップで全文表示
             # 編集可能（フラグはそのまま）
-            self.store_table.setItem(i, 8, notes_item)
+            # 備考カラムのインデックスは basic_columns の最後
+            notes_col_index = len(basic_columns) - 1
+            self.store_table.setItem(i, notes_col_index, notes_item)
             
             # カスタムフィールド（編集不可）
             custom_fields = store.get('custom_fields', {})
@@ -1494,19 +1504,21 @@ class StoreListWidget(QWidget):
         )
     
     def on_store_cell_changed(self, row: int, column: int):
-        """セルが変更されたときの処理（備考欄のみ保存）"""
-        # 備考欄（8列目）以外は無視
-        if column != 8:
+        """セルが変更されたときの処理（登録番号・備考欄を保存）"""
+        # 登録番号列と備考列のみ保存対象
+        basic_columns = ["ID", "所属ルート名", "ルートコード", "店舗コード", "店舗名", "住所", "電話番号", "登録番号", "備考"]
+        registration_column_index = basic_columns.index("登録番号")
+        notes_column_index = len(basic_columns) - 1
+        if column not in (registration_column_index, notes_column_index):
             return
         
         try:
-            # 備考欄のアイテムを取得
-            notes_item = self.store_table.item(row, column)
-            if not notes_item:
+            item = self.store_table.item(row, column)
+            if not item:
                 return
             
             # 店舗IDを取得（UserRoleに保存されている）
-            store_id = notes_item.data(Qt.UserRole)
+            store_id = item.data(Qt.UserRole)
             if not store_id:
                 # UserRoleにIDがない場合は、ID列から取得を試みる
                 id_item = self.store_table.item(row, 0)
@@ -1518,14 +1530,18 @@ class StoreListWidget(QWidget):
                 else:
                     return
             
-            # 新しい備考の値
-            new_notes = notes_item.text()
-            
-            # データベースに保存
-            self.db.update_store_notes(store_id, new_notes)
+            # 列ごとに保存先を切り替え
+            if column == notes_column_index:
+                # 新しい備考の値
+                new_notes = item.text()
+                # データベースに保存
+                self.db.update_store_notes(store_id, new_notes)
+            elif column == registration_column_index:
+                new_reg_no = item.text()
+                self.db.update_registration_number(store_id, new_reg_no)
             
         except Exception as e:
-            print(f"備考欄の保存エラー: {e}")
+            print(f"店舗マスタセル保存エラー: {e}")
     
     def on_search_changed(self, text):
         """検索テキスト変更時の処理"""

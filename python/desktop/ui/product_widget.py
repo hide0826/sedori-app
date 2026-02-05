@@ -986,8 +986,12 @@ class ProductWidget(QWidget):
             existing_paths.add(image_path)
             added_count += 1
 
+        # added_count == 0 の場合でも、既に登録済みのレコードのスナップショットを返す
+        # （画像登録タブに反映するため）
         if added_count == 0:
-            return True, 0, None
+            # スナップショット用にコピーを返す（既存レコードでも反映するため）
+            record_snapshot = dict(target_record)
+            return True, 0, record_snapshot
 
         # purchase_all_records にも変更を反映（同じオブジェクトを指している前提）
         if hasattr(self, "purchase_all_records") and self.purchase_all_records:
@@ -1002,6 +1006,12 @@ class ProductWidget(QWidget):
         self.purchase_records = list(self.purchase_all_records)
         self.populate_purchase_table(self.purchase_records)
         self.update_purchase_count_label()
+        
+        # スナップショットを保存（リネーム後のパスを永続化）
+        try:
+            self.save_purchase_snapshot()
+        except Exception as e:
+            logger.warning(f"スナップショット保存エラー（画像パス更新は反映済み）: {e}")
 
         # スナップショット用にコピーを返す
         record_snapshot = dict(target_record)

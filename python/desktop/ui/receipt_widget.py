@@ -468,10 +468,11 @@ class ReceiptWidget(QWidget):
 
         self.receipt_table = QTableWidget()
         # 0列目のIDは非表示（内部用）、1列目に種別、2列目に科目、3列目に画像ファイル名
-        self.receipt_table.setColumnCount(11)
+        # 「登録番号」カラムを追加（店舗マスタと同様の登録番号T+13桁）
+        self.receipt_table.setColumnCount(12)
         self.receipt_table.setHorizontalHeaderLabels([
             "ID(内部)", "種別", "科目", "画像ファイル名", "日付",
-            "店舗名", "電話番号", "合計", "差額", "店舗コード", "SKU"
+            "店舗名", "電話番号", "合計", "差額", "店舗コード", "登録番号", "SKU"
         ])
         self.receipt_table.horizontalHeader().setStretchLastSection(True)
         self.receipt_table.itemDoubleClicked.connect(self.on_receipt_double_clicked)
@@ -498,6 +499,15 @@ class ReceiptWidget(QWidget):
         warranty_group = QGroupBox("保証書一覧")
         warranty_layout = QVBoxLayout(warranty_group)
 
+        # 保証書一覧の操作ボタン
+        warranty_action_layout = QHBoxLayout()
+        self.delete_warranty_row_btn = QPushButton("選択行削除")
+        self.delete_warranty_row_btn.setEnabled(False)
+        self.delete_warranty_row_btn.clicked.connect(self.delete_selected_warranties)
+        warranty_action_layout.addWidget(self.delete_warranty_row_btn)
+        warranty_action_layout.addStretch()
+        warranty_layout.addLayout(warranty_action_layout)
+
         self.warranty_table = QTableWidget()
         # 0列目は内部ID、ユーザーには非表示
         self.warranty_table.setColumnCount(11)
@@ -514,6 +524,8 @@ class ReceiptWidget(QWidget):
         # コンテキストメニューを有効化
         self.warranty_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.warranty_table.customContextMenuRequested.connect(self.on_warranty_table_context_menu)
+        # 選択変更時にボタンの有効/無効を切り替え
+        self.warranty_table.itemSelectionChanged.connect(self.on_warranty_selection_changed)
         warranty_layout.addWidget(self.warranty_table)
 
         # スプリッターで管理するため、固定高さの設定を削除
@@ -1955,11 +1967,15 @@ class ReceiptWidget(QWidget):
                 store_item.setData(Qt.UserRole, store_code)
                 self.receipt_table.setItem(row, 9, store_item)
                 
-                # SKU（10列目）
+                # 登録番号（10列目） - 適格請求書の登録番号 T + 13桁
+                registration_number = receipt.get('registration_number') or ""
+                self.receipt_table.setItem(row, 10, QTableWidgetItem(registration_number))
+                
+                # SKU（11列目）
                 linked_skus_text = receipt.get('linked_skus', '') or ''
                 linked_skus = [sku.strip() for sku in linked_skus_text.split(',') if sku.strip()] if linked_skus_text else []
                 sku_display = ', '.join(linked_skus) if linked_skus else ''
-                self.receipt_table.setItem(row, 10, QTableWidgetItem(sku_display))
+                self.receipt_table.setItem(row, 11, QTableWidgetItem(sku_display))
                 receipt_row += 1
 
             # 保証書用テーブル: 種別=保証書のみ
@@ -2085,6 +2101,51 @@ class ReceiptWidget(QWidget):
                     self.reset_form()
         self.refresh_receipt_list()
         QMessageBox.information(self, "削除完了", f"{deleted} 件のレシートを削除しました。")
+
+    def on_warranty_selection_changed(self):
+        """保証書表の選択変更を監視"""
+        if not hasattr(self, 'delete_warranty_row_btn'):
+            return
+        selection_model = self.warranty_table.selectionModel()
+        has_selection = bool(selection_model and selection_model.selectedRows())
+        self.delete_warranty_row_btn.setEnabled(has_selection)
+
+    def delete_selected_warranties(self):
+        """選択した保証書を削除"""
+        selection_model = self.warranty_table.selectionModel()
+        if not selection_model:
+            return
+        rows = selection_model.selectedRows()
+        if not rows:
+            QMessageBox.information(self, "情報", "削除する保証書を選択してください。")
+            return
+        receipt_ids = []
+        for idx in rows:
+            item = self.warranty_table.item(idx.row(), 0)
+            if item:
+                try:
+                    receipt_ids.append(int(item.text()))
+                except ValueError:
+                    continue
+        if not receipt_ids:
+            QMessageBox.warning(self, "警告", "選択された行に有効なIDがありません。")
+            return
+        if QMessageBox.question(
+            self,
+            "確認",
+            f"選択された {len(receipt_ids)} 件の保証書を削除します。よろしいですか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        ) != QMessageBox.Yes:
+            return
+        deleted = 0
+        for rid in receipt_ids:
+            if self.receipt_db.delete_receipt_by_id(rid):
+                deleted += 1
+                if self.current_receipt_id == rid:
+                    self.reset_form()
+        self.refresh_receipt_list()
+        QMessageBox.information(self, "削除完了", f"{deleted} 件の保証書を削除しました。")
 
     def delete_all_receipts(self):
         """レシートを全件削除（テスト用途）"""
@@ -4573,6 +4634,12 @@ class ReceiptWidget(QWidget):
             
             form_layout.addRow("店舗名:", store_name_combo)
             
+            # 登録番号（T + 13桁、手動編集可能）
+            registration_edit = QLineEdit()
+            registration_edit.setText(receipt_data.get('registration_number') or '')
+            registration_edit.setPlaceholderText("例: T1234567890123")
+            form_layout.addRow("登録番号:", registration_edit)
+            
             # 電話番号
             phone_edit = QLineEdit()
             phone_edit.setText(receipt_data.get('phone_number') or '')
@@ -5594,6 +5661,11 @@ class ReceiptWidget(QWidget):
                 if phone:
                     updates['phone_number'] = phone
                 
+                # 登録番号
+                registration_number = registration_edit.text().strip()
+                if registration_number:
+                    updates['registration_number'] = registration_number
+                
                 # 合計
                 try:
                     total = int(total_edit.text()) if total_edit.text().strip() else None
@@ -5772,7 +5844,7 @@ class ReceiptWidget(QWidget):
                                         QMessageBox.warning(self, "警告", f"SKU {sku.strip()} のDB更新中にエラーが発生しました: {str(e)}")
                                 
                                 updated_count += 1
-                        
+
                         # 仕入DBの変更をスナップショットとして保存
                         if updated_count > 0 and hasattr(self.product_widget, 'purchase_db'):
                             try:
@@ -5783,6 +5855,18 @@ class ReceiptWidget(QWidget):
                                 QMessageBox.warning(self, "警告", f"スナップショットの保存中にエラーが発生しました: {str(e)}")
                     except Exception as e:
                         QMessageBox.warning(self, "警告", f"仕入DBの更新中にエラーが発生しました: {str(e)}")
+
+                # 店舗マスタ側に登録番号を反映（store_code があり、まだ登録番号が空の場合）
+                try:
+                    selected_store_code = updates.get('store_code') or receipt_data.get('store_code') or ''
+                    reg_no = updates.get('registration_number') or receipt_data.get('registration_number') or ''
+                    if selected_store_code and reg_no:
+                        store = self.store_db.get_store_by_code(selected_store_code)
+                        if store and not store.get('registration_number'):
+                            # 既存の登録番号が空のときのみ更新
+                            self.store_db.update_registration_number(store.get('id'), reg_no)
+                except Exception as e:
+                    print(f"[レシート情報編集] 登録番号の店舗マスタ反映エラー: {e}")
                 
                 # レシート画像を仕入DBに反映（科目が「仕入」でSKUが紐付けられている場合）
                 if is_purchase and linked_skus and self.product_widget:
@@ -6641,13 +6725,9 @@ class ReceiptWidget(QWidget):
                 warranty_updated_count = 0
                 for warranty_row in range(self.warranty_table.rowCount()):
                     try:
-                        # SKUを取得
+                        # まずテーブル上の代表SKUを取得（後方互換用）
                         sku_item = self.warranty_table.item(warranty_row, 7)  # SKU列
-                        if not sku_item:
-                            continue
-                        sku = sku_item.text().strip()
-                        if not sku:
-                            continue
+                        base_sku = sku_item.text().strip() if sku_item else ""
                         
                         # receipt_idから保証書情報を取得
                         id_item = self.warranty_table.item(warranty_row, 0)  # ID列
@@ -6661,18 +6741,33 @@ class ReceiptWidget(QWidget):
                         # receipt_idからレシートDBから情報を取得
                         receipt_info = self.receipt_db.get_receipt(receipt_id)
                         warranty_image_name = ""
+                        linked_skus_from_receipt: List[str] = []
                         if receipt_info:
                             # ファイルパスを取得（original_file_pathを優先、なければfile_path）
                             file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path', '')
                             if file_path:
                                 from pathlib import Path
                                 file_path_obj = Path(file_path)
-                                if file_path_obj.exists():
-                                    # ファイル名（拡張子なし）を取得
-                                    warranty_image_name = file_path_obj.stem
-                                else:
-                                    # ファイルが存在しない場合でも、ファイル名を取得
-                                    warranty_image_name = file_path_obj.stem
+                                # ファイルの有無にかかわらずファイル名（拡張子なし）を取得
+                                warranty_image_name = file_path_obj.stem
+                            
+                            # レシート側に保存されている linked_skus を優先して使用
+                            linked_skus_text = receipt_info.get('linked_skus', '') or ''
+                            if linked_skus_text:
+                                linked_skus_from_receipt = [
+                                    s.strip() for s in linked_skus_text.split(',') if s.strip()
+                                ]
+                        
+                        # 対象SKUリストを決定
+                        target_skus: List[str] = []
+                        if linked_skus_from_receipt:
+                            target_skus = linked_skus_from_receipt
+                        elif base_sku:
+                            # linked_skus が無い古いデータ用に、テーブル上のSKUを1件だけ処理
+                            target_skus = [base_sku]
+                        else:
+                            # 対象SKUが無い場合はスキップ
+                            continue
                         
                         # 保証期間(日)を取得
                         warranty_days_item = self.warranty_table.item(warranty_row, 9)  # 保証期間(日)列
@@ -6695,124 +6790,120 @@ class ReceiptWidget(QWidget):
                                 if qdate.isValid():
                                     warranty_until = qdate.toString("yyyy-MM-dd")
                         
-                        # 仕入DBから該当SKUのレコードを取得して更新
+                        # 仕入DBから該当SKU群のレコードを取得して更新
                         if not hasattr(self, 'product_widget') or not self.product_widget:
                             continue
                         
-                        # purchase_all_recordsを更新
-                        found_in_records = False
-                        if hasattr(self.product_widget, 'purchase_all_records') and self.product_widget.purchase_all_records:
-                            for record in self.product_widget.purchase_all_records:
-                                record_sku = str(record.get('SKU') or record.get('sku') or '').strip()
-                                if record_sku == sku:
-                                    # 保証書画像を更新
-                                    if warranty_image_name:
-                                        record['保証書画像'] = warranty_image_name
-                                    # 保証期間を更新
-                                    if warranty_days is not None:
-                                        record['保証期間'] = warranty_days
-                                    # 保証最終日を更新
-                                    if warranty_until:
-                                        record['保証最終日'] = warranty_until
-                                    found_in_records = True
-                                    break
-                        
-                        # ProductDatabaseから商品を取得して更新（永続化のため）
-                        product = self.product_widget.db.get_by_sku(sku)
-                        if product:
-                            # 保証書画像を更新（warranty_imageは使用しない、保証書画像カラムに直接保存）
-                            # 保証書画像はpurchase_all_recordsに保存されるため、ここでは特に処理不要
+                        for sku in target_skus:
+                            # purchase_all_recordsを更新
+                            found_in_records = False
+                            if hasattr(self.product_widget, 'purchase_all_records') and self.product_widget.purchase_all_records:
+                                for record in self.product_widget.purchase_all_records:
+                                    record_sku = str(record.get('SKU') or record.get('sku') or '').strip()
+                                    if record_sku == sku:
+                                        # 保証書画像を更新
+                                        if warranty_image_name:
+                                            record['保証書画像'] = warranty_image_name
+                                        # 保証期間を更新
+                                        if warranty_days is not None:
+                                            record['保証期間'] = warranty_days
+                                        # 保証最終日を更新
+                                        if warranty_until:
+                                            record['保証最終日'] = warranty_until
+                                        found_in_records = True
+                                        break
                             
-                            # 保証期間を更新
-                            if warranty_days is not None:
-                                product['warranty_period_days'] = warranty_days
-                            
-                            # 保証最終日を更新
-                            if warranty_until:
-                                product['warranty_until'] = warranty_until
-                            
-                            self.product_widget.db.upsert(product)
-                        else:
-                            # ProductDatabaseに商品がない場合は、最小限の情報で作成
-                            try:
-                                product_data = None
-                                if hasattr(self.product_widget, 'purchase_all_records') and self.product_widget.purchase_all_records:
-                                    for record in self.product_widget.purchase_all_records:
-                                        record_sku = str(record.get('SKU') or record.get('sku') or '').strip()
-                                        if record_sku == sku:
-                                            product_data = {
-                                                'sku': sku,
-                                                'product_name': record.get('商品名') or record.get('product_name'),
-                                                'jan': record.get('JAN') or record.get('jan'),
-                                                'asin': record.get('ASIN') or record.get('asin'),
-                                                'purchase_price': record.get('仕入れ価格') or record.get('purchase_price'),
-                                                'purchase_date': record.get('仕入れ日') or record.get('purchase_date'),
-                                            }
-                                            # 保証書情報を追加
-                                            if warranty_image_name:
-                                                product_data['warranty_image'] = warranty_image_name
-                                            if warranty_days is not None:
-                                                product_data['warranty_period_days'] = warranty_days
-                                            if warranty_until:
-                                                product_data['warranty_until'] = warranty_until
-                                            break
+                            # ProductDatabaseから商品を取得して更新（永続化のため）
+                            product = self.product_widget.db.get_by_sku(sku)
+                            if product:
+                                # 保証期間を更新
+                                if warranty_days is not None:
+                                    product['warranty_period_days'] = warranty_days
                                 
-                                if product_data:
-                                    self.product_widget.db.upsert(product_data)
-                            except Exception as e:
-                                import traceback
-                                print(f"ProductDatabase作成エラー (SKU={sku}): {e}\n{traceback.format_exc()}")
-                        
-                        # 仕入管理タブのデータを確認
-                        if hasattr(self.product_widget, 'inventory_data') and self.product_widget.inventory_data is not None:
-                            import pandas as pd
-                            for idx, row in self.product_widget.inventory_data.iterrows():
-                                row_sku = str(row.get('SKU') or '').strip()
-                                if row_sku == sku:
-                                    # 保証書画像を更新
-                                    if warranty_image_name:
-                                        if '保証書画像' not in self.product_widget.inventory_data.columns:
-                                            self.product_widget.inventory_data['保証書画像'] = ''
-                                        self.product_widget.inventory_data.at[idx, '保証書画像'] = warranty_image_name
-                                    # 保証期間を更新
-                                    if warranty_days is not None:
-                                        if '保証期間' not in self.product_widget.inventory_data.columns:
-                                            self.product_widget.inventory_data['保証期間'] = ''
-                                        self.product_widget.inventory_data.at[idx, '保証期間'] = warranty_days
-                                    # 保証最終日を更新
-                                    if warranty_until:
-                                        if '保証最終日' not in self.product_widget.inventory_data.columns:
-                                            self.product_widget.inventory_data['保証最終日'] = ''
-                                        self.product_widget.inventory_data.at[idx, '保証最終日'] = warranty_until
-                                    if not found_in_records:
-                                        warranty_updated_count += 1
-                                    break
-                        
-                        # filtered_dataも更新
-                        if hasattr(self.product_widget, 'filtered_data') and self.product_widget.filtered_data is not None:
-                            for idx, row in self.product_widget.filtered_data.iterrows():
-                                row_sku = str(row.get('SKU') or '').strip()
-                                if row_sku == sku:
-                                    # 保証書画像を更新
-                                    if warranty_image_name:
-                                        if '保証書画像' not in self.product_widget.filtered_data.columns:
-                                            self.product_widget.filtered_data['保証書画像'] = ''
-                                        self.product_widget.filtered_data.at[idx, '保証書画像'] = warranty_image_name
-                                    # 保証期間を更新
-                                    if warranty_days is not None:
-                                        if '保証期間' not in self.product_widget.filtered_data.columns:
-                                            self.product_widget.filtered_data['保証期間'] = ''
-                                        self.product_widget.filtered_data.at[idx, '保証期間'] = warranty_days
-                                    # 保証最終日を更新
-                                    if warranty_until:
-                                        if '保証最終日' not in self.product_widget.filtered_data.columns:
-                                            self.product_widget.filtered_data['保証最終日'] = ''
-                                        self.product_widget.filtered_data.at[idx, '保証最終日'] = warranty_until
-                                    break
-                        
-                        if found_in_records:
-                            warranty_updated_count += 1
-                        else:
+                                # 保証最終日を更新
+                                if warranty_until:
+                                    product['warranty_until'] = warranty_until
+                                
+                                self.product_widget.db.upsert(product)
+                            else:
+                                # ProductDatabaseに商品がない場合は、最小限の情報で作成
+                                try:
+                                    product_data = None
+                                    if hasattr(self.product_widget, 'purchase_all_records') and self.product_widget.purchase_all_records:
+                                        for record in self.product_widget.purchase_all_records:
+                                            record_sku = str(record.get('SKU') or record.get('sku') or '').strip()
+                                            if record_sku == sku:
+                                                product_data = {
+                                                    'sku': sku,
+                                                    'product_name': record.get('商品名') or record.get('product_name'),
+                                                    'jan': record.get('JAN') or record.get('jan'),
+                                                    'asin': record.get('ASIN') or record.get('asin'),
+                                                    'purchase_price': record.get('仕入れ価格') or record.get('purchase_price'),
+                                                    'purchase_date': record.get('仕入れ日') or record.get('purchase_date'),
+                                                }
+                                                # 保証書情報を追加
+                                                if warranty_image_name:
+                                                    product_data['warranty_image'] = warranty_image_name
+                                                if warranty_days is not None:
+                                                    product_data['warranty_period_days'] = warranty_days
+                                                if warranty_until:
+                                                    product_data['warranty_until'] = warranty_until
+                                                break
+                                    
+                                    if product_data:
+                                        self.product_widget.db.upsert(product_data)
+                                except Exception as e:
+                                    import traceback
+                                    print(f"ProductDatabase作成エラー (SKU={sku}): {e}\n{traceback.format_exc()}")
+                            
+                            # 仕入管理タブのデータを確認
+                            if hasattr(self.product_widget, 'inventory_data') and self.product_widget.inventory_data is not None:
+                                import pandas as pd
+                                for idx, row in self.product_widget.inventory_data.iterrows():
+                                    row_sku = str(row.get('SKU') or '').strip()
+                                    if row_sku == sku:
+                                        # 保証書画像を更新
+                                        if warranty_image_name:
+                                            if '保証書画像' not in self.product_widget.inventory_data.columns:
+                                                self.product_widget.inventory_data['保証書画像'] = ''
+                                            self.product_widget.inventory_data.at[idx, '保証書画像'] = warranty_image_name
+                                        # 保証期間を更新
+                                        if warranty_days is not None:
+                                            if '保証期間' not in self.product_widget.inventory_data.columns:
+                                                self.product_widget.inventory_data['保証期間'] = ''
+                                            self.product_widget.inventory_data.at[idx, '保証期間'] = warranty_days
+                                        # 保証最終日を更新
+                                        if warranty_until:
+                                            if '保証最終日' not in self.product_widget.inventory_data.columns:
+                                                self.product_widget.inventory_data['保証最終日'] = ''
+                                            self.product_widget.inventory_data.at[idx, '保証最終日'] = warranty_until
+                                        if not found_in_records:
+                                            warranty_updated_count += 1
+                                        break
+                            
+                            # filtered_dataも更新
+                            if hasattr(self.product_widget, 'filtered_data') and self.product_widget.filtered_data is not None:
+                                for idx, row in self.product_widget.filtered_data.iterrows():
+                                    row_sku = str(row.get('SKU') or '').strip()
+                                    if row_sku == sku:
+                                        # 保証書画像を更新
+                                        if warranty_image_name:
+                                            if '保証書画像' not in self.product_widget.filtered_data.columns:
+                                                self.product_widget.filtered_data['保証書画像'] = ''
+                                            self.product_widget.filtered_data.at[idx, '保証書画像'] = warranty_image_name
+                                        # 保証期間を更新
+                                        if warranty_days is not None:
+                                            if '保証期間' not in self.product_widget.filtered_data.columns:
+                                                self.product_widget.filtered_data['保証期間'] = ''
+                                            self.product_widget.filtered_data.at[idx, '保証期間'] = warranty_days
+                                        # 保証最終日を更新
+                                        if warranty_until:
+                                            if '保証最終日' not in self.product_widget.filtered_data.columns:
+                                                self.product_widget.filtered_data['保証最終日'] = ''
+                                            self.product_widget.filtered_data.at[idx, '保証最終日'] = warranty_until
+                                        break
+                            
+                            # 件数カウント（SKUごとに1件）
                             warranty_updated_count += 1
                     except Exception as e:
                         error_count += 1

@@ -3544,6 +3544,7 @@ class InventoryWidget(QWidget):
             "商品コンディション記号",
             "発送方法",
             "仕入先コード",
+            "仕入れ価格",
             "連番",
             "任意の文字列",
         ]
@@ -3635,6 +3636,9 @@ class InventoryWidget(QWidget):
                 parts.append("{ship}")
             elif t == "仕入先コード":
                 parts.append("{supplier}")
+            elif t == "仕入れ価格":
+                # 仕入れ価格（purchase_price）をそのまま数値文字列として使用
+                parts.append("{purchasePrice}")
             elif t == "連番":
                 width = int(seqw.value()) if seqw else 3
                 parts.append(f"{{seq:{width}}}")
