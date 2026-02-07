@@ -88,6 +88,7 @@ class ProductDatabase:
             ("warranty_product_name", "TEXT"),
             ("warranty_image_path", "TEXT"),
             ("receipt_id", "INTEGER"),
+            ("receipt_image_url", "TEXT"),  # レシート画像URL（GCSアップロード後のURL）
             ("image_1", "TEXT"),
             ("image_2", "TEXT"),
             ("image_3", "TEXT"),

@@ -242,6 +242,9 @@ class MainWindow(QMainWindow):
             inventory_widget=self.inventory_widget,
             product_widget=self.product_widget
         )
+        # ReceiptWidgetにEvidenceManagerWidgetへの参照を設定
+        if hasattr(self.evidence_widget, 'receipt_widget'):
+            self.evidence_widget.receipt_widget.set_evidence_widget(self.evidence_widget)
         self.tab_widget.addTab(self.evidence_widget, "証憑管理")
         
         # 台帳タブ（確定申告用）

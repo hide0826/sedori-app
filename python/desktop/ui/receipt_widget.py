@@ -350,6 +350,10 @@ class ReceiptWidget(QWidget):
         """ProductWidgetへの参照を設定"""
         self.product_widget = product_widget
     
+    def set_evidence_widget(self, evidence_widget):
+        """EvidenceManagerWidgetへの参照を設定"""
+        self.evidence_widget = evidence_widget
+    
     # ==================== レシート一覧スナップショット（検証用） ====================
 
     def save_receipt_snapshot(self):
@@ -7773,11 +7777,14 @@ class ReceiptWidget(QWidget):
                 if not image_file_name:
                     continue
                 
+                # レシート画像URLを取得（GCSアップロード後のURL）
+                receipt_image_url = receipt.get('gcs_url') or receipt.get('image_url') or ''
+                
                 # 紐付けられたSKUを取得
                 linked_skus_text = receipt.get('linked_skus', '') or ''
                 linked_skus = [sku.strip() for sku in linked_skus_text.split(',') if sku.strip()] if linked_skus_text else []
                 
-                print(f"[DEBUG] レシートID {receipt_id}: linked_skus_text={linked_skus_text}, linked_skus={linked_skus}")
+                print(f"[DEBUG] レシートID {receipt_id}: linked_skus_text={linked_skus_text}, linked_skus={linked_skus}, receipt_image_url={receipt_image_url}")
                 
                 if not linked_skus:
                     print(f"[DEBUG] レシートID {receipt_id}: SKUが紐付けられていないためスキップ")
@@ -7799,6 +7806,9 @@ class ReceiptWidget(QWidget):
                                     # ファイル名（拡張子なし）を保存（表示用）
                                     # 実際のファイルパスはreceipt_dbから検索できる
                                     record['レシート画像'] = image_file_name
+                                    # レシート画像URLを保存
+                                    if receipt_image_url:
+                                        record['レシート画像URL'] = receipt_image_url
                                     found_in_records = True
                                     break
                         
@@ -7807,6 +7817,9 @@ class ReceiptWidget(QWidget):
                         if product:
                             # レシート画像を更新
                             product['receipt_id'] = image_file_name
+                            # レシート画像URLを更新
+                            if receipt_image_url:
+                                product['receipt_image_url'] = receipt_image_url
                             self.product_widget.db.upsert(product)
                         else:
                             # ProductDatabaseに商品がない場合は、最小限の情報で作成
@@ -7826,6 +7839,9 @@ class ReceiptWidget(QWidget):
                                                 'purchase_price': record.get('仕入れ価格') or record.get('purchase_price'),
                                                 'purchase_date': record.get('仕入れ日') or record.get('purchase_date'),
                                             }
+                                            # レシート画像URLを追加
+                                            if receipt_image_url:
+                                                product_data['receipt_image_url'] = receipt_image_url
                                             break
                                 
                                 if product_data:
@@ -7846,6 +7862,11 @@ class ReceiptWidget(QWidget):
                                     if 'レシート画像' not in self.product_widget.inventory_data.columns:
                                         self.product_widget.inventory_data['レシート画像'] = ''
                                     self.product_widget.inventory_data.at[idx, 'レシート画像'] = image_file_name
+                                    # レシート画像URLを保存
+                                    if receipt_image_url:
+                                        if 'レシート画像URL' not in self.product_widget.inventory_data.columns:
+                                            self.product_widget.inventory_data['レシート画像URL'] = ''
+                                        self.product_widget.inventory_data.at[idx, 'レシート画像URL'] = receipt_image_url
                                     if not found_in_records:
                                         updated_count += 1
                                     break
@@ -7858,6 +7879,11 @@ class ReceiptWidget(QWidget):
                                     if 'レシート画像' not in self.product_widget.filtered_data.columns:
                                         self.product_widget.filtered_data['レシート画像'] = ''
                                     self.product_widget.filtered_data.at[idx, 'レシート画像'] = image_file_name
+                                    # レシート画像URLを保存
+                                    if receipt_image_url:
+                                        if 'レシート画像URL' not in self.product_widget.filtered_data.columns:
+                                            self.product_widget.filtered_data['レシート画像URL'] = ''
+                                        self.product_widget.filtered_data.at[idx, 'レシート画像URL'] = receipt_image_url
                                     break
                         
                         if found_in_records:
@@ -8084,11 +8110,190 @@ class ReceiptWidget(QWidget):
                     except Exception:
                         pass
             
+            # 仕訳帳への自動登録処理
+            journal_count = 0
+            try:
+                from desktop.database.journal_db import JournalDatabase
+                from desktop.database.account_title_db import AccountTitleDatabase
+                from datetime import datetime
+                import re
+                
+                journal_db = JournalDatabase()
+                account_title_db = AccountTitleDatabase()
+                
+                # デフォルトの借方勘定科目（仕入）
+                default_debit = "仕入"
+                
+                # デフォルトの貸方勘定科目を取得
+                default_credit_account = account_title_db.get_default_credit_account()
+                default_credit = "現金"  # フォールバック
+                if default_credit_account:
+                    name = default_credit_account.get("name", "")
+                    card_name = default_credit_account.get("card_name", "")
+                    last_four = default_credit_account.get("last_four_digits", "")
+                    if card_name and last_four:
+                        default_credit = f"{name} ({card_name} ****{last_four})"
+                    elif card_name:
+                        default_credit = f"{name} ({card_name})"
+                    else:
+                        default_credit = name
+                
+                # レシート一覧から仕訳帳に登録
+                skipped_reasons = {
+                    "保証書": 0,
+                    "科目が仕入でない": 0,
+                    "日付なし": 0,
+                    "金額0": 0,
+                    "既に登録済み": 0
+                }
+                
+                for receipt in all_receipts:
+                    receipt_id = receipt.get('id')
+                    
+                    # 種別判定（レシートのみを対象）
+                    ocr_text = receipt.get('ocr_text') or ""
+                    doc_type = "レシート"
+                    if "保証書" in ocr_text or "保証期間" in ocr_text or "保証規定" in ocr_text:
+                        doc_type = "保証書"
+                    
+                    if doc_type == "保証書":
+                        skipped_reasons["保証書"] += 1
+                        continue
+                    
+                    # 科目を取得（空欄の場合は「仕入」として扱う）
+                    account_title = receipt.get('account_title', '') or ''
+                    if not account_title or account_title.strip() == '':
+                        account_title = default_debit  # 空欄の場合は「仕入」として扱う
+                    
+                    # 科目が「仕入」でない場合はスキップ（仕入のみを仕訳帳に登録）
+                    if account_title != '仕入' and account_title != default_debit:
+                        skipped_reasons["科目が仕入でない"] += 1
+                        print(f"[DEBUG] 仕訳帳スキップ (receipt_id={receipt_id}): 科目が「仕入」でない (account_title={account_title})")
+                        continue
+                    
+                    # 日付を取得（yyyy-MM-dd形式、時刻は不要）
+                    purchase_date = receipt.get('purchase_date', '')
+                    if not purchase_date:
+                        skipped_reasons["日付なし"] += 1
+                        print(f"[DEBUG] 仕訳帳スキップ (receipt_id={receipt_id}): 日付なし")
+                        continue
+                    # 日付から時刻部分を除去
+                    if ' ' in purchase_date:
+                        purchase_date = purchase_date.split(' ')[0]
+                    if 'T' in purchase_date:
+                        purchase_date = purchase_date.split('T')[0]
+                    
+                    # 合計金額を取得
+                    total_amount = receipt.get('total_amount', 0) or 0
+                    if not total_amount or total_amount == 0:
+                        skipped_reasons["金額0"] += 1
+                        print(f"[DEBUG] 仕訳帳スキップ (receipt_id={receipt_id}): 金額が0 (total_amount={total_amount})")
+                        continue
+                    
+                    # 店舗名を取得（店舗コードから店舗マスタを参照）
+                    store_code = receipt.get('store_code', '') or ''
+                    store_name = ''
+                    
+                    if store_code:
+                        # 店舗マスタから店舗名を取得
+                        try:
+                            store = self.store_db.get_store_by_code(store_code)
+                            if store:
+                                store_name = store.get('store_name', '') or ''
+                        except Exception as e:
+                            print(f"[DEBUG] 店舗マスタ取得エラー (store_code={store_code}): {e}")
+                    
+                    # 店舗マスタから取得できない場合は、既存の方法で取得（フォールバック）
+                    if not store_name:
+                        store_name = receipt.get('store_name_raw', '') or receipt.get('store_name', '') or ''
+                        # 店舗コード（ss-53等）を除去
+                        if store_name:
+                            # パターン: "店舗名 (ss-53)" や "店舗名 ss-53" を除去
+                            store_name = re.sub(r'\s*\([^)]*\)', '', store_name)  # 括弧内を除去
+                            store_name = re.sub(r'\s+ss-\d+', '', store_name, flags=re.IGNORECASE)  # ss-53等を除去
+                            store_name = store_name.strip()
+                    
+                    # 登録番号を取得
+                    registration_number = receipt.get('registration_number', '') or ''
+                    
+                    # 画像URLを取得
+                    image_url = receipt.get('gcs_url') or receipt.get('image_url') or ''
+                    
+                    # 既に登録されているかチェック（画像URLで判定）
+                    existing_entries = journal_db.list_by_date(purchase_date, purchase_date)
+                    existing_entry = None
+                    
+                    # 画像URLで既存エントリを検索
+                    if image_url:
+                        for e in existing_entries:
+                            if e.get('image_url') == image_url:
+                                existing_entry = e
+                                break
+                    
+                    # 仕訳帳エントリのデータ
+                    journal_entry = {
+                        "transaction_date": purchase_date,
+                        "debit_account": default_debit,
+                        "amount": total_amount,
+                        "credit_account": default_credit,
+                        "description": store_name,
+                        "invoice_number": registration_number,
+                        "tax_category": "10％",
+                        "image_url": image_url
+                    }
+                    
+                    try:
+                        if existing_entry:
+                            # 既に登録済みの場合は更新（変更がある場合は修正）
+                            existing_id = existing_entry.get('id')
+                            if existing_id:
+                                # 変更があるかチェック
+                                has_changes = (
+                                    existing_entry.get('transaction_date') != purchase_date or
+                                    existing_entry.get('debit_account') != default_debit or
+                                    existing_entry.get('amount') != total_amount or
+                                    existing_entry.get('credit_account') != default_credit or
+                                    existing_entry.get('description') != store_name or
+                                    existing_entry.get('invoice_number') != registration_number or
+                                    existing_entry.get('tax_category') != "10％" or
+                                    existing_entry.get('image_url') != image_url
+                                )
+                                
+                                if has_changes:
+                                    journal_db.update(existing_id, journal_entry)
+                                    journal_count += 1
+                                    print(f"[DEBUG] 仕訳帳更新成功 (receipt_id={receipt_id}, journal_id={existing_id}): date={purchase_date}, amount={total_amount}, store={store_name}")
+                                else:
+                                    print(f"[DEBUG] 仕訳帳スキップ (receipt_id={receipt_id}): 変更なし (journal_id={existing_id})")
+                        else:
+                            # 新規登録
+                            journal_db.insert(journal_entry)
+                            journal_count += 1
+                            print(f"[DEBUG] 仕訳帳登録成功 (receipt_id={receipt_id}): date={purchase_date}, amount={total_amount}, store={store_name}")
+                    except Exception as e:
+                        print(f"[DEBUG] 仕訳帳登録/更新エラー (receipt_id={receipt_id}): {e}")
+                        error_count += 1
+                        error_messages.append(f"仕訳帳登録/更新エラー (receipt_id={receipt_id}): {str(e)}")
+                
+                # スキップ理由をログ出力
+                print(f"[DEBUG] 仕訳帳登録スキップ理由: {skipped_reasons}")
+                
+                # 仕訳帳タブを更新（もし開いていれば）
+                if hasattr(self, 'evidence_widget'):
+                    try:
+                        if hasattr(self.evidence_widget, 'journal_entry_widget'):
+                            self.evidence_widget.journal_entry_widget.load_entries()
+                    except Exception:
+                        pass
+            except Exception as e:
+                import traceback
+                print(f"[DEBUG] 仕訳帳自動登録処理エラー: {e}\n{traceback.format_exc()}")
+            
             # 結果を表示
             receipt_count = updated_count - warranty_updated_count
             warranty_count = warranty_updated_count
             
-            print(f"[DEBUG] 確定処理完了: receipt_count={receipt_count}, warranty_count={warranty_count}, error_count={error_count}")
+            print(f"[DEBUG] 確定処理完了: receipt_count={receipt_count}, warranty_count={warranty_count}, journal_count={journal_count}, error_count={error_count}")
             
             if receipt_count == 0 and warranty_count == 0 and error_count == 0:
                 # 処理対象がなかった場合
@@ -8101,6 +8306,8 @@ class ReceiptWidget(QWidget):
                 message = f"{receipt_count} 件のSKUにレシート画像を設定しました。"
                 if warranty_count > 0:
                     message += f"\n{warranty_count} 件のSKUに保証書情報（保証書画像・保証期間・保証最終日）を設定しました。"
+                if journal_count > 0:
+                    message += f"\n{journal_count} 件のレシートを仕訳帳に登録しました。"
                 QMessageBox.information(
                     self, "確定完了",
                     message
@@ -8109,6 +8316,8 @@ class ReceiptWidget(QWidget):
                 message = f"{receipt_count} 件のSKUにレシート画像を設定しました。"
                 if warranty_count > 0:
                     message += f"\n{warranty_count} 件のSKUに保証書情報（保証書画像・保証期間・保証最終日）を設定しました。"
+                if journal_count > 0:
+                    message += f"\n{journal_count} 件のレシートを仕訳帳に登録しました。"
                 message += f"\n\nエラー: {error_count} 件\n" + "\n".join(error_messages[:5])
                 QMessageBox.warning(
                     self, "確定完了（一部エラー）",

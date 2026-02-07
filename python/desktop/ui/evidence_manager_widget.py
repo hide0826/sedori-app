@@ -22,9 +22,9 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QTabWidget
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from ui.receipt_widget import ReceiptWidget
-from ui.warranty_widget import WarrantyWidget
 from ui.expense_widget import ExpenseWidget
 from ui.account_title_widget import AccountTitleWidget
+from ui.journal_entry_widget import JournalEntryWidget
 
 
 class EvidenceManagerWidget(QWidget):
@@ -41,12 +41,12 @@ class EvidenceManagerWidget(QWidget):
         """このウィジェットに含まれるすべてのサブウィジェットの設定を保存します。"""
         if hasattr(self, 'receipt_widget') and callable(getattr(self.receipt_widget, 'save_settings', None)):
             self.receipt_widget.save_settings()
-        if hasattr(self, 'warranty_widget') and callable(getattr(self.warranty_widget, 'save_settings', None)):
-            self.warranty_widget.save_settings()
         if hasattr(self, 'expense_widget') and callable(getattr(self.expense_widget, 'save_settings', None)):
             self.expense_widget.save_settings()
         if hasattr(self, 'account_title_widget') and callable(getattr(self.account_title_widget, 'save_settings', None)):
             self.account_title_widget.save_settings()
+        if hasattr(self, 'journal_entry_widget') and callable(getattr(self.journal_entry_widget, 'save_settings', None)):
+            self.journal_entry_widget.save_settings()
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -56,18 +56,14 @@ class EvidenceManagerWidget(QWidget):
         self.tab_widget = QTabWidget()
         layout.addWidget(self.tab_widget)
 
-        # レシート管理タブ
+        # レシート・領収書・保証書タブ（レシート管理タブの名前を変更、保証書管理タブを統合）
         self.receipt_widget = ReceiptWidget(self.api_client, inventory_widget=self.inventory_widget)
         if self.product_widget is not None:
             try:
                 self.receipt_widget.set_product_widget(self.product_widget)
             except Exception:
                 pass
-        self.tab_widget.addTab(self.receipt_widget, "レシート管理")
-
-        # 保証書管理タブ
-        self.warranty_widget = WarrantyWidget(self.api_client)
-        self.tab_widget.addTab(self.warranty_widget, "保証書管理")
+        self.tab_widget.addTab(self.receipt_widget, "レシート・領収書・保証書")
 
         # 経費管理タブ
         self.expense_widget = ExpenseWidget(self.api_client)
@@ -76,4 +72,8 @@ class EvidenceManagerWidget(QWidget):
         # 勘定科目設定タブ
         self.account_title_widget = AccountTitleWidget()
         self.tab_widget.addTab(self.account_title_widget, "勘定科目設定")
+        
+        # 仕訳帳タブ
+        self.journal_entry_widget = JournalEntryWidget()
+        self.tab_widget.addTab(self.journal_entry_widget, "仕訳帳")
 
