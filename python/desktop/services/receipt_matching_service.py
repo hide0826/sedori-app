@@ -45,6 +45,34 @@ class ReceiptMatchingService:
         s = unicodedata.normalize('NFKC', s)
         return s.strip()
 
+    @staticmethod
+    def _normalize_phone(raw: Optional[str]) -> Optional[str]:
+        """電話番号を正規化して比較しやすくする
+
+        - 全角→半角
+        - 電話番号に関係ない文字を除去
+        - 10桁/11桁のみの場合は 03-1234-5678 / 090-1234-5678 形式に整形
+        - ハイフン区切り3ブロックまでに統一
+        """
+        if not raw:
+            return None
+        import unicodedata
+        import re
+
+        s = unicodedata.normalize("NFKC", str(raw))
+        s = s.replace("ー", "-").replace("−", "-").replace("―", "-").replace("‐", "-")
+        s = re.sub(r"[^0-9-]", "", s)
+        # 連続した数字のみの場合は標準的なハイフン位置に整形
+        if "-" not in s and len(s) in (10, 11):
+            if len(s) == 10:
+                s = f"{s[0:2]}-{s[2:6]}-{s[6:]}"
+            else:
+                s = f"{s[0:3]}-{s[3:7]}-{s[7:]}"
+        parts = [p for p in s.split("-") if p]
+        if len(parts) >= 3:
+            return "-".join(parts[:3])
+        return s or None
+
     def _guess_store_code(self, raw_name: Optional[str]) -> Optional[str]:
         if not raw_name:
             return None
@@ -81,6 +109,33 @@ class ReceiptMatchingService:
                 return st.get('store_code') or st.get('supplier_code')
         return None
 
+    def _guess_store_code_by_phone(self, phone_number: Optional[str]) -> Optional[str]:
+        """電話番号から店舗コードを推定
+
+        店舗名はOCRの表記揺れが大きいため、比較的精度の高い電話番号を優先的に使用する。
+        - 電話番号が取得できていない場合は None を返す
+        - stores.phone を同じ正規化ルールで整形し、完全一致した店舗の store_code を返す
+        """
+        normalized_target = self._normalize_phone(phone_number)
+        if not normalized_target:
+            return None
+
+        try:
+            stores = self.store_db.list_stores()
+        except Exception:
+            stores = []
+
+        for st in stores:
+            store_phone = st.get("phone") or ""
+            if not store_phone:
+                continue
+            normalized_store_phone = self._normalize_phone(store_phone)
+            if normalized_store_phone and normalized_store_phone == normalized_target:
+                # 店舗コード優先、なければ互換性のため仕入れ先コード
+                return st.get("store_code") or st.get("supplier_code")
+
+        return None
+
     @staticmethod
     def _calc_items_total(items: List[Dict[str, Any]]) -> int:
         total = 0
@@ -110,6 +165,7 @@ class ReceiptMatchingService:
         """
         purchase_date = receipt.get('purchase_date')
         raw_name = receipt.get('store_name_raw')
+        phone_number = receipt.get('phone_number')
         total = receipt.get('total_amount')
         discount = receipt.get('discount_amount') or 0
         effective_total = None
@@ -120,7 +176,15 @@ class ReceiptMatchingService:
         same_day_items = [it for it in purchase_items if (it.get('purchase_date') == purchase_date)]
 
         # 推定店舗コード
-        store_code = preferred_store_code or receipt.get('store_code') or self._guess_store_code(raw_name)
+        # 1. 明示的に指定された店舗コード（preferred_store_code / receipt.store_code）
+        # 2. 電話番号からの推定（OCRで比較的正確に取れるため優先）
+        # 3. 店舗名（store_name_raw）からの推定（フォールバック）
+        store_code = (
+            preferred_store_code
+            or receipt.get('store_code')
+            or self._guess_store_code_by_phone(phone_number)
+            or self._guess_store_code(raw_name)
+        )
 
         # 店舗コードでさらに絞り込み（あれば）
         if store_code:

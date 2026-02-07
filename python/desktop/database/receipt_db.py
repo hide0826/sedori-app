@@ -115,7 +115,7 @@ class ReceiptDatabase:
         fields = [
             "file_path","purchase_date","purchase_time","store_name_raw","phone_number","store_code","subtotal","tax",
             "discount_amount","total_amount","paid_amount","items_count","currency","ocr_provider","ocr_text",
-            "original_file_path","plastic_bag_amount","linked_skus","registration_number",
+            "original_file_path","plastic_bag_amount","linked_skus","registration_number","price_difference","account_title",
         ]
         placeholders = ",".join(["?"] * len(fields))
         cur = self.conn.cursor()

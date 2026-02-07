@@ -14,8 +14,10 @@ import os
 import re
 import sys
 import logging
+import json
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -297,6 +299,12 @@ class ReceiptWidget(QWidget):
         self.inventory_db = InventoryDatabase()
         self.store_db = StoreDatabase()
         self.account_title_db = AccountTitleDatabase()
+        # レシート一覧用スナップショットファイルパス（検証用）
+        try:
+            base_dir = Path(__file__).resolve().parents[2]
+            self.receipt_snapshot_path = base_dir / "data" / "receipt_list_snapshot.json"
+        except Exception:
+            self.receipt_snapshot_path = None
 
         # フォルダ一括OCR用
         self.current_folder: Optional[Path] = None
@@ -334,6 +342,97 @@ class ReceiptWidget(QWidget):
     def set_product_widget(self, product_widget):
         """ProductWidgetへの参照を設定"""
         self.product_widget = product_widget
+    
+    # ==================== レシート一覧スナップショット（検証用） ====================
+
+    def save_receipt_snapshot(self):
+        """現在のレシート一覧をJSONファイルにスナップ保存（検証用）"""
+        if not self.receipt_snapshot_path:
+            QMessageBox.warning(self, "スナップ保存", "スナップショット保存先パスを初期化できませんでした。")
+            return
+
+        # DBから現在のレシートデータを取得
+        try:
+            receipts = self.receipt_db.find_by_date_and_store(None)
+        except Exception as e:
+            QMessageBox.critical(self, "スナップ保存エラー", f"レシート一覧の取得に失敗しました:\n{e}")
+            return
+
+        if not receipts:
+            QMessageBox.information(self, "スナップ保存", "保存するレシートデータがありません。")
+            return
+
+        try:
+            self.receipt_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "record_count": len(receipts),
+                "receipts": receipts,
+            }
+            with open(self.receipt_snapshot_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+
+            QMessageBox.information(
+                self,
+                "スナップ保存",
+                f"レシート一覧をスナップ保存しました。\n"
+                f"ファイル: {self.receipt_snapshot_path}",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "スナップ保存エラー", f"スナップ保存に失敗しました:\n{e}")
+
+    def load_receipt_snapshot(self):
+        """前回保存したレシート一覧スナップショットを読み込んでDBに復元（検証用）"""
+        if not self.receipt_snapshot_path:
+            QMessageBox.warning(self, "スナップ読込", "スナップショット保存先パスを初期化できませんでした。")
+            return
+
+        if not self.receipt_snapshot_path.exists():
+            QMessageBox.information(
+                self,
+                "スナップ読込",
+                "スナップショットファイルが見つかりませんでした。\n"
+                "先に「スナップ保存」を実行してください。",
+            )
+            return
+
+        try:
+            with open(self.receipt_snapshot_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+
+            receipts = payload.get("receipts", [])
+            if not isinstance(receipts, list):
+                raise ValueError("receipts フィールドの形式が不正です。")
+
+            # 既存のレシートデータを削除してから、スナップショットの内容を挿入
+            try:
+                self.receipt_db.delete_all_receipts()
+            except Exception:
+                # 一括削除が実装されていない場合は、そのまま上書き保存にフォールバック
+                pass
+
+            for rec in receipts:
+                # IDは新しく振り直す（重複防止）
+                rec_id = rec.pop("id", None)
+                try:
+                    new_id = self.receipt_db.insert_receipt(rec)
+                    rec["id"] = new_id
+                except Exception:
+                    continue
+
+            # UIを再読込
+            self.refresh_receipt_list()
+
+            saved_at = payload.get("saved_at", "不明な日時")
+            QMessageBox.information(
+                self,
+                "スナップ読込",
+                f"レシート一覧スナップショットを読み込みました。\n"
+                f"保存日時: {saved_at}\n"
+                f"件数: {len(receipts)}件",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "スナップ読込エラー", f"スナップ読込に失敗しました:\n{e}")
     
     def setup_ui(self):
         """UIの設定（シンプルなレイアウト）"""
@@ -447,6 +546,17 @@ class ReceiptWidget(QWidget):
         """)
         self.confirm_btn.clicked.connect(self.confirm_receipt_linkage)
         action_layout.addWidget(self.confirm_btn)
+        
+        # 検証用: レシート一覧のスナップ保存・読込ボタン
+        self.save_receipt_snapshot_btn = QPushButton("スナップ保存")
+        self.save_receipt_snapshot_btn.setToolTip("現在のレシート一覧を一時保存します（検証用）")
+        self.save_receipt_snapshot_btn.clicked.connect(self.save_receipt_snapshot)
+        action_layout.addWidget(self.save_receipt_snapshot_btn)
+
+        self.load_receipt_snapshot_btn = QPushButton("スナップ読込")
+        self.load_receipt_snapshot_btn.setToolTip("前回保存したレシート一覧スナップショットを読み込みます（検証用）")
+        self.load_receipt_snapshot_btn.clicked.connect(self.load_receipt_snapshot)
+        action_layout.addWidget(self.load_receipt_snapshot_btn)
         
         self.delete_row_btn = QPushButton("選択行削除")
         self.delete_row_btn.setEnabled(False)
@@ -1880,6 +1990,7 @@ class ReceiptWidget(QWidget):
             self.warranty_table.blockSignals(False)
 
         from pathlib import Path
+        from collections import Counter
         receipt_row = 0
         warranty_row = 0
 
@@ -1893,6 +2004,27 @@ class ReceiptWidget(QWidget):
         default_title = "仕入"
         if default_title not in account_titles:
             account_titles.insert(0, default_title)
+
+        # 日付の異常検出用：全レシートの日付（yyyy/mm/dd部分）を集計
+        date_counter = Counter()
+        for receipt in receipts:
+            purchase_date = receipt.get('purchase_date') or ""
+            if purchase_date:
+                # 日付文字列から yyyy/mm/dd 部分を抽出
+                date_only = purchase_date.strip()
+                # 時刻が含まれている場合は除去
+                if " " in date_only:
+                    date_only = date_only.split(" ")[0]
+                # 形式を統一（yyyy/mm/dd または yyyy-mm-dd）
+                date_only = date_only.replace("-", "/")
+                # yyyy/mm/dd 形式に正規化
+                if re.match(r"^\d{4}/\d{1,2}/\d{1,2}", date_only):
+                    date_counter[date_only] += 1
+
+        # 全レシート数
+        total_receipts = len(receipts) if receipts else 1
+        # 50%の閾値
+        threshold = total_receipts * 0.5
 
         for receipt in receipts:
             # 種別判定（OCRテキストから簡易判定）
@@ -1937,26 +2069,59 @@ class ReceiptWidget(QWidget):
                 date_display = purchase_date
                 if purchase_time:
                     date_display = f"{purchase_date} {purchase_time}"
-                self.receipt_table.setItem(row, 4, QTableWidgetItem(date_display))
                 
-                # 店舗名（OCRで取得した店舗名のまま表示）
-                self.receipt_table.setItem(row, 5, QTableWidgetItem(receipt.get('store_name_raw') or ""))
+                # 日付の異常検出：yyyy/mm/dd部分が他のレシートと50%以上一致しているかチェック
+                date_item = QTableWidgetItem(date_display)
+                if purchase_date:
+                    # 日付文字列から yyyy/mm/dd 部分を抽出
+                    date_only = purchase_date.strip()
+                    if " " in date_only:
+                        date_only = date_only.split(" ")[0]
+                    date_only = date_only.replace("-", "/")
+                    # yyyy/mm/dd 形式に正規化
+                    if re.match(r"^\d{4}/\d{1,2}/\d{1,2}", date_only):
+                        # この日付の出現回数を取得
+                        date_count = date_counter.get(date_only, 0)
+                        # 50%未満の場合は赤字で表示
+                        if date_count < threshold:
+                            date_item.setForeground(QColor("#FF6B6B"))  # 赤字
+                        else:
+                            date_item.setForeground(QColor("#FFFFFF"))  # 白字（デフォルト）
+                
+                self.receipt_table.setItem(row, 4, date_item)
+                
+                # 店舗名（初期値: OCRで取得した店舗名）
+                initial_store_name = receipt.get('store_name_raw') or ""
+                self.receipt_table.setItem(row, 5, QTableWidgetItem(initial_store_name))
                 self.receipt_table.setItem(row, 6, QTableWidgetItem(receipt.get('phone_number') or ""))
                 self.receipt_table.setItem(row, 7, QTableWidgetItem(str(receipt.get('total_amount') or "")))
                 
                 # 差額（8列目）- 紐付けSKUの合計金額とレシートの合計金額の差
-                difference = receipt.get('price_difference') or None
+                diff_val = None
+                difference = receipt.get('price_difference')
                 if difference is not None:
-                    difference_text = f"¥{int(difference):,}"
-                    difference_item = QTableWidgetItem(difference_text)
-                    # 差額の色分け（プラス: 赤、マイナス: 緑、ゼロ: グレー）
-                    if difference > 0:
-                        difference_item.setForeground(QColor("#FF6B6B"))
-                    elif difference < 0:
-                        difference_item.setForeground(QColor("#4CAF50"))
+                    # 数値に変換（文字列やfloatにも対応）
+                    try:
+                        diff_val = int(round(float(difference)))
+                    except (ValueError, TypeError):
+                        diff_val = None
+
+                    if diff_val is not None:
+                        # 差額が0の場合は完全マッチとして「OK」を緑色で表示
+                        if diff_val == 0:
+                            difference_text = "OK"
+                        else:
+                            difference_text = f"¥{diff_val:,}"
+
+                        difference_item = QTableWidgetItem(difference_text)
+                        # 差額の色分け（プラス: 赤、マイナス/ゼロOK: 緑）
+                        if diff_val > 0:
+                            difference_item.setForeground(QColor("#FF6B6B"))
+                        else:
+                            difference_item.setForeground(QColor("#4CAF50"))
+                        self.receipt_table.setItem(row, 8, difference_item)
                     else:
-                        difference_item.setForeground(QColor("#666666"))
-                    self.receipt_table.setItem(row, 8, difference_item)
+                        self.receipt_table.setItem(row, 8, QTableWidgetItem(""))
                 else:
                     self.receipt_table.setItem(row, 8, QTableWidgetItem(""))
 
@@ -1966,6 +2131,11 @@ class ReceiptWidget(QWidget):
                 store_item = QTableWidgetItem(store_label)
                 store_item.setData(Qt.UserRole, store_code)
                 self.receipt_table.setItem(row, 9, store_item)
+
+                # 差額OK（完全マッチ）の場合は、店舗名カラムを店舗コードカラムの店舗名で上書き
+                # → 店舗コード側のラベル（コード＋正式店舗名）を店舗名としても表示
+                if diff_val == 0 and store_label:
+                    self.receipt_table.setItem(row, 5, QTableWidgetItem(store_label))
                 
                 # 登録番号（10列目） - 適格請求書の登録番号 T + 13桁
                 registration_number = receipt.get('registration_number') or ""
@@ -2193,15 +2363,26 @@ class ReceiptWidget(QWidget):
                 # 店舗コード（候補が存在し、現在のレシートに店舗コードがない、または異なる場合に更新）
                 current_store_code = receipt.get('store_code') or ""
                 matched_store_code = cand.store_code
-                # 店舗コードが空の場合は、候補から店舗コードを設定（手動で紐付けした場合も含む）
+                store_name_updated = False
                 if matched_store_code and matched_store_code != current_store_code:
                     updates["store_code"] = matched_store_code
+                    # 店舗名も店舗マスタの正式名称に更新（電話番号マッチなどで確定した場合）
+                    try:
+                        store = self.store_db.get_store_by_code(matched_store_code)
+                        if store and store.get("store_name"):
+                            updates["store_name_raw"] = store.get("store_name")
+                            store_name_updated = True
+                    except Exception:
+                        pass
                 elif not current_store_code and matched_store_code:
                     # 店舗コードが空の場合、候補から店舗コードを設定
                     updates["store_code"] = matched_store_code
-                    # 店舗名も更新（店舗コードから店舗名を取得）※現状はOCR結果を優先するため更新しない
+                    # 店舗名も更新（店舗コードから正式名称を取得）
                     try:
-                        _ = self.store_db.get_store_by_code(matched_store_code)
+                        store = self.store_db.get_store_by_code(matched_store_code)
+                        if store and store.get("store_name"):
+                            updates["store_name_raw"] = store.get("store_name")
+                            store_name_updated = True
                     except Exception:
                         pass
                 
@@ -2521,12 +2702,223 @@ class ReceiptWidget(QWidget):
         QMessageBox.information(self, "一括マッチング", f"{updated} 件のレシートにマッチング候補を適用しました。\n（候補なし: {skipped_no_candidates}件, 更新なし: {skipped_no_updates}件）")
 
     def bulk_rename_receipts(self):
-        """一括リネーム（簡易版・今後拡張予定）"""
-        QMessageBox.information(
+        """一括リネーム: 
+        - レシート: yyyy-mm-dd-店舗コード-連番.jpg
+        - 保証書: yyyy-mm-dd-war-店舗コード-連番.jpg
+        """
+        from pathlib import Path
+        import shutil
+        from datetime import datetime
+        import re
+        
+        # 全レシートを取得
+        receipts = self.receipt_db.find_by_date_and_store(None)
+        if not receipts:
+            QMessageBox.information(self, "一括リネーム", "リネームするレシートがありません。")
+            return
+        
+        # レシートと保証書の件数をカウント
+        receipt_count = 0
+        warranty_count = 0
+        for receipt in receipts:
+            ocr_text = receipt.get('ocr_text') or ""
+            if "保証書" in ocr_text or "保証期間" in ocr_text or "保証規定" in ocr_text:
+                warranty_count += 1
+            else:
+                receipt_count += 1
+        
+        # 確認ダイアログ
+        reply = QMessageBox.question(
             self,
             "一括リネーム",
-            "一括リネームは今後のバージョンで、既存の確定処理（レシートID＋画像リネーム）を\n自動で回す形で実装予定です。\n現在は個別の「確定」ボタンでリネームしてください。"
+            f"{len(receipts)} 件の画像を一括リネームします。\n"
+            f"レシート: {receipt_count} 件 (形式: yyyy-mm-dd-店舗コード-連番.jpg)\n"
+            f"保証書: {warranty_count} 件 (形式: yyyy-mm-dd-war-店舗コード-連番.jpg)\n\n"
+            f"続行しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
         )
+        if reply != QMessageBox.Yes:
+            return
+        
+        renamed_count = 0
+        skipped_count = 0
+        error_count = 0
+        error_messages = []
+        
+        # 日付・店舗コード・種別ごとの連番を管理
+        # {(date_str, store_code, doc_type): 連番}
+        date_store_counter = {}
+        
+        for receipt in receipts:
+            try:
+                receipt_id = receipt.get('id')
+                
+                # 種別判定（レシートと保証書の両方を対象）
+                ocr_text = receipt.get('ocr_text') or ""
+                doc_type = "レシート"
+                if "保証書" in ocr_text or "保証期間" in ocr_text or "保証規定" in ocr_text:
+                    doc_type = "保証書"
+                
+                # 日付を取得
+                purchase_date = receipt.get('purchase_date') or ""
+                if not purchase_date:
+                    skipped_count += 1
+                    error_messages.append(f"{doc_type}ID {receipt_id}: 日付が設定されていません")
+                    continue
+                
+                # 日付を yyyy-mm-dd 形式に正規化
+                date_str = purchase_date.strip()
+                if " " in date_str:
+                    date_str = date_str.split(" ")[0]
+                date_str = date_str.replace("/", "-")
+                # yyyy-mm-dd 形式に変換
+                try:
+                    if "/" in date_str:
+                        date_parts = date_str.split("/")
+                        if len(date_parts) == 3:
+                            date_str = f"{date_parts[0]}-{date_parts[1].zfill(2)}-{date_parts[2].zfill(2)}"
+                    elif "-" in date_str:
+                        date_parts = date_str.split("-")
+                        if len(date_parts) == 3:
+                            date_str = f"{date_parts[0]}-{date_parts[1].zfill(2)}-{date_parts[2].zfill(2)}"
+                    # yyyy-mm-dd 形式か確認
+                    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
+                        skipped_count += 1
+                        error_messages.append(f"{doc_type}ID {receipt_id}: 日付形式が不正です: {purchase_date}")
+                        continue
+                except Exception:
+                    skipped_count += 1
+                    error_messages.append(f"{doc_type}ID {receipt_id}: 日付の解析に失敗しました: {purchase_date}")
+                    continue
+                
+                # 店舗コードを取得
+                store_code = receipt.get('store_code') or ""
+                if not store_code:
+                    skipped_count += 1
+                    error_messages.append(f"{doc_type}ID {receipt_id}: 店舗コードが設定されていません")
+                    continue
+                
+                # 店舗コードのみを取得（表示ラベルから抽出）
+                store_code_clean = str(store_code).strip()
+                if " " in store_code_clean:
+                    store_code_clean = store_code_clean.split(" ")[0]
+                
+                if not store_code_clean:
+                    skipped_count += 1
+                    error_messages.append(f"{doc_type}ID {receipt_id}: 店舗コードが空です")
+                    continue
+                
+                # 連番を決定（同じ日付・店舗コード・種別の連番を管理）
+                key = (date_str, store_code_clean, doc_type)
+                if key not in date_store_counter:
+                    date_store_counter[key] = 0
+                date_store_counter[key] += 1
+                sequence_number = date_store_counter[key]
+                
+                # 画像ファイルパスを取得
+                file_path = receipt.get('original_file_path') or receipt.get('file_path', '')
+                if not file_path:
+                    skipped_count += 1
+                    error_messages.append(f"{doc_type}ID {receipt_id}: 画像ファイルパスが設定されていません")
+                    continue
+                
+                old_image_file = Path(file_path)
+                if not old_image_file.exists():
+                    skipped_count += 1
+                    error_messages.append(f"{doc_type}ID {receipt_id}: 画像ファイルが見つかりません: {file_path}")
+                    continue
+                
+                # 新しいファイル名を生成
+                extension = old_image_file.suffix or '.jpg'
+                if doc_type == "保証書":
+                    # 保証書: yyyy-mm-dd-war-店舗コード-連番.jpg
+                    new_image_name = f"{date_str}-war-{store_code_clean}-{sequence_number:02d}{extension}"
+                else:
+                    # レシート: yyyy-mm-dd-店舗コード-連番.jpg
+                    new_image_name = f"{date_str}-{store_code_clean}-{sequence_number:02d}{extension}"
+                new_image_path = old_image_file.parent / new_image_name
+                
+                # 既に同じファイル名の場合はスキップ
+                if new_image_path == old_image_file:
+                    skipped_count += 1
+                    continue
+                
+                # 同名ファイルが存在する場合は連番を増やす
+                while new_image_path.exists():
+                    date_store_counter[key] += 1
+                    sequence_number = date_store_counter[key]
+                    new_image_name = f"{date_str}-{store_code_clean}-{sequence_number:02d}{extension}"
+                    new_image_path = old_image_file.parent / new_image_name
+                
+                # ファイルをリネーム
+                try:
+                    shutil.move(str(old_image_file), str(new_image_path))
+                    
+                    # 元のファイルパスも更新（original_file_pathがある場合）
+                    original_file_path = receipt.get('original_file_path')
+                    if original_file_path and original_file_path != file_path:
+                        original_file = Path(original_file_path)
+                        if original_file.exists():
+                            new_original_path = original_file.parent / new_image_name
+                            if new_original_path != original_file:
+                                try:
+                                    shutil.move(str(original_file), str(new_original_path))
+                                    # DBを更新
+                                    self.receipt_db.update_receipt(receipt_id, {
+                                        "file_path": str(new_image_path),
+                                        "original_file_path": str(new_original_path)
+                                    })
+                                except Exception:
+                                    # 元のファイルのリネーム失敗は警告のみ
+                                    self.receipt_db.update_receipt(receipt_id, {
+                                        "file_path": str(new_image_path)
+                                    })
+                            else:
+                                self.receipt_db.update_receipt(receipt_id, {
+                                    "file_path": str(new_image_path)
+                                })
+                        else:
+                            self.receipt_db.update_receipt(receipt_id, {
+                                "file_path": str(new_image_path)
+                            })
+                    else:
+                        # DBを更新
+                        self.receipt_db.update_receipt(receipt_id, {
+                            "file_path": str(new_image_path)
+                        })
+                    
+                    renamed_count += 1
+                except Exception as e:
+                    error_count += 1
+                    error_messages.append(f"{doc_type}ID {receipt_id}: リネームエラー: {str(e)}")
+                    continue
+                    
+            except Exception as e:
+                error_count += 1
+                doc_type_fallback = receipt.get('ocr_text', '')
+                if "保証書" in doc_type_fallback or "保証期間" in doc_type_fallback or "保証規定" in doc_type_fallback:
+                    doc_type_fallback = "保証書"
+                else:
+                    doc_type_fallback = "レシート"
+                error_messages.append(f"{doc_type_fallback}ID {receipt.get('id', '不明')}: 処理エラー: {str(e)}")
+                continue
+        
+        # 結果を表示
+        result_message = f"一括リネーム完了\n\n"
+        result_message += f"リネーム成功: {renamed_count} 件\n"
+        result_message += f"スキップ: {skipped_count} 件\n"
+        result_message += f"エラー: {error_count} 件"
+        
+        if error_messages:
+            result_message += f"\n\nエラー詳細:\n" + "\n".join(error_messages[:10])
+            if len(error_messages) > 10:
+                result_message += f"\n... 他 {len(error_messages) - 10} 件"
+        
+        QMessageBox.information(self, "一括リネーム", result_message)
+        
+        # レシート一覧を更新
+        self.refresh_receipt_list()
 
     def verify_receipts_with_purchases(self):
         """レシート一覧と仕入DBの照合チェック"""
@@ -5251,16 +5643,22 @@ class ReceiptWidget(QWidget):
                 }
             """)
             
-            def fetch_skus_by_date():
-                """同じ日付のSKUを時間が近い順から取得して候補リストに表示"""
+            def fetch_skus_by_date(show_message=True):
+                """同じ日付のSKUを時間が近い順から取得して候補リストに表示
+                
+                Args:
+                    show_message: Trueの場合、メッセージボックスを表示する（デフォルト: True）
+                """
                 candidate_skus_list.clear()
                 if not self.product_widget:
-                    QMessageBox.warning(None, "警告", "仕入DBへの参照がありません。")
+                    if show_message:
+                        QMessageBox.warning(None, "警告", "仕入DBへの参照がありません。")
                     return
                 
                 purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
                 if not purchase_records:
-                    QMessageBox.warning(None, "警告", "仕入DBにデータがありません。")
+                    if show_message:
+                        QMessageBox.warning(None, "警告", "仕入DBにデータがありません。")
                     return
                 
                 # レシートの日付を取得（日付フィールドから最新の値を取得）
@@ -5280,7 +5678,8 @@ class ReceiptWidget(QWidget):
                     purchase_time = receipt_data.get('purchase_time', '') if receipt_data else ''
                 
                 if not purchase_date:
-                    QMessageBox.warning(None, "警告", "レシートの日付が設定されていません。")
+                    if show_message:
+                        QMessageBox.warning(None, "警告", "レシートの日付が設定されていません。")
                     return
                 
                 # レシートの店舗コード（優先表示用）を取得
@@ -5591,13 +5990,17 @@ class ReceiptWidget(QWidget):
                     item.setData(Qt.UserRole, sku)  # SKUをUserRoleに保存
                     candidate_skus_list.addItem(item)
                 
-                if candidate_skus_list.count() == 0:
-                    QMessageBox.information(None, "情報", f"日付 {purchase_date} のSKUが見つかりませんでした。")
-                else:
-                    QMessageBox.information(None, "情報", f"{candidate_skus_list.count()} 件のSKU候補を表示しました。")
+                if show_message:
+                    if candidate_skus_list.count() == 0:
+                        QMessageBox.information(None, "情報", f"日付 {purchase_date} のSKUが見つかりませんでした。")
+                    else:
+                        QMessageBox.information(None, "情報", f"{candidate_skus_list.count()} 件のSKU候補を表示しました。")
             
             fetch_sku_btn.clicked.connect(fetch_skus_by_date)
             sku_layout.addWidget(fetch_sku_btn)
+            
+            # 日付変更時にSKUマッチングを自動実行（候補SKUリストを更新、メッセージは表示しない）
+            date_edit.dateChanged.connect(lambda: fetch_skus_by_date(show_message=False))
             
             # SKU追加ボタン
             add_sku_btn = QPushButton("選択SKUを追加")
@@ -5767,10 +6170,8 @@ class ReceiptWidget(QWidget):
                     
                     # 差額を計算（SKU合計 - レシート合計（値引き後））
                     difference = sku_total - receipt_total_after_discount
-                    if abs(difference) == 0:
-                        updates['price_difference'] = None  # 差額が0の場合はNoneに設定
-                    else:
-                        updates['price_difference'] = int(difference)
+                    # 差額が0の場合も 0 を保存しておき、一覧では「OK」表示にする
+                    updates['price_difference'] = int(difference)
                 else:
                     # 科目が「仕入」以外の場合は紐付けSKUと差額をクリア
                     updates['linked_skus'] = None
