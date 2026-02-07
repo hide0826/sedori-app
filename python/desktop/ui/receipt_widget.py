@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox, QTextEdit, QDateEdit, QSpinBox,
     QScrollArea, QSizePolicy, QStyledItemDelegate,
     QSplitter, QListWidget, QListWidgetItem, QMenu,
-    QFormLayout, QApplication,
+    QFormLayout, QApplication, QCheckBox,
 )
 from PySide6.QtCore import Qt, QDate, QThread, Signal, QSettings, QTimer, QUrl
 from PySide6.QtGui import QPixmap, QTransform, QColor, QDesktopServices, QClipboard
@@ -52,6 +52,13 @@ from database.inventory_db import InventoryDatabase
 from database.store_db import StoreDatabase
 from database.account_title_db import AccountTitleDatabase
 from database.product_db import ProductDatabase
+
+# GCSアップロード機能（画像管理タブと同じ動的インポート方式を使用）
+# モジュールレベルではインポートせず、使用時に動的にインポートする
+upload_image_to_gcs = None
+check_gcs_authentication = None
+set_bucket_lifecycle_policy = None
+GCS_AVAILABLE = False
 
 
 class AccountTitleDelegate(QStyledItemDelegate):
@@ -567,6 +574,10 @@ class ReceiptWidget(QWidget):
         self.delete_all_btn.clicked.connect(self.delete_all_receipts)
         action_layout.addWidget(self.delete_all_btn)
         
+        self.gcs_upload_btn = QPushButton("GCSアップロード")
+        self.gcs_upload_btn.clicked.connect(self.show_gcs_upload_dialog)
+        action_layout.addWidget(self.gcs_upload_btn)
+        
         action_layout.addStretch()
         
         self.layout.addWidget(action_group)
@@ -579,10 +590,11 @@ class ReceiptWidget(QWidget):
         self.receipt_table = QTableWidget()
         # 0列目のIDは非表示（内部用）、1列目に種別、2列目に科目、3列目に画像ファイル名
         # 「登録番号」カラムを追加（店舗マスタと同様の登録番号T+13桁）
-        self.receipt_table.setColumnCount(12)
+        # 「画像URL」カラムを追加（SKUの右、GCSアップロード時のURLを表示）
+        self.receipt_table.setColumnCount(13)
         self.receipt_table.setHorizontalHeaderLabels([
             "ID(内部)", "種別", "科目", "画像ファイル名", "日付",
-            "店舗名", "電話番号", "合計", "差額", "店舗コード", "登録番号", "SKU"
+            "店舗名", "電話番号", "合計", "差額", "店舗コード", "登録番号", "SKU", "画像URL"
         ])
         self.receipt_table.horizontalHeader().setStretchLastSection(True)
         self.receipt_table.itemDoubleClicked.connect(self.on_receipt_double_clicked)
@@ -2146,6 +2158,23 @@ class ReceiptWidget(QWidget):
                 linked_skus = [sku.strip() for sku in linked_skus_text.split(',') if sku.strip()] if linked_skus_text else []
                 sku_display = ', '.join(linked_skus) if linked_skus else ''
                 self.receipt_table.setItem(row, 11, QTableWidgetItem(sku_display))
+                
+                # 画像URL（12列目）- GCSアップロード時のURLを表示
+                gcs_url = receipt.get('gcs_url') or receipt.get('image_url') or ''
+                image_url_item = QTableWidgetItem(gcs_url)
+                if gcs_url:
+                    image_url_item.setToolTip(f"画像URL: {gcs_url}\n（ダブルクリックでブラウザ表示）")
+                    # URLのスタイル設定（画像URL列と同じ）
+                    image_url_item.setForeground(Qt.white)
+                    font = image_url_item.font()
+                    font.setUnderline(True)
+                    image_url_item.setFont(font)
+                    # 編集不可にする
+                    image_url_item.setFlags(image_url_item.flags() & ~Qt.ItemIsEditable)
+                else:
+                    image_url_item.setFlags(image_url_item.flags() & ~Qt.ItemIsEditable)
+                self.receipt_table.setItem(row, 12, image_url_item)
+                
                 receipt_row += 1
 
             # 保証書用テーブル: 種別=保証書のみ
@@ -2167,7 +2196,13 @@ class ReceiptWidget(QWidget):
                 store_item.setData(Qt.UserRole, store_code)
                 self.warranty_table.setItem(row, 6, store_item)
                 # SKU・商品名はプルダウンで候補をセット
-                sku = receipt.get('sku') or ""
+                # 複数SKUが紐付けられている場合は、linked_skusから取得（カンマ区切り）
+                linked_skus_text = receipt.get('linked_skus', '') or ''
+                if linked_skus_text:
+                    linked_skus = [sku.strip() for sku in linked_skus_text.split(',') if sku.strip()]
+                    sku = ', '.join(linked_skus) if linked_skus else (receipt.get('sku') or "")
+                else:
+                    sku = receipt.get('sku') or ""
                 product_name = receipt.get('product_name') or ""
                 self._populate_warranty_product_cell(row, receipt, sku, product_name)
 
@@ -2317,6 +2352,324 @@ class ReceiptWidget(QWidget):
         self.refresh_receipt_list()
         QMessageBox.information(self, "削除完了", f"{deleted} 件の保証書を削除しました。")
 
+    def _load_gcs_uploader(self):
+        """GCSアップロードユーティリティを動的に読み込む（画像管理タブと同じ方式）"""
+        import sys
+        import os
+        import importlib.util
+        
+        # python/utils/gcs_uploader.py へのパスを追加
+        # このファイルは python/desktop/ui/ 配下なので、2つ上の python/ をsys.pathに追加する
+        current_file_dir = os.path.dirname(os.path.abspath(__file__))
+        python_dir = os.path.abspath(os.path.join(current_file_dir, '..', '..'))
+        
+        # パス候補を複数試す（PyInstaller等で__file__が期待通りでない場合に対応）
+        candidate_paths = [
+            python_dir,  # 通常の開発環境
+            os.path.join(python_dir, 'python'),  # プロジェクトルートから実行している場合
+        ]
+        
+        # 実際にutils/gcs_uploader.pyが存在するパスを探す
+        found_path = None
+        for candidate in candidate_paths:
+            gcs_uploader_path = os.path.join(candidate, 'utils', 'gcs_uploader.py')
+            if os.path.exists(gcs_uploader_path):
+                found_path = candidate
+                break
+        
+        if found_path:
+            # sys.pathの先頭を強制的にfound_pathに設定（他のコードが先頭を書き換えても確実にインポートできるように）
+            # 既に存在する場合は削除してから先頭に追加
+            if found_path in sys.path:
+                sys.path.remove(found_path)
+            sys.path.insert(0, found_path)
+            
+            # importlibを使って動的にモジュールを読み込む
+            gcs_uploader_file = os.path.join(found_path, 'utils', 'gcs_uploader.py')
+            if os.path.exists(gcs_uploader_file):
+                spec = importlib.util.spec_from_file_location("gcs_uploader", gcs_uploader_file)
+                gcs_uploader_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(gcs_uploader_module)
+                return (
+                    gcs_uploader_module.upload_image_to_gcs,
+                    gcs_uploader_module.check_gcs_authentication,
+                    getattr(gcs_uploader_module, 'set_bucket_lifecycle_policy', None),
+                    gcs_uploader_module.GCS_AVAILABLE
+                )
+            else:
+                raise ImportError(f"gcs_uploader.py not found at {gcs_uploader_file}")
+        else:
+            # フォールバック: 通常のインポートを試す
+            from utils.gcs_uploader import upload_image_to_gcs, check_gcs_authentication, GCS_AVAILABLE
+            set_bucket_lifecycle_policy = getattr(__import__('utils.gcs_uploader', fromlist=['set_bucket_lifecycle_policy']), 'set_bucket_lifecycle_policy', None)
+            return upload_image_to_gcs, check_gcs_authentication, set_bucket_lifecycle_policy, GCS_AVAILABLE
+
+    def show_gcs_upload_dialog(self):
+        """GCSアップロードダイアログを表示"""
+        # GCSアップロードユーティリティを動的に読み込む（画像管理タブと同じ方式）
+        try:
+            upload_func, auth_func, lifecycle_func, gcs_available = self._load_gcs_uploader()
+        except Exception as e:
+            import sys
+            error_msg = (
+                f"GCSアップロード機能の読み込みに失敗しました:\n\n{str(e)}\n\n"
+                f"Python実行環境: {sys.executable}\n\n"
+                "インストール方法:\n"
+                f"  {sys.executable} -m pip install google-cloud-storage\n\n"
+                "または、requirements.txtからインストール:\n"
+                "  pip install -r requirements.txt"
+            )
+            QMessageBox.warning(self, "GCSアップロード", error_msg)
+            return
+        
+        if not gcs_available:
+            import sys
+            error_msg = (
+                "google-cloud-storageがインストールされていません。\n\n"
+                f"Python実行環境: {sys.executable}\n\n"
+                "インストール方法:\n"
+                f"  {sys.executable} -m pip install google-cloud-storage\n\n"
+                "または、requirements.txtからインストール:\n"
+                "  pip install -r requirements.txt"
+            )
+            QMessageBox.warning(self, "GCSアップロード", error_msg)
+            return
+        
+        # 認証確認
+        auth_success, auth_error = auth_func()
+        if not auth_success:
+            QMessageBox.warning(
+                self, "GCS認証エラー",
+                f"GCS認証に失敗しました:\n{auth_error}"
+            )
+            return
+        
+        # グローバル変数に保存（後で使用するため）
+        global upload_image_to_gcs, check_gcs_authentication, set_bucket_lifecycle_policy, GCS_AVAILABLE
+        upload_image_to_gcs = upload_func
+        check_gcs_authentication = auth_func
+        set_bucket_lifecycle_policy = lifecycle_func
+        GCS_AVAILABLE = gcs_available
+        
+        # ライフサイクル管理ポリシー選択ダイアログ
+        dialog = QDialog(self)
+        dialog.setWindowTitle("GCSアップロード設定")
+        dialog.resize(600, 400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # 説明
+        info_label = QLabel(
+            "レシート一覧の全件をGCSにアップロードします。\n"
+            "電子帳簿保存法に対応するため、10年間保存する前提でライフサイクル管理ポリシーを設定します。"
+        )
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        # ライフサイクル管理ポリシー選択
+        policy_group = QGroupBox("ライフサイクル管理ポリシー")
+        policy_layout = QFormLayout(policy_group)
+        
+        # 1年目
+        year1_combo = QComboBox()
+        year1_combo.addItems(["STANDARD", "COLDLINE", "ARCHIVE"])
+        year1_combo.setCurrentText("STANDARD")
+        policy_layout.addRow("1年目:", year1_combo)
+        
+        # 2年目～7年目
+        year2_7_combo = QComboBox()
+        year2_7_combo.addItems(["STANDARD", "COLDLINE", "ARCHIVE"])
+        year2_7_combo.setCurrentText("COLDLINE")
+        policy_layout.addRow("2年目～7年目:", year2_7_combo)
+        
+        # 8年目～10年目
+        year8_10_combo = QComboBox()
+        year8_10_combo.addItems(["STANDARD", "COLDLINE", "ARCHIVE"])
+        year8_10_combo.setCurrentText("ARCHIVE")
+        policy_layout.addRow("8年目～10年目:", year8_10_combo)
+        
+        layout.addWidget(policy_group)
+        
+        # デフォルトポリシー説明
+        default_info = QLabel(
+            "デフォルトポリシー:\n"
+            "・1年経過後: COLDLINEへ移行\n"
+            "・7年経過後: ARCHIVEへ移行\n"
+            "・10年経過後: 自動削除（任意）"
+        )
+        default_info.setWordWrap(True)
+        default_info.setStyleSheet("color: #888; font-size: 10px;")
+        layout.addWidget(default_info)
+        
+        # ライフサイクル管理ポリシーをバケットに設定するか
+        set_lifecycle_checkbox = QCheckBox("バケットのライフサイクル管理ポリシーを設定する")
+        set_lifecycle_checkbox.setChecked(True)
+        set_lifecycle_checkbox.setStyleSheet("QCheckBox { color: #000000; font-size: 11px; }")
+        layout.addWidget(set_lifecycle_checkbox)
+        
+        # 10年後の自動削除
+        auto_delete_checkbox = QCheckBox("10年経過後に自動削除する（任意）")
+        auto_delete_checkbox.setChecked(False)
+        auto_delete_checkbox.setStyleSheet("QCheckBox { color: #000000; font-size: 11px; }")
+        auto_delete_checkbox.setToolTip("10年経過後にGCS上のファイルを自動削除するかどうかを設定します")
+        layout.addWidget(auto_delete_checkbox)
+        
+        # ボタン
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        if dialog.exec() == QDialog.Accepted:
+            # 選択されたポリシーを取得
+            year1_storage = year1_combo.currentText()
+            year2_7_storage = year2_7_combo.currentText()
+            year8_10_storage = year8_10_combo.currentText()
+            set_lifecycle = set_lifecycle_checkbox.isChecked()
+            enable_auto_delete = auto_delete_checkbox.isChecked()
+            
+            # バケットのライフサイクル管理ポリシーを設定
+            if set_lifecycle:
+                # ライフサイクル管理ポリシー設定関数を動的に読み込む
+                try:
+                    _, _, lifecycle_func, _ = self._load_gcs_uploader()
+                    if lifecycle_func:
+                        success = lifecycle_func(
+                            year1_storage=year1_storage,
+                            year2_7_storage=year2_7_storage,
+                            year8_10_storage=year8_10_storage,
+                            enable_auto_delete=enable_auto_delete
+                        )
+                        if not success:
+                            QMessageBox.warning(
+                                self, "警告",
+                                "バケットのライフサイクル管理ポリシーの設定に失敗しました。\n"
+                                "アップロードは続行しますが、手動で設定してください。"
+                            )
+                    else:
+                        QMessageBox.warning(
+                            self, "警告",
+                            "ライフサイクル管理ポリシー設定機能が利用できません。\n"
+                            "アップロードは続行しますが、手動で設定してください。"
+                        )
+                except Exception as e:
+                    QMessageBox.warning(
+                        self, "警告",
+                        f"バケットのライフサイクル管理ポリシーの設定中にエラーが発生しました:\n{str(e)}\n"
+                        "アップロードは続行しますが、手動で設定してください。"
+                    )
+            
+            # アップロード実行
+            self.upload_receipts_to_gcs(year1_storage, year2_7_storage, year8_10_storage)
+    
+    def upload_receipts_to_gcs(self, year1_storage: str, year2_7_storage: str, year8_10_storage: str):
+        """レシート一覧の全件をGCSにアップロード"""
+        from PySide6.QtWidgets import QProgressDialog
+        
+        # 全レシートを取得
+        receipts = self.receipt_db.find_by_date_and_store(None)
+        if not receipts:
+            QMessageBox.information(self, "GCSアップロード", "アップロードするレシートがありません。")
+            return
+        
+        # 確認ダイアログ
+        reply = QMessageBox.question(
+            self,
+            "GCSアップロード",
+            f"{len(receipts)} 件のレシートをGCSにアップロードします。\n"
+            f"ライフサイクル管理ポリシー:\n"
+            f"・1年目: {year1_storage}\n"
+            f"・2年目～7年目: {year2_7_storage}\n"
+            f"・8年目～10年目: {year8_10_storage}\n\n"
+            f"続行しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        
+        # プログレスダイアログ
+        progress = QProgressDialog("GCSアップロード中...", "キャンセル", 0, len(receipts), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+        
+        uploaded_count = 0
+        skipped_count = 0
+        error_count = 0
+        error_messages = []
+        
+        for i, receipt in enumerate(receipts):
+            if progress.wasCanceled():
+                break
+            
+            progress.setValue(i)
+            progress.setLabelText(f"アップロード中: {receipt.get('id', '不明')} ({i+1}/{len(receipts)})")
+            QApplication.processEvents()
+            
+            try:
+                receipt_id = receipt.get('id')
+                
+                # ファイルパスを取得
+                file_path = receipt.get('original_file_path') or receipt.get('file_path', '')
+                if not file_path:
+                    skipped_count += 1
+                    error_messages.append(f"レシートID {receipt_id}: ファイルパスが設定されていません")
+                    continue
+                
+                file_path_obj = Path(file_path)
+                if not file_path_obj.exists():
+                    skipped_count += 1
+                    error_messages.append(f"レシートID {receipt_id}: ファイルが見つかりません: {file_path}")
+                    continue
+                
+                # ストレージクラスを決定（現在は1年目のストレージクラスを使用）
+                # 実際のライフサイクル管理はバケットのライフサイクル管理ポリシーで行う
+                storage_class = year1_storage
+                
+                # GCSにアップロード
+                try:
+                    # GCSアップロード関数を動的に読み込む
+                    upload_func, _, _, _ = self._load_gcs_uploader()
+                    
+                    # レシート用のパスを生成（receipts/プレフィックス）
+                    destination_blob_name = f"receipts/{file_path_obj.name}"
+                    public_url = upload_func(
+                        str(file_path_obj),
+                        destination_blob_name=destination_blob_name,
+                        storage_class=storage_class
+                    )
+                    
+                    # データベースにGCS URLを保存
+                    self.receipt_db.update_receipt(receipt_id, {"gcs_url": public_url})
+                    uploaded_count += 1
+                except Exception as e:
+                    error_count += 1
+                    error_messages.append(f"レシートID {receipt_id}: アップロードエラー: {str(e)}")
+                    continue
+                    
+            except Exception as e:
+                error_count += 1
+                error_messages.append(f"レシートID {receipt.get('id', '不明')}: 処理エラー: {str(e)}")
+                continue
+        
+        progress.setValue(len(receipts))
+        
+        # 結果を表示
+        result_message = f"GCSアップロード完了\n\n"
+        result_message += f"アップロード成功: {uploaded_count} 件\n"
+        result_message += f"スキップ: {skipped_count} 件\n"
+        result_message += f"エラー: {error_count} 件"
+        
+        if error_messages:
+            result_message += f"\n\nエラー詳細:\n" + "\n".join(error_messages[:10])
+            if len(error_messages) > 10:
+                result_message += f"\n... 他 {len(error_messages) - 10} 件"
+        
+        QMessageBox.information(self, "GCSアップロード", result_message)
+        
+        # レシート一覧を更新
+        self.refresh_receipt_list()
+    
     def delete_all_receipts(self):
         """レシートを全件削除（テスト用途）"""
         if QMessageBox.warning(
@@ -2825,6 +3178,33 @@ class ReceiptWidget(QWidget):
                 
                 old_image_file = Path(file_path)
                 if not old_image_file.exists():
+                    # ファイルが見つからない場合、既にリネームされている可能性がある
+                    # 同じディレクトリ内で新しいファイル名パターンに一致するファイルを検索
+                    directory = old_image_file.parent
+                    if directory.exists():
+                        # 新しいファイル名パターンを生成（連番は1から試行）
+                        extension = old_image_file.suffix or '.jpg'
+                        found_file = None
+                        for seq in range(1, 100):  # 最大99まで試行
+                            if doc_type == "保証書":
+                                search_pattern = f"{date_str}-war-{store_code_clean}-{seq:02d}{extension}"
+                            else:
+                                search_pattern = f"{date_str}-{store_code_clean}-{seq:02d}{extension}"
+                            candidate_file = directory / search_pattern
+                            if candidate_file.exists():
+                                found_file = candidate_file
+                                break
+                        
+                        if found_file:
+                            # 既にリネームされたファイルが見つかった場合、データベースを更新
+                            update_data = {"file_path": str(found_file)}
+                            if receipt.get('original_file_path'):
+                                update_data["original_file_path"] = str(found_file)
+                            self.receipt_db.update_receipt(receipt_id, update_data)
+                            renamed_count += 1
+                            continue
+                    
+                    # ファイルが見つからず、既にリネームされたファイルも見つからない場合
                     skipped_count += 1
                     error_messages.append(f"{doc_type}ID {receipt_id}: 画像ファイルが見つかりません: {file_path}")
                     continue
@@ -2857,36 +3237,32 @@ class ReceiptWidget(QWidget):
                     
                     # 元のファイルパスも更新（original_file_pathがある場合）
                     original_file_path = receipt.get('original_file_path')
-                    if original_file_path and original_file_path != file_path:
+                    update_data = {"file_path": str(new_image_path)}
+                    
+                    if original_file_path:
                         original_file = Path(original_file_path)
-                        if original_file.exists():
+                        if original_file.exists() and original_file != old_image_file:
+                            # original_file_pathが存在し、file_pathと異なる場合は別途リネーム
                             new_original_path = original_file.parent / new_image_name
                             if new_original_path != original_file:
                                 try:
                                     shutil.move(str(original_file), str(new_original_path))
-                                    # DBを更新
-                                    self.receipt_db.update_receipt(receipt_id, {
-                                        "file_path": str(new_image_path),
-                                        "original_file_path": str(new_original_path)
-                                    })
+                                    update_data["original_file_path"] = str(new_original_path)
                                 except Exception:
-                                    # 元のファイルのリネーム失敗は警告のみ
-                                    self.receipt_db.update_receipt(receipt_id, {
-                                        "file_path": str(new_image_path)
-                                    })
-                            else:
-                                self.receipt_db.update_receipt(receipt_id, {
-                                    "file_path": str(new_image_path)
-                                })
+                                    # 元のファイルのリネーム失敗は警告のみ（file_pathは更新済み）
+                                    pass
+                        elif original_file == old_image_file:
+                            # original_file_pathとfile_pathが同じ場合は、同じ新しいパスに更新
+                            update_data["original_file_path"] = str(new_image_path)
                         else:
-                            self.receipt_db.update_receipt(receipt_id, {
-                                "file_path": str(new_image_path)
-                            })
+                            # original_file_pathが存在しない場合は、file_pathと同じ新しいパスに更新
+                            update_data["original_file_path"] = str(new_image_path)
                     else:
-                        # DBを更新
-                        self.receipt_db.update_receipt(receipt_id, {
-                            "file_path": str(new_image_path)
-                        })
+                        # original_file_pathが存在しない場合は、file_pathと同じ新しいパスに設定
+                        update_data["original_file_path"] = str(new_image_path)
+                    
+                    # DBを更新（file_pathとoriginal_file_pathの両方を更新）
+                    self.receipt_db.update_receipt(receipt_id, update_data)
                     
                     renamed_count += 1
                 except Exception as e:
@@ -2916,6 +3292,151 @@ class ReceiptWidget(QWidget):
                 result_message += f"\n... 他 {len(error_messages) - 10} 件"
         
         QMessageBox.information(self, "一括リネーム", result_message)
+        
+        # リネーム済みファイルを検出してデータベースを更新（スキップされたファイルがある場合）
+        if skipped_count > 0:
+            reply = QMessageBox.question(
+                self,
+                "リネーム済みファイルの検出",
+                f"{skipped_count} 件のファイルが見つかりませんでした。\n"
+                f"既にリネームされたファイルを検出してデータベースを更新しますか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                self.detect_and_update_renamed_files()
+        
+        # レシート一覧を更新
+        self.refresh_receipt_list()
+    
+    def detect_and_update_renamed_files(self):
+        """リネーム済みファイルを検出してデータベースを更新"""
+        from pathlib import Path
+        import re
+        
+        # 全レシートを取得
+        receipts = self.receipt_db.find_by_date_and_store(None)
+        if not receipts:
+            QMessageBox.information(self, "リネーム済みファイル検出", "対象のレシートがありません。")
+            return
+        
+        updated_count = 0
+        not_found_count = 0
+        error_count = 0
+        error_messages = []
+        
+        for receipt in receipts:
+            try:
+                receipt_id = receipt.get('id')
+                
+                # 種別判定
+                ocr_text = receipt.get('ocr_text') or ""
+                doc_type = "レシート"
+                if "保証書" in ocr_text or "保証期間" in ocr_text or "保証規定" in ocr_text:
+                    doc_type = "保証書"
+                
+                # 日付を取得
+                purchase_date = receipt.get('purchase_date') or ""
+                if not purchase_date:
+                    continue
+                
+                # 日付を yyyy-mm-dd 形式に正規化
+                date_str = purchase_date.strip()
+                if " " in date_str:
+                    date_str = date_str.split(" ")[0]
+                date_str = date_str.replace("/", "-")
+                try:
+                    if "/" in date_str:
+                        date_parts = date_str.split("/")
+                        if len(date_parts) == 3:
+                            date_str = f"{date_parts[0]}-{date_parts[1].zfill(2)}-{date_parts[2].zfill(2)}"
+                    elif "-" in date_str:
+                        date_parts = date_str.split("-")
+                        if len(date_parts) == 3:
+                            date_str = f"{date_parts[0]}-{date_parts[1].zfill(2)}-{date_parts[2].zfill(2)}"
+                    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
+                        continue
+                except Exception:
+                    continue
+                
+                # 店舗コードを取得
+                store_code = receipt.get('store_code') or ""
+                if not store_code:
+                    continue
+                
+                store_code_clean = str(store_code).strip()
+                if " " in store_code_clean:
+                    store_code_clean = store_code_clean.split(" ")[0]
+                
+                if not store_code_clean:
+                    continue
+                
+                # 現在のファイルパスを取得
+                file_path = receipt.get('original_file_path') or receipt.get('file_path', '')
+                if not file_path:
+                    continue
+                
+                old_image_file = Path(file_path)
+                
+                # ファイルが存在する場合はスキップ（既に正しいパス）
+                if old_image_file.exists():
+                    continue
+                
+                # 同じディレクトリ内でリネーム済みファイルを検索
+                directory = old_image_file.parent
+                if not directory.exists():
+                    not_found_count += 1
+                    continue
+                
+                # 新しいファイル名パターンで検索
+                extension = old_image_file.suffix or '.jpg'
+                found_file = None
+                
+                # 連番1から99まで試行
+                for seq in range(1, 100):
+                    if doc_type == "保証書":
+                        search_pattern = f"{date_str}-war-{store_code_clean}-{seq:02d}{extension}"
+                    else:
+                        search_pattern = f"{date_str}-{store_code_clean}-{seq:02d}{extension}"
+                    candidate_file = directory / search_pattern
+                    if candidate_file.exists():
+                        found_file = candidate_file
+                        break
+                
+                if found_file:
+                    # リネーム済みファイルが見つかった場合、データベースを更新
+                    update_data = {"file_path": str(found_file)}
+                    if receipt.get('original_file_path'):
+                        update_data["original_file_path"] = str(found_file)
+                    self.receipt_db.update_receipt(receipt_id, update_data)
+                    updated_count += 1
+                else:
+                    not_found_count += 1
+                    error_messages.append(f"{doc_type}ID {receipt_id}: リネーム済みファイルが見つかりません")
+                    
+            except Exception as e:
+                error_count += 1
+                doc_type_fallback = receipt.get('ocr_text', '')
+                if "保証書" in doc_type_fallback or "保証期間" in doc_type_fallback or "保証規定" in doc_type_fallback:
+                    doc_type_fallback = "保証書"
+                else:
+                    doc_type_fallback = "レシート"
+                error_messages.append(f"{doc_type_fallback}ID {receipt.get('id', '不明')}: 処理エラー: {str(e)}")
+                continue
+        
+        # 結果を表示
+        result_message = f"リネーム済みファイル検出完了\n\n"
+        result_message += f"データベース更新: {updated_count} 件\n"
+        result_message += f"見つからなかった: {not_found_count} 件\n"
+        result_message += f"エラー: {error_count} 件"
+        
+        if error_messages and len(error_messages) <= 10:
+            result_message += f"\n\n詳細:\n" + "\n".join(error_messages)
+        elif error_messages:
+            result_message += f"\n\n詳細:\n" + "\n".join(error_messages[:10])
+            result_message += f"\n... 他 {len(error_messages) - 10} 件"
+        
+        QMessageBox.information(self, "リネーム済みファイル検出", result_message)
         
         # レシート一覧を更新
         self.refresh_receipt_list()
@@ -3136,8 +3657,23 @@ class ReceiptWidget(QWidget):
         self.process_image(image_path)
     
     def on_receipt_double_clicked(self, item: QTableWidgetItem):
-        """レシート一覧のダブルクリック動作を制御（詳細編集を開く）"""
-        # すべての列で詳細編集を開く
+        """レシート一覧のダブルクリック動作を制御（詳細編集を開く、または画像URLを開く）"""
+        row = item.row()
+        col = item.column()
+        
+        # 画像URL列（12列目）をダブルクリックした場合はブラウザで開く
+        if col == 12:
+            url = item.text().strip()
+            if url:
+                qurl = QUrl(url)
+                if qurl.isValid():
+                    if not QDesktopServices.openUrl(qurl):
+                        QMessageBox.warning(self, "警告", f"ブラウザでURLを開けませんでした:\n{url}")
+                else:
+                    QMessageBox.warning(self, "警告", f"URLが不正です:\n{url}")
+            return
+        
+        # その他の列は詳細編集を開く
         self.load_receipt(item)
 
     def on_warranty_table_context_menu(self, position):
@@ -3158,6 +3694,10 @@ class ReceiptWidget(QWidget):
         copy_action.triggered.connect(lambda: self.copy_warranty_cell(row, item.column()))
         
         menu.addSeparator()
+        
+        # コピーを追加メニュー（同一保証書内に複数SKU・複数保証期間があった場合に保証期間別にDBに紐付ける為）
+        copy_add_action = menu.addAction("コピーを追加")
+        copy_add_action.triggered.connect(lambda: self.copy_add_warranty_row(row))
         
         # 商品の追加メニュー
         add_product_action = menu.addAction("商品の追加")
@@ -3307,6 +3847,210 @@ class ReceiptWidget(QWidget):
         
         # データベースに新しいレシートレコードを作成（永続化のため）
         self.save_warranty_row_to_db(new_row)
+    
+    def copy_add_warranty_row(self, source_row: int):
+        """選択行を完全にコピーして新しい行を追加（同一保証書内に複数SKU・複数保証期間があった場合に保証期間別にDBに紐付ける為）"""
+        if not hasattr(self, 'warranty_table'):
+            return
+        
+        # ID列を取得（receipt_idを取得するため）
+        id_item = self.warranty_table.item(source_row, 0)
+        receipt_id = None
+        if id_item:
+            try:
+                receipt_id = int(id_item.text())
+            except ValueError:
+                pass
+        
+        # receiptデータを取得
+        receipt = None
+        if receipt_id:
+            receipt = self.receipt_db.get_receipt(receipt_id)
+        
+        # 新しい行を追加
+        self.warranty_table.blockSignals(True)
+        new_row = self.warranty_table.rowCount()
+        self.warranty_table.insertRow(new_row)
+        
+        # ID列: 空IDにしておき、最後にsave_warranty_row_to_db()で新しいreceiptレコードを作成してIDを採番する
+        self.warranty_table.setItem(new_row, 0, QTableWidgetItem(""))
+        
+        # 種別（列1）
+        doc_type_item = self.warranty_table.item(source_row, 1)
+        if doc_type_item:
+            self.warranty_table.setItem(new_row, 1, QTableWidgetItem(doc_type_item.text()))
+        
+        # 画像ファイル名（列2）
+        image_item = self.warranty_table.item(source_row, 2)
+        if image_item:
+            self.warranty_table.setItem(new_row, 2, QTableWidgetItem(image_item.text()))
+        
+        # 日付（列3）
+        date_item = self.warranty_table.item(source_row, 3)
+        if date_item:
+            self.warranty_table.setItem(new_row, 3, QTableWidgetItem(date_item.text()))
+        elif receipt:
+            self.warranty_table.setItem(new_row, 3, QTableWidgetItem(receipt.get('purchase_date') or ""))
+        
+        # 店舗名（列4）
+        store_name_item = self.warranty_table.item(source_row, 4)
+        if store_name_item:
+            self.warranty_table.setItem(new_row, 4, QTableWidgetItem(store_name_item.text()))
+        elif receipt:
+            self.warranty_table.setItem(new_row, 4, QTableWidgetItem(receipt.get('store_name_raw') or ""))
+        
+        # 電話番号（列5）
+        phone_item = self.warranty_table.item(source_row, 5)
+        if phone_item:
+            self.warranty_table.setItem(new_row, 5, QTableWidgetItem(phone_item.text()))
+        elif receipt:
+            self.warranty_table.setItem(new_row, 5, QTableWidgetItem(receipt.get('phone_number') or ""))
+        
+        # 店舗コード（列6）
+        store_code_item = self.warranty_table.item(source_row, 6)
+        if store_code_item:
+            store_code = store_code_item.data(Qt.UserRole) or ""
+            store_label = store_code_item.text() or ""
+            store_item = QTableWidgetItem(store_label if store_label else store_code)
+            store_item.setData(Qt.UserRole, store_code)
+            self.warranty_table.setItem(new_row, 6, store_item)
+        elif receipt:
+            store_code_from_receipt = receipt.get('store_code') or ""
+            store_label_from_receipt = self._format_store_code_label(
+                store_code_from_receipt, 
+                receipt.get('store_name_raw') or ""
+            )
+            store_item = QTableWidgetItem(store_label_from_receipt)
+            store_item.setData(Qt.UserRole, store_code_from_receipt)
+            self.warranty_table.setItem(new_row, 6, store_item)
+        
+        # SKU・商品名（列7, 8）: 元の行からコピー
+        sku_item = self.warranty_table.item(source_row, 7)
+        product_item = self.warranty_table.item(source_row, 8)
+        sku_text = sku_item.text() if sku_item else ""
+        product_name_text = product_item.text() if product_item else ""
+        
+        # SKUと商品名をコピーしてプルダウンを設定
+        if receipt:
+            # receipt_dataを更新（SKUと商品名を含める）
+            receipt_data = dict(receipt)
+            receipt_data['sku'] = sku_text
+            receipt_data['product_name'] = product_name_text
+            self._populate_warranty_product_cell(new_row, receipt_data, sku_text, product_name_text)
+        else:
+            # receiptがない場合でも、テーブルのデータから最低限のreceiptオブジェクトを作成
+            date_item = self.warranty_table.item(new_row, 3)
+            store_code_item = self.warranty_table.item(new_row, 6)
+            store_name_item = self.warranty_table.item(new_row, 4)
+            store_code = store_code_item.data(Qt.UserRole) if store_code_item else ""
+            minimal_receipt = {
+                'purchase_date': date_item.text() if date_item else "",
+                'store_code': store_code,
+                'store_name_raw': store_name_item.text() if store_name_item else "",
+                'sku': sku_text,
+                'product_name': product_name_text,
+            }
+            self._populate_warranty_product_cell(new_row, minimal_receipt, sku_text, product_name_text)
+        
+        # 保証期間(日)（列9）: 元の行からコピー
+        days_item = self.warranty_table.item(source_row, 9)
+        if days_item:
+            self.warranty_table.setItem(new_row, 9, QTableWidgetItem(days_item.text()))
+        else:
+            self.warranty_table.setItem(new_row, 9, QTableWidgetItem(""))
+        
+        # 保証最終日（列10）: 元の行からコピー
+        warranty_until_widget = self.warranty_table.cellWidget(source_row, 10)
+        from PySide6.QtWidgets import QDateEdit
+        date_edit = QDateEdit()
+        date_edit.setCalendarPopup(True)
+        
+        if warranty_until_widget and isinstance(warranty_until_widget, QDateEdit):
+            # 元の行の保証最終日をコピー
+            source_date = warranty_until_widget.date()
+            if source_date.isValid():
+                date_edit.setDate(source_date)
+        else:
+            # 元の行に保証最終日がない場合は、日付列から日付を取得してデフォルトに設定
+            date_item = self.warranty_table.item(new_row, 3)
+            if date_item:
+                purchase_date_str = date_item.text().strip().replace("/", "-").split(" ")[0]
+                if purchase_date_str:
+                    try:
+                        from datetime import datetime
+                        qdate = QDate.fromString(purchase_date_str, "yyyy-MM-dd")
+                        if qdate.isValid():
+                            date_edit.setDate(qdate)
+                    except Exception:
+                        pass
+        
+        self.warranty_table.setCellWidget(new_row, 10, date_edit)
+        
+        # 日付変更時の処理を接続
+        date_edit.dateChanged.connect(lambda qd, r=new_row: self.on_warranty_date_changed(r, qd))
+        
+        self.warranty_table.blockSignals(False)
+        
+        # 新しい行を選択状態にする
+        self.warranty_table.selectRow(new_row)
+        
+        # データベースに新しいレシートレコードを作成（永続化のため）
+        self.save_warranty_row_to_db(new_row)
+        
+        # 新しいレシートレコードにSKUと保証期間の情報を保存
+        id_item = self.warranty_table.item(new_row, 0)
+        if id_item:
+            try:
+                new_receipt_id = int(id_item.text())
+                if new_receipt_id:
+                    # SKU情報を取得（カンマ区切りの複数SKUに対応）
+                    sku_item = self.warranty_table.item(new_row, 7)
+                    sku_text = sku_item.text() if sku_item else ""
+                    
+                    # 保証期間(日)を取得
+                    days_item = self.warranty_table.item(new_row, 9)
+                    warranty_days = 0
+                    if days_item and days_item.text():
+                        try:
+                            warranty_days = int(days_item.text())
+                        except ValueError:
+                            pass
+                    
+                    # 保証最終日を取得
+                    warranty_until_widget = self.warranty_table.cellWidget(new_row, 10)
+                    warranty_until_str = None
+                    if warranty_until_widget and isinstance(warranty_until_widget, QDateEdit):
+                        warranty_until = warranty_until_widget.date()
+                        if warranty_until.isValid():
+                            warranty_until_str = warranty_until.toString("yyyy-MM-dd")
+                    
+                    # 商品名を取得
+                    product_item = self.warranty_table.item(new_row, 8)
+                    product_name = product_item.text() if product_item else ""
+                    
+                    # 更新データを準備
+                    updates = {}
+                    if sku_text:
+                        # カンマ区切りのSKUをlinked_skusに保存
+                        linked_skus = [sku.strip() for sku in sku_text.split(',') if sku.strip()]
+                        if linked_skus:
+                            updates['linked_skus'] = ','.join(linked_skus)
+                            # 最初のSKUをskuフィールドにも保存（後方互換性のため）
+                            updates['sku'] = linked_skus[0]
+                    if product_name:
+                        updates['product_name'] = product_name
+                    if warranty_days > 0:
+                        updates['warranty_days'] = warranty_days
+                    if warranty_until_str:
+                        updates['warranty_until'] = warranty_until_str
+                    
+                    # データベースを更新
+                    if updates:
+                        self.receipt_db.update_receipt(new_receipt_id, updates)
+            except (ValueError, Exception) as e:
+                # エラーが発生しても処理を続行
+                print(f"保証書コピー追加時のSKU/保証期間保存エラー: {e}")
+    
     def copy_warranty_cell(self, row: int, col: int):
         """保証書テーブルのセルをクリップボードにコピー"""
         if not hasattr(self, 'warranty_table'):
@@ -4304,16 +5048,18 @@ class ReceiptWidget(QWidget):
                     date_edit.dateChanged.connect(lambda qd, r=table_row: self.on_warranty_date_changed(r, qd))
                     self.warranty_table.setCellWidget(table_row, 10, date_edit)
                 
-                # 紐付けSKUの最初のSKUを保証書一覧のSKU欄に入力
-                if first_sku:
+                # 紐付けSKUを保証書一覧のSKU欄に入力（カンマ区切りで複数表示）
+                if linked_skus:
+                    # すべての紐付けSKUをカンマ区切りで表示
+                    sku_display = ', '.join(linked_skus)
                     # SKU列を更新
                     sku_item = self.warranty_table.item(table_row, 7)
                     if sku_item:
-                        sku_item.setText(first_sku)
+                        sku_item.setText(sku_display)
                     else:
-                        self.warranty_table.setItem(table_row, 7, QTableWidgetItem(first_sku))
+                        self.warranty_table.setItem(table_row, 7, QTableWidgetItem(sku_display))
                     
-                    # 商品名列を更新
+                    # 商品名列を更新（最初のSKUの商品名を表示）
                     product_item = self.warranty_table.item(table_row, 8)
                     if product_item:
                         product_item.setText(product_name)
@@ -4325,9 +5071,10 @@ class ReceiptWidget(QWidget):
                     if receipt_data:
                         # receipt_dataを更新（SKUと商品名を含める）
                         receipt_data = dict(receipt_data)
-                        receipt_data['sku'] = first_sku
+                        # 表示用にカンマ区切りのSKUを設定
+                        receipt_data['sku'] = sku_display
                         receipt_data['product_name'] = product_name
-                        self._populate_warranty_product_cell(table_row, receipt_data, first_sku, product_name)
+                        self._populate_warranty_product_cell(table_row, receipt_data, sku_display, product_name)
                 
                 self.warranty_table.blockSignals(False)
             

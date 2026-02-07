@@ -23,10 +23,10 @@ KEY_PATH = r"D:\HIRIO\repo\sedori-app.github\python\desktop\data\credentials\ser
 try:
     from google.cloud import storage
     GCS_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     storage = None
     GCS_AVAILABLE = False
-    logger.warning("google-cloud-storage is not installed. GCS upload functionality will be disabled.")
+    logger.warning(f"google-cloud-storage is not installed. GCS upload functionality will be disabled. Error: {e}")
 
 
 def _get_content_type(file_path: str) -> str:
@@ -100,7 +100,8 @@ def check_gcs_authentication() -> tuple:
 
 def upload_image_to_gcs(
     source_file_path: str,
-    destination_blob_name: Optional[str] = None
+    destination_blob_name: Optional[str] = None,
+    storage_class: Optional[str] = None
 ) -> str:
     """
     画像ファイルをGCSにアップロードし、公開URLを取得する
@@ -108,6 +109,7 @@ def upload_image_to_gcs(
     Args:
         source_file_path: アップロードする画像ファイルのパス
         destination_blob_name: GCS上の保存先パス（指定しない場合は自動生成）
+        storage_class: ストレージクラス（STANDARD, COLDLINE, ARCHIVE など。Noneの場合はSTANDARD）
         
     Returns:
         公開URL（https://storage.googleapis.com/{BUCKET_NAME}/{destination_blob_name}）
@@ -216,8 +218,12 @@ def upload_image_to_gcs(
         content_type = _get_content_type(source_file_path)
         blob.content_type = content_type
         
+        # ストレージクラスの設定（指定がある場合）
+        if storage_class:
+            blob.storage_class = storage_class
+        
         # ファイルのアップロード
-        logger.info(f"Uploading {source_file_path} to gs://{BUCKET_NAME}/{destination_blob_name}")
+        logger.info(f"Uploading {source_file_path} to gs://{BUCKET_NAME}/{destination_blob_name} (storage_class: {storage_class or 'STANDARD'})")
         blob.upload_from_filename(str(source_path))
         
         # 公開URLの生成
@@ -308,6 +314,106 @@ def find_existing_public_url_for_local_file(
     except Exception as e:
         logger.warning(f"Failed to find existing blob for {source_file_path}: {e}")
         return None
+
+
+def set_bucket_lifecycle_policy(
+    year1_storage: str = "STANDARD",
+    year2_7_storage: str = "COLDLINE",
+    year8_10_storage: str = "ARCHIVE",
+    enable_auto_delete: bool = False
+) -> bool:
+    """
+    バケットのライフサイクル管理ポリシーを設定する
+    
+    Args:
+        year1_storage: 1年目のストレージクラス（STANDARD, COLDLINE, ARCHIVE）
+        year2_7_storage: 2年目～7年目のストレージクラス
+        year8_10_storage: 8年目～10年目のストレージクラス
+        enable_auto_delete: 10年経過後の自動削除を有効にするか
+    
+    Returns:
+        成功した場合True、失敗した場合False
+    """
+    if not GCS_AVAILABLE:
+        logger.error("google-cloud-storage is not installed")
+        return False
+    
+    key_path = Path(KEY_PATH)
+    if not key_path.exists():
+        logger.error(f"Service account key file not found: {KEY_PATH}")
+        return False
+    
+    try:
+        client = storage.Client.from_service_account_json(str(key_path))
+        bucket = client.bucket(BUCKET_NAME)
+        bucket.reload()
+        
+        # ライフサイクル管理ルールを構築
+        rules = []
+        
+        # 1年経過後: year1_storage → year2_7_storage へ移行
+        if year1_storage != year2_7_storage:
+            rules.append({
+                "action": {"type": "SetStorageClass", "storageClass": year2_7_storage},
+                "condition": {"age": 365}  # 1年 = 365日
+            })
+        
+        # 7年経過後: year2_7_storage → year8_10_storage へ移行
+        if year2_7_storage != year8_10_storage:
+            rules.append({
+                "action": {"type": "SetStorageClass", "storageClass": year8_10_storage},
+                "condition": {"age": 2555}  # 7年 = 2555日
+            })
+        
+        # 10年経過後: 自動削除（オプション）
+        if enable_auto_delete:
+            rules.append({
+                "action": {"type": "Delete"},
+                "condition": {"age": 3650}  # 10年 = 3650日
+            })
+        
+        # バケットのライフサイクル管理ポリシーを設定
+        if rules:
+            try:
+                from google.cloud.storage.bucket import LifecycleConfiguration
+                lifecycle = LifecycleConfiguration()
+                
+                # 各ルールを追加
+                for rule in rules:
+                    action_type = rule["action"]["type"]
+                    if action_type == "SetStorageClass":
+                        storage_class = rule["action"]["storageClass"]
+                        age = rule["condition"]["age"]
+                        lifecycle.add_lifecycle_set_storage_class_rule(age=age, storage_class=storage_class)
+                    elif action_type == "Delete":
+                        age = rule["condition"]["age"]
+                        lifecycle.add_lifecycle_delete_rule(age=age)
+                
+                bucket.lifecycle = lifecycle
+                bucket.update()
+                logger.info(f"Lifecycle policy set: {len(rules)} rules")
+                return True
+            except ImportError:
+                # LifecycleConfigurationが利用できない場合は、直接辞書形式で設定を試行
+                try:
+                    lifecycle_dict = {"rule": rules}
+                    bucket.lifecycle = lifecycle_dict
+                    bucket.update()
+                    logger.info(f"Lifecycle policy set (dict format): {len(rules)} rules")
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to set lifecycle policy (dict format): {e}")
+                    return False
+            except Exception as e:
+                logger.error(f"Failed to set lifecycle policy: {e}", exc_info=True)
+                return False
+        else:
+            logger.warning("No lifecycle rules to set")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Failed to set lifecycle policy: {e}", exc_info=True)
+        return False
 
 
 if __name__ == "__main__":
