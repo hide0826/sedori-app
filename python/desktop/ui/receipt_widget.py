@@ -52,6 +52,7 @@ from database.inventory_db import InventoryDatabase
 from database.store_db import StoreDatabase
 from database.account_title_db import AccountTitleDatabase
 from database.product_db import ProductDatabase
+from database.route_db import RouteDatabase
 
 # GCSアップロード機能（画像管理タブと同じ動的インポート方式を使用）
 # モジュールレベルではインポートせず、使用時に動的にインポートする
@@ -273,6 +274,120 @@ class WarrantyProductDelegate(QStyledItemDelegate):
             self.receipt_db.update_receipt(receipt_id, update_data)
 
 
+class ReceiptSnapshotDialog(QDialog):
+    """レシートスナップショットの一覧から選択して読込するダイアログ"""
+    
+    def __init__(self, snapshot_dir: Path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("レシートスナップショット読込")
+        self.resize(720, 420)
+        self.snapshot_dir = snapshot_dir
+        self._selected_file_path = None
+        
+        layout = QVBoxLayout(self)
+        
+        # 説明ラベル
+        info_label = QLabel("読み込むスナップショットを選択してください:")
+        layout.addWidget(info_label)
+        
+        # 一覧テーブル
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["保存名", "ルート名", "保存日時"])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setStretchLastSection(True)
+        layout.addWidget(self.table)
+        
+        # ボタン
+        btns = QDialogButtonBox()
+        self.load_btn = QPushButton("OK")
+        self.cancel_btn = QPushButton("Cancel")
+        btns.addButton(self.load_btn, QDialogButtonBox.AcceptRole)
+        btns.addButton(self.cancel_btn, QDialogButtonBox.RejectRole)
+        layout.addWidget(btns)
+        
+        self.load_btn.clicked.connect(self._on_load)
+        self.cancel_btn.clicked.connect(self.reject)
+        
+        self._reload()
+    
+    def _reload(self):
+        """一覧を再読み込み"""
+        try:
+            if not self.snapshot_dir or not self.snapshot_dir.exists():
+                self.table.setRowCount(0)
+                return
+            
+            snapshot_files = sorted(
+                self.snapshot_dir.glob("*.json"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True
+            )
+            
+            self.table.setRowCount(len(snapshot_files))
+            for i, file_path in enumerate(snapshot_files):
+                try:
+                    # JSONファイルから情報を読み込む
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        payload = json.load(f)
+                    
+                    saved_at = payload.get("saved_at", "不明な日時")
+                    route_name = payload.get("route_name", "不明")
+                    route_date = payload.get("route_date", "")
+                    
+                    # 保存名（ファイル名から拡張子を除いたもの）
+                    snapshot_name = file_path.stem
+                    # 日付とルート名を組み合わせて表示名を作成
+                    if route_date and route_name:
+                        display_name = f"{route_date} {route_name}"
+                    else:
+                        display_name = snapshot_name
+                    
+                    self.table.setItem(i, 0, QTableWidgetItem(display_name))
+                    self.table.setItem(i, 1, QTableWidgetItem(route_name))
+                    self.table.setItem(i, 2, QTableWidgetItem(saved_at))
+                    
+                    # ファイルパスをUserRoleとして保存
+                    self.table.item(i, 0).setData(Qt.UserRole, str(file_path))
+                except Exception as e:
+                    # 読み込みエラーの場合はファイル名のみ表示
+                    self.table.setItem(i, 0, QTableWidgetItem(file_path.stem))
+                    self.table.setItem(i, 1, QTableWidgetItem("読み込みエラー"))
+                    self.table.setItem(i, 2, QTableWidgetItem(""))
+                    self.table.item(i, 0).setData(Qt.UserRole, str(file_path))
+            
+            self.table.resizeColumnsToContents()
+        except Exception as e:
+            QMessageBox.warning(self, "エラー", f"一覧の読み込みに失敗しました:\n{str(e)}")
+    
+    def _get_selected_file_path(self):
+        """選択されている行のファイルパスを取得"""
+        sel = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        if not sel:
+            return None
+        r = sel[0].row()
+        item = self.table.item(r, 0)
+        if item:
+            return item.data(Qt.UserRole)
+        return None
+    
+    def _on_load(self):
+        """読み込みボタンクリック"""
+        file_path = self._get_selected_file_path()
+        if not file_path:
+            QMessageBox.information(self, "情報", "読み込むスナップショットを選択してください")
+            return
+        self._selected_file_path = file_path
+        self.accept()
+    
+    def get_selected_file_path(self):
+        """選択されたファイルパスを取得"""
+        return self._selected_file_path
+
+
 class ReceiptOCRThread(QThread):
     """OCR処理をバックグラウンドで実行するスレッド"""
     finished = Signal(dict)
@@ -306,12 +421,14 @@ class ReceiptWidget(QWidget):
         self.inventory_db = InventoryDatabase()
         self.store_db = StoreDatabase()
         self.account_title_db = AccountTitleDatabase()
-        # レシート一覧用スナップショットファイルパス（検証用）
+        self.route_db = RouteDatabase()
+        # レシート一覧用スナップショット保存先ディレクトリ
         try:
             base_dir = Path(__file__).resolve().parents[2]
-            self.receipt_snapshot_path = base_dir / "data" / "receipt_list_snapshot.json"
+            self.receipt_snapshot_dir = base_dir / "data" / "receipt_snapshots"
+            self.receipt_snapshot_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
-            self.receipt_snapshot_path = None
+            self.receipt_snapshot_dir = None
 
         # フォルダ一括OCR用
         self.current_folder: Optional[Path] = None
@@ -357,9 +474,9 @@ class ReceiptWidget(QWidget):
     # ==================== レシート一覧スナップショット（検証用） ====================
 
     def save_receipt_snapshot(self):
-        """現在のレシート一覧をJSONファイルにスナップ保存（検証用）"""
-        if not self.receipt_snapshot_path:
-            QMessageBox.warning(self, "スナップ保存", "スナップショット保存先パスを初期化できませんでした。")
+        """現在のレシート一覧をJSONファイルにスナップ保存（最大50件まで保存）"""
+        if not self.receipt_snapshot_dir:
+            QMessageBox.warning(self, "スナップ保存", "スナップショット保存先ディレクトリを初期化できませんでした。")
             return
 
         # DBから現在のレシートデータを取得
@@ -374,31 +491,89 @@ class ReceiptWidget(QWidget):
             return
 
         try:
-            self.receipt_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            # 最新のルートサマリーを取得
+            route_summaries = self.route_db.list_route_summaries()
+            route_date = ""
+            route_name = ""
+            
+            if route_summaries:
+                latest_route = route_summaries[0]  # 最新のルートサマリー
+                route_date = latest_route.get("route_date", "")
+                route_code = latest_route.get("route_code", "")
+                
+                # ルートコードからルート名を取得
+                if route_code:
+                    route_name = self.store_db.get_route_name_by_code(route_code) or route_code
+                else:
+                    route_name = "未設定"
+            else:
+                route_date = datetime.now().strftime("%Y-%m-%d")
+                route_name = "未設定"
+            
+            # ファイル名に使えない文字を置換
+            safe_route_name = route_name.replace("/", "_").replace("\\", "_").replace(":", "_").replace("*", "_").replace("?", "_").replace("\"", "_").replace("<", "_").replace(">", "_").replace("|", "_")
+            
+            # 日付-ルート名の形式でファイル名を生成
+            if route_date:
+                filename = f"{route_date}-{safe_route_name}.json"
+            else:
+                filename = f"{datetime.now().strftime('%Y-%m-%d')}-{safe_route_name}.json"
+            
+            snapshot_path = self.receipt_snapshot_dir / filename
+            
+            # ディレクトリが存在することを確認
+            self.receipt_snapshot_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 最大50件まで保存（古いファイルを削除）
+            existing_files = sorted(self.receipt_snapshot_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if len(existing_files) >= 50:
+                # 古いファイルを削除（最新50件を保持）
+                for old_file in existing_files[49:]:
+                    try:
+                        old_file.unlink()
+                    except Exception:
+                        pass
+            
             payload = {
                 "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "route_date": route_date,
+                "route_name": route_name,
                 "record_count": len(receipts),
                 "receipts": receipts,
             }
-            with open(self.receipt_snapshot_path, "w", encoding="utf-8") as f:
+            with open(snapshot_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
 
             QMessageBox.information(
                 self,
                 "スナップ保存",
                 f"レシート一覧をスナップ保存しました。\n"
-                f"ファイル: {self.receipt_snapshot_path}",
+                f"ファイル: {filename}\n"
+                f"ルート: {route_name}\n"
+                f"件数: {len(receipts)}件",
             )
         except Exception as e:
             QMessageBox.critical(self, "スナップ保存エラー", f"スナップ保存に失敗しました:\n{e}")
 
     def load_receipt_snapshot(self):
-        """前回保存したレシート一覧スナップショットを読み込んでDBに復元（検証用）"""
-        if not self.receipt_snapshot_path:
-            QMessageBox.warning(self, "スナップ読込", "スナップショット保存先パスを初期化できませんでした。")
+        """保存されたレシート一覧スナップショットを読み込んでDBに復元"""
+        if not self.receipt_snapshot_dir:
+            QMessageBox.warning(self, "スナップ読込", "スナップショット保存先ディレクトリを初期化できませんでした。")
             return
 
-        if not self.receipt_snapshot_path.exists():
+        if not self.receipt_snapshot_dir.exists():
+            QMessageBox.information(
+                self,
+                "スナップ読込",
+                "スナップショットディレクトリが見つかりませんでした。\n"
+                "先に「スナップ保存」を実行してください。",
+            )
+            return
+
+        # スナップショットファイル一覧を取得
+        snapshot_files = sorted(self.receipt_snapshot_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        
+        if not snapshot_files:
             QMessageBox.information(
                 self,
                 "スナップ読込",
@@ -407,43 +582,55 @@ class ReceiptWidget(QWidget):
             )
             return
 
-        try:
-            with open(self.receipt_snapshot_path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-
-            receipts = payload.get("receipts", [])
-            if not isinstance(receipts, list):
-                raise ValueError("receipts フィールドの形式が不正です。")
-
-            # 既存のレシートデータを削除してから、スナップショットの内容を挿入
+        # カスタムダイアログを使用
+        dlg = ReceiptSnapshotDialog(self.receipt_snapshot_dir, self)
+        res = dlg.exec()
+        if res == QDialog.Accepted:
+            file_path = dlg.get_selected_file_path()
+            if not file_path:
+                return
+            
             try:
-                self.receipt_db.delete_all_receipts()
-            except Exception:
-                # 一括削除が実装されていない場合は、そのまま上書き保存にフォールバック
-                pass
+                with open(file_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
 
-            for rec in receipts:
-                # IDは新しく振り直す（重複防止）
-                rec_id = rec.pop("id", None)
+                receipts = payload.get("receipts", [])
+                if not isinstance(receipts, list):
+                    raise ValueError("receipts フィールドの形式が不正です。")
+
+                # 既存のレシートデータを削除してから、スナップショットの内容を挿入
                 try:
-                    new_id = self.receipt_db.insert_receipt(rec)
-                    rec["id"] = new_id
+                    self.receipt_db.delete_all_receipts()
                 except Exception:
-                    continue
+                    # 一括削除が実装されていない場合は、そのまま上書き保存にフォールバック
+                    pass
 
-            # UIを再読込
-            self.refresh_receipt_list()
+                for rec in receipts:
+                    # IDは新しく振り直す（重複防止）
+                    rec_id = rec.pop("id", None)
+                    try:
+                        new_id = self.receipt_db.insert_receipt(rec)
+                        rec["id"] = new_id
+                    except Exception:
+                        continue
 
-            saved_at = payload.get("saved_at", "不明な日時")
-            QMessageBox.information(
-                self,
-                "スナップ読込",
-                f"レシート一覧スナップショットを読み込みました。\n"
-                f"保存日時: {saved_at}\n"
-                f"件数: {len(receipts)}件",
-            )
-        except Exception as e:
-            QMessageBox.critical(self, "スナップ読込エラー", f"スナップ読込に失敗しました:\n{e}")
+                # UIを再読込
+                self.refresh_receipt_list()
+
+                saved_at = payload.get("saved_at", "不明な日時")
+                route_name = payload.get("route_name", "不明")
+                route_date = payload.get("route_date", "不明")
+                QMessageBox.information(
+                    self,
+                    "スナップ読込",
+                    f"レシート一覧スナップショットを読み込みました。\n"
+                    f"保存日時: {saved_at}\n"
+                    f"ルート: {route_name}\n"
+                    f"日付: {route_date}\n"
+                    f"件数: {len(receipts)}件",
+                )
+            except Exception as e:
+                QMessageBox.critical(self, "スナップ読込エラー", f"スナップ読込に失敗しました:\n{e}")
     
     def setup_ui(self):
         """UIの設定（シンプルなレイアウト）"""
@@ -2398,7 +2585,8 @@ class ReceiptWidget(QWidget):
                     gcs_uploader_module.upload_image_to_gcs,
                     gcs_uploader_module.check_gcs_authentication,
                     getattr(gcs_uploader_module, 'set_bucket_lifecycle_policy', None),
-                    gcs_uploader_module.GCS_AVAILABLE
+                    gcs_uploader_module.GCS_AVAILABLE,
+                    getattr(gcs_uploader_module, 'find_existing_public_url_for_local_file', None)
                 )
             else:
                 raise ImportError(f"gcs_uploader.py not found at {gcs_uploader_file}")
@@ -2406,13 +2594,14 @@ class ReceiptWidget(QWidget):
             # フォールバック: 通常のインポートを試す
             from utils.gcs_uploader import upload_image_to_gcs, check_gcs_authentication, GCS_AVAILABLE
             set_bucket_lifecycle_policy = getattr(__import__('utils.gcs_uploader', fromlist=['set_bucket_lifecycle_policy']), 'set_bucket_lifecycle_policy', None)
-            return upload_image_to_gcs, check_gcs_authentication, set_bucket_lifecycle_policy, GCS_AVAILABLE
+            find_existing_public_url_for_local_file = getattr(__import__('utils.gcs_uploader', fromlist=['find_existing_public_url_for_local_file']), 'find_existing_public_url_for_local_file', None)
+            return upload_image_to_gcs, check_gcs_authentication, set_bucket_lifecycle_policy, GCS_AVAILABLE, find_existing_public_url_for_local_file
 
     def show_gcs_upload_dialog(self):
         """GCSアップロードダイアログを表示"""
         # GCSアップロードユーティリティを動的に読み込む（画像管理タブと同じ方式）
         try:
-            upload_func, auth_func, lifecycle_func, gcs_available = self._load_gcs_uploader()
+            upload_func, auth_func, lifecycle_func, gcs_available, find_existing_func = self._load_gcs_uploader()
         except Exception as e:
             import sys
             error_msg = (
@@ -2599,6 +2788,7 @@ class ReceiptWidget(QWidget):
         
         uploaded_count = 0
         skipped_count = 0
+        existing_count = 0  # 既存ファイルから取得した件数
         error_count = 0
         error_messages = []
         
@@ -2633,19 +2823,34 @@ class ReceiptWidget(QWidget):
                 # GCSにアップロード
                 try:
                     # GCSアップロード関数を動的に読み込む
-                    upload_func, _, _, _ = self._load_gcs_uploader()
+                    upload_func, _, _, _, find_existing_func = self._load_gcs_uploader()
                     
-                    # レシート用のパスを生成（receipts/プレフィックス）
-                    destination_blob_name = f"receipts/{file_path_obj.name}"
-                    public_url = upload_func(
-                        str(file_path_obj),
-                        destination_blob_name=destination_blob_name,
-                        storage_class=storage_class
-                    )
+                    # 既にGCSに存在する場合は、アップロードせずURLを取得（重複アップロード防止）
+                    public_url = None
+                    if find_existing_func:
+                        try:
+                            # receipts/プレフィックスで既存ファイルを検索
+                            existing_url = find_existing_func(str(file_path_obj), prefix="receipts/")
+                            if existing_url:
+                                public_url = existing_url
+                                existing_count += 1
+                        except Exception:
+                            # 既存ファイル検索でエラーが発生した場合は、通常のアップロード処理に進む
+                            pass
+                    
+                    # 既存ファイルが見つからなかった場合は、アップロードを実行
+                    if not public_url:
+                        # レシート用のパスを生成（receipts/プレフィックス）
+                        destination_blob_name = f"receipts/{file_path_obj.name}"
+                        public_url = upload_func(
+                            str(file_path_obj),
+                            destination_blob_name=destination_blob_name,
+                            storage_class=storage_class
+                        )
+                        uploaded_count += 1
                     
                     # データベースにGCS URLを保存
                     self.receipt_db.update_receipt(receipt_id, {"gcs_url": public_url})
-                    uploaded_count += 1
                 except Exception as e:
                     error_count += 1
                     error_messages.append(f"レシートID {receipt_id}: アップロードエラー: {str(e)}")
@@ -2661,6 +2866,8 @@ class ReceiptWidget(QWidget):
         # 結果を表示
         result_message = f"GCSアップロード完了\n\n"
         result_message += f"アップロード成功: {uploaded_count} 件\n"
+        if existing_count > 0:
+            result_message += f"既存ファイルから取得: {existing_count} 件\n"
         result_message += f"スキップ: {skipped_count} 件\n"
         result_message += f"エラー: {error_count} 件"
         

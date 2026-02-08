@@ -1483,6 +1483,10 @@ class StoreListWidget(QWidget):
         # データ投入完了後、ソート機能を再有効化
         self.store_table.setSortingEnabled(True)
         
+        # 店舗コードカラムで昇順ソート（店舗コードは3列目、0-indexedで3）
+        store_code_col_index = basic_columns.index("店舗コード")
+        self.store_table.sortItems(store_code_col_index, Qt.AscendingOrder)
+        
         # 列幅の自動調整
         self.store_table.resizeColumnsToContents()
         

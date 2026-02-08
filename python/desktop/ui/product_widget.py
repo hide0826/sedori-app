@@ -368,6 +368,7 @@ class ProductWidget(QWidget):
             "ステータス",
             "ステータス理由",
             "レシート画像",
+            "レシート画像URL",  # レシート画像の後に追加
             "保証書画像",  # 保証書IDから変更
             "保証期間",
             "保証最終日"  # 新規追加
@@ -805,6 +806,8 @@ class ProductWidget(QWidget):
 
             # テーブルの1行分の値を辞書にまとめる
             row_data: Dict[str, Any] = {}
+            receipt_image_path = None  # レシート画像パスを保持
+            
             for col in range(col_count):
                 header = self.purchase_columns[col] if col < len(self.purchase_columns) else None
                 if not header:
@@ -812,6 +815,16 @@ class ProductWidget(QWidget):
                 cell_item = self.purchase_table.item(row, col)
                 value = cell_item.text() if cell_item else ""
                 row_data[header] = value
+                
+                # レシート画像列の場合は、UserRoleに保存されているファイルパスも取得
+                if header == "レシート画像" and cell_item:
+                    file_path = cell_item.data(Qt.UserRole)
+                    if file_path:
+                        # UserRoleに保存されている値がファイルパスの場合
+                        from pathlib import Path
+                        file_path_obj = Path(file_path)
+                        if file_path_obj.exists() or file_path:  # ファイルが存在するか、パスが設定されている場合
+                            receipt_image_path = str(file_path) if isinstance(file_path, str) else str(file_path_obj.resolve())
 
             # 対象リストをすべて更新
             for lst_name in ["purchase_all_records", "purchase_all_records_master", "purchase_records"]:
@@ -824,6 +837,13 @@ class ProductWidget(QWidget):
                         # 既存キーを維持しつつ、テーブル側の値で上書き
                         for key, val in row_data.items():
                             rec[key] = val
+                        
+                        # レシート画像パスを保持（UserRoleから取得した値、または既存の値を保持）
+                        if receipt_image_path:
+                            rec['レシート画像パス'] = receipt_image_path
+                        elif 'レシート画像パス' in rec:
+                            # 既存のレシート画像パスを保持（テーブルに表示されていないメタデータ）
+                            pass  # 既にrecに含まれているのでそのまま保持
                         break
 
         # スナップショット保存
@@ -1722,11 +1742,16 @@ class ProductWidget(QWidget):
                                     file_path_obj = Path(file_path)
                                     if file_path_obj.exists():
                                         item.setToolTip(f"クリックで画像を開く\n{file_path}")
-                                        item.setData(Qt.UserRole, str(file_path_obj.resolve()))
+                                        resolved_path = str(file_path_obj.resolve())
+                                        item.setData(Qt.UserRole, resolved_path)
+                                        # レコードにレシート画像パスを保存して、次回から使えるようにする
+                                        record['レシート画像パス'] = resolved_path
                                     else:
                                         # ファイルが存在しない場合は、file_pathをそのまま保存（後で検索できるように）
                                         item.setToolTip(f"レシート画像: {receipt_image_str}\n（ファイルが見つかりません: {file_path}）")
                                         item.setData(Qt.UserRole, file_path)
+                                        # レコードにレシート画像パスを保存（ファイルが存在しなくても、パス情報は保存）
+                                        record['レシート画像パス'] = file_path
                                 else:
                                     # デバッグ: レシート情報は見つかったが、file_pathがない
                                     item.setToolTip("レシート画像: " + receipt_image_str + "\n（レシートDBにfile_pathがありません）")
@@ -1738,6 +1763,16 @@ class ProductWidget(QWidget):
                                 # UserRoleにはファイル名を保存して、後で検索できるようにする
                                 item.setData(Qt.UserRole, receipt_image_str)
                         item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
+                elif header == "レシート画像URL":
+                    receipt_image_url_str = "" if value is None else str(value)
+                    item = QTableWidgetItem(receipt_image_url_str)
+                    if receipt_image_url_str:
+                        item.setFlags(item.flags() | Qt.ItemIsEnabled)
+                        item.setToolTip(f"ダブルクリックでブラウザで表示\n{receipt_image_url_str}")
+                        # URLをUserRoleに保存
+                        item.setData(Qt.UserRole, receipt_image_url_str)
+                    else:
+                        item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
                 elif header == "保証書画像":
                     warranty_image_str = "" if value is None else str(value)
                     item = QTableWidgetItem(warranty_image_str)
@@ -2432,6 +2467,22 @@ class ProductWidget(QWidget):
                 QApplication.processEvents()
                 self.purchase_table.editItem(item)
             return
+        if header_text == "レシート画像URL":
+            # レシート画像URL列をダブルクリックしたときはブラウザで開く
+            item = self.purchase_table.item(row, col)
+            if not item:
+                return
+            url = (item.text() or "").strip()
+            if not url:
+                QMessageBox.information(self, "情報", "レシート画像URLが設定されていません。")
+                return
+            qurl = QUrl(url)
+            if not qurl.isValid():
+                QMessageBox.warning(self, "警告", f"URLが不正です:\n{url}")
+                return
+            if not QDesktopServices.openUrl(qurl):
+                QMessageBox.warning(self, "警告", f"ブラウザでURLを開けませんでした:\n{url}")
+            return
         if header_text.startswith("画像URL"):
             # 画像URL列をクリックしたときはブラウザで開く
             item = self.purchase_table.item(row, col)
@@ -2480,6 +2531,28 @@ class ProductWidget(QWidget):
                 if receipt_info:
                     # original_file_pathを優先、なければfile_path
                     file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path')
+                    
+                    # レシートDBからファイルパスが見つかった場合、レコードに保存して次回から使えるようにする
+                    if file_path and hasattr(self, 'purchase_all_records') and self.purchase_all_records:
+                        # SKU列のインデックスを取得
+                        sku_col_idx = None
+                        if "SKU" in self.purchase_columns:
+                            sku_col_idx = self.purchase_columns.index("SKU")
+                        
+                        if sku_col_idx is not None:
+                            sku_item = self.purchase_table.item(row, sku_col_idx)
+                            if sku_item:
+                                sku_val = (sku_item.text() or "").strip()
+                                if sku_val:
+                                    # purchase_all_recordsを更新
+                                    for rec in self.purchase_all_records:
+                                        rec_sku = (rec.get("SKU") or rec.get("sku") or "").strip()
+                                        if rec_sku == sku_val:
+                                            # レシート画像パスを保存
+                                            rec['レシート画像パス'] = str(file_path)
+                                            # UserRoleも更新
+                                            item.setData(Qt.UserRole, str(file_path))
+                                            break
             
             if file_path:
                 from pathlib import Path
