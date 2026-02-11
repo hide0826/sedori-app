@@ -382,9 +382,19 @@ class RouteManagementDialog(QDialog):
         
         # 右側の操作ボタン
         right_buttons = QHBoxLayout()
+        
+        # 通常追加ボタン（このルートに「移動」するイメージ）
         add_btn = QPushButton("選択店舗を追加")
+        add_btn.setToolTip("選択した店舗をこのルートに追加します（所属ルートをこのルートに変更します）")
         add_btn.clicked.connect(self.add_selected_store)
         right_buttons.addWidget(add_btn)
+        
+        # 重複追加ボタン（他ルートとの重複所属を許可）
+        duplicate_add_btn = QPushButton("選択店舗の重複追加")
+        duplicate_add_btn.setToolTip("既に他のルートに所属している店舗を、このルートにも追加します（ルートコードはカンマ区切りで複数保持されます）")
+        duplicate_add_btn.clicked.connect(lambda: self.add_selected_store(allow_duplicate=True))
+        right_buttons.addWidget(duplicate_add_btn)
+        
         right_buttons.addStretch()
         right_layout.addLayout(right_buttons)
         
@@ -409,14 +419,28 @@ class RouteManagementDialog(QDialog):
         stores = self.db.list_stores()
         self.all_stores_list.clear()
         
+        # 編集モード時に、このルートに既に所属している店舗を除外するためのルートコード
+        current_route_code = None
+        if self.is_edit_mode:
+            current_route_code = self.db.get_route_code_by_name(self.route_name)
+        
         for store in stores:
             store_code = store.get('store_code') or store.get('supplier_code') or ''
             store_name = store.get('store_name') or ''
             current_route = store.get('affiliated_route_name') or ''
+            route_codes_str = store.get('route_code') or ''
+            route_codes = [code.strip() for code in route_codes_str.split(',') if code.strip()]
             
             # 編集モードの場合、既にこのルートに所属している店舗は右側に表示しない
-            if self.is_edit_mode and current_route == self.route_name:
-                continue
+            if self.is_edit_mode:
+                if current_route_code:
+                    # route_codeベースで判定
+                    if current_route_code in route_codes:
+                        continue
+                else:
+                    # 互換性のため、古いデータではaffiliated_route_nameで判定
+                    if current_route == self.route_name:
+                        continue
             
             display_text = f"{store_code} - {store_name}"
             if current_route:
@@ -443,15 +467,34 @@ class RouteManagementDialog(QDialog):
         stores = self.db.list_stores()
         self.selected_stores_list.clear()
         
+        # 現在編集中のルートコードを取得（なければ後で自動生成される）
+        current_route_code = self.db.get_route_code_by_name(self.route_name)
+        
         for store in stores:
-            store_route_name = store.get('affiliated_route_name') or ''
-            if store_route_name == self.route_name:
+            belongs_to_route = False
+            
+            route_codes_str = store.get('route_code') or ''
+            route_codes = [code.strip() for code in route_codes_str.split(',') if code.strip()]
+            
+            if current_route_code:
+                # route_codeが設定されている場合は、route_codeに含まれているかで判定
+                if current_route_code in route_codes:
+                    belongs_to_route = True
+            else:
+                # 互換性のため、古いデータではaffiliated_route_nameで判定
+                store_route_name = store.get('affiliated_route_name') or ''
+                if store_route_name == self.route_name:
+                    belongs_to_route = True
+            
+            if belongs_to_route:
                 store_code = store.get('store_code') or store.get('supplier_code') or ''
                 store_name = store.get('store_name') or ''
                 display_text = f"{store_code} - {store_name}"
                 
                 item = QListWidgetItem(display_text)
                 item.setData(Qt.UserRole, store)
+                # 既存データについては、重複追加フラグは False として扱う
+                item.setData(Qt.UserRole + 1, False)
                 self.selected_stores_list.addItem(item)
         
         # 右側の店舗一覧を再読み込み（このルートに所属する店舗を除外）
@@ -467,8 +510,13 @@ class RouteManagementDialog(QDialog):
                 text = item.text().lower()
                 item.setHidden(search_term not in text)
     
-    def add_selected_store(self):
-        """選択された店舗を左側のリストに追加"""
+    def add_selected_store(self, allow_duplicate: bool = False):
+        """選択された店舗を左側のリストに追加
+        
+        Args:
+            allow_duplicate: Trueの場合、このルート以外のルートへの所属を維持したまま
+                             このルートにも所属させる（ルートコードをカンマ区切りで複数保持）
+        """
         selected_items = self.all_stores_list.selectedItems()
         if not selected_items:
             QMessageBox.warning(self, "警告", "追加する店舗を選択してください。")
@@ -490,17 +538,22 @@ class RouteManagementDialog(QDialog):
                         exists = True
                         break
             
-            if not exists:
-                store_code = store.get('store_code') or store.get('supplier_code') or ''
-                store_name = store.get('store_name') or ''
-                display_text = f"{store_code} - {store_name}"
-                
-                new_item = QListWidgetItem(display_text)
-                new_item.setData(Qt.UserRole, store)
-                self.selected_stores_list.addItem(new_item)
-                
-                # 右側のリストから削除
-                self.all_stores_list.takeItem(self.all_stores_list.row(item))
+            # 同じルート内での二重追加は避けるため、左側リスト上の重複は許可しない
+            if exists:
+                continue
+            
+            store_code = store.get('store_code') or store.get('supplier_code') or ''
+            store_name = store.get('store_name') or ''
+            display_text = f"{store_code} - {store_name}"
+            
+            new_item = QListWidgetItem(display_text)
+            new_item.setData(Qt.UserRole, store)
+            # UserRole+1 に「重複追加かどうか」のフラグを保存（True/False）
+            new_item.setData(Qt.UserRole + 1, bool(allow_duplicate))
+            self.selected_stores_list.addItem(new_item)
+            
+            # 右側のリストから削除
+            self.all_stores_list.takeItem(self.all_stores_list.row(item))
     
     def remove_selected_store(self):
         """選択された店舗を左側のリストから削除"""
@@ -555,44 +608,82 @@ class RouteManagementDialog(QDialog):
             
             # 選択された店舗のIDを取得
             selected_store_ids = []
+            duplicate_flags = {}
             for i in range(self.selected_stores_list.count()):
                 item = self.selected_stores_list.item(i)
                 if item:
                     store = item.data(Qt.UserRole)
                     if store and store.get('id'):
-                        selected_store_ids.append(store.get('id'))
+                        store_id = store.get('id')
+                        selected_store_ids.append(store_id)
+                        # UserRole+1 に保存した「重複追加フラグ」を取得
+                        duplicate_flags[store_id] = bool(item.data(Qt.UserRole + 1))
             
             # 店舗のルート情報を更新
             for store_id in selected_store_ids:
                 store = self.db.get_store(store_id)
                 if store:
-                    # 既に別のルートに所属している場合は、ルートコードを更新
-                    old_route = store.get('affiliated_route_name')
-                    if old_route and old_route != route_name:
-                        # 店舗のルート情報を更新（別ルートから移動）
-                        self.db.update_store(store_id, {
-                            'affiliated_route_name': route_name,
-                            'route_code': route_code
-                        })
+                    allow_duplicate = duplicate_flags.get(store_id, False)
+                    
+                    # 既存のルートコードを取得（カンマ区切りの文字列をリストに変換）
+                    existing_route_code_str = store.get('route_code') or ''
+                    existing_codes = [
+                        code.strip()
+                        for code in existing_route_code_str.split(',')
+                        if code.strip()
+                    ]
+                    
+                    if allow_duplicate:
+                        # 既存のルートコードを維持したまま、このルートコードを追加
+                        if route_code not in existing_codes:
+                            existing_codes.append(route_code)
+                        new_route_code_str = ",".join(existing_codes) if existing_codes else None
+                        
+                        update_data = {
+                            'route_code': new_route_code_str,
+                        }
+                        # まだ所属ルート名が設定されていない場合のみ、このルート名を設定
+                        if not store.get('affiliated_route_name'):
+                            update_data['affiliated_route_name'] = route_name
+                        self.db.update_store(store_id, update_data)
                     else:
-                        # 新規追加または同じルート
+                        # このルートをメインとし、ルートコードはこのルートのみとする
                         self.db.update_store(store_id, {
                             'affiliated_route_name': route_name,
                             'route_code': route_code
                         })
             
-            # このルートから外れた店舗のルート情報をクリア
+            # このルートから外れた店舗のルート情報を更新
             if self.is_edit_mode:
                 all_stores = self.db.list_stores()
                 for store in all_stores:
-                    if store.get('affiliated_route_name') == self.route_name:
-                        store_id = store.get('id')
-                        if store_id and store_id not in selected_store_ids:
-                            # ルート情報をクリア
-                            self.db.update_store(store_id, {
-                                'affiliated_route_name': None,
-                                'route_code': None
-                            })
+                    store_id = store.get('id')
+                    if not store_id:
+                        continue
+                    
+                    existing_route_code_str = store.get('route_code') or ''
+                    existing_codes = [
+                        code.strip()
+                        for code in existing_route_code_str.split(',')
+                        if code.strip()
+                    ]
+                    
+                    if not existing_codes:
+                        continue
+                    
+                    # このルートコードを持っているが、今回の選択から外れている店舗については、このルートコードだけを削除
+                    if route_code in existing_codes and store_id not in selected_store_ids:
+                        new_codes = [code for code in existing_codes if code != route_code]
+                        new_route_code_str = ",".join(new_codes) if new_codes else None
+                        
+                        update_data = {
+                            'route_code': new_route_code_str
+                        }
+                        # このルート名がaffiliated_route_nameとして設定されていた場合はクリア
+                        if store.get('affiliated_route_name') == self.route_name:
+                            update_data['affiliated_route_name'] = None
+                        
+                        self.db.update_store(store_id, update_data)
             
             # routesテーブルにルート情報を保存
             self.db.upsert_route(route_name, route_code)
@@ -695,7 +786,9 @@ class StoreListWidget(QWidget):
         self.excel_importer = ExcelImporter()
         self.current_filtered_route = None  # 現在フィルタリング中のルート名
         self.current_selected_route = None  # 現在選択中のルート名
-        self.route_data = {}  # ルート名とデータのマッピング
+        # ルート情報リスト（コンボボックスの並び順と完全に一致させる）
+        # 各要素は {'route_name': str, 'route_code': str, 'store_count': int, 'google_map_url': str} の辞書
+        self.route_data = []
         
         self.setup_ui()
         self.load_routes()
@@ -796,6 +889,19 @@ class StoreListWidget(QWidget):
             }
         """)
         button_layout.addWidget(edit_route_btn)
+        
+        # 選択ルート削除ボタン
+        delete_route_btn = QPushButton("選択ルート削除")
+        delete_route_btn.clicked.connect(self.delete_selected_route)
+        delete_route_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+        """)
+        button_layout.addWidget(delete_route_btn)
         
         parent_layout.addWidget(button_group)
     
@@ -976,27 +1082,32 @@ class StoreListWidget(QWidget):
     def update_route_combo(self, routes: list):
         """ルート選択プルダウンを更新"""
         self.route_combo.clear()
-        self.route_data = {}  # ルート名とデータのマッピング
+        # ルート情報リストをそのまま保持（順序を維持）
+        self.route_data = list(routes) if routes else []
         
-        for route in routes:
+        for route in self.route_data:
             route_name = route.get('route_name', '')
             route_code = route.get('route_code', '')
             store_count = route.get('store_count', 0)
             display_text = f"{route_name} ({route_code}) - {store_count}店舗"
             
             self.route_combo.addItem(display_text)
-            self.route_data[route_name] = route
         
         # 現在選択中のルートのGoogle Map URLを表示
-        if self.current_selected_route and self.current_selected_route in self.route_data:
-            url = self.route_data[self.current_selected_route].get('google_map_url', '')
-            self.google_map_url_edit.setText(url)
+        if self.current_selected_route:
+            for route in self.route_data:
+                if route.get('route_name') == self.current_selected_route:
+                    url = route.get('google_map_url', '')
+                    self.google_map_url_edit.setText(url)
+                    break
     
     def on_route_selection_changed(self, text: str):
         """ルート選択変更時の処理"""
-        if self.route_combo.currentIndex() >= 0 and self.route_combo.currentIndex() < len(self.route_data):
-            selected_route = list(self.route_data.keys())[self.route_combo.currentIndex()]
-            route_info = self.route_data.get(selected_route, {})
+        index = self.route_combo.currentIndex()
+        if 0 <= index < len(self.route_data):
+            route_info = self.route_data[index]
+            selected_route_name = route_info.get('route_name', '')
+            self.current_selected_route = selected_route_name
             url = route_info.get('google_map_url', '')
             self.google_map_url_edit.setText(url)
     
@@ -1006,14 +1117,19 @@ class StoreListWidget(QWidget):
             QMessageBox.warning(self, "警告", "ルートを選択してください")
             return
         
-        selected_route = list(self.route_data.keys())[self.route_combo.currentIndex()]
+        index = self.route_combo.currentIndex()
+        if not (0 <= index < len(self.route_data)):
+            QMessageBox.warning(self, "警告", "選択されたルートが見つかりません。")
+            return
+        
+        route_info = self.route_data[index]
+        selected_route = route_info.get('route_name', '')
         google_map_url = self.google_map_url_edit.text().strip()
         
         try:
             self.db.update_route_google_map_url(selected_route, google_map_url)
             # データも更新
-            if selected_route in self.route_data:
-                self.route_data[selected_route]['google_map_url'] = google_map_url
+            self.route_data[index]['google_map_url'] = google_map_url
             QMessageBox.information(self, "完了", f"ルート '{selected_route}' のGoogle Map URLを保存しました")
         except Exception as e:
             QMessageBox.warning(self, "エラー", f"Google Map URLの保存に失敗しました:\n{str(e)}")
@@ -1037,8 +1153,14 @@ class StoreListWidget(QWidget):
             QMessageBox.warning(self, "警告", "ルートを選択してください")
             return
         
+        index = self.route_combo.currentIndex()
+        if not (0 <= index < len(self.route_data)):
+            QMessageBox.warning(self, "警告", "選択されたルートが見つかりません。")
+            return
+        
         # 現在選択されているルート名を取得
-        selected_route = list(self.route_data.keys())[self.route_combo.currentIndex()]
+        route_info = self.route_data[index]
+        selected_route = route_info.get('route_name', '')
         self.current_selected_route = selected_route
         
         self.call_route(selected_route)
@@ -1418,10 +1540,38 @@ class StoreListWidget(QWidget):
             # 編集不可のカラム（登録番号以外）＋ 登録番号カラム（編集可）
             # store_codeを優先し、なければsupplier_codeをフォールバック（互換性のため）
             store_code = store.get('store_code', '') or store.get('supplier_code', '')
+
+            # ルートコードがカンマ区切りで複数ある場合は、それぞれのルート名を取得してカンマ区切りで表示
+            base_affiliated_route_name = store.get('affiliated_route_name', '') or ''
+            route_code_str = store.get('route_code', '') or ''
+            display_route_name = base_affiliated_route_name
+
+            if route_code_str:
+                codes = [code.strip() for code in route_code_str.split(',') if code.strip()]
+                route_names: list[str] = []
+                for code in codes:
+                    try:
+                        name = self.db.get_route_name_by_code(code) or ''
+                    except Exception:
+                        name = ''
+                    if name:
+                        route_names.append(name)
+
+                # ルートコードから名前が取得できた場合はそれらを優先して表示
+                if route_names:
+                    # 重複を除去し、コードの並び順で表示
+                    seen = set()
+                    ordered_names = []
+                    for name in route_names:
+                        if name not in seen:
+                            seen.add(name)
+                            ordered_names.append(name)
+                    display_route_name = ",".join(ordered_names)
+
             registration_col_index = basic_columns.index("登録番号")
             for col, value in enumerate([
-                store.get('affiliated_route_name', ''),
-                store.get('route_code', ''),
+                display_route_name,
+                route_code_str,
                 store_code,  # 店舗コード
                 store.get('store_name', ''),
                 store.get('address', ''),
@@ -1750,13 +1900,13 @@ class StoreListWidget(QWidget):
             QMessageBox.warning(self, "警告", "編集するルートを選択してください。")
             return
         
-        # route_dataから実際のルート名を取得
-        route_names = list(self.route_data.keys())
-        if current_index >= len(route_names):
+        # route_dataから実際のルート名を取得（コンボボックスと同じ順序で保持）
+        if current_index >= len(self.route_data):
             QMessageBox.warning(self, "警告", "選択されたルートが見つかりません。")
             return
         
-        selected_route_name = route_names[current_index]
+        selected_route = self.route_data[current_index]
+        selected_route_name = selected_route.get('route_name', '')
         
         dialog = RouteManagementDialog(self, self.db, route_name=selected_route_name)
         if dialog.exec() == QDialog.Accepted:
@@ -1764,6 +1914,89 @@ class StoreListWidget(QWidget):
             self.load_routes()
             # 店舗一覧を再読み込み
             self.load_stores(self.search_edit.text())
+
+    def delete_selected_route(self):
+        """選択中のルートを削除"""
+        current_index = self.route_combo.currentIndex()
+        if current_index < 0:
+            QMessageBox.warning(self, "警告", "削除するルートを選択してください。")
+            return
+        
+        if current_index >= len(self.route_data):
+            QMessageBox.warning(self, "警告", "選択されたルートが見つかりません。")
+            return
+        
+        route_info = self.route_data[current_index]
+        route_name = route_info.get('route_name', '')
+        route_code = route_info.get('route_code', '')
+        
+        if not route_name:
+            QMessageBox.warning(self, "警告", "ルート名が空のため削除できません。")
+            return
+        
+        reply = QMessageBox.question(
+            self,
+            "選択ルート削除の確認",
+            f"ルート「{route_name}（{route_code}）」を削除しますか？\n\n"
+            f"このルートに属している店舗のルートコードから「{route_code}」を削除します。\n"
+            f"削除後、どのルートにも属さない店舗はルートコードカラムが空白になります。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        
+        try:
+            # すべての店舗を取得し、該当ルートコードを除去
+            stores = self.db.list_stores()
+            for store in stores:
+                store_id = store.get('id')
+                if not store_id:
+                    continue
+                
+                route_code_str = store.get('route_code') or ''
+                
+                # パターン1: 選択ルートコードがカンマ区切り（複数コードをまとめた表示）の場合は、
+                #           文字列として完全一致する店舗のみを対象にし、丸ごと削除する。
+                if "," in route_code:
+                    if route_code_str != route_code:
+                        continue
+                    
+                    new_route_code_str = None
+                    new_codes = []
+                else:
+                    # パターン2: 単一コードの場合は、カンマ区切りリストからそのコードだけを取り除く
+                    codes = [code.strip() for code in route_code_str.split(',') if code.strip()]
+                    if not codes or route_code not in codes:
+                        continue
+                    
+                    # このルートコードを削除
+                    new_codes = [code for code in codes if code != route_code]
+                    new_route_code_str = ",".join(new_codes) if new_codes else None
+                
+                update_data = {
+                    'route_code': new_route_code_str,
+                }
+                
+                # もしこの店舗が削除対象ルート名を「所属ルート名」として持っていて、
+                # かつ他にルートコードが残っていなければ、所属ルート名もクリア
+                if store.get('affiliated_route_name') == route_name and not new_codes:
+                    update_data['affiliated_route_name'] = None
+                
+                self.db.update_store(store_id, update_data)
+            
+            # routes テーブルからも該当ルートを削除（存在しない場合はスキップ）
+            self.db.delete_route(route_name, route_code)
+            
+            QMessageBox.information(self, "完了", f"ルート「{route_name}（{route_code}）」を削除しました。")
+            
+            # ルート一覧と店舗一覧を更新
+            self.current_filtered_route = None
+            self.current_selected_route = None
+            self.load_routes()
+            self.load_stores(self.search_edit.text())
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"ルートの削除に失敗しました:\n{str(e)}")
 
 
 class StoreMasterWidget(QWidget):

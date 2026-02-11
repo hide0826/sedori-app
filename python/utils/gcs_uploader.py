@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict
 import logging
 
 logger = logging.getLogger(__name__)
@@ -101,7 +101,8 @@ def check_gcs_authentication() -> tuple:
 def upload_image_to_gcs(
     source_file_path: str,
     destination_blob_name: Optional[str] = None,
-    storage_class: Optional[str] = None
+    storage_class: Optional[str] = None,
+    metadata: Optional[Dict[str, str]] = None,
 ) -> str:
     """
     画像ファイルをGCSにアップロードし、公開URLを取得する
@@ -110,6 +111,7 @@ def upload_image_to_gcs(
         source_file_path: アップロードする画像ファイルのパス
         destination_blob_name: GCS上の保存先パス（指定しない場合は自動生成）
         storage_class: ストレージクラス（STANDARD, COLDLINE, ARCHIVE など。Noneの場合はSTANDARD）
+        metadata: オブジェクトに付与するカスタムメタデータ（任意）
         
     Returns:
         公開URL（https://storage.googleapis.com/{BUCKET_NAME}/{destination_blob_name}）
@@ -213,6 +215,14 @@ def upload_image_to_gcs(
         
         # Blobオブジェクトの作成
         blob = bucket.blob(destination_blob_name)
+        
+        # メタデータの設定（任意）
+        if metadata:
+            try:
+                blob.metadata = metadata
+            except Exception as e:
+                # メタデータ設定に失敗してもアップロード自体は継続する
+                logger.warning(f"Failed to set metadata for {destination_blob_name}: {e}")
         
         # Content-Typeの設定
         content_type = _get_content_type(source_file_path)

@@ -766,47 +766,86 @@ class StoreDatabase:
     # ==================== routes テーブル操作 ====================
     
     def list_routes_with_store_count(self) -> List[Dict[str, Any]]:
-        """ルート一覧を店舗数付きで取得"""
+        """
+        ルート一覧を店舗数付きで取得する
+        
+        - ルートのマスタ情報は `routes` テーブルを基本とする
+        - 店舗側の `route_code` がカンマ区切り（R004,R005）の場合は、
+          各コードごとに店舗数へカウントする
+        - 複数コードをまとめた「R004,R005」のようなルート行は作成しない
+        """
         conn = self._get_connection()
         cursor = conn.cursor()
-        
-        # ルート名でグループ化して店舗数を集計
+
+        # 1. routes テーブルから全ルートを取得（マスタ）
         cursor.execute("""
-            SELECT 
-                s.affiliated_route_name AS route_name,
-                s.route_code AS route_code,
-                COUNT(*) AS store_count
-            FROM stores s
-            WHERE s.affiliated_route_name IS NOT NULL 
-                AND s.affiliated_route_name != ''
-            GROUP BY s.affiliated_route_name, s.route_code
-            ORDER BY s.route_code, s.affiliated_route_name
+            SELECT route_name, route_code, google_map_url
+            FROM routes
         """)
-        
-        rows = cursor.fetchall()
-        routes = []
-        
-        for row in rows:
-            route_name = row[0]
-            route_code = row[1]
-            store_count = row[2]
-            
-            # routes テーブルから Google Map URL を取得
-            cursor.execute("""
-                SELECT google_map_url FROM routes 
-                WHERE route_name = ? OR route_code = ?
-            """, (route_name, route_code))
-            
-            url_row = cursor.fetchone()
-            google_map_url = url_row[0] if url_row else ''
-            
-            routes.append({
-                'route_name': route_name,
-                'route_code': route_code,
-                'store_count': store_count,
-                'google_map_url': google_map_url
-            })
-        
+        route_rows = cursor.fetchall()
+
+        # route_code をキーにしたルート情報マップ
+        routes_by_code: Dict[str, Dict[str, Any]] = {}
+        for row in route_rows:
+            route_name = (row[0] or "").strip()
+            route_code = (row[1] or "").strip()
+            google_map_url = row[2] or ""
+            if not route_code:
+                continue
+            routes_by_code[route_code] = {
+                "route_name": route_name,
+                "route_code": route_code,
+                "google_map_url": google_map_url,
+            }
+
+        # 2. stores テーブルから全店舗の route_code を取得し、店舗数を集計
+        cursor.execute("""
+            SELECT route_code
+            FROM stores
+            WHERE route_code IS NOT NULL
+              AND route_code != ''
+        """)
+        store_rows = cursor.fetchall()
+
+        store_count_by_code: Dict[str, int] = {}
+
+        for row in store_rows:
+            raw_route_code = row[0] or ""
+            if not raw_route_code:
+                continue
+
+            # カンマ区切りコードを分解して、それぞれのコードに 1 ずつ加算
+            codes = [code.strip() for code in str(raw_route_code).split(",") if code.strip()]
+            for code in codes:
+                if not code:
+                    continue
+                store_count_by_code[code] = store_count_by_code.get(code, 0) + 1
+
+                # routes テーブルに存在しないコードについても、後で一覧に出せるようにエントリを作成
+                if code not in routes_by_code:
+                    routes_by_code[code] = {
+                        "route_name": "",  # 不明なコードは名前空欄
+                        "route_code": code,
+                        "google_map_url": "",
+                    }
+
+        # 3. routes_by_code と store_count_by_code を結合して最終的なリストを作成
+        routes: List[Dict[str, Any]] = []
+        for code, route_info in routes_by_code.items():
+            count = store_count_by_code.get(code, 0)
+            # 店舗数 0 のルートも一覧に出したい場合はこの条件を外す
+            # 今回は既存仕様にならい、0件でも表示する
+            routes.append(
+                {
+                    "route_name": route_info.get("route_name", ""),
+                    "route_code": code,
+                    "store_count": count,
+                    "google_map_url": route_info.get("google_map_url", ""),
+                }
+            )
+
+        # ルートコード、ルート名で安定ソート
+        routes.sort(key=lambda r: (r.get("route_code") or "", r.get("route_name") or ""))
         return routes
     
     def get_store_by_id(self, store_id: int) -> Optional[Dict[str, Any]]:
@@ -843,6 +882,34 @@ class StoreDatabase:
             return True
         except Exception as e:
             print(f"ルート保存エラー: {e}")
+            conn.rollback()
+            return False
+
+    def delete_route(self, route_name: str, route_code: Optional[str] = None) -> bool:
+        """routes テーブルから指定ルートを削除
+        
+        Args:
+            route_name: ルート名
+            route_code: ルートコード（指定されていれば name+code の組み合わせで削除）
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            if route_code:
+                cursor.execute(
+                    "DELETE FROM routes WHERE route_name = ? AND route_code = ?",
+                    (route_name, route_code),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM routes WHERE route_name = ?",
+                    (route_name,),
+                )
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"ルート削除エラー: {e}")
             conn.rollback()
             return False
     

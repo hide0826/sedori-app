@@ -29,9 +29,9 @@ from PySide6.QtWidgets import (
     QDialogButtonBox, QTextEdit, QDateEdit, QSpinBox,
     QScrollArea, QSizePolicy, QStyledItemDelegate,
     QSplitter, QListWidget, QListWidgetItem, QMenu,
-    QFormLayout, QApplication, QCheckBox,
+    QFormLayout, QApplication, QCheckBox, QProgressDialog,
 )
-from PySide6.QtCore import Qt, QDate, QThread, Signal, QSettings, QTimer, QUrl
+from PySide6.QtCore import Qt, QDate, QThread, Signal, QSettings, QTimer, QUrl, QCoreApplication
 from PySide6.QtGui import QPixmap, QTransform, QColor, QDesktopServices, QClipboard
 
 from desktop.utils.ui_utils import save_table_header_state, restore_table_header_state
@@ -442,6 +442,12 @@ class ReceiptWidget(QWidget):
         self.notifications_enabled = True
         
         self.setup_ui()
+        
+        # デフォルトフォルダを読み込み（UI構築後に実行）
+        self.load_default_folder()
+        # 初期フォルダラベルを更新
+        if hasattr(self, 'folder_label'):
+            self.update_folder_label()
 
         # テーブルの列幅を復元
         restore_table_header_state(self.receipt_table, "ReceiptWidget/ReceiptTableHeaderState")
@@ -491,24 +497,71 @@ class ReceiptWidget(QWidget):
             return
 
         try:
-            # 最新のルートサマリーを取得
-            route_summaries = self.route_db.list_route_summaries()
+            # レシート一覧から日付を取得（最も多い日付を使用）
+            receipt_dates = {}
+            for receipt in receipts:
+                purchase_date = receipt.get('purchase_date', '')
+                if purchase_date:
+                    # 日付を正規化（yyyy-MM-dd形式に統一）
+                    date_str = str(purchase_date).strip()
+                    # 時刻部分を除去
+                    if ' ' in date_str:
+                        date_str = date_str.split(' ')[0]
+                    if 'T' in date_str:
+                        date_str = date_str.split('T')[0]
+                    # スラッシュをハイフンに変換
+                    date_str = date_str.replace('/', '-')
+                    # yyyy-MM-dd形式に統一
+                    try:
+                        from datetime import datetime
+                        date_obj = datetime.strptime(date_str[:10], "%Y-%m-%d")
+                        normalized_date = date_obj.strftime("%Y-%m-%d")
+                        receipt_dates[normalized_date] = receipt_dates.get(normalized_date, 0) + 1
+                    except Exception:
+                        pass
+            
+            # 最も多い日付を取得
             route_date = ""
             route_name = ""
             
-            if route_summaries:
-                latest_route = route_summaries[0]  # 最新のルートサマリー
-                route_date = latest_route.get("route_date", "")
-                route_code = latest_route.get("route_code", "")
+            if receipt_dates:
+                # 最も多い日付を取得
+                most_common_date = max(receipt_dates.items(), key=lambda x: x[1])[0]
+                route_date = most_common_date
                 
-                # ルートコードからルート名を取得
-                if route_code:
-                    route_name = self.store_db.get_route_name_by_code(route_code) or route_code
+                # その日付でルートサマリーを検索
+                route_summaries = self.route_db.list_route_summaries(
+                    start_date=route_date,
+                    end_date=route_date
+                )
+                
+                if route_summaries:
+                    # 該当日付のルートサマリーが見つかった場合、最初のものを使用
+                    matched_route = route_summaries[0]
+                    route_code = matched_route.get("route_code", "")
+                    
+                    # ルートコードからルート名を取得
+                    if route_code:
+                        route_name = self.store_db.get_route_name_by_code(route_code) or route_code
+                    else:
+                        route_name = "未設定"
                 else:
+                    # ルートサマリーが見つからない場合
                     route_name = "未設定"
             else:
-                route_date = datetime.now().strftime("%Y-%m-%d")
-                route_name = "未設定"
+                # レシートに日付がない場合、最新のルートサマリーを使用（フォールバック）
+                route_summaries = self.route_db.list_route_summaries()
+                if route_summaries:
+                    latest_route = route_summaries[0]
+                    route_date = latest_route.get("route_date", "")
+                    route_code = latest_route.get("route_code", "")
+                    if route_code:
+                        route_name = self.store_db.get_route_name_by_code(route_code) or route_code
+                    else:
+                        route_name = "未設定"
+                else:
+                    route_date = datetime.now().strftime("%Y-%m-%d")
+                    route_name = "未設定"
             
             # ファイル名に使えない文字を置換
             safe_route_name = route_name.replace("/", "_").replace("\\", "_").replace(":", "_").replace("*", "_").replace("?", "_").replace("\"", "_").replace("<", "_").replace(">", "_").replace("|", "_")
@@ -702,10 +755,16 @@ class ReceiptWidget(QWidget):
         self.folder_btn.clicked.connect(self.select_folder_for_batch)
         action_layout.addWidget(self.folder_btn)
         
+        # デフォルトフォルダ設定ボタン
+        self.default_folder_btn = QPushButton("デフォルトフォルダ設定")
+        self.default_folder_btn.setToolTip("処理の起点となるデフォルトフォルダを設定します")
+        self.default_folder_btn.clicked.connect(self.set_default_folder)
+        action_layout.addWidget(self.default_folder_btn)
+        
         self.folder_label = QLabel("未選択")
         self.folder_label.setStyleSheet("color: #bbb;")
         self.folder_label.setWordWrap(False)  # 折り返しを無効化
-        self.folder_label.setMaximumWidth(150)  # 最大幅を制限
+        self.folder_label.setMaximumWidth(200)  # 最大幅を拡張
         action_layout.addWidget(self.folder_label)
         
         self.process_btn = QPushButton("OCR処理")
@@ -761,7 +820,7 @@ class ReceiptWidget(QWidget):
         self.delete_row_btn.clicked.connect(self.delete_selected_receipts)
         action_layout.addWidget(self.delete_row_btn)
         
-        self.delete_all_btn = QPushButton("全件削除")
+        self.delete_all_btn = QPushButton("クリア")
         self.delete_all_btn.clicked.connect(self.delete_all_receipts)
         action_layout.addWidget(self.delete_all_btn)
         
@@ -967,9 +1026,89 @@ class ReceiptWidget(QWidget):
             self.image_path_label.setText(f"選択: {Path(file_path).name}")
             self.process_image(file_path)
 
+    def load_default_folder(self):
+        """保存されたデフォルトフォルダを読み込む"""
+        try:
+            s = QSettings("HIRIO", "SedoriDesktopApp")
+            default_folder_path = s.value("receipt/default_folder", "")
+            if default_folder_path and Path(default_folder_path).exists():
+                self.default_folder = Path(default_folder_path)
+            else:
+                self.default_folder = None
+        except Exception as e:
+            logger.error(f"デフォルトフォルダ読み込みエラー: {e}")
+            self.default_folder = None
+    
+    def set_default_folder(self):
+        """デフォルトフォルダを設定"""
+        # 現在のデフォルトフォルダまたは現在のフォルダを初期値として使用
+        initial_dir = None
+        if self.default_folder and self.default_folder.exists():
+            initial_dir = str(self.default_folder)
+        elif self.current_folder and self.current_folder.exists():
+            initial_dir = str(self.current_folder)
+        else:
+            initial_dir = r"D:\せどり総合"
+        
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "デフォルトフォルダを選択",
+            initial_dir,
+        )
+        
+        if not folder:
+            return
+        
+        folder_path = Path(folder)
+        if not folder_path.exists():
+            QMessageBox.warning(self, "エラー", "選択したフォルダが存在しません。")
+            return
+        
+        # デフォルトフォルダを保存
+        try:
+            s = QSettings("HIRIO", "SedoriDesktopApp")
+            s.setValue("receipt/default_folder", str(folder_path))
+            self.default_folder = folder_path
+            QMessageBox.information(
+                self, "設定完了",
+                f"デフォルトフォルダを設定しました:\n{str(folder_path)}"
+            )
+            # フォルダラベルを更新
+            self.update_folder_label()
+        except Exception as e:
+            logger.error(f"デフォルトフォルダ保存エラー: {e}")
+            QMessageBox.warning(self, "エラー", f"デフォルトフォルダの保存に失敗しました:\n{str(e)}")
+    
+    def update_folder_label(self):
+        """フォルダラベルを更新"""
+        if self.current_folder and self.current_folder.exists():
+            # 画像ファイル数をカウント
+            image_paths = []
+            try:
+                for entry in sorted(self.current_folder.iterdir()):
+                    if not entry.is_file():
+                        continue
+                    suffix = entry.suffix.lower()
+                    if suffix in (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"):
+                        image_paths.append(str(entry))
+            except Exception:
+                pass
+            self.folder_label.setText(f"{str(self.current_folder)} ({len(image_paths)}件)")
+        elif self.default_folder and self.default_folder.exists():
+            self.folder_label.setText(f"デフォルト: {str(self.default_folder)}")
+        else:
+            self.folder_label.setText("未選択")
+    
     def select_folder_for_batch(self):
         """フォルダを選択して、フォルダ内の全画像をOCRキューに追加"""
-        default_dir = str(self.current_folder) if self.current_folder else r"D:\せどり総合"
+        # デフォルトフォルダを優先的に使用
+        if self.default_folder and self.default_folder.exists():
+            default_dir = str(self.default_folder)
+        elif self.current_folder and self.current_folder.exists():
+            default_dir = str(self.current_folder)
+        else:
+            default_dir = r"D:\せどり総合"
+        
         folder = QFileDialog.getExistingDirectory(
             self,
             "レシート画像フォルダを選択",
@@ -989,7 +1128,7 @@ class ReceiptWidget(QWidget):
                 image_paths.append(str(entry))
         
         self.ocr_queue = image_paths
-        self.folder_label.setText(f"{str(self.current_folder)} ({len(image_paths)}件)")
+        self.update_folder_label()
     
     def process_selected_file(self):
         """OCRキューから最初のファイルを処理（フォルダ選択後）"""
@@ -2725,7 +2864,7 @@ class ReceiptWidget(QWidget):
             if set_lifecycle:
                 # ライフサイクル管理ポリシー設定関数を動的に読み込む
                 try:
-                    _, _, lifecycle_func, _ = self._load_gcs_uploader()
+                    _, _, lifecycle_func, _, _ = self._load_gcs_uploader()
                     if lifecycle_func:
                         success = lifecycle_func(
                             year1_storage=year1_storage,
@@ -2882,11 +3021,11 @@ class ReceiptWidget(QWidget):
         self.refresh_receipt_list()
     
     def delete_all_receipts(self):
-        """レシートを全件削除（テスト用途）"""
+        """レシート情報をクリア"""
         if QMessageBox.warning(
             self,
             "確認",
-            "レシート情報をすべて削除します。テスト用途以外では実行しないでください。\n続行しますか？",
+            "レシート情報をクリアします。続行しますか？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         ) != QMessageBox.Yes:
@@ -2894,7 +3033,7 @@ class ReceiptWidget(QWidget):
         deleted = self.receipt_db.delete_all_receipts()
         self.reset_form()
         self.refresh_receipt_list()
-        QMessageBox.information(self, "削除完了", f"{deleted} 件のレシートを削除しました。")
+        QMessageBox.information(self, "クリア完了", f"{deleted} 件のレシートをクリアしました。")
 
     # ===== 一括処理 =====
     def bulk_match_receipts(self):
@@ -5140,6 +5279,22 @@ class ReceiptWidget(QWidget):
         add_sku_btn.clicked.connect(lambda: self._add_skus_to_list(candidate_skus_list, linked_skus_list, None))
         sku_layout.addWidget(add_sku_btn)
         
+        # SKU直接入力エリア
+        sku_input_layout = QHBoxLayout()
+        sku_input_label = QLabel("SKU直接入力:")
+        sku_input_layout.addWidget(sku_input_label)
+        
+        sku_input_edit = QLineEdit()
+        sku_input_edit.setPlaceholderText("SKUを入力（カンマ区切りで複数可）")
+        sku_input_edit.returnPressed.connect(lambda: self._add_sku_by_input(sku_input_edit, linked_skus_list, None, sku_info_map))
+        sku_input_layout.addWidget(sku_input_edit)
+        
+        sku_input_btn = QPushButton("追加")
+        sku_input_btn.clicked.connect(lambda: self._add_sku_by_input(sku_input_edit, linked_skus_list, None, sku_info_map))
+        sku_input_layout.addWidget(sku_input_btn)
+        
+        sku_layout.addLayout(sku_input_layout)
+        
         right_layout.addWidget(sku_group)
         
         # ボタン
@@ -6965,6 +7120,22 @@ class ReceiptWidget(QWidget):
             add_sku_btn.clicked.connect(lambda: self._add_skus_to_list(candidate_skus_list, linked_skus_list, total_edit))
             sku_layout.addWidget(add_sku_btn)
             
+            # SKU直接入力エリア
+            sku_input_layout = QHBoxLayout()
+            sku_input_label = QLabel("SKU直接入力:")
+            sku_input_layout.addWidget(sku_input_label)
+            
+            sku_input_edit = QLineEdit()
+            sku_input_edit.setPlaceholderText("SKUを入力（カンマ区切りで複数可）")
+            sku_input_edit.returnPressed.connect(lambda: self._add_sku_by_input(sku_input_edit, linked_skus_list, total_edit, sku_info_map))
+            sku_input_layout.addWidget(sku_input_edit)
+            
+            sku_input_btn = QPushButton("追加")
+            sku_input_btn.clicked.connect(lambda: self._add_sku_by_input(sku_input_edit, linked_skus_list, total_edit, sku_info_map))
+            sku_input_layout.addWidget(sku_input_btn)
+            
+            sku_layout.addLayout(sku_input_layout)
+            
             right_layout.addWidget(sku_group)
             
             # 保存ボタン
@@ -7709,6 +7880,150 @@ class ReceiptWidget(QWidget):
                 receipt_total = 0
         self._update_sku_total(target_list, receipt_total)
     
+    def _add_sku_by_input(self, sku_input_edit: QLineEdit, linked_skus_list: QListWidget, total_edit, sku_info_map: dict):
+        """直接入力されたSKUを仕入DBから検索して追加"""
+        sku_text = sku_input_edit.text().strip()
+        if not sku_text:
+            QMessageBox.warning(self, "警告", "SKUを入力してください。")
+            return
+        
+        # カンマ区切りで複数SKUを処理
+        input_skus = [sku.strip() for sku in sku_text.split(',') if sku.strip()]
+        if not input_skus:
+            QMessageBox.warning(self, "警告", "有効なSKUが入力されていません。")
+            return
+        
+        # 既存のSKUを取得（重複チェック用）
+        existing_skus = set()
+        for i in range(linked_skus_list.count()):
+            item = linked_skus_list.item(i)
+            if item:
+                sku = item.data(Qt.UserRole)
+                if sku:
+                    existing_skus.add(sku)
+        
+        added_count = 0
+        not_found_skus = []
+        
+        # 仕入DBからSKUを検索
+        if not self.product_widget:
+            QMessageBox.warning(self, "警告", "仕入DBへの参照がありません。")
+            return
+        
+        purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
+        
+        for input_sku in input_skus:
+            # 重複チェック
+            if input_sku in existing_skus:
+                continue
+            
+            # 仕入DBから該当SKUを検索
+            found_record = None
+            for record in purchase_records:
+                record_sku = record.get('SKU') or record.get('sku', '')
+                if record_sku and record_sku.strip() == input_sku:
+                    found_record = record
+                    break
+            
+            if found_record:
+                # 仕入れ価格を取得
+                price = found_record.get('仕入れ価格') or found_record.get('仕入価格') or found_record.get('purchase_price') or found_record.get('cost', 0)
+                try:
+                    price = float(price) if price else 0
+                except (ValueError, TypeError):
+                    price = 0
+                
+                # 仕入れ個数を取得
+                quantity = found_record.get('仕入れ個数') or found_record.get('仕入個数') or found_record.get('quantity') or found_record.get('数量', 1)
+                try:
+                    quantity = float(quantity) if quantity else 1
+                except (ValueError, TypeError):
+                    quantity = 1
+                
+                # 金額 = 仕入れ個数 × 仕入れ価格
+                total_amount = price * quantity
+                
+                # 時刻情報を取得（sku_info_mapと同じロジック）
+                time_str = "時刻不明"
+                purchase_date_str = found_record.get('仕入れ日') or found_record.get('purchase_date') or ""
+                if purchase_date_str:
+                    try:
+                        from datetime import datetime
+                        purchase_date_str_clean = str(purchase_date_str).strip()
+                        if ' ' in purchase_date_str_clean:
+                            try:
+                                dt = datetime.strptime(purchase_date_str_clean, "%Y/%m/%d %H:%M")
+                                time_str = dt.strftime("%Y/%m/%d %H:%M")
+                            except:
+                                try:
+                                    dt = datetime.strptime(purchase_date_str_clean, "%Y-%m-%d %H:%M")
+                                    time_str = dt.strftime("%Y/%m/%d %H:%M")
+                                except:
+                                    try:
+                                        dt = datetime.strptime(purchase_date_str_clean, "%Y/%m/%d %H:%M:%S")
+                                        time_str = dt.strftime("%Y/%m/%d %H:%M")
+                                    except:
+                                        try:
+                                            dt = datetime.strptime(purchase_date_str_clean, "%Y-%m-%d %H:%M:%S")
+                                            time_str = dt.strftime("%Y/%m/%d %H:%M")
+                                        except:
+                                            time_str = purchase_date_str_clean
+                    except Exception:
+                        pass
+                
+                # 表示テキストを作成
+                if total_amount > 0:
+                    display_text = f"{input_sku} - ¥{int(total_amount):,} - ({time_str})"
+                else:
+                    display_text = f"{input_sku} - 価格不明 - ({time_str})"
+                
+                # リストに追加
+                list_item = QListWidgetItem(display_text)
+                list_item.setData(Qt.UserRole, input_sku)
+                linked_skus_list.addItem(list_item)
+                existing_skus.add(input_sku)
+                added_count += 1
+                
+                # sku_info_mapにも追加（後で合計計算に使用）
+                if input_sku not in sku_info_map:
+                    sku_info_map[input_sku] = {
+                        'price': total_amount,
+                        'time': time_str
+                    }
+            else:
+                # 仕入DBに見つからない場合は、価格不明として追加
+                display_text = f"{input_sku} - 価格不明 - (時刻不明)"
+                list_item = QListWidgetItem(display_text)
+                list_item.setData(Qt.UserRole, input_sku)
+                linked_skus_list.addItem(list_item)
+                existing_skus.add(input_sku)
+                added_count += 1
+                not_found_skus.append(input_sku)
+        
+        # 入力フィールドをクリア
+        sku_input_edit.clear()
+        
+        # 合計金額を更新
+        receipt_total = None
+        if total_edit:
+            try:
+                receipt_total = int(total_edit.text()) if total_edit.text().strip() else 0
+            except ValueError:
+                receipt_total = 0
+        self._update_sku_total(linked_skus_list, receipt_total)
+        
+        # 結果メッセージを表示
+        if not_found_skus:
+            QMessageBox.warning(
+                self, "一部SKUが見つかりませんでした",
+                f"{added_count} 件のSKUを追加しました。\n"
+                f"以下のSKUは仕入DBに見つかりませんでした（価格不明として追加）:\n{', '.join(not_found_skus)}"
+            )
+        elif added_count > 0:
+            QMessageBox.information(self, "追加完了", f"{added_count} 件のSKUを追加しました。")
+        else:
+            QMessageBox.information(self, "情報", "追加できるSKUがありませんでした（既に追加済みの可能性があります）。")
+    
     def _remove_sku_from_list(self, sku_list: QListWidget, total_edit=None):
         """選択されたSKUを削除"""
         selected_items = sku_list.selectedItems()
@@ -7939,7 +8254,35 @@ class ReceiptWidget(QWidget):
             all_receipts = self.receipt_db.find_by_date_and_store(None, None)
             print(f"[DEBUG] レシート件数: {len(all_receipts)}")
             
+            # 保証書テーブルの行数を取得
+            warranty_row_count = 0
+            if hasattr(self, 'warranty_table') and self.warranty_table:
+                warranty_row_count = self.warranty_table.rowCount()
+            
+            # 処理ステップ数を計算（レシート処理 + 保証書処理 + 仕訳帳処理）
+            total_steps = len(all_receipts) + warranty_row_count + len(all_receipts)
+            
+            # プログレスダイアログを表示
+            progress = QProgressDialog("確定処理中...", "キャンセル", 0, total_steps, self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)  # 即座に表示
+            progress.setValue(0)
+            progress.show()
+            QCoreApplication.processEvents()  # UIを更新
+            
+            current_step = 0
+            
             for receipt in all_receipts:
+                # キャンセルチェック
+                if progress.wasCanceled():
+                    QMessageBox.information(self, "確定処理", "確定処理がキャンセルされました。")
+                    return
+                
+                current_step += 1
+                progress.setValue(current_step)
+                progress.setLabelText(f"確定処理中... (レシート処理: {current_step}/{len(all_receipts)})")
+                QCoreApplication.processEvents()  # UIを更新
+                
                 receipt_id = receipt.get('id')
                 
                 # 種別判定（OCRテキストから簡易判定）- レシートのみを対象にする
@@ -8104,7 +8447,17 @@ class ReceiptWidget(QWidget):
             # 保証書一覧から情報を取得して仕入DBに反映
             if hasattr(self, 'warranty_table') and self.warranty_table.rowCount() > 0:
                 warranty_updated_count = 0
-                for warranty_row in range(self.warranty_table.rowCount()):
+                warranty_total = self.warranty_table.rowCount()
+                for warranty_row in range(warranty_total):
+                    # キャンセルチェック
+                    if progress.wasCanceled():
+                        QMessageBox.information(self, "確定処理", "確定処理がキャンセルされました。")
+                        return
+                    
+                    current_step += 1
+                    progress.setValue(current_step)
+                    progress.setLabelText(f"確定処理中... (保証書処理: {warranty_row + 1}/{warranty_total})")
+                    QCoreApplication.processEvents()  # UIを更新
                     try:
                         # まずテーブル上の代表SKUを取得（後方互換用）
                         sku_item = self.warranty_table.item(warranty_row, 7)  # SKU列
@@ -8354,7 +8707,18 @@ class ReceiptWidget(QWidget):
                     "既に登録済み": 0
                 }
                 
+                journal_receipt_count = 0
                 for receipt in all_receipts:
+                    # キャンセルチェック
+                    if progress.wasCanceled():
+                        QMessageBox.information(self, "確定処理", "確定処理がキャンセルされました。")
+                        return
+                    
+                    current_step += 1
+                    journal_receipt_count += 1
+                    progress.setValue(current_step)
+                    progress.setLabelText(f"確定処理中... (仕訳帳登録: {journal_receipt_count}/{len(all_receipts)})")
+                    QCoreApplication.processEvents()  # UIを更新
                     receipt_id = receipt.get('id')
                     
                     # 種別判定（レシートのみを対象）
@@ -8501,6 +8865,10 @@ class ReceiptWidget(QWidget):
             warranty_count = warranty_updated_count
             
             print(f"[DEBUG] 確定処理完了: receipt_count={receipt_count}, warranty_count={warranty_count}, journal_count={journal_count}, error_count={error_count}")
+            
+            # プログレスダイアログを閉じる
+            progress.setValue(total_steps)
+            progress.close()
             
             if receipt_count == 0 and warranty_count == 0 and error_count == 0:
                 # 処理対象がなかった場合

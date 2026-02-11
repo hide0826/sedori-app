@@ -924,6 +924,7 @@ class ProductWidget(QWidget):
         all_records: List[Dict[str, Any]],
         skip_existing: bool = True,
         target_sku: Optional[str] = None,
+        clear_existing: bool = False,
     ) -> Tuple[bool, int, Optional[Dict[str, Any]]]:
         """
         指定JANに対応する仕入レコードへ画像パスを割り当てる
@@ -933,6 +934,7 @@ class ProductWidget(QWidget):
             image_paths: 割り当てたい画像パスのリスト
             all_records: 現在の全仕入レコード（purchase_all_records 相当）
             skip_existing: 既に画像列が埋まっている場合はスキップするかどうか
+            clear_existing: 既存の画像をクリアしてから新しい画像を登録するかどうか
 
         Returns:
             (success, added_count, record_snapshot)
@@ -969,6 +971,11 @@ class ProductWidget(QWidget):
 
         # 画像列名候補（仕入DB側の列名）
         image_columns = [f"画像{i}" for i in range(1, 7)]
+
+        # 既存の画像をクリアする場合
+        if clear_existing:
+            for col in image_columns:
+                target_record[col] = ""
 
         added_count = 0
 

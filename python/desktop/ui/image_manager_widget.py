@@ -1831,9 +1831,9 @@ class ImageManagerWidget(QWidget):
                     # 対象SKUを取得
                     target_sku = self._get_target_sku_for_group(group, all_records)
                     
-                    # 更新処理を実行（既存画像はスキップ）
+                    # 更新処理を実行（既存画像をクリアしてから新しい画像で上書き）
                     success, added_count, record_snapshot = self.product_widget.update_image_paths_for_jan(
-                        jan, image_paths, all_records, skip_existing=True, target_sku=target_sku
+                        jan, image_paths, all_records, skip_existing=False, target_sku=target_sku, clear_existing=True
                     )
 
                     if success:
@@ -1860,8 +1860,8 @@ class ImageManagerWidget(QWidget):
             message_parts = []
             if success_count > 0:
                 message_parts.append(f"{success_count}件のJANグループを確定処理しました。")
-            if skipped_count > 0:
-                message_parts.append(f"{skipped_count}件の画像は既に登録済みのためスキップしました。")
+                if skipped_count > 0:
+                    message_parts.append(f"（{skipped_count}件の画像は既に登録済みのためスキップしました）")
             if failed_groups:
                 message_parts.append(f"\n以下のJANグループの処理に失敗しました:\n{', '.join(failed_groups)}")
 
@@ -3162,6 +3162,32 @@ class ImageManagerWidget(QWidget):
             QMessageBox.warning(self, "警告", "登録されている商品がありません。")
             return
         
+        # 保存期間（月）をユーザーに確認（0=無期限）。デフォルトは3か月。
+        try:
+            settings = QSettings("HIRIO", "SedoriDesktopApp")
+            default_months = settings.value("image_manager/gcs_retention_months", 3)
+            try:
+                default_months = int(default_months)
+            except (TypeError, ValueError):
+                default_months = 3
+            
+            retention_months, ok = QInputDialog.getInt(
+                self,
+                "GCS保存期間の設定",
+                "画像の保存期間（月）を入力してください。\n0 を指定すると保存期間は制限なし（無期限）になります。",
+                value=default_months,
+                min=0,
+                max=120,
+            )
+            if not ok:
+                # キャンセルされた場合はアップロード処理を中止
+                return
+            
+            settings.setValue("image_manager/gcs_retention_months", retention_months)
+        except Exception:
+            # 保存期間の取得に失敗しても、デフォルト3か月として続行
+            retention_months = 3
+        
         # 対象行を決定
         if force_all:
             selected_rows = set(range(len(self.registration_records)))
@@ -3350,10 +3376,17 @@ class ImageManagerWidget(QWidget):
                         if existing_url:
                             public_url = existing_url
                         else:
-                            public_url = upload_image_to_gcs(image_path)
+                            # 保存期間をメタデータとして付与（0=無期限）
+                            metadata = None
+                            if retention_months is not None and retention_months >= 0:
+                                metadata = {"retention_months": str(retention_months)}
+                            public_url = upload_image_to_gcs(image_path, metadata=metadata)
                     else:
-                    # GCSにアップロード
-                        public_url = upload_image_to_gcs(image_path)
+                        # GCSにアップロード（保存期間メタデータ付き）
+                        metadata = None
+                        if retention_months is not None and retention_months >= 0:
+                            metadata = {"retention_months": str(retention_months)}
+                        public_url = upload_image_to_gcs(image_path, metadata=metadata)
                     
                     # entryのimage_urlsを更新
                     if "image_urls" not in entry:
