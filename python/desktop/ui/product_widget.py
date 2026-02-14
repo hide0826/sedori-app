@@ -329,6 +329,8 @@ class ProductWidget(QWidget):
         self.purchase_columns: List[str] = list(self.inventory_columns)
         self.purchase_records: List[Dict[str, Any]] = []
         self.sales_records: List[Dict[str, Any]] = []
+        # 仕入DB行の一意IDカウンタ（ソートしても行を特定できるようにする）
+        self._purchase_row_id_counter: int = 1
         self.setup_ui()
         self.load_products()
         self.restore_latest_purchase_snapshot()
@@ -777,33 +779,45 @@ class ProductWidget(QWidget):
         仕入DBテーブルの現在の状態を内部レコードに反映してスナップショット保存する
 
         - 手動編集したセルの内容も含めて保存したい場合に使用
-        - SKU列をキーに purchase_all_records / master / purchase_records を更新
+        - テーブル上に表示されている行をそのまま「正」とみなし、
+          purchase_all_records / master / purchase_records を丸ごと置き換える
         """
-        if not hasattr(self, "purchase_all_records") or not self.purchase_all_records:
+        if not hasattr(self, "purchase_columns") or not self.purchase_columns:
             QMessageBox.information(self, "情報", "保存する仕入DBデータがありません。")
             return
 
-        # SKU列のインデックスを取得
-        sku_col_idx = None
-        if "SKU" in self.purchase_columns:
-            sku_col_idx = self.purchase_columns.index("SKU")
-
-        if sku_col_idx is None:
-            QMessageBox.warning(self, "エラー", "SKU列が見つからないため、保存できません。")
-            return
-
+        # テーブルの全行を走査して、現在表示されている内容から新しいレコードリストを構築する
         row_count = self.purchase_table.rowCount()
         col_count = self.purchase_table.columnCount()
 
-        # SKUをキーに全レコードを更新
-        for row in range(row_count):
-            sku_item = self.purchase_table.item(row, sku_col_idx)
-            if not sku_item:
-                continue
-            sku_val = (sku_item.text() or "").strip()
-            if not sku_val:
-                continue
+        # 既存レコードをキー（SKU or 仕入れ日+ASIN/JAN+商品名+店舗コード）で引けるようにしておく
+        def _make_key(rec: Dict[str, Any]) -> str:
+            sku = str(rec.get("SKU") or rec.get("sku") or "").strip()
+            if sku:
+                return f"SKU:{sku}"
+            purchase_date = str(rec.get("仕入れ日") or rec.get("purchase_date") or "").strip()
+            asin = str(rec.get("ASIN") or rec.get("asin") or "").strip()
+            jan = str(rec.get("JAN") or rec.get("jan") or "").strip()
+            asin_or_jan = asin or jan
+            title = str(rec.get("商品名") or rec.get("title") or rec.get("product_name") or "").strip()
+            store_code = str(
+                rec.get("仕入先")
+                or rec.get("店舗コード")
+                or rec.get("store_code")
+                or ""
+            ).strip()
+            return f"{purchase_date}|{asin_or_jan}|{store_code}|{title}"
 
+        existing_index: Dict[str, Dict[str, Any]] = {}
+        if hasattr(self, "purchase_all_records") and self.purchase_all_records:
+            for rec in self.purchase_all_records:
+                key = _make_key(rec)
+                if key:
+                    existing_index[key] = rec
+
+        new_all_records: List[Dict[str, Any]] = []
+
+        for row in range(row_count):
             # テーブルの1行分の値を辞書にまとめる
             row_data: Dict[str, Any] = {}
             receipt_image_path = None  # レシート画像パスを保持
@@ -820,31 +834,27 @@ class ProductWidget(QWidget):
                 if header == "レシート画像" and cell_item:
                     file_path = cell_item.data(Qt.UserRole)
                     if file_path:
-                        # UserRoleに保存されている値がファイルパスの場合
                         from pathlib import Path
                         file_path_obj = Path(file_path)
-                        if file_path_obj.exists() or file_path:  # ファイルが存在するか、パスが設定されている場合
+                        if file_path_obj.exists() or file_path:
                             receipt_image_path = str(file_path) if isinstance(file_path, str) else str(file_path_obj.resolve())
 
-            # 対象リストをすべて更新
-            for lst_name in ["purchase_all_records", "purchase_all_records_master", "purchase_records"]:
-                lst = getattr(self, lst_name, None)
-                if not lst:
-                    continue
-                for rec in lst:
-                    rec_sku = (rec.get("SKU") or rec.get("sku") or "").strip()
-                    if rec_sku == sku_val:
-                        # 既存キーを維持しつつ、テーブル側の値で上書き
-                        for key, val in row_data.items():
-                            rec[key] = val
-                        
-                        # レシート画像パスを保持（UserRoleから取得した値、または既存の値を保持）
-                        if receipt_image_path:
-                            rec['レシート画像パス'] = receipt_image_path
-                        elif 'レシート画像パス' in rec:
-                            # 既存のレシート画像パスを保持（テーブルに表示されていないメタデータ）
-                            pass  # 既にrecに含まれているのでそのまま保持
-                        break
+            key = _make_key(row_data)
+            base_rec = existing_index.get(key, {}).copy() if key in existing_index else {}
+
+            # 既存レコードにテーブルの値を上書き
+            for k, v in row_data.items():
+                base_rec[k] = v
+
+            if receipt_image_path:
+                base_rec["レシート画像パス"] = receipt_image_path
+
+            new_all_records.append(base_rec)
+
+        # テーブルが空の場合は全削除
+        self.purchase_all_records = new_all_records
+        self.purchase_all_records_master = copy.deepcopy(new_all_records)
+        self.purchase_records = copy.deepcopy(new_all_records)
 
         # スナップショット保存
         try:
@@ -1234,19 +1244,45 @@ class ProductWidget(QWidget):
 
     def on_delete_purchase_row(self):
         """選択行を削除"""
-        rows = sorted(set(index.row() for index in self.purchase_table.selectedIndexes()), reverse=True)
+        rows = sorted({index.row() for index in self.purchase_table.selectedIndexes()})
         if not rows:
             QMessageBox.warning(self, "選択なし", "削除する行を選択してください。")
             return
-            
-        if QMessageBox.question(self, "確認", f"{len(rows)}件のデータを削除しますか？") != QMessageBox.Yes:
+
+        # 行ID（_row_id）を取得して削除対象を特定
+        row_ids_to_delete = set()
+        for row in rows:
+            try:
+                item0 = self.purchase_table.item(row, 0)
+                if item0 is not None:
+                    row_id = item0.data(Qt.UserRole + 1)
+                    if row_id is not None:
+                        row_ids_to_delete.add(row_id)
+            except Exception:
+                continue
+
+        # フォールバック: 行IDがない場合は削除不可
+        if not row_ids_to_delete:
+            QMessageBox.warning(self, "削除不可", "削除対象の行情報が取得できませんでした。")
             return
 
-        for row in rows:
-            if 0 <= row < len(self.purchase_records):
-                del self.purchase_records[row]
-        
-        self.purchase_all_records = list(self.purchase_records)
+        if QMessageBox.question(self, "確認", f"{len(row_ids_to_delete)}件のデータを削除しますか？") != QMessageBox.Yes:
+            return
+
+        # _row_id をキーに、内部リストから該当レコードを削除（スナップショット用DBのみ）
+        def _filter_by_row_id(lst):
+            return [
+                rec for rec in (lst or [])
+                if rec.get("_row_id") not in row_ids_to_delete
+            ]
+
+        if hasattr(self, "purchase_records"):
+            self.purchase_records = _filter_by_row_id(getattr(self, "purchase_records", []))
+
+        for attr_name in ["purchase_all_records", "purchase_all_records_master"]:
+            if hasattr(self, attr_name):
+                setattr(self, attr_name, _filter_by_row_id(getattr(self, attr_name, [])))
+
         self.populate_purchase_table(self.purchase_records)
         self.update_purchase_count_label()
         self.save_purchase_snapshot()
@@ -1700,6 +1736,12 @@ class ProductWidget(QWidget):
             header.setSectionResizeMode(col_idx, QHeaderView.Interactive)
 
         for row, record in enumerate(records):
+            # レコードに行IDを付与（なければ採番）
+            if "_row_id" not in record or record.get("_row_id") is None:
+                record["_row_id"] = self._purchase_row_id_counter
+                self._purchase_row_id_counter += 1
+            row_id = record.get("_row_id")
+
             for col, header in enumerate(columns):
                 value = self._get_record_value(record, [header])
                 if value is None:
@@ -2061,6 +2103,14 @@ class ProductWidget(QWidget):
                 
                 if header != "ステータス":  # ステータス列はセルウィジェットを設定済み
                     self.purchase_table.setItem(row, col, item)
+
+            # 1列目のUserRole+1に行IDを保存（ソート後も元レコードを特定するため）
+            try:
+                first_item = self.purchase_table.item(row, 0)
+                if first_item is not None:
+                    first_item.setData(Qt.UserRole + 1, row_id)
+            except Exception:
+                pass
         
         # すべての行の背景色を設定（ステータスに応じて）
         for row in range(len(records)):
@@ -2210,6 +2260,49 @@ class ProductWidget(QWidget):
         self.purchase_table.blockSignals(False)
         self.purchase_table.viewport().update()
 
+    def _delete_record_by_row_signature(self, row: int) -> None:
+        """
+        SKUが空の行などを、テーブル上の内容（全カラム）をキーにして内部レコードから削除する。
+        ソートやフィルタで行番号と内部インデックスがずれていても、内容一致で削除できるようにする。
+        """
+        if not hasattr(self, "purchase_columns"):
+            return
+
+        # テーブル行から「列名 -> テキスト」の辞書を作成（空文字はキーとして弱く扱う）
+        row_values: Dict[str, str] = {}
+        for col_idx, col_name in enumerate(self.purchase_columns):
+            if col_name is None:
+                continue
+            item = self.purchase_table.item(row, col_idx)
+            text = (item.text() if item else "").strip()
+            # 完全空欄はマッチ条件から外す（ユルめの比較にする）
+            if text != "":
+                row_values[str(col_name)] = text
+
+        if not row_values:
+            return
+
+        def _matches(rec: Dict[str, Any]) -> bool:
+            """record が row_values と一致するか判定（指定された列のみ比較）"""
+            for col_name, text in row_values.items():
+                val = self._get_record_value(rec, [col_name])
+                val_str = "" if val is None else str(val).strip()
+                if val_str != text:
+                    return False
+            return True
+
+        # 各リストから最初にマッチしたレコードを1件だけ削除
+        for attr_name in ["purchase_records", "purchase_all_records", "purchase_all_records_master"]:
+            if not hasattr(self, attr_name):
+                continue
+            lst = getattr(self, attr_name, [])
+            if not lst:
+                continue
+            for idx, rec in enumerate(lst):
+                if _matches(rec):
+                    del lst[idx]
+                    break
+
     def _get_record_value(self, record: Dict[str, Any], keys: List[str]) -> Any:
         """大文字小文字を無視して値を取得"""
         for key in keys:
@@ -2272,6 +2365,11 @@ class ProductWidget(QWidget):
         
         copy_action = menu.addAction("選択範囲をコピー")
         copy_action.triggered.connect(self._copy_selection_to_clipboard)
+        menu.addSeparator()
+
+        # 選択行削除（行削除ボタンと同じ処理）
+        delete_row_action = menu.addAction("選択行を削除")
+        delete_row_action.triggered.connect(self.on_delete_purchase_row)
         menu.addSeparator()
         amazon_action = menu.addAction("Amazon商品ページを開く")
         amazon_action.triggered.connect(self._open_amazon_link)

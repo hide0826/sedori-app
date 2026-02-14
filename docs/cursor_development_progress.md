@@ -1199,5 +1199,29 @@
   - コミットメッセージ: "feat: 証憑管理・仕入DB・店舗マスタ機能改善"
   - リモートリポジトリへのプッシュ完了
 
-**最終更新**: 2026-02-08
-**更新者**: Agentモード（機能改善）
+## 2026-02-14 画像管理・GCS・起動改善・Amazonテンプレート修正
+
+- **画像管理タブ（画像管理サブタブ）**
+  - 画像一覧で複数選択可能に（ExtendedSelection）: 左ドラッグで範囲選択、Shift/Ctrl+クリックで複数選択
+  - ImageListWidget.startDrag: 選択した全画像のパスを改行区切りでMIME渡し
+  - JanGroupTreeWidget.dropEvent: 複数パスを受け取り add_images_to_group で一括追加
+  - add_images_to_group: 複数画像を同一JANグループに登録し、完了メッセージは1回のみ表示
+
+- **画像登録タブ（GCSアップロード）**
+  - GCS保存期間を「日数」で指定するUIをタブ右上に追加（GCS保存期間（日）: スピンボックス、0=無期限）
+  - 保存期間はQSettings（image_manager/gcs_retention_days）で永続化、デフォルト90日
+  - gcs_uploader.py: set_used_items_retention_days() を追加（used_items/ をN日後に削除するライフサイクル設定）
+  - アップロード前に「GCSアップロードの確認」ダイアログで保存期間・件数を表示し、OKで開始
+
+- **アプリ起動時間短縮**
+  - main_window.py: 全タブウィジェットのトップレベルインポートを廃止し、setup_tabs() 内で遅延インポート
+  - 起動直後は「読み込み中...」プレースホルダタブのみ表示し、QTimer.singleShot(0, _deferred_setup_tabs) でタブを遅延構築
+
+- **その他修正**
+  - inventory_widget.py: desktop.database / desktop.utils を database / utils に変更（ModuleNotFoundError 解消）
+  - Amazonテンプレート書き込み: services.amazon_inventory_loader_service を importlib.util でファイルパスから直接読み込み（sys.path に依存しない）
+
+- **変更ファイル**: image_manager_widget.py, main_window.py, inventory_widget.py, gcs_uploader.py, docs/cursor_development_progress.md ほか
+
+**最終更新**: 2026-02-14
+**更新者**: Agentモード（実装）

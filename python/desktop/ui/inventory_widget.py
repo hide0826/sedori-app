@@ -65,7 +65,7 @@ class InventoryWidget(QWidget):
         self.product_purchase_db = ProductPurchaseDatabase()
         self.route_visit_db = RouteVisitDatabase()
         self.warranty_db = WarrantyDatabase()
-        from desktop.database.condition_template_db import ConditionTemplateDatabase
+        from database.condition_template_db import ConditionTemplateDatabase
         self.condition_template_db = ConditionTemplateDatabase()
         
         # UIの初期化
@@ -409,7 +409,13 @@ class InventoryWidget(QWidget):
         self.chk_include_title.setChecked(True)
         self.chk_include_title.setToolTip("無効にすると、出品CSVのtitle列を空欄で出力します")
         layout.addWidget(self.chk_include_title)
+
+        # 自己発送SKU末尾M挿入設定（タイトルの次に配置）
+        self.chk_append_m_for_self_ship = QCheckBox("自己発送末尾にMを挿入")
+        self.chk_append_m_for_self_ship.setToolTip("有効にすると、発送方法が『自己発送』の商品は生成されたSKUの末尾にMを付けます")
+        layout.addWidget(self.chk_append_m_for_self_ship)
         
+        # 高値設定と +% は隣り合わせで配置
         self.chk_enable_takane = QCheckBox("高値を設定する")
         self.chk_enable_takane.setToolTip("有効にすると、takane欄にpriceの〇%上を自動設定")
         layout.addWidget(self.chk_enable_takane)
@@ -428,6 +434,7 @@ class InventoryWidget(QWidget):
         # 永続化
         self.chk_include_title.toggled.connect(self.save_listing_settings)
         self.chk_enable_takane.toggled.connect(self.save_listing_settings)
+        self.chk_append_m_for_self_ship.toggled.connect(self.save_listing_settings)
         self.spin_takane_pct.valueChanged.connect(self.save_listing_settings)
         self.load_listing_settings()
         
@@ -445,6 +452,9 @@ class InventoryWidget(QWidget):
             takane_pct = s.value("listing/takane_pct", 5, type=int)
             self.chk_include_title.setChecked(bool(include_title))
             self.chk_enable_takane.setChecked(bool(enable_takane))
+            # 自己発送末尾M設定（デフォルトはFalse）
+            append_m = s.value("listing/append_m_for_self_ship", False, type=bool)
+            self.chk_append_m_for_self_ship.setChecked(bool(append_m))
             try:
                 self.spin_takane_pct.setValue(int(takane_pct))
             except Exception:
@@ -457,6 +467,7 @@ class InventoryWidget(QWidget):
             s = self._get_qsettings()
             s.setValue("listing/include_title", self.chk_include_title.isChecked())
             s.setValue("listing/enable_takane", self.chk_enable_takane.isChecked())
+            s.setValue("listing/append_m_for_self_ship", self.chk_append_m_for_self_ship.isChecked())
             s.setValue("listing/takane_pct", int(self.spin_takane_pct.value()))
         except Exception as e:
             print(f"出品設定セーブ失敗: {e}")
@@ -1184,33 +1195,35 @@ class InventoryWidget(QWidget):
                 
                 # 最新スナップショットから既存データを取得
                 snapshots = self.product_purchase_db.list_snapshots()
-                existing_all_records = []
+                existing_all_records: List[Dict[str, Any]] = []
                 if snapshots:
                     latest_snapshot = self.product_purchase_db.get_snapshot(snapshots[0]["id"])
                     if latest_snapshot:
                         existing_all_records = latest_snapshot.get("data", [])
                 
                 # 既存データとマージ（重複チェック）
-                existing_skus = {r.get("SKU") or r.get("sku", "") for r in existing_all_records if r.get("SKU") or r.get("sku")}
-                new_records = []
+                # キーは SKU があれば SKU、それ以外は「仕入れ日 + ASIN/JAN + 商品名 + 店舗コード」で判定
+                existing_index: Dict[str, int] = {}
+                for idx, rec in enumerate(existing_all_records):
+                    key = self._get_purchase_record_key(rec)
+                    if key:
+                        existing_index[key] = idx
+
                 updated_count = 0
+                new_count = 0
                 
                 for record in purchase_records:
-                    sku = record.get("SKU") or record.get("sku", "")
-                    if sku and sku in existing_skus:
-                        # 既存データを更新（同じSKUの既存レコードを置き換え）
-                        for i, existing in enumerate(existing_all_records):
-                            existing_sku = existing.get("SKU") or existing.get("sku", "")
-                            if existing_sku == sku:
-                                existing_all_records[i] = record
-                                updated_count += 1
-                                break
+                    key = self._get_purchase_record_key(record)
+                    if key and key in existing_index:
+                        # 既存データを更新（同じキーの既存レコードを置き換え）
+                        existing_all_records[existing_index[key]] = record
+                        updated_count += 1
                     else:
                         # 新規データを追加
-                        new_records.append(record)
-                
-                # 新規データを追加
-                existing_all_records.extend(new_records)
+                        existing_all_records.append(record)
+                        if key:
+                            existing_index[key] = len(existing_all_records) - 1
+                        new_count += 1
                 
                 # スナップショットに保存
                 self.product_purchase_db.save_snapshot("自動保存(仕入DB)", existing_all_records)
@@ -1225,7 +1238,7 @@ class InventoryWidget(QWidget):
                     except Exception as e:
                         print(f"仕入DBタブの表示更新エラー: {e}")
                 
-                message = f"仕入データ: {len(new_records)}件の新規データを追加"
+                message = f"仕入データ: {new_count}件の新規データを追加"
                 if updated_count > 0:
                     message += f"、{updated_count}件を更新"
                 message += f"しました。（合計: {len(existing_all_records)}件）"
@@ -1369,6 +1382,36 @@ class InventoryWidget(QWidget):
                     row["保証書ID"] = warranty_id
             augmented.append(row)
         return augmented
+
+    def _get_purchase_record_key(self, record: Dict[str, Any]) -> Optional[str]:
+        """
+        仕入レコードを一意に識別するためのキーを生成する。
+        - SKU があれば SKU を優先（SKU単位で一意）
+        - SKU が無い場合は「仕入れ日 + ASIN or JAN + 商品名 + 店舗コード」で判定
+          → これにより、同じ仕入データを何度DB保存しても更新扱いになり、重複登録を防ぐ
+        """
+        sku = str(record.get("SKU") or record.get("sku") or "").strip()
+        if sku:
+            return f"SKU:{sku}"
+
+        # SKUが無い場合のフォールバックキー
+        purchase_date = str(record.get("仕入れ日") or record.get("purchase_date") or "").strip()
+        asin = str(record.get("ASIN") or record.get("asin") or "").strip()
+        jan = str(record.get("JAN") or record.get("jan") or "").strip()
+        asin_or_jan = asin or jan
+        title = str(record.get("商品名") or record.get("title") or record.get("product_name") or "").strip()
+        store_code = str(
+            record.get("仕入先")
+            or record.get("店舗コード")
+            or record.get("store_code")
+            or ""
+        ).strip()
+
+        # ほとんど情報が無い場合はキーを作らない（安全のため）
+        if not (purchase_date or asin_or_jan or title or store_code):
+            return None
+
+        return f"NO-SKU:{purchase_date}|{asin_or_jan}|{store_code}|{title}"
     
     def _infer_warranty_from_comment_for_db(self, row: Dict[str, Any]) -> Optional[str]:
         """コメント欄から保証期間（月）を推定し、仕入日からの満了日を返す"""
@@ -2020,6 +2063,26 @@ class InventoryWidget(QWidget):
         except Exception:
             return True
 
+    def _is_excluded_for_sku(self, row: dict) -> bool:
+        """
+        SKU生成時の除外条件
+        
+        - コメントに『除外』が含まれる行は除外
+        - 発送方法が空欄の行は除外
+        - FBA 以外（自己発送など）は SKU 生成対象に含める
+        """
+        try:
+            comment = str(row.get('コメント', '') or '')
+            if '除外' in comment:
+                return True
+            ship = str(row.get('発送方法', '') or '').strip()
+            # 発送方法が空欄の行は除外
+            if ship == '':
+                return True
+            return False
+        except Exception:
+            return True
+
     def toggle_excluded_highlight(self):
         self.excluded_highlight_on = not self.excluded_highlight_on
         if self.excluded_highlight_on:
@@ -2480,7 +2543,8 @@ class InventoryWidget(QWidget):
         try:
             # データを辞書形式に変換（除外商品を除く）
             all_list = self.filtered_data.to_dict('records')
-            data_list = [r for r in all_list if not self._is_excluded_row(r)]
+            # SKU生成専用の除外条件（自己発送も含める）
+            data_list = [r for r in all_list if not self._is_excluded_for_sku(r)]
             excluded_count = len(all_list) - len(data_list)
             
             # 各商品データに店舗情報を追加
@@ -2608,6 +2672,17 @@ class InventoryWidget(QWidget):
                         matched_index = idx_result
 
                     if matched_index is not None:
+                        # 必要であれば自己発送用に末尾Mを付与
+                        if self.chk_append_m_for_self_ship.isChecked():
+                            try:
+                                ship_method = str(self.inventory_data.at[matched_index, '発送方法'] or '')
+                            except Exception:
+                                ship_method = ''
+                            # 発送方法に「自己発送」が含まれる行だけ対象
+                            if '自己発送' in ship_method:
+                                if isinstance(generated_sku, str) and not generated_sku.endswith('M'):
+                                    generated_sku = f"{generated_sku}M"
+
                         self.inventory_data.at[matched_index, 'SKU'] = generated_sku
                         used_rows.add(matched_index)
             
@@ -2636,7 +2711,7 @@ class InventoryWidget(QWidget):
         if file_path:
             try:
                 from pathlib import Path
-                from desktop.utils.file_naming import resolve_unique_path
+                from utils.file_naming import resolve_unique_path
                 target = resolve_unique_path(Path(file_path))
                 self.filtered_data.to_csv(str(target), index=False, encoding='utf-8')
                 QMessageBox.information(self, "出力完了", f"プレビュー用CSVを保存しました（UTF-8）。出品用は『出品CSV生成』をご利用ください。\n{str(target)}")
@@ -3153,7 +3228,7 @@ class InventoryWidget(QWidget):
 
                 # 保存先フォルダを取得（CSV取込時に選択したフォルダ、なければデフォルト）
                 from pathlib import Path
-                from desktop.utils.file_naming import resolve_unique_path
+                from utils.file_naming import resolve_unique_path
                 
                 default_dir = None
                 try:

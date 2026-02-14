@@ -11,9 +11,9 @@ HIRIO メインウィンドウ
 """
 
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QMenuBar, QMenu, QStatusBar, QLabel,
-    QMessageBox, QSplitter, QPushButton
+    QMessageBox, QSplitter, QPushButton, QApplication,
 )
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings
 from PySide6.QtGui import QAction, QKeySequence
@@ -21,28 +21,7 @@ import subprocess
 import threading
 import time
 
-# プロジェクト内のモジュール
-from ui.repricer_widget import RepricerWidget
-from ui.repricer_settings_widget import RepricerSettingsWidget
-from ui.inventory_widget import InventoryWidget
-from ui.antique_widget import AntiqueWidget
-from ui.settings_widget import SettingsWidget
-from ui.workflow_panel import WorkflowPanel
-from ui.store_master_widget import StoreMasterWidget
-from ui.route_summary_widget import RouteSummaryWidget
-from ui.route_list_widget import RouteListWidget
-from ui.route_visit_widget import RouteVisitLogWidget
-from ui.analysis_widget import AnalysisWidget
-from ui.product_widget import ProductWidget
-from ui.condition_template_widget import ConditionTemplateWidget
-from ui.barcode_checker_widget import BarcodeCheckerWidget
-from ui.image_manager_widget import ImageManagerWidget
-from ui.evidence_manager_widget import EvidenceManagerWidget
-from ui.purchase_ledger_widget import PurchaseLedgerWidget
-from ui.expense_ledger_widget import ExpenseLedgerWidget
-from ui.keepa_test_widget import KeepaTestWidget
-from ui.image_test_widget import ImageTestWidget
-from ui.store_code_batch_widget import StoreCodeBatchWidget
+# 重いウィジェットは setup_tabs() 内で遅延インポート（起動時間短縮のため）
 
 
 class APIServerThread(QThread):
@@ -110,8 +89,7 @@ class MainWindow(QMainWindow):
         # 中央配置
         self.center_window()
         
-        # タブの順序を復元
-        self.restore_tab_order()
+        # タブの順序は _deferred_setup_tabs 完了後に復元する
         
     def closeEvent(self, event):
         """ウィンドウが閉じるときのイベント"""
@@ -163,117 +141,138 @@ class MainWindow(QMainWindow):
         # タブが移動されたときに順序を保存
         self.tab_widget.tabBar().tabMoved.connect(self.save_tab_order)
         
-        # 各タブの追加
-        self.setup_tabs()
+        # 起動直後は「読み込み中」タブのみ表示し、ウィンドウ表示後にタブを構築（起動時間短縮）
+        loading_widget = QWidget()
+        loading_layout = QVBoxLayout(loading_widget)
+        loading_layout.addWidget(QLabel("タブを読み込み中..."))
+        self.tab_widget.addTab(loading_widget, "読み込み中...")
+        self._tabs_loaded = False
         
         # レイアウトに追加
         main_layout.addWidget(self.tab_widget)
         
+        # ウィンドウ表示後にタブを構築（イベントループに1回入ってから実行）
+        QTimer.singleShot(0, self._deferred_setup_tabs)
+        
+    def _deferred_setup_tabs(self):
+        """ウィンドウ表示後にタブを構築（遅延インポートで起動を短縮）"""
+        if getattr(self, "_tabs_loaded", False):
+            return
+        # プレースホルダタブを削除
+        self.tab_widget.removeTab(0)
+        self.setup_tabs()
+        self._tabs_loaded = True
+        self.restore_tab_order()
+        QApplication.processEvents()
+
     def setup_tabs(self):
-        """タブの設定"""
+        """タブの設定（各ウィジェットはここで遅延インポート）"""
         # 価格改定タブ（サブタブを持つ）
-        # 各価格改定ウィジェットの作成
+        from ui.repricer_widget import RepricerWidget
+        from ui.repricer_settings_widget import RepricerSettingsWidget
         self.repricer_widget = RepricerWidget(self.api_client)
         self.repricer_settings_widget = RepricerSettingsWidget(self.api_client)
-        
-        # 価格改定用のサブタブウィジェットを作成
         repricer_tabs = QTabWidget()
         repricer_tabs.addTab(self.repricer_widget, "改定実行")
         repricer_tabs.addTab(self.repricer_settings_widget, "改定ルール")
-        
-        # メインタブに追加
         self.tab_widget.addTab(repricer_tabs, "価格改定")
-        
-        # 仕入管理タブ（仮に作成）
+        QApplication.processEvents()
+
+        # 仕入管理タブ
+        from ui.inventory_widget import InventoryWidget
         self.inventory_widget = InventoryWidget(self.api_client)
         self.tab_widget.addTab(self.inventory_widget, "仕入管理")
-        
-        # 古物台帳タブ（仕入管理ウィジェット参照を渡す）
+        QApplication.processEvents()
+
+        # 古物台帳タブ
+        from ui.antique_widget import AntiqueWidget
         self.antique_widget = AntiqueWidget(self.api_client, inventory_widget=self.inventory_widget)
         self.tab_widget.addTab(self.antique_widget, "古物台帳")
-        
-        # ===== ルートタブ（メインタブ） =====
-        # ルート登録とルートサマリーをまとめる
+
+        # ルートタブ
+        from ui.route_summary_widget import RouteSummaryWidget
+        from ui.route_list_widget import RouteListWidget
         route_tabs = QTabWidget()
         self.route_summary_widget = RouteSummaryWidget(self.api_client, inventory_widget=self.inventory_widget)
         route_tabs.addTab(self.route_summary_widget, "ルート登録")
         self.route_list_widget = RouteListWidget()
         route_tabs.addTab(self.route_list_widget, "ルートサマリー")
-        
-        # 保存完了時にサマリー一覧を更新
         self.route_summary_widget.data_saved.connect(self.route_list_widget.load_routes)
-        
-        # メインタブに追加
         self.tab_widget.addTab(route_tabs, "ルート")
-        
-        # 仕入管理ウィジェットから参照できるように設定
         self.inventory_widget.set_route_summary_widget(self.route_summary_widget)
         self.inventory_widget.set_antique_widget(self.antique_widget)
-        
-        # ===== データベース管理タブ（メインタブ） =====
-        # 商品DB、店舗マスタ、ルート訪問DB、コンディション説明をまとめる
+        QApplication.processEvents()
+
+        # データベース管理タブ
+        from ui.store_master_widget import StoreMasterWidget
+        from ui.product_widget import ProductWidget
+        from ui.route_visit_widget import RouteVisitLogWidget
+        from ui.condition_template_widget import ConditionTemplateWidget
         self.store_master_widget = StoreMasterWidget()
         self.product_widget = ProductWidget(inventory_widget=self.inventory_widget)
-        # InventoryWidgetにProductWidgetへの参照を設定
         self.inventory_widget.set_product_widget(self.product_widget)
         self.route_visit_widget = RouteVisitLogWidget()
         self.condition_template_widget = ConditionTemplateWidget()
-        
         db_management_tabs = QTabWidget()
         db_management_tabs.addTab(self.product_widget, "商品DB")
         db_management_tabs.addTab(self.store_master_widget, "店舗マスタ")
         db_management_tabs.addTab(self.route_visit_widget, "ルート訪問DB")
         db_management_tabs.addTab(self.condition_template_widget, "コンディション説明")
-        
-        # メインタブに追加
         self.tab_widget.addTab(db_management_tabs, "データベース管理")
-        
-        # 店舗コード移行用バッチタブ
+        QApplication.processEvents()
+
+        # バッチ処理タブ
+        from ui.store_code_batch_widget import StoreCodeBatchWidget
         self.store_code_batch_widget = StoreCodeBatchWidget()
         self.tab_widget.addTab(self.store_code_batch_widget, "バッチ処理")
-        
+
         # 分析タブ
+        from ui.analysis_widget import AnalysisWidget
         self.analysis_widget = AnalysisWidget()
         self.tab_widget.addTab(self.analysis_widget, "分析")
-        
-        # 証憑管理タブ（レシート + 保証書統合）
+
+        # 証憑管理タブ
+        from ui.evidence_manager_widget import EvidenceManagerWidget
         self.evidence_widget = EvidenceManagerWidget(
             self.api_client,
             inventory_widget=self.inventory_widget,
             product_widget=self.product_widget
         )
-        # ReceiptWidgetにEvidenceManagerWidgetへの参照を設定
         if hasattr(self.evidence_widget, 'receipt_widget'):
             self.evidence_widget.receipt_widget.set_evidence_widget(self.evidence_widget)
         self.tab_widget.addTab(self.evidence_widget, "証憑管理")
-        
-        # 台帳タブ（確定申告用）
+        QApplication.processEvents()
+
+        # 台帳タブ
+        from ui.purchase_ledger_widget import PurchaseLedgerWidget
+        from ui.expense_ledger_widget import ExpenseLedgerWidget
         ledger_tabs = QTabWidget()
         self.purchase_ledger_widget = PurchaseLedgerWidget(self.api_client)
         ledger_tabs.addTab(self.purchase_ledger_widget, "仕入台帳")
         self.expense_ledger_widget = ExpenseLedgerWidget(self.api_client)
         ledger_tabs.addTab(self.expense_ledger_widget, "経費台帳")
         self.tab_widget.addTab(ledger_tabs, "台帳")
-        
+
         # バーコードチェッカータブ
+        from ui.barcode_checker_widget import BarcodeCheckerWidget
         self.barcode_checker_widget = BarcodeCheckerWidget()
         self.tab_widget.addTab(self.barcode_checker_widget, "バーコードチェッカー")
-        
+
         # 画像管理タブ
+        from ui.image_manager_widget import ImageManagerWidget
         self.image_manager_widget = ImageManagerWidget(self.api_client)
-        # ImageManagerWidgetにProductWidgetへの参照を設定
         self.image_manager_widget.set_product_widget(self.product_widget)
         self.tab_widget.addTab(self.image_manager_widget, "画像管理")
+        QApplication.processEvents()
 
-        # Keepaテストタブ
+        # Keepaテスト・画像テスト・設定タブ
+        from ui.keepa_test_widget import KeepaTestWidget
+        from ui.image_test_widget import ImageTestWidget
+        from ui.settings_widget import SettingsWidget
         self.keepa_test_widget = KeepaTestWidget()
         self.tab_widget.addTab(self.keepa_test_widget, "Keepaテスト")
-        
-        # 画像テストタブ
         self.image_test_widget = ImageTestWidget()
         self.tab_widget.addTab(self.image_test_widget, "画像テスト")
-        
-        # 設定タブ
         self.settings_widget = SettingsWidget(self.api_client)
         self.settings_widget.settings_changed.connect(self.on_settings_changed)
         self.tab_widget.addTab(self.settings_widget, "設定")
@@ -520,6 +519,8 @@ class MainWindow(QMainWindow):
     
     def save_tab_order(self):
         """タブの順序を保存"""
+        if not getattr(self, "_tabs_loaded", False):
+            return
         tab_count = self.tab_widget.count()
         tab_order = []
         for i in range(tab_count):

@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QSplitter, QGroupBox, QFormLayout,
     QFileDialog, QMessageBox, QSizePolicy, QTextEdit, QProgressDialog,
     QInputDialog, QMenu, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
-    QTabWidget
+    QTabWidget, QSpinBox
 )
 from PySide6.QtGui import QPixmap, QFont, QDrag, QDropEvent, QImageReader, QImage, QDesktopServices, QCursor
 
@@ -300,14 +300,16 @@ class JanGroupTreeWidget(QTreeWidget):
             event.ignore()
     
     def dropEvent(self, event):
-        """ドロップイベント"""
+        """ドロップイベント（複数画像の改行区切りテキストに対応）"""
         if event.mimeData().hasText():
-            image_path = event.mimeData().text()
-            # ドロップされた位置のアイテムを取得
+            text = event.mimeData().text().strip()
+            image_paths = [p.strip() for p in text.split("\n") if p.strip()]
             item = self.itemAt(event.pos())
-            if item and self.parent_widget:
-                # 親ウィジェットのメソッドを呼び出し
-                self.parent_widget.add_image_to_group(image_path, item)
+            if item and self.parent_widget and image_paths:
+                if len(image_paths) == 1:
+                    self.parent_widget.add_image_to_group(image_paths[0], item)
+                else:
+                    self.parent_widget.add_images_to_group(image_paths, item)
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -321,20 +323,22 @@ class ImageListWidget(QListWidget):
         self.parent_widget = parent  # ImageManagerWidgetへの参照
     
     def startDrag(self, supportedActions):
-        """ドラッグ開始時の処理"""
+        """ドラッグ開始時の処理（複数選択時は全選択画像のパスを渡す）"""
         items = self.selectedItems()
         if not items:
             return
         
-        # 最初に選択されたアイテムの画像パスを取得
-        item = items[0]
-        image_path = item.data(Qt.UserRole)
-        if not image_path:
+        paths = []
+        for item in items:
+            image_path = item.data(Qt.UserRole)
+            if image_path:
+                paths.append(image_path)
+        if not paths:
             return
         
-        # MIMEデータを作成
+        # MIMEデータを作成（複数パスは改行区切り）
         mime_data = QMimeData()
-        mime_data.setText(image_path)
+        mime_data.setText("\n".join(paths))
         
         # ドラッグを開始
         drag = QDrag(self)
@@ -597,6 +601,7 @@ class ImageManagerWidget(QWidget):
         self.image_list.setIconSize(QSize(192, 192))
         self.image_list.setSpacing(10)
         self.image_list.itemClicked.connect(self.on_image_clicked)
+        self.image_list.setSelectionMode(QListWidget.ExtendedSelection)  # 複数選択（ドラッグ範囲・Ctrl/Shift）
         self.image_list.setDragDropMode(QListWidget.DragOnly)  # ドラッグのみ許可
         self.image_list.setDefaultDropAction(Qt.MoveAction)  # ドラッグ時の動作
         self.image_list.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -1492,7 +1497,41 @@ class ImageManagerWidget(QWidget):
         if self.assign_image_to_jan(image_path, jan):
             QMessageBox.information(self, "完了", f"画像をJANグループ {jan} に追加しました。")
     
-    def assign_image_to_jan(self, image_path: str, jan: str, capture_dt: Optional[datetime] = None, show_message: bool = False) -> bool:
+    def add_images_to_group(self, image_paths: List[str], target_item: QTreeWidgetItem):
+        """複数画像をJANグループに一括追加（ドラッグアンドドロップ時）"""
+        if not image_paths or not target_item:
+            return
+        
+        # ターゲットアイテムからJANグループを取得
+        group = target_item.data(0, Qt.UserRole)
+        if isinstance(group, JanGroup):
+            jan = group.jan
+        else:
+            parent = target_item.parent()
+            if parent:
+                group = parent.data(0, Qt.UserRole)
+                if isinstance(group, JanGroup):
+                    jan = group.jan
+                else:
+                    QMessageBox.warning(self, "エラー", "JANグループが見つかりませんでした。")
+                    return
+            else:
+                QMessageBox.warning(self, "エラー", "JANグループが見つかりませんでした。")
+                return
+        
+        if jan == "unknown":
+            QMessageBox.warning(self, "エラー", "JAN不明グループには画像を追加できません。")
+            return
+        
+        success_count = 0
+        for image_path in image_paths:
+            if self.assign_image_to_jan(image_path, jan, show_message=False, refresh_tree=False):
+                success_count += 1
+        if success_count > 0:
+            self.update_tree_widget()
+            QMessageBox.information(self, "完了", f"{success_count}枚の画像をJANグループ {jan} に追加しました。")
+    
+    def assign_image_to_jan(self, image_path: str, jan: str, capture_dt: Optional[datetime] = None, show_message: bool = False, refresh_tree: bool = True) -> bool:
         """画像に指定JANを割り当て"""
         record = next((r for r in self.image_records if r.path == image_path), None)
         if not record:
@@ -1517,7 +1556,8 @@ class ImageManagerWidget(QWidget):
         self.jan_groups = self.image_service.group_by_jan(self.image_records)
         if jan:
             self._jan_title_cache.pop(jan, None)
-        self.update_tree_widget()
+        if refresh_tree:
+            self.update_tree_widget()
         
         if show_message:
             QMessageBox.information(self, "完了", f"画像をJANグループ {jan} に登録しました。")
@@ -1881,12 +1921,29 @@ class ImageManagerWidget(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
+        # 上段: 説明（左）＋ GCS保存期間（日）（右）
+        top_row = QHBoxLayout()
         description = QLabel(
             "確定処理で仕入DBに登録した商品の情報を表示します。\n"
             "アプリ再起動時に自動でクリアされる一時的なリストです。"
         )
         description.setWordWrap(True)
-        layout.addWidget(description)
+        top_row.addWidget(description)
+        top_row.addStretch()
+        top_row.addWidget(QLabel("GCS保存期間（日）:"))
+        self.gcs_retention_days_spinbox = QSpinBox()
+        self.gcs_retention_days_spinbox.setRange(0, 3650)
+        self.gcs_retention_days_spinbox.setSuffix(" 日")
+        self.gcs_retention_days_spinbox.setToolTip("アップロードした画像を何日後にGCSから削除するか。0=無期限")
+        try:
+            settings = QSettings("HIRIO", "SedoriDesktopApp")
+            saved_days = settings.value("image_manager/gcs_retention_days", 90)
+            self.gcs_retention_days_spinbox.setValue(int(saved_days) if saved_days is not None else 90)
+        except (TypeError, ValueError):
+            self.gcs_retention_days_spinbox.setValue(90)
+        top_row.addWidget(self.gcs_retention_days_spinbox)
+        top_row.addWidget(QLabel("(0=無期限)"))
+        layout.addLayout(top_row)
 
         self.registration_table = RegistrationTableWidget()
         self.registration_columns = [
@@ -3162,31 +3219,13 @@ class ImageManagerWidget(QWidget):
             QMessageBox.warning(self, "警告", "登録されている商品がありません。")
             return
         
-        # 保存期間（月）をユーザーに確認（0=無期限）。デフォルトは3か月。
+        # 保存期間（日）は画像登録タブ右上の「GCS保存期間（日）」で設定。0=無期限。
+        retention_days = self.gcs_retention_days_spinbox.value()
         try:
             settings = QSettings("HIRIO", "SedoriDesktopApp")
-            default_months = settings.value("image_manager/gcs_retention_months", 3)
-            try:
-                default_months = int(default_months)
-            except (TypeError, ValueError):
-                default_months = 3
-            
-            retention_months, ok = QInputDialog.getInt(
-                self,
-                "GCS保存期間の設定",
-                "画像の保存期間（月）を入力してください。\n0 を指定すると保存期間は制限なし（無期限）になります。",
-                value=default_months,
-                min=0,
-                max=120,
-            )
-            if not ok:
-                # キャンセルされた場合はアップロード処理を中止
-                return
-            
-            settings.setValue("image_manager/gcs_retention_months", retention_months)
+            settings.setValue("image_manager/gcs_retention_days", retention_days)
         except Exception:
-            # 保存期間の取得に失敗しても、デフォルト3か月として続行
-            retention_months = 3
+            pass
         
         # 対象行を決定
         if force_all:
@@ -3264,6 +3303,9 @@ class ImageManagerWidget(QWidget):
                     find_existing_public_url_for_local_file = getattr(
                         gcs_uploader_module, "find_existing_public_url_for_local_file", None
                     )
+                    set_used_items_retention_days = getattr(
+                        gcs_uploader_module, "set_used_items_retention_days", None
+                    )
                 else:
                     raise ImportError(f"gcs_uploader.py not found at {gcs_uploader_file}")
             else:
@@ -3273,6 +3315,10 @@ class ImageManagerWidget(QWidget):
                     from utils.gcs_uploader import find_existing_public_url_for_local_file
                 except Exception:
                     find_existing_public_url_for_local_file = None
+                try:
+                    from utils.gcs_uploader import set_used_items_retention_days
+                except Exception:
+                    set_used_items_retention_days = None
             
             if not GCS_AVAILABLE:
                 QMessageBox.critical(
@@ -3291,6 +3337,14 @@ class ImageManagerWidget(QWidget):
                     f"サービスアカウントキーの設定を確認してください。"
                 )
                 return
+            
+            # 保存期間に応じてバケットのライフサイクル（N日後に削除）を設定（0＝無期限の場合は削除ルールを外す）
+            if set_used_items_retention_days:
+                try:
+                    if not set_used_items_retention_days(retention_days):
+                        logger.warning("Failed to set GCS lifecycle (used_items retention); continuing upload")
+                except Exception as e:
+                    logger.warning(f"Failed to set GCS lifecycle: {e}; continuing upload")
         except ImportError as e:
             # デバッグ情報を収集
             debug_info = []
@@ -3347,6 +3401,22 @@ class ImageManagerWidget(QWidget):
             )
             return
         
+        # アップロード前の最終確認（保存期間・件数を表示してOKで開始）
+        retention_text = f"{retention_days}日後に削除" if retention_days > 0 else "無期限"
+        reply = QMessageBox.question(
+            self,
+            "GCSアップロードの確認",
+            f"以下の内容でGCSにアップロードします。よろしいですか？\n\n"
+            f"・保存期間: {retention_text}\n"
+            f"・アップロード対象: {len(upload_tasks)}件（{total_images}枚の画像）\n\n"
+            f"OKでアップロードを開始、キャンセルで中止します。\n\n"
+            f"※保存期間はタブ右上の「GCS保存期間（日）」で変更できます。",
+            QMessageBox.Ok | QMessageBox.Cancel,
+            QMessageBox.Cancel
+        )
+        if reply != QMessageBox.Ok:
+            return
+        
         # 進捗ダイアログ
         progress = QProgressDialog("GCSに画像をアップロード中...", "キャンセル", 0, total_images, self)
         progress.setWindowModality(Qt.WindowModal)
@@ -3378,14 +3448,14 @@ class ImageManagerWidget(QWidget):
                         else:
                             # 保存期間をメタデータとして付与（0=無期限）
                             metadata = None
-                            if retention_months is not None and retention_months >= 0:
-                                metadata = {"retention_months": str(retention_months)}
+                            if retention_days is not None and retention_days >= 0:
+                                metadata = {"retention_days": str(retention_days)}
                             public_url = upload_image_to_gcs(image_path, metadata=metadata)
                     else:
                         # GCSにアップロード（保存期間メタデータ付き）
                         metadata = None
-                        if retention_months is not None and retention_months >= 0:
-                            metadata = {"retention_months": str(retention_months)}
+                        if retention_days is not None and retention_days >= 0:
+                            metadata = {"retention_days": str(retention_days)}
                         public_url = upload_image_to_gcs(image_path, metadata=metadata)
                     
                     # entryのimage_urlsを更新
@@ -3758,10 +3828,19 @@ class ImageManagerWidget(QWidget):
         try:
             import sys
             import os
+            import importlib.util
             from pathlib import Path
             
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-            from services.amazon_inventory_loader_service import AmazonInventoryLoaderService
+            # amazon_inventory_loader_service は python/services/ にある。sys.path に依存せずファイルパスから直接読み込む。
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            python_dir = os.path.abspath(os.path.join(current_dir, '..', '..'))
+            service_file = os.path.join(python_dir, 'services', 'amazon_inventory_loader_service.py')
+            if not os.path.exists(service_file):
+                raise FileNotFoundError(f"amazon_inventory_loader_service が見つかりません: {service_file}")
+            spec = importlib.util.spec_from_file_location("amazon_inventory_loader_service", service_file)
+            loader_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(loader_module)
+            AmazonInventoryLoaderService = loader_module.AmazonInventoryLoaderService
             
             # テンプレートファイルのパス（設定から読み込む）
             template_path_str = self.template_file_edit.text().strip()

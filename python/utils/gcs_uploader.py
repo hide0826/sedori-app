@@ -426,6 +426,77 @@ def set_bucket_lifecycle_policy(
         return False
 
 
+# 画像登録タブのアップロード先プレフィックス（N日後に削除するルール対象）
+USED_ITEMS_PREFIX = "used_items/"
+
+
+def set_used_items_retention_days(retention_days: int) -> bool:
+    """
+    used_items/ プレフィックスのオブジェクトを、作成から N 日経過後に削除する
+    ライフサイクルルールをバケットに設定する。
+    既存の他のライフサイクルルールは維持し、used_items/ 用のルールのみ追加・更新する。
+
+    Args:
+        retention_days: 作成から何日後に削除するか。0 以下の場合は削除ルールを付けない（無期限）。
+
+    Returns:
+        成功した場合 True、失敗した場合 False。
+    """
+    if not GCS_AVAILABLE:
+        logger.error("google-cloud-storage is not installed")
+        return False
+
+    key_path = Path(KEY_PATH)
+    if not key_path.exists():
+        logger.error(f"Service account key file not found: {KEY_PATH}")
+        return False
+
+    try:
+        client = storage.Client.from_service_account_json(str(key_path))
+        bucket = client.bucket(BUCKET_NAME)
+        bucket.reload()
+
+        # 現在のライフサイクルルールを取得（generator を list に）
+        try:
+            current_rules = list(bucket.lifecycle_rules)
+        except Exception:
+            current_rules = []
+
+        # used_items/ 用の既存ルールを除く
+        other_rules = []
+        for rule in current_rules:
+            cond = rule.get("condition") or {}
+            if cond.get("matchesPrefix") == USED_ITEMS_PREFIX:
+                continue
+            other_rules.append(rule)
+
+        # retention_days > 0 のとき、used_items/ を N 日後に削除するルールを追加
+        if retention_days > 0:
+            other_rules.append({
+                "action": {"type": "Delete"},
+                "condition": {"age": retention_days, "matchesPrefix": USED_ITEMS_PREFIX},
+            })
+            logger.info(f"Lifecycle: used_items/ will be deleted after {retention_days} days")
+        else:
+            logger.info("Lifecycle: used_items/ has no auto-delete (unlimited retention)")
+
+        # ルールが空の場合はクリア、それ以外は辞書形式で設定
+        if not other_rules:
+            bucket.clear_lifecycle_rules()
+            bucket.update()
+            return True
+
+        lifecycle_dict = {"rule": other_rules}
+        bucket.lifecycle = lifecycle_dict
+        bucket.update()
+        logger.info(f"Lifecycle policy updated: {len(other_rules)} rule(s)")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to set used_items retention: {e}", exc_info=True)
+        return False
+
+
 if __name__ == "__main__":
     # 動作確認用のダミーファイルパス
     # 実際のファイルパスに置き換えてテストしてください
