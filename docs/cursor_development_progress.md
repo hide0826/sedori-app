@@ -1223,5 +1223,28 @@
 
 - **変更ファイル**: image_manager_widget.py, main_window.py, inventory_widget.py, gcs_uploader.py, docs/cursor_development_progress.md ほか
 
+## 2026-02-14 経費先タブ・OCR経費先マッチ・貸方勘定科目・登録番号反映
+
+- **経費先タブ追加（データベース管理＞店舗マスタ）**
+  - 店舗一覧と法人マスタの間に「経費先」タブを追加
+  - 経費先一覧は店舗一覧と同様UI（ルート関連ボタンなし、科目列、検索・情報取得ボタンのみ）
+  - expense_destinations テーブル、CRUD、経費先コード自動採番（チェーン店コードマッピング参照、既存は連番）
+  - 経費先一覧の列名「仕訳」を「科目」に変更
+
+- **証憑管理＞勘定科目設定＞貸方勘定科目タブ**
+  - 科目名を借方勘定科目のプルダウンで選択可能に
+  - 選択した科目をデフォルトとして保存、変更時はその行をデフォルトに
+
+- **OCR処理・全件OCR・一括マッチングの経費先マッチング**
+  - 店舗名・電話番号で店舗一覧にマッチしない場合、経費先（電話番号→名称）でもマッチング
+  - 経費先にマッチした場合、レシートの科目を経費先の登録科目に設定、店舗コードコンボに経費先も表示
+  - ReceiptMatchingService: MatchCandidate.account_title、_guess_expense_destination_by_phone / _guess_expense_destination_by_name
+
+- **経費先への登録番号反映**
+  - 経費先一覧の登録番号が空の場合、レシートから読み取った登録番号を経費先に自動入力（OCR完了・search_from_purchase_db・一括マッチングの3箇所）
+  - store_db: update_expense_destination_registration_number、get_expense_destination_by_code
+
+- **変更ファイル**: store_db.py, store_master_widget.py, account_title_widget.py, receipt_matching_service.py, receipt_widget.py
+
 **最終更新**: 2026-02-14
 **更新者**: Agentモード（実装）

@@ -1247,8 +1247,19 @@ class ReceiptWidget(QWidget):
                             if idx >= 0:
                                 self.store_code_combo.setCurrentIndex(idx)
                         updates["store_code"] = cand.store_code
+                    if getattr(cand, 'account_title', None):
+                        updates["account_title"] = cand.account_title
                     if updates and self.current_receipt_id:
                         self.receipt_db.update_receipt(self.current_receipt_id, updates)
+                    # 経費先マッチ時：経費先一覧の登録番号が空ならレシートの登録番号を入力
+                    if getattr(cand, 'account_title', None) and cand.store_code:
+                        try:
+                            dest = self.store_db.get_expense_destination_by_code(cand.store_code)
+                            reg_from_receipt = (result.get("registration_number") or "").strip()
+                            if dest and reg_from_receipt and not (dest.get("registration_number") or "").strip():
+                                self.store_db.update_expense_destination_registration_number(dest["id"], reg_from_receipt)
+                        except Exception:
+                            pass
         except Exception as e:
             # 自動マッチング失敗は致命的ではないのでログのみにする
             try:
@@ -1290,14 +1301,20 @@ class ReceiptWidget(QWidget):
             self._process_next_in_queue()
     
     def load_store_codes(self):
-        """店舗コード候補を読み込み"""
+        """店舗コード候補を読み込み（店舗マスタ＋経費先）"""
         if not hasattr(self, 'store_code_combo'):
             return
         self.store_code_combo.clear()
         stores = self.store_db.list_stores()
         for store in stores:
-            code = store.get('supplier_code')
+            code = store.get('store_code') or store.get('supplier_code')
             name = store.get('store_name')
+            if code:
+                self.store_code_combo.addItem(f"{code} - {name}", code)
+        dests = self.store_db.list_expense_destinations()
+        for d in dests:
+            code = (d.get('code') or '').strip()
+            name = d.get('name') or ''
             if code:
                 self.store_code_combo.addItem(f"{code} - {name}", code)
     
@@ -1347,7 +1364,43 @@ class ReceiptWidget(QWidget):
                     matched_store_code = store.get('store_code') or store.get('supplier_code')
                     break
         
+        # 店舗マスタに無い場合は経費先でマッチング（電話番号→名称の順）
         if not matched_store_code:
+            dests = self.store_db.list_expense_destinations()
+            normalized_phone = self.matching_service._normalize_phone(phone_number) if phone_number else None
+            matched_dest_code = None
+            matched_dest_journal = None
+            if normalized_phone:
+                for d in dests:
+                    dp = d.get('phone') or ''
+                    if dp and self.matching_service._normalize_phone(dp) == normalized_phone:
+                        matched_dest_code = (d.get('code') or '').strip()
+                        matched_dest_journal = (d.get('journal') or '').strip()
+                        break
+            if not matched_dest_code and store_name_raw:
+                for d in dests:
+                    dn = (d.get('name') or '').strip()
+                    if dn and (store_name_raw in dn or dn in store_name_raw):
+                        matched_dest_code = (d.get('code') or '').strip()
+                        matched_dest_journal = (d.get('journal') or '').strip()
+                        break
+            if matched_dest_code and self.current_receipt_id:
+                if hasattr(self, 'store_code_combo'):
+                    idx = self.store_code_combo.findData(matched_dest_code)
+                    if idx >= 0:
+                        self.store_code_combo.setCurrentIndex(idx)
+                self.receipt_db.update_receipt(self.current_receipt_id, {
+                    "store_code": matched_dest_code,
+                    "account_title": matched_dest_journal or None,
+                })
+                # 経費先一覧の登録番号が空の場合はレシートの登録番号を入力
+                try:
+                    dest = self.store_db.get_expense_destination_by_code(matched_dest_code)
+                    reg_from_receipt = (self.current_receipt_data.get("registration_number") or "").strip()
+                    if dest and reg_from_receipt and not (dest.get("registration_number") or "").strip():
+                        self.store_db.update_expense_destination_registration_number(dest["id"], reg_from_receipt)
+                except Exception:
+                    pass
             return
         
         # 日付を正規化（yyyy-MM-dd形式に揃えて比較）
@@ -3067,25 +3120,46 @@ class ReceiptWidget(QWidget):
                 current_store_code = receipt.get('store_code') or ""
                 matched_store_code = cand.store_code
                 store_name_updated = False
+                if getattr(cand, 'account_title', None):
+                    updates["account_title"] = cand.account_title
                 if matched_store_code and matched_store_code != current_store_code:
                     updates["store_code"] = matched_store_code
-                    # 店舗名も店舗マスタの正式名称に更新（電話番号マッチなどで確定した場合）
+                    # 店舗名を店舗マスタまたは経費先の正式名称に更新
                     try:
                         store = self.store_db.get_store_by_code(matched_store_code)
                         if store and store.get("store_name"):
                             updates["store_name_raw"] = store.get("store_name")
                             store_name_updated = True
+                        else:
+                            dest = self.store_db.get_expense_destination_by_code(matched_store_code)
+                            if dest and dest.get("name"):
+                                updates["store_name_raw"] = dest.get("name")
+                                store_name_updated = True
                     except Exception:
                         pass
                 elif not current_store_code and matched_store_code:
                     # 店舗コードが空の場合、候補から店舗コードを設定
                     updates["store_code"] = matched_store_code
-                    # 店舗名も更新（店舗コードから正式名称を取得）
                     try:
                         store = self.store_db.get_store_by_code(matched_store_code)
                         if store and store.get("store_name"):
                             updates["store_name_raw"] = store.get("store_name")
                             store_name_updated = True
+                        else:
+                            dest = self.store_db.get_expense_destination_by_code(matched_store_code)
+                            if dest and dest.get("name"):
+                                updates["store_name_raw"] = dest.get("name")
+                                store_name_updated = True
+                    except Exception:
+                        pass
+                
+                # 経費先マッチ時：経費先一覧の登録番号が空ならレシートの登録番号を入力
+                if getattr(cand, 'account_title', None) and matched_store_code:
+                    try:
+                        dest = self.store_db.get_expense_destination_by_code(matched_store_code)
+                        reg_from_receipt = (receipt.get("registration_number") or "").strip()
+                        if dest and reg_from_receipt and not (dest.get("registration_number") or "").strip():
+                            self.store_db.update_expense_destination_registration_number(dest["id"], reg_from_receipt)
                     except Exception:
                         pass
                 

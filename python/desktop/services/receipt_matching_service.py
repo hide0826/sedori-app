@@ -30,6 +30,7 @@ class MatchCandidate:
     expected_total: Optional[int]
     diff: Optional[int]
     items_count: int
+    account_title: Optional[str] = None  # 経費先マッチ時は経費先の科目（仕訳）
 
 
 class ReceiptMatchingService:
@@ -136,6 +137,51 @@ class ReceiptMatchingService:
 
         return None
 
+    def _guess_expense_destination_by_phone(self, phone_number: Optional[str]) -> Optional[Tuple[str, str]]:
+        """電話番号から経費先を推定。(経費先コード, 科目journal) を返す。見つからなければ None"""
+        normalized_target = self._normalize_phone(phone_number)
+        if not normalized_target:
+            return None
+        try:
+            dests = self.store_db.list_expense_destinations()
+        except Exception:
+            dests = []
+        for d in dests:
+            dest_phone = d.get("phone") or ""
+            if not dest_phone:
+                continue
+            normalized_dest_phone = self._normalize_phone(dest_phone)
+            if normalized_dest_phone and normalized_dest_phone == normalized_target:
+                code = (d.get("code") or "").strip()
+                journal = (d.get("journal") or "").strip()
+                if code:
+                    return (code, journal)
+        return None
+
+    def _guess_expense_destination_by_name(self, raw_name: Optional[str]) -> Optional[Tuple[str, str]]:
+        """店舗名（名称）から経費先を推定。(経費先コード, 科目journal) を返す。見つからなければ None"""
+        if not raw_name:
+            return None
+        raw_name = self._normalize_text(raw_name)
+        try:
+            dests = self.store_db.list_expense_destinations(search_term=raw_name)
+        except Exception:
+            dests = []
+        if not dests:
+            try:
+                dests = self.store_db.list_expense_destinations()
+            except Exception:
+                dests = []
+        raw_lower = raw_name.lower()
+        for d in dests:
+            name = (d.get("name") or "").lower()
+            if name and (raw_lower in name or name in raw_lower):
+                code = (d.get("code") or "").strip()
+                journal = (d.get("journal") or "").strip()
+                if code:
+                    return (code, journal)
+        return None
+
     @staticmethod
     def _calc_items_total(items: List[Dict[str, Any]]) -> int:
         total = 0
@@ -177,14 +223,21 @@ class ReceiptMatchingService:
 
         # 推定店舗コード
         # 1. 明示的に指定された店舗コード（preferred_store_code / receipt.store_code）
-        # 2. 電話番号からの推定（OCRで比較的正確に取れるため優先）
-        # 3. 店舗名（store_name_raw）からの推定（フォールバック）
+        # 2. 電話番号からの推定（店舗マスタ優先）
+        # 3. 店舗名（store_name_raw）からの推定（店舗マスタ）
+        # 4. 店舗に無い場合は経費先を電話番号・名称で検索
         store_code = (
             preferred_store_code
             or receipt.get('store_code')
             or self._guess_store_code_by_phone(phone_number)
             or self._guess_store_code(raw_name)
         )
+        account_title_from_expense: Optional[str] = None
+        if not store_code:
+            expense_match = self._guess_expense_destination_by_phone(phone_number) or self._guess_expense_destination_by_name(raw_name)
+            if expense_match:
+                store_code = expense_match[0]
+                account_title_from_expense = expense_match[1] or None
 
         # 店舗コードでさらに絞り込み（あれば）
         if store_code:
@@ -203,6 +256,7 @@ class ReceiptMatchingService:
             expected_total=items_total,
             diff=diff,
             items_count=len(filtered_items),
+            account_title=account_title_from_expense,
         )
 
         # 許容誤差内なら候補として返す、誤差不明でも一応返す

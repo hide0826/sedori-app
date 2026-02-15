@@ -211,6 +211,30 @@ class StoreDatabase:
             END
         """)
         
+        # expense_destinations テーブル作成（経費先マスタ）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS expense_destinations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                journal TEXT,
+                code TEXT UNIQUE,
+                name TEXT NOT NULL,
+                address TEXT,
+                phone TEXT,
+                registration_number TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS update_expense_destinations_timestamp
+            AFTER UPDATE ON expense_destinations
+            FOR EACH ROW
+            BEGIN
+                UPDATE expense_destinations SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            END
+        """)
+        
         conn.commit()
     
     def close(self):
@@ -1053,6 +1077,181 @@ class StoreDatabase:
         
         cursor.execute("SELECT COUNT(*) FROM company_master")
         return cursor.fetchone()[0]
+    
+    # ==================== expense_destinations テーブル操作（経費先マスタ） ====================
+    
+    def add_expense_destination(self, data: Dict[str, Any]) -> int:
+        """経費先を追加"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        code_val = (data.get('code') or '').strip() or None  # 空は NULL（UNIQUE制約で複数許容）
+        cursor.execute("""
+            INSERT INTO expense_destinations (journal, code, name, address, phone, registration_number, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            data.get('journal') or '',
+            code_val,
+            data.get('name') or '',
+            data.get('address') or '',
+            data.get('phone') or '',
+            data.get('registration_number') or '',
+            data.get('notes') or '',
+        ))
+        conn.commit()
+        return cursor.lastrowid
+    
+    def update_expense_destination(self, dest_id: int, data: Dict[str, Any]) -> bool:
+        """経費先を更新"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        code_val = (data.get('code') or '').strip() or None
+        cursor.execute("""
+            UPDATE expense_destinations SET
+                journal = ?, code = ?, name = ?, address = ?, phone = ?,
+                registration_number = ?, notes = ?
+            WHERE id = ?
+        """, (
+            data.get('journal') or '',
+            code_val,
+            data.get('name') or '',
+            data.get('address') or '',
+            data.get('phone') or '',
+            data.get('registration_number') or '',
+            data.get('notes') or '',
+            dest_id,
+        ))
+        conn.commit()
+        return cursor.rowcount > 0
+    
+    def delete_expense_destination(self, dest_id: int) -> bool:
+        """経費先を削除"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM expense_destinations WHERE id = ?", (dest_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    
+    def get_expense_destination(self, dest_id: int) -> Optional[Dict[str, Any]]:
+        """経費先を1件取得"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM expense_destinations WHERE id = ?", (dest_id,))
+        row = cursor.fetchone()
+        if row:
+            return dict(row)
+        return None
+    
+    def get_expense_destination_by_code(self, code: str) -> Optional[Dict[str, Any]]:
+        """経費先コードで経費先を1件取得"""
+        if not (code or "").strip():
+            return None
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM expense_destinations WHERE code = ?", (code.strip(),))
+        row = cursor.fetchone()
+        if row:
+            return dict(row)
+        return None
+    
+    def list_expense_destinations(self, search_term: Optional[str] = None) -> List[Dict[str, Any]]:
+        """経費先一覧を取得（検索対応）"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        if search_term:
+            pattern = f"%{search_term}%"
+            cursor.execute("""
+                SELECT * FROM expense_destinations
+                WHERE name LIKE ? OR code LIKE ? OR journal LIKE ? OR address LIKE ?
+                ORDER BY name
+            """, (pattern, pattern, pattern, pattern))
+        else:
+            cursor.execute("SELECT * FROM expense_destinations ORDER BY name")
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    
+    def check_expense_destination_code_exists(self, code: str, exclude_id: Optional[int] = None) -> bool:
+        """経費先コードの重複チェック（空は重複とみなさない）"""
+        if not (code or '').strip():
+            return False
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        if exclude_id:
+            cursor.execute(
+                "SELECT COUNT(*) FROM expense_destinations WHERE code = ? AND id != ?",
+                (code, exclude_id),
+            )
+        else:
+            cursor.execute("SELECT COUNT(*) FROM expense_destinations WHERE code = ?", (code,))
+        return cursor.fetchone()[0] > 0
+    
+    def update_expense_destination_address_phone(self, dest_id: int, address: str, phone: str) -> bool:
+        """経費先の住所・電話番号を更新（情報取得用）"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE expense_destinations SET address = ?, phone = ? WHERE id = ?",
+            (address or '', phone or '', dest_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    
+    def update_expense_destination_registration_number(self, dest_id: int, registration_number: str) -> bool:
+        """経費先の登録番号を更新（レシートから反映用）"""
+        if not (registration_number or '').strip():
+            return False
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE expense_destinations SET registration_number = ? WHERE id = ?",
+            (registration_number.strip(), dest_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    
+    def get_max_expense_destination_code_for_prefix(self, prefix: str) -> Optional[str]:
+        """指定プレフィックスの経費先コードの最大値を取得（例: KO -> KO-02）"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT code FROM expense_destinations WHERE code LIKE ? AND code IS NOT NULL AND code != ''",
+            (f"{prefix}-%",),
+        )
+        rows = cursor.fetchall()
+        codes = [row[0] for row in rows if row[0]]
+        if not codes:
+            return None
+        def parse_code(code: str) -> tuple:
+            try:
+                if '-' in code:
+                    code_prefix, number_part = code.rsplit('-', 1)
+                    if code_prefix == prefix:
+                        return (code_prefix, int(number_part))
+            except (ValueError, AttributeError):
+                pass
+            return (prefix, 0)
+        parsed = [parse_code(c) for c in codes if parse_code(c)[0] == prefix]
+        if not parsed:
+            return None
+        parsed.sort(key=lambda x: x[1])
+        max_prefix, max_number = parsed[-1]
+        return f"{max_prefix}-{max_number:02d}"
+    
+    def get_next_expense_destination_code_from_name(self, name: str) -> str:
+        """名称から次の経費先コードを生成（チェーン店コードマッピング参照、既存は連番）"""
+        chain_code = self.find_chain_code_by_store_name(name)
+        if not chain_code:
+            chain_code = self._extract_store_prefix(name)
+        max_code = self.get_max_expense_destination_code_for_prefix(chain_code)
+        if not max_code:
+            return f"{chain_code}-01"
+        try:
+            if '-' in max_code:
+                code_prefix, number_part = max_code.rsplit('-', 1)
+                if code_prefix == chain_code:
+                    return f"{code_prefix}-{int(number_part) + 1:02d}"
+            return f"{chain_code}-01"
+        except (ValueError, AttributeError):
+            return f"{chain_code}-01"
     
     # ==================== chain_store_code_mappings テーブル操作 ====================
     

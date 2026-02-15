@@ -11,7 +11,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
-    QLineEdit, QTabWidget, QCheckBox, QDialog, QDialogButtonBox, QFormLayout
+    QLineEdit, QTabWidget, QCheckBox, QDialog, QDialogButtonBox, QFormLayout,
+    QComboBox,
 )
 
 # プロジェクトルートをパスに追加
@@ -109,7 +110,7 @@ class AccountTitleWidget(QWidget):
         add_layout.addStretch()
         layout.addLayout(add_layout)
 
-        # テーブル
+        # テーブル（科目名列はプルダウンで借方勘定科目から選択、選択時にデフォルトとして保存）
         self.credit_table = QTableWidget()
         self.credit_table.setColumnCount(6)
         self.credit_table.setHorizontalHeaderLabels(["ID", "科目名", "クレジットカード名", "下四桁", "デフォルト", "メモ"])
@@ -118,6 +119,7 @@ class AccountTitleWidget(QWidget):
         self.credit_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.credit_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.credit_table.setColumnHidden(0, True)
+        self._credit_combo_block = False  # 科目名変更時の再描画ループ防止
         layout.addWidget(self.credit_table)
 
         # ボタン
@@ -178,15 +180,53 @@ class AccountTitleWidget(QWidget):
     
     def refresh_credit_table(self) -> None:
         accounts = self.db.list_credit_accounts()
+        titles = self.db.list_titles()  # 借方勘定科目（プルダウン候補）
+        title_names = [t.get("name", "") for t in titles if t.get("name")]
         self.credit_table.setRowCount(len(accounts))
         for row, account in enumerate(accounts):
             self.credit_table.setItem(row, 0, QTableWidgetItem(str(account.get("id"))))
-            self.credit_table.setItem(row, 1, QTableWidgetItem(account.get("name", "")))
+            # 科目名列: プルダウン（借方勘定科目から選択、変更時はその行をデフォルトに保存）
+            combo = QComboBox()
+            combo.addItem("")  # 未選択
+            for n in title_names:
+                combo.addItem(n)
+            current_name = account.get("name", "") or ""
+            idx = combo.findText(current_name)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            else:
+                combo.setCurrentIndex(0)
+                if current_name:
+                    combo.addItem(current_name)
+                    combo.setCurrentText(current_name)
+            account_id = account.get("id")
+            combo.currentTextChanged.connect(
+                lambda text, r=row, aid=account_id: self._on_credit_account_name_changed(aid, text)
+            )
+            self.credit_table.setCellWidget(row, 1, combo)
             self.credit_table.setItem(row, 2, QTableWidgetItem(account.get("card_name", "")))
             self.credit_table.setItem(row, 3, QTableWidgetItem(account.get("last_four_digits", "")))
             default_item = QTableWidgetItem("✓" if account.get("is_default") else "")
             self.credit_table.setItem(row, 4, default_item)
             self.credit_table.setItem(row, 5, QTableWidgetItem(account.get("note", "")))
+    
+    def _on_credit_account_name_changed(self, account_id: int, name: str) -> None:
+        """貸方勘定科目の科目名をプルダウンで変更したとき、その科目をデフォルトとして保存"""
+        if self._credit_combo_block:
+            return
+        name_val = (name or "").strip()
+        try:
+            self._credit_combo_block = True
+            self.db.update_credit_account(
+                account_id,
+                name=name_val,
+                is_default=True,
+            )
+            self.refresh_credit_table()
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"科目の更新に失敗しました:\n{e}")
+        finally:
+            self._credit_combo_block = False
     
     def add_credit_account(self) -> None:
         dialog = CreditAccountDialog(self)
@@ -281,9 +321,15 @@ class CreditAccountDialog(QDialog):
         layout = QVBoxLayout(self)
         form_layout = QFormLayout()
         
-        self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("例: 現金, 預金, クレジットカード名")
-        form_layout.addRow("科目名:", self.name_edit)
+        self.name_combo = QComboBox()
+        self.name_combo.setEditable(True)
+        try:
+            titles = self.parent().db.list_titles() if self.parent() and hasattr(self.parent(), 'db') else []
+        except Exception:
+            titles = []
+        for t in titles:
+            self.name_combo.addItem(t.get("name", ""))
+        form_layout.addRow("科目名:", self.name_combo)
         
         self.card_name_edit = QLineEdit()
         self.card_name_edit.setPlaceholderText("例: 楽天カード, 三井住友カード")
@@ -312,16 +358,21 @@ class CreditAccountDialog(QDialog):
     def load_data(self):
         if not self.account:
             return
-        self.name_edit.setText(self.account.get("name", ""))
+        name = self.account.get("name", "")
+        idx = self.name_combo.findText(name)
+        if idx >= 0:
+            self.name_combo.setCurrentIndex(idx)
+        else:
+            self.name_combo.setCurrentText(name)
         self.card_name_edit.setText(self.account.get("card_name", ""))
         self.last_four_edit.setText(self.account.get("last_four_digits", ""))
         self.default_check.setChecked(bool(self.account.get("is_default")))
         self.note_edit.setText(self.account.get("note", ""))
     
     def get_data(self) -> Dict[str, Any]:
-        name = self.name_edit.text().strip()
+        name = self.name_combo.currentText().strip()
         if not name:
-            QMessageBox.warning(self, "入力エラー", "科目名を入力してください。")
+            QMessageBox.warning(self, "入力エラー", "科目名を選択または入力してください。")
             return None
         return {
             "name": name,
