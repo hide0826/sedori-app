@@ -51,6 +51,8 @@ class InventoryWidget(QWidget):
         self.inventory_data = None
         self.filtered_data = None
         self.excluded_highlight_on = False
+        # ワークフロー状態（工程6まで完了して一時停止中かどうか）
+        self.workflow_paused_after_step6 = False
         
         # ルートサマリーウィジェットへの参照（後で設定される）
         self.route_summary_widget = None
@@ -189,6 +191,18 @@ class InventoryWidget(QWidget):
         # アクションボタンセクション
         action_ops_layout = QHBoxLayout()
         
+        # スタートボタン（一括処理）※色はワークフロー状態で _apply_start_button_style により更新
+        self.start_workflow_btn = QPushButton("スタート")
+        self.start_workflow_btn.clicked.connect(self.start_inventory_workflow)
+        self.start_workflow_btn.setToolTip("ワークフローを開始。一時停止中は押すと再開/終了を選択できます。")
+        self._apply_start_button_style("idle")
+        action_ops_layout.addWidget(self.start_workflow_btn)
+
+        # スタート時の実行モード（1工程ずつ確認するか）
+        self.step_by_step_checkbox = QCheckBox("1工程ずつ確認")
+        self.step_by_step_checkbox.setToolTip("チェックすると、スタート実行時に各工程ごとに実行確認ダイアログを表示します。")
+        action_ops_layout.addWidget(self.step_by_step_checkbox)
+        
         # SKU生成ボタン
         self.generate_sku_btn = QPushButton("SKU生成")
         self.generate_sku_btn.clicked.connect(self.generate_sku)
@@ -247,6 +261,26 @@ class InventoryWidget(QWidget):
         
         file_layout.addLayout(action_ops_layout)
 
+        # デフォルトフォルダ設定エリア
+        default_folder_layout = QHBoxLayout()
+        default_folder_label = QLabel("デフォルトフォルダ:")
+        default_folder_label.setStyleSheet("color: #cccccc;")
+        default_folder_layout.addWidget(default_folder_label)
+
+        from PySide6.QtWidgets import QSizePolicy as _QSizePolicyForDefaultFolder
+        self.default_base_folder_edit = QLineEdit()
+        self.default_base_folder_edit.setReadOnly(True)
+        self.default_base_folder_edit.setPlaceholderText("未設定")
+        self.default_base_folder_edit.setMinimumWidth(220)
+        self.default_base_folder_edit.setSizePolicy(_QSizePolicyForDefaultFolder.Expanding, _QSizePolicyForDefaultFolder.Fixed)
+        default_folder_layout.addWidget(self.default_base_folder_edit)
+
+        self.default_base_folder_btn = QPushButton("参照…")
+        self.default_base_folder_btn.clicked.connect(self.browse_default_base_folder)
+        default_folder_layout.addWidget(self.default_base_folder_btn)
+
+        file_layout.addLayout(default_folder_layout)
+
         # SKU設定トグルボタン
         self.toggle_settings_btn = QPushButton("SKU設定")
         self.toggle_settings_btn.clicked.connect(self.toggle_settings_panel)
@@ -259,7 +293,19 @@ class InventoryWidget(QWidget):
         file_layout.addWidget(self.data_count_label)
         file_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         
+        # グループボックスをメインレイアウトに追加
         self.layout().addWidget(file_group)
+
+        # ワークフロー状態表示（ファイル操作・アクションエリアの下の行に配置）
+        self.workflow_status_label = QLabel("ワークフロー: 未実行")
+        self.workflow_status_label.setStyleSheet("color: #cccccc;")
+        status_layout = QHBoxLayout()
+        status_layout.addWidget(self.workflow_status_label)
+        status_layout.addStretch()
+        self.layout().addLayout(status_layout)
+
+        # デフォルトフォルダ設定をロード
+        self._load_default_base_folder()
 
     def setup_view_mode_selector(self):
         selector_layout = QHBoxLayout()
@@ -443,6 +489,35 @@ class InventoryWidget(QWidget):
     def _get_qsettings(self) -> QSettings:
         # 会社名/アプリ名は任意の固定値で統一
         return QSettings("HIRIO", "SedoriDesktopApp")
+
+    def _load_default_base_folder(self):
+        """仕入処理用のデフォルトフォルダを設定から読み込んで表示"""
+        try:
+            s = self._get_qsettings()
+            base = s.value("inventory/default_base_folder", "", type=str)
+            if hasattr(self, "default_base_folder_edit"):
+                self.default_base_folder_edit.setText(base or "")
+        except Exception as e:
+            print(f"デフォルトフォルダ設定ロード失敗: {e}")
+
+    def browse_default_base_folder(self):
+        """デフォルトフォルダをユーザーに選択させて保存"""
+        try:
+            from pathlib import Path
+            s = self._get_qsettings()
+            current = s.value("inventory/default_base_folder", "", type=str)
+            start_dir = current if current and Path(current).exists() else str(Path.home())
+            folder = QFileDialog.getExistingDirectory(
+                self,
+                "仕入処理用のデフォルトフォルダを選択",
+                start_dir
+            )
+            if folder:
+                s.setValue("inventory/default_base_folder", folder)
+                if hasattr(self, "default_base_folder_edit"):
+                    self.default_base_folder_edit.setText(folder)
+        except Exception as e:
+            QMessageBox.warning(self, "エラー", f"デフォルトフォルダの設定に失敗しました:\n{str(e)}")
 
     def load_listing_settings(self):
         try:
@@ -1694,10 +1769,382 @@ class InventoryWidget(QWidget):
         
         return date_str
         
+    def _get_default_batch_root_dir(self) -> str:
+        """
+        仕入処理用のフォルダ選択で使用する基準フォルダを取得
+        優先順位:
+        1. inventory/default_base_folder（ユーザー指定のデフォルトフォルダ）
+        2. inventory/last_csv_folder（最後に読み込んだCSVのフォルダ）
+        3. 固定のフォールバックパス / ホームディレクトリ
+        """
+        from pathlib import Path
+        try:
+            s = self._get_qsettings()
+            base = s.value("inventory/default_base_folder", "", type=str)
+            if base and Path(base).exists():
+                return base
+            last_folder = s.value("inventory/last_csv_folder", "", type=str)
+            if last_folder and Path(last_folder).exists():
+                return last_folder
+        except Exception as e:
+            print(f"デフォルトフォルダ取得エラー: {e}")
+        # 以前のハードコードされたフォルダをフォールバックとして残す
+        fallback = r"D:\せどり総合\店舗せどり仕入リスト入れ"
+        if Path(fallback).exists():
+            return fallback
+        return str(Path.home())
+
+    def _update_workflow_status(self, text: str, emphasize: bool = False):
+        """ワークフロー状態ラベルを更新"""
+        if not hasattr(self, "workflow_status_label") or self.workflow_status_label is None:
+            return
+        self.workflow_status_label.setText(text)
+        if emphasize:
+            # 強調表示（黄色っぽい色）
+            self.workflow_status_label.setStyleSheet("color: #ffd54f; font-weight: bold;")
+        else:
+            # 通常表示
+            self.workflow_status_label.setStyleSheet("color: #cccccc; font-weight: normal;")
+
+    def _apply_start_button_style(self, state: str):
+        """
+        ワークフロー状態に応じてスタートボタンの色を変更
+        state: "idle"=通常, "paused"=一時停止（再開可能）, "completed"=工程8まで完了
+        """
+        if not hasattr(self, "start_workflow_btn") or self.start_workflow_btn is None:
+            return
+        if state == "paused":
+            # 一時停止中（緑系＝再開可能）
+            self.start_workflow_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2196f3;
+                    color: white;
+                    border: none;
+                    padding: 8px 16px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #1976d2;
+                }
+            """)
+            self.start_workflow_btn.setText("スタート（再開）")
+        elif state == "completed":
+            # 工程8まで完了（グレー系）
+            self.start_workflow_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #607d8b;
+                    color: white;
+                    border: none;
+                    padding: 8px 16px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #546e7a;
+                }
+            """)
+            self.start_workflow_btn.setText("スタート")
+        else:
+            # idle: 通常（オレンジ）
+            self.start_workflow_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #ff9800;
+                    color: white;
+                    border: none;
+                    padding: 8px 16px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #fb8c00;
+                }
+            """)
+            self.start_workflow_btn.setText("スタート")
+
+    def _stop_workflow_paused_state(self):
+        """ワークフロー一時停止状態を解除し、スタートボタンを通常表示に戻す"""
+        self.workflow_paused_after_step6 = False
+        self._update_workflow_status("ワークフロー: 未実行")
+        self._apply_start_button_style("idle")
+
+    def _should_run_step(self, title: str, description: str) -> bool:
+        """
+        スタートワークフローの各工程を実行するかどうかを判定
+        
+        「1工程ずつ確認」がOFFのときは常にTrueを返し、そのまま進める。
+        ONのときは、ユーザーに確認ダイアログを表示し、Yesのときだけ実行を続行する。
+        """
+        # チェックボックスが無い、または未チェックなら確認なしで進む
+        if not hasattr(self, "step_by_step_checkbox") or not self.step_by_step_checkbox.isChecked():
+            return True
+        
+        reply = QMessageBox.question(
+            self,
+            title,
+            f"{description}\n\nこの工程を実行しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        return reply == QMessageBox.Yes
+
+    def start_inventory_workflow(self):
+        """
+        スタートボタンから仕入管理の一連の処理を自動実行する
+        
+        フロー:
+        1. デフォルトフォルダを基準に仕入処理フォルダを選択
+        2. 選択フォルダ内の StockList_*.csv を読み込み（CSV取込と同等）
+        3. 同じフォルダ内の route_template_*.xlsx を読み込み（ルートテンプレ読込と同等）
+        4. 照合処理実行
+        5. SKU生成
+        6. 統合保存
+        7. DB保存
+        8. 出品CSV生成（保存先は選択フォルダまたは既定設定）
+        9. 古物台帳生成
+        """
+        from pathlib import Path
+
+        # すでに工程6まで完了してコンディション説明編集待ちの場合は、再開 or ワークフロー終了を選択
+        if self.workflow_paused_after_step6:
+            # データが残っているか確認
+            if self.filtered_data is None or len(self.filtered_data) == 0:
+                QMessageBox.warning(
+                    self,
+                    "再開不可",
+                    "仕入データが存在しないため、作業を再開できません。\n最初からワークフローを実行してください。"
+                )
+                self._stop_workflow_paused_state()
+                return
+
+            # 再開 / ワークフロー終了 の2択ダイアログ
+            box = QMessageBox(self)
+            box.setWindowTitle("スタート")
+            box.setText(
+                "工程6（DB保存）まで完了し、コンディション説明編集待ちの状態です。\n\n"
+                "工程7から再開するか、ワークフローを終了するか選んでください。"
+            )
+            btn_resume = box.addButton("工程7から再開", QMessageBox.YesRole)
+            btn_stop = box.addButton("ワークフロー終了", QMessageBox.NoRole)
+            box.exec()
+            if box.clickedButton() == btn_stop:
+                self._stop_workflow_paused_state()
+                QMessageBox.information(
+                    self,
+                    "ワークフロー終了",
+                    "ワークフローを終了しました。\n再度スタートボタンで最初から実行できます。"
+                )
+                return
+
+            # 出品CSV生成（保存ダイアログは従来どおり表示）
+            if not self._should_run_step(
+                "工程7: 出品CSV生成",
+                "Amazon出品用のCSVファイルを生成します。"
+            ):
+                return
+            self.export_listing_csv()
+            
+            # 古物台帳生成
+            if not self._should_run_step(
+                "工程8: 古物台帳生成",
+                "現在の仕入データとルート情報を古物台帳タブに転送します。"
+            ):
+                return
+            self.generate_antique_register()
+
+            # 再開完了
+            self.workflow_paused_after_step6 = False
+            self._update_workflow_status("ワークフロー: 工程8まで完了")
+            self._apply_start_button_style("completed")
+            QMessageBox.information(self, "作業再開完了", "工程7および工程8の処理が完了しました。")
+            return
+        
+        # 1. 仕入処理フォルダを選択（デフォルトフォルダを基準にする）
+        base_dir = self._get_default_batch_root_dir()
+        selected_dir = QFileDialog.getExistingDirectory(
+            self,
+            "仕入処理フォルダを選択（StockList_ と route_template_ を含むフォルダ）",
+            base_dir
+        )
+        if not selected_dir:
+            # キャンセル
+            return
+        
+        folder_path = Path(selected_dir)
+        
+        # 選択フォルダを last_csv_folder として保存（出品CSVの初期フォルダにも利用）
+        try:
+            s = self._get_qsettings()
+            s.setValue("inventory/last_csv_folder", str(folder_path))
+        except Exception:
+            pass
+        
+        # 2. StockList_ で始まる CSV を探して読み込み
+        csv_candidates = sorted(folder_path.glob("StockList_*.csv"))
+        if not csv_candidates:
+            QMessageBox.warning(
+                self,
+                "CSVファイル未検出",
+                f"選択したフォルダ内に『StockList_』で始まるCSVファイルが見つかりませんでした。\n\nフォルダ: {selected_dir}"
+            )
+            return
+        
+        # 最も新しいファイルを優先
+        try:
+            csv_path = max(csv_candidates, key=lambda p: p.stat().st_mtime)
+        except Exception:
+            csv_path = csv_candidates[0]
+        
+        # 工程1: CSV取込
+        if not self._should_run_step(
+            "工程1: CSV取込",
+            f"選択フォルダ内の仕入リストCSVを読み込みます。\n対象ファイル: {csv_path.name}"
+        ):
+            return
+        self._import_csv_from_path(str(csv_path))
+        
+        # 3. route_template_ で始まる xlsx/xls を探して読み込み
+        if not self.route_summary_widget:
+            QMessageBox.warning(
+                self,
+                "ルート機能未初期化",
+                "ルート登録タブ（ルートサマリー）が初期化されていないため、ルートテンプレートを読み込めません。"
+            )
+            return
+        
+        route_candidates = sorted(
+            list(folder_path.glob("route_template_*.xlsx")) +
+            list(folder_path.glob("route_template_*.xls"))
+        )
+        if not route_candidates:
+            QMessageBox.warning(
+                self,
+                "ルートテンプレート未検出",
+                f"選択したフォルダ内に『route_template_』で始まるExcelファイルが見つかりませんでした。\n\nフォルダ: {selected_dir}"
+            )
+            return
+        
+        try:
+            route_path = max(route_candidates, key=lambda p: p.stat().st_mtime)
+        except Exception:
+            route_path = route_candidates[0]
+        
+        # 工程2: ルートテンプレート読込
+        if not self._should_run_step(
+            "工程2: ルートテンプレ読込",
+            f"選択フォルダ内のルートテンプレートを読み込みます。\n対象ファイル: {route_path.name}"
+        ):
+            return
+        
+        # ルートテンプレ読込と同等の処理（ダイアログを出さずに直接読み込み）
+        try:
+            loaded_path = self.route_summary_widget.load_template(str(route_path))
+            if not loaded_path:
+                QMessageBox.warning(
+                    self,
+                    "ルートテンプレート読込失敗",
+                    "ルートテンプレートの読み込みに失敗したため、後続の処理を中止します。"
+                )
+                return
+            # 仕入管理タブ側のルート情報エリアも更新
+            self.refresh_route_template_view()
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "ルートテンプレート読込エラー",
+                f"ルートテンプレートの読み込み中にエラーが発生しました:\n{str(e)}"
+            )
+            return
+        
+        # 4. 照合処理実行
+        if not self._should_run_step(
+            "工程3: 照合処理実行",
+            "仕入データとルート情報の照合処理を実行します。"
+        ):
+            return
+        self.run_matching()
+        
+        # 照合処理で inventory_data が更新されている前提で後続処理を実行
+        if self.inventory_data is None or len(self.inventory_data) == 0:
+            QMessageBox.warning(
+                self,
+                "データなし",
+                "照合処理後の仕入データが存在しないため、後続の処理を中止します。"
+            )
+            return
+        
+        # 5. SKU生成
+        if not self._should_run_step(
+            "工程4: SKU生成",
+            "仕入データにSKUを自動生成します。"
+        ):
+            return
+        self.generate_sku()
+        
+        # 6. 統合保存
+        if not self._should_run_step(
+            "工程5: 統合保存",
+            "現在の仕入データとルート情報を統合スナップショットとして保存します。"
+        ):
+            return
+        self.save_combined_snapshot()
+        
+        # 7. DB保存
+        if not self._should_run_step(
+            "工程6: DB保存",
+            "統合された仕入データをデータベースに保存します。"
+        ):
+            return
+        self.save_to_databases()
+
+        # 工程6完了後、工程7に進む前にコンディション説明編集の確認（1工程ずつ確認モード時のみ）
+        if hasattr(self, "step_by_step_checkbox") and self.step_by_step_checkbox.isChecked():
+            reply = QMessageBox.question(
+                self,
+                "コンディション説明の編集",
+                "工程6（DB保存）が完了しました。\n\n"
+                "出品CSV生成の前に、仕入データ一覧の「コンディション説明」を編集しますか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                # ワークフローを一時停止状態にし、ステータスとボタン色を更新
+                self.workflow_paused_after_step6 = True
+                self._update_workflow_status("ワークフロー: 工程6まで完了（コンディション説明編集中。スタートで工程7から再開できます）", emphasize=True)
+                self._apply_start_button_style("paused")
+                QMessageBox.information(
+                    self,
+                    "コンディション説明を編集してください",
+                    "このダイアログを閉じたあとで、仕入データ一覧の「コンディション説明」列を自由に編集してください。\n\n"
+                    "編集が終わったら、もう一度「スタート」ボタンを押すと、\n"
+                    "工程7（出品CSV生成）と工程8（古物台帳生成）を自動で続きから実行できます。"
+                )
+                # ユーザーがコンディション説明を編集できるように、ここでスタートワークフローを一旦終了する
+                return
+        
+        # 8. 出品CSV生成（保存ダイアログは従来どおり表示）
+        if not self._should_run_step(
+            "工程7: 出品CSV生成",
+            "Amazon出品用のCSVファイルを生成します。"
+        ):
+            return
+        self.export_listing_csv()
+        
+        # 9. 古物台帳生成
+        if not self._should_run_step(
+            "工程8: 古物台帳生成",
+            "現在の仕入データとルート情報を古物台帳タブに転送します。"
+        ):
+            return
+        self.generate_antique_register()
+
+        # 全工程完了
+        self._update_workflow_status("ワークフロー: 工程8まで完了")
+        self._apply_start_button_style("completed")
+
     def import_csv(self):
         """CSVファイルの取込"""
-        # デフォルトディレクトリを設定（デバッグ用：暫定的に変更）
-        default_dir = r"D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳\20251026鎌倉ルート"
+        default_dir = self._get_default_batch_root_dir()
         
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -1707,50 +2154,54 @@ class InventoryWidget(QWidget):
         )
         
         if file_path:
+            self._import_csv_from_path(file_path)
+
+    def _import_csv_from_path(self, file_path: str):
+        """指定パスのCSVファイルを読み込んで仕入データに展開する共通処理"""
+        try:
+            # CSVファイルの読み込み（複数エンコーディング対応）
+            df = self._read_csv_with_encoding_fallback(file_path)
+            
+            # 選択したフォルダを保存（次回の出品CSV生成時に使用）
             try:
-                # CSVファイルの読み込み（複数エンコーディング対応）
-                df = self._read_csv_with_encoding_fallback(file_path)
-                
-                # 選択したフォルダを保存（次回の出品CSV生成時に使用）
-                try:
-                    from pathlib import Path
-                    selected_folder = str(Path(file_path).parent)
-                    s = self._get_qsettings()
-                    s.setValue("inventory/last_csv_folder", selected_folder)
-                except Exception:
-                    pass
-                
-                # 列マッピングと並び替え
-                self.inventory_data = self._map_and_reorder_columns(df)
-                self.filtered_data = self.inventory_data.copy()
-                
-                # SKU自動マッチング処理（商品DBから仕入れ日・ASINで検索）
-                self._auto_match_sku_from_product_db()
-                
-                # テーブルの更新
-                self.update_table()
-                
-                # ボタンの有効化
-                self.export_btn.setEnabled(True)
-                self.clear_btn.setEnabled(True)
-                self.generate_sku_btn.setEnabled(True)
-                self.export_listing_btn.setEnabled(True)
-                self.antique_register_btn.setEnabled(True)
-                
-                # データ件数の更新
-                self.update_data_count()
-                
-                QMessageBox.information(
-                    self, 
-                    "取込完了", 
-                    f"CSVファイルを読み込みました（{len(self.inventory_data)}行）"
-                )
-                
-                # シグナル発火
-                self.data_loaded.emit(len(self.inventory_data))
-                
-            except Exception as e:
-                QMessageBox.warning(self, "エラー", f"CSVファイルの読み込みに失敗しました:\n{str(e)}")
+                from pathlib import Path
+                selected_folder = str(Path(file_path).parent)
+                s = self._get_qsettings()
+                s.setValue("inventory/last_csv_folder", selected_folder)
+            except Exception:
+                pass
+            
+            # 列マッピングと並び替え
+            self.inventory_data = self._map_and_reorder_columns(df)
+            self.filtered_data = self.inventory_data.copy()
+            
+            # SKU自動マッチング処理（商品DBから仕入れ日・ASINで検索）
+            self._auto_match_sku_from_product_db()
+            
+            # テーブルの更新
+            self.update_table()
+            
+            # ボタンの有効化
+            self.export_btn.setEnabled(True)
+            self.clear_btn.setEnabled(True)
+            self.generate_sku_btn.setEnabled(True)
+            self.export_listing_btn.setEnabled(True)
+            self.antique_register_btn.setEnabled(True)
+            
+            # データ件数の更新
+            self.update_data_count()
+            
+            QMessageBox.information(
+                self, 
+                "取込完了", 
+                f"CSVファイルを読み込みました（{len(self.inventory_data)}行）"
+            )
+            
+            # シグナル発火
+            self.data_loaded.emit(len(self.inventory_data))
+            
+        except Exception as e:
+            QMessageBox.warning(self, "エラー", f"CSVファイルの読み込みに失敗しました:\n{str(e)}")
     
     def _read_csv_with_encoding_fallback(self, file_path):
         """複数エンコーディングでCSVファイルを読み込む"""
@@ -3239,9 +3690,9 @@ class InventoryWidget(QWidget):
                 except Exception:
                     pass
                 
-                # デフォルトフォルダが設定されていない場合は、デフォルトディレクトリを使用
+                # デフォルトフォルダが設定されていない場合は、仕入処理用の基準フォルダを使用
                 if default_dir is None:
-                    default_dir = r"D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳\20251026鎌倉ルート"
+                    default_dir = self._get_default_batch_root_dir()
                 
                 # ファイル保存ダイアログを表示
                 default_path = str(Path(default_dir) / default_name)

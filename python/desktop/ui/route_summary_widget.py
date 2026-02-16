@@ -993,27 +993,39 @@ class RouteSummaryWidget(QWidget):
                 f"訪問順序の保存中にエラーが発生しました:\n{str(e)}\n\n詳細はコンソールを確認してください。"
             )
     
-    def load_template(self) -> Optional[str]:
+    def load_template(self, file_path: Optional[str] = None) -> Optional[str]:
         """
         テンプレートファイルを読み込む
         
+        Args:
+            file_path: 直接読み込むテンプレートファイルパス。
+                       None の場合はファイル選択ダイアログを表示する。
+        
         Returns:
-            読み込んだファイルパス（キャンセル時はNone）
+            読み込んだファイルパス（キャンセル時や失敗時はNone）
         """
         try:
-            # 前回選択したフォルダを取得
-            last_path = self.settings.value("route_template/last_selected", "")
-            default_dir = os.path.dirname(last_path) if last_path and os.path.exists(last_path) else ""
-            
-            # ファイル選択ダイアログ
-            file_path, _ = QFileDialog.getOpenFileName(
-                self,
-                "ルートテンプレートファイルを選択",
-                default_dir,
-                "Excelファイル (*.xlsx *.xls);;CSVファイル (*.csv);;すべてのファイル (*)"
-            )
-            
+            # パスが指定されていない場合はダイアログで選択
             if not file_path:
+                # 前回選択したフォルダを取得
+                last_path = self.settings.value("route_template/last_selected", "")
+                default_dir = os.path.dirname(last_path) if last_path and os.path.exists(last_path) else ""
+                
+                # ファイル選択ダイアログ
+                file_path, _ = QFileDialog.getOpenFileName(
+                    self,
+                    "ルートテンプレートファイルを選択",
+                    default_dir,
+                    "Excelファイル (*.xlsx *.xls);;CSVファイル (*.csv);;すべてのファイル (*)"
+                )
+            
+            # キャンセルされた場合
+            if not file_path:
+                return None
+            
+            # ファイルが存在するか確認
+            if not os.path.exists(file_path):
+                QMessageBox.warning(self, "警告", f"指定されたファイルが見つかりません:\n{file_path}")
                 return None
             
             # ファイル拡張子で処理を分岐
