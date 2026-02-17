@@ -1265,3 +1265,20 @@
 
 **最終更新**: 2026-02-16
 **更新者**: Agentモード（実装）
+
+### 2026-02-16（仕入管理SKU生成・証憑管理レシート編集・仕訳帳改善）
+- **内容**:
+  1. 仕入管理タブのSKU生成：仕入DBに同じ仕入時間・同じASINがある場合はそこからSKUを入力（重複登録防止）
+  2. DB保存時：同じ仕入時間・同じASINが既存にある場合はスキップ（更新しない）
+  3. レシート情報編集：店舗名プルダウンに経費先一覧を追加
+  4. レシート情報編集ウィンドウを最大化・最小化可能に
+  5. レシート情報編集の変更を保存時、経費先の場合も store_name_raw を正しく保存
+  6. 科目が仕入以外の場合、変更を保存時に差額カラムにOKを設定
+  7. 確定処理：仕入以外の科目（旅費交通費・消耗品費など）も仕訳帳に登録
+- **実装**:
+  - inventory_widget.py: _normalize_datetime_for_match, _get_datetime_asin_key, SKU生成前のmatch_purchase_records、DB保存時の同一仕入時間+ASINスキップ
+  - receipt_widget.py: 店舗名プルダウンに経費先追加、最大化ボタン、経費先のstore_name_raw保存、科目非仕入時の差額OK、仕訳帳に全科目登録
+- **変更ファイル**: python/desktop/ui/inventory_widget.py, python/desktop/ui/receipt_widget.py, docs/cursor_development_progress.md
+
+**最終更新**: 2026-02-16
+**更新者**: Agentモード（実装）

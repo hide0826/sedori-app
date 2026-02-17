@@ -5835,6 +5835,8 @@ class ReceiptWidget(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle(str(image_file.name))
         dialog.setMinimumSize(1200, 800)
+        # 最大化・最小化ボタンを有効にして編集しやすくする
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
 
         screen = dialog.screen().availableGeometry()
         max_dialog_width = int(screen.width() * 0.95)
@@ -6190,6 +6192,27 @@ class ReceiptWidget(QWidget):
                     # 通常店舗を追加
                     for label, code in other_stores:
                         store_name_combo.addItem(label, code)
+                    
+                    # 経費先一覧からも店舗名候補を追加（店舗マスタにない経費先も選択可能に）
+                    added_codes = {code for _, code in priority_stores + other_stores}
+                    try:
+                        dests = self.store_db.list_expense_destinations()
+                        expense_items = []
+                        for d in dests:
+                            code = (d.get('code') or '').strip()
+                            name = (d.get('name') or '').strip()
+                            if code and code not in added_codes:
+                                label = f"{code} {name}" if name else code
+                                expense_items.append((label, code))
+                                added_codes.add(code)
+                        if expense_items:
+                            store_name_combo.insertSeparator(store_name_combo.count())
+                            for label, code in expense_items:
+                                store_name_combo.addItem(label, code)
+                            print(f"[レシート情報編集] 経費先追加数: {len(expense_items)}")
+                    except Exception as ex:
+                        import traceback
+                        print(f"[レシート情報編集] 経費先読み込みエラー: {ex}\n{traceback.format_exc()}")
                     
                     print(f"[レシート情報編集] プルダウン項目数: {store_name_combo.count()}")
                     
@@ -7254,13 +7277,29 @@ class ReceiptWidget(QWidget):
                 selected_store_label = store_name_combo.currentText()
                 if selected_store_code:
                     updates['store_code'] = selected_store_code
-                    # 店舗名（生）は店舗マスタから取得（store_code優先、互換性のため仕入れ先コードも許容）
+                    # 店舗名（生）は店舗マスタまたは経費先から取得
+                    store_name_raw = None
                     try:
                         store = self.store_db.get_store_by_code(selected_store_code)
                         if store:
-                            updates['store_name_raw'] = store.get('store_name', '') or selected_store_label
+                            store_name_raw = (store.get('store_name') or '').strip()
+                        if not store_name_raw:
+                            dest = self.store_db.get_expense_destination_by_code(selected_store_code)
+                            if dest:
+                                store_name_raw = (dest.get('name') or '').strip()
+                        if not store_name_raw:
+                            # ラベルから店舗名を抽出（「CODE 店舗名」形式 → 店舗名部分）
+                            if selected_store_label.startswith(selected_store_code):
+                                store_name_raw = selected_store_label[len(selected_store_code):].strip()
+                            else:
+                                store_name_raw = selected_store_label.strip()
+                        if store_name_raw:
+                            updates['store_name_raw'] = store_name_raw
                     except Exception:
-                        updates['store_name_raw'] = selected_store_label
+                        if selected_store_label.startswith(selected_store_code):
+                            updates['store_name_raw'] = selected_store_label[len(selected_store_code):].strip()
+                        else:
+                            updates['store_name_raw'] = selected_store_label.strip()
                 
                 # 電話番号
                 phone = phone_edit.text().strip()
@@ -7376,9 +7415,9 @@ class ReceiptWidget(QWidget):
                     # 差額が0の場合も 0 を保存しておき、一覧では「OK」表示にする
                     updates['price_difference'] = int(difference)
                 else:
-                    # 科目が「仕入」以外の場合は紐付けSKUと差額をクリア
+                    # 科目が「仕入」以外の場合は紐付けSKUをクリアし、差額は0（OK表示）にする
                     updates['linked_skus'] = None
-                    updates['price_difference'] = None
+                    updates['price_difference'] = 0
                 
                 # 仕入DBの価格を更新し、見込み利益・損益分岐点・利益率・ROIを再計算（科目が「仕入」の場合のみ）
                 if is_purchase and sku_price_updates and self.product_widget:
@@ -8806,15 +8845,9 @@ class ReceiptWidget(QWidget):
                         continue
                     
                     # 科目を取得（空欄の場合は「仕入」として扱う）
-                    account_title = receipt.get('account_title', '') or ''
-                    if not account_title or account_title.strip() == '':
+                    account_title = (receipt.get('account_title') or '').strip()
+                    if not account_title:
                         account_title = default_debit  # 空欄の場合は「仕入」として扱う
-                    
-                    # 科目が「仕入」でない場合はスキップ（仕入のみを仕訳帳に登録）
-                    if account_title != '仕入' and account_title != default_debit:
-                        skipped_reasons["科目が仕入でない"] += 1
-                        print(f"[DEBUG] 仕訳帳スキップ (receipt_id={receipt_id}): 科目が「仕入」でない (account_title={account_title})")
-                        continue
                     
                     # 日付を取得（yyyy-MM-dd形式、時刻は不要）
                     purchase_date = receipt.get('purchase_date', '')
@@ -8875,10 +8908,10 @@ class ReceiptWidget(QWidget):
                                 existing_entry = e
                                 break
                     
-                    # 仕訳帳エントリのデータ
+                    # 仕訳帳エントリのデータ（借方勘定科目はレシートの科目を使用：仕入・旅費交通費・消耗品費など）
                     journal_entry = {
                         "transaction_date": purchase_date,
-                        "debit_account": default_debit,
+                        "debit_account": account_title,
                         "amount": total_amount,
                         "credit_account": default_credit,
                         "description": store_name,
@@ -8895,7 +8928,7 @@ class ReceiptWidget(QWidget):
                                 # 変更があるかチェック
                                 has_changes = (
                                     existing_entry.get('transaction_date') != purchase_date or
-                                    existing_entry.get('debit_account') != default_debit or
+                                    existing_entry.get('debit_account') != account_title or
                                     existing_entry.get('amount') != total_amount or
                                     existing_entry.get('credit_account') != default_credit or
                                     existing_entry.get('description') != store_name or

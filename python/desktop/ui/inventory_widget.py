@@ -1277,6 +1277,13 @@ class InventoryWidget(QWidget):
                         existing_all_records = latest_snapshot.get("data", [])
                 
                 # 既存データとマージ（重複チェック）
+                # 同じ仕入時間・同じASINが既に仕入DBにある場合はスキップ（更新しない）
+                existing_datetime_asin_keys: set = set()
+                for rec in existing_all_records:
+                    k = self._get_datetime_asin_key(rec)
+                    if k:
+                        existing_datetime_asin_keys.add(k)
+                
                 # キーは SKU があれば SKU、それ以外は「仕入れ日 + ASIN/JAN + 商品名 + 店舗コード」で判定
                 existing_index: Dict[str, int] = {}
                 for idx, rec in enumerate(existing_all_records):
@@ -1286,8 +1293,15 @@ class InventoryWidget(QWidget):
 
                 updated_count = 0
                 new_count = 0
+                skipped_count = 0
                 
                 for record in purchase_records:
+                    dt_asin_key = self._get_datetime_asin_key(record)
+                    if dt_asin_key and dt_asin_key in existing_datetime_asin_keys:
+                        # 同じ仕入時間・同じASINが既存にある場合はスキップ（重複登録・上書き防止）
+                        skipped_count += 1
+                        continue
+                    
                     key = self._get_purchase_record_key(record)
                     if key and key in existing_index:
                         # 既存データを更新（同じキーの既存レコードを置き換え）
@@ -1298,6 +1312,8 @@ class InventoryWidget(QWidget):
                         existing_all_records.append(record)
                         if key:
                             existing_index[key] = len(existing_all_records) - 1
+                        if dt_asin_key:
+                            existing_datetime_asin_keys.add(dt_asin_key)
                         new_count += 1
                 
                 # スナップショットに保存
@@ -1316,6 +1332,8 @@ class InventoryWidget(QWidget):
                 message = f"仕入データ: {new_count}件の新規データを追加"
                 if updated_count > 0:
                     message += f"、{updated_count}件を更新"
+                if skipped_count > 0:
+                    message += f"、{skipped_count}件をスキップ（同一仕入時間・ASINの既存あり）"
                 message += f"しました。（合計: {len(existing_all_records)}件）"
                 messages.append(message)
         except Exception as e:
@@ -1705,17 +1723,18 @@ class InventoryWidget(QWidget):
                 matched_sku = None
                 
                 # 1. 商品DBタブの仕入DB（最新スナップショット）から検索
+                # 同じ仕入時間・同じASINのレコードからSKUを取得（重複登録防止）
                 if purchase_records:
-                    normalized_target_date = self._normalize_date_for_match(purchase_date)
+                    normalized_target_datetime = self._normalize_datetime_for_match(purchase_date)
                     for purchase_record in purchase_records:
-                        record_date = str(purchase_record.get('仕入れ日', '') or purchase_record.get('purchase_date', '')).strip()
+                        record_datetime = str(purchase_record.get('仕入れ日', '') or purchase_record.get('purchase_date', '')).strip()
                         record_asin = str(purchase_record.get('ASIN', '') or purchase_record.get('asin', '')).strip()
                         record_sku = str(purchase_record.get('SKU', '') or purchase_record.get('sku', '')).strip()
                         
-                        normalized_record_date = self._normalize_date_for_match(record_date)
+                        normalized_record_datetime = self._normalize_datetime_for_match(record_datetime)
                         
-                        # 日付形式を正規化して比較
-                        if normalized_record_date == normalized_target_date:
+                        # 仕入時間（日付+時刻）+ ASINで比較
+                        if normalized_record_datetime == normalized_target_datetime:
                             if record_asin.upper() == asin.upper() and record_sku and record_sku != '未実装':
                                 matched_sku = record_sku
                                 break
@@ -1768,6 +1787,65 @@ class InventoryWidget(QWidget):
             return f"{year}-{month}-{day}"
         
         return date_str
+    
+    def _normalize_datetime_for_match(self, date_str: str) -> str:
+        """
+        仕入れ日文字列を正規化（日付+時刻を含む場合も含める）
+        同じ仕入時間・同じASINの判定に使用する。
+        
+        例:
+        - "2025/11/8 10:22" -> "2025-11-08 10:22"
+        - "2025-11-08 10:22:00" -> "2025-11-08 10:22"
+        - "2025/11/8" -> "2025-11-08"
+        """
+        if not date_str or str(date_str).strip() == '' or str(date_str) == 'nan':
+            return ''
+        
+        s = str(date_str).strip()
+        # スラッシュをハイフンに変換
+        s = s.replace('/', '-').replace('.', '-')
+        
+        date_part = s
+        time_part = ''
+        if ' ' in s:
+            parts = s.split(' ', 1)
+            date_part = parts[0]
+            time_part = (parts[1] or '').strip()
+            # 時刻を HH:MM に正規化（秒を削除）
+            if time_part and ':' in time_part:
+                t_parts = time_part.split(':')
+                if len(t_parts) >= 2:
+                    try:
+                        h, m = int(t_parts[0]), int(t_parts[1])
+                        time_part = f"{h:02d}:{m:02d}"
+                    except (ValueError, IndexError):
+                        time_part = ''
+        
+        # 日付部分を正規化
+        d_parts = date_part.split('-')
+        if len(d_parts) >= 3:
+            try:
+                y, m, d = int(d_parts[0]), int(d_parts[1]), int(d_parts[2])
+                date_part = f"{y:04d}-{m:02d}-{d:02d}"
+            except (ValueError, IndexError):
+                pass
+        
+        if time_part:
+            return f"{date_part} {time_part}"
+        return date_part
+    
+    def _get_datetime_asin_key(self, record: Dict[str, Any]) -> Optional[str]:
+        """
+        仕入時間+ASINによる一意キーを生成する。
+        同じ仕入時間・同じASIN = 同一レコードとみなす。
+        """
+        purchase_datetime = self._normalize_datetime_for_match(
+            str(record.get("仕入れ日") or record.get("purchase_date") or "").strip()
+        )
+        asin = str(record.get("ASIN") or record.get("asin") or "").strip()
+        if not purchase_datetime or not asin:
+            return None
+        return f"DT_ASIN:{purchase_datetime}|{asin.upper()}"
         
     def _get_default_batch_root_dir(self) -> str:
         """
@@ -2992,6 +3070,9 @@ class InventoryWidget(QWidget):
             return
             
         try:
+            # 仕入DBに同じ仕入時間・同じASINがある場合はそこからSKUを入力（重複登録防止）
+            self.match_purchase_records_from_product_db()
+            
             # データを辞書形式に変換（除外商品を除く）
             all_list = self.filtered_data.to_dict('records')
             # SKU生成専用の除外条件（自己発送も含める）
