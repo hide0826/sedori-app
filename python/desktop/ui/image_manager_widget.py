@@ -462,7 +462,16 @@ class ImageManagerWidget(QWidget):
         self.product_widget = None  # ProductWidgetへの参照
         
         # データ
+        # 画像管理タブで使用する現在のフォルダ
         self.current_directory = ""
+        # 「起点」となるデフォルトフォルダ（ユーザーが任意に登録可能）
+        self.default_root_dir: str = ""
+        # JANグループ1枚目画像のチェック状態
+        #   True  = 1枚目を送信しない（除外）
+        #   False = 1枚目も送信する（例外的に含める）
+        self.first_image_flags: Dict[str, bool] = {}
+        # ツリー更新中フラグ（itemChangedの再入防止）
+        self._updating_tree_checks: bool = False
         self.image_records: List[ImageRecord] = []
         self.jan_groups: List[JanGroup] = []
         self.selected_group: Optional[JanGroup] = None
@@ -527,6 +536,10 @@ class ImageManagerWidget(QWidget):
         
         self.select_folder_btn = QPushButton("フォルダ選択")
         self.select_folder_btn.clicked.connect(self.select_directory)
+        # 画像管理タブの起点となるデフォルトフォルダを登録するボタン
+        self.set_default_folder_btn = QPushButton("デフォルト設定")
+        self.set_default_folder_btn.setToolTip("画像管理タブでフォルダを開くときの起点フォルダを登録します。")
+        self.set_default_folder_btn.clicked.connect(self.set_default_root_directory)
         self.scan_btn = QPushButton("スキャン実行")
         self.scan_btn.clicked.connect(self.scan_directory)
         self.scan_btn.setEnabled(False)
@@ -553,6 +566,7 @@ class ImageManagerWidget(QWidget):
         folder_layout.addWidget(folder_label)
         folder_layout.addWidget(self.folder_path_label, stretch=1)
         folder_layout.addWidget(self.select_folder_btn)
+        folder_layout.addWidget(self.set_default_folder_btn)
         folder_layout.addWidget(self.scan_btn)
         folder_layout.addWidget(self.scan_unknown_btn)
         folder_layout.addWidget(self.clear_images_btn)
@@ -573,7 +587,26 @@ class ImageManagerWidget(QWidget):
         
         self.tree_widget = JanGroupTreeWidget(self)
         self.tree_widget.setHeaderLabel("JANグループ")
+        # チェックボックスがダークテーマでもはっきり見えるようにスタイルを調整
+        self.tree_widget.setStyleSheet("""
+            QTreeWidget::indicator {
+                width: 16px;
+                height: 16px;
+            }
+            QTreeWidget::indicator:unchecked {
+                image: none;
+                border: 2px solid #ffffff;
+                background-color: transparent;
+            }
+            QTreeWidget::indicator:checked {
+                image: none;
+                border: 2px solid #ffffff;
+                background-color: #ffffff;
+            }
+        """)
         self.tree_widget.itemSelectionChanged.connect(self.on_tree_selection_changed)
+        # 各JANグループ1枚目画像のチェックボックス変更を監視
+        self.tree_widget.itemChanged.connect(self.on_tree_item_changed)
         self.tree_widget.setAcceptDrops(True)  # ドロップを受け入れる
         self.tree_widget.setDragDropMode(QTreeWidget.DropOnly)  # ドロップのみ許可
         self.tree_widget.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -698,6 +731,11 @@ class ImageManagerWidget(QWidget):
             if self.config_path.exists():
                 with open(self.config_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
+                    # デフォルトフォルダ（起点）の読み込み
+                    default_dir = config.get('image_manager_default_root_dir')
+                    if default_dir and os.path.exists(default_dir) and os.path.isdir(default_dir):
+                        self.default_root_dir = default_dir
+
                     if 'image_manager_last_directory' in config:
                         last_dir = config['image_manager_last_directory']
                         if os.path.exists(last_dir) and os.path.isdir(last_dir):
@@ -718,7 +756,12 @@ class ImageManagerWidget(QWidget):
                     config = json.load(f)
             
             # 最後に開いたフォルダパスを保存
-            config['image_manager_last_directory'] = self.current_directory
+            if self.current_directory:
+                config['image_manager_last_directory'] = self.current_directory
+
+            # 起点となるデフォルトフォルダも保存
+            if self.default_root_dir:
+                config['image_manager_default_root_dir'] = self.default_root_dir
             
             # 設定ファイルを保存
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -729,7 +772,13 @@ class ImageManagerWidget(QWidget):
     
     def select_directory(self):
         """フォルダ選択ダイアログを表示"""
-        last_dir = self.current_directory if self.current_directory else str(Path.home())
+        # 優先順位: 現在のフォルダ > デフォルトフォルダ > ホームディレクトリ
+        if self.current_directory:
+            last_dir = self.current_directory
+        elif self.default_root_dir:
+            last_dir = self.default_root_dir
+        else:
+            last_dir = str(Path.home())
         directory = QFileDialog.getExistingDirectory(self, "画像フォルダを選択", last_dir)
         
         if directory:
@@ -738,6 +787,30 @@ class ImageManagerWidget(QWidget):
             self.scan_btn.setEnabled(True)
             self.scan_unknown_btn.setEnabled(True)
             self.save_last_directory()
+
+    def set_default_root_directory(self):
+        """画像管理タブの起点となるデフォルトフォルダを設定"""
+        # ダイアログの開始位置（既存のデフォルトフォルダ → 現在のフォルダ → ホーム）
+        if self.default_root_dir:
+            start_dir = self.default_root_dir
+        elif self.current_directory:
+            start_dir = self.current_directory
+        else:
+            start_dir = str(Path.home())
+
+        directory = QFileDialog.getExistingDirectory(self, "デフォルト画像フォルダを選択", start_dir)
+        if not directory:
+            return
+
+        self.default_root_dir = directory
+        # ユーザーに分かるよう簡単なメッセージを表示
+        QMessageBox.information(
+            self,
+            "デフォルトフォルダ設定",
+            f"画像管理タブの起点フォルダを次の場所に設定しました:\n{directory}"
+        )
+        # 設定ファイルに保存
+        self.save_last_directory()
     
     def scan_directory(self):
         """ディレクトリをスキャンして画像を取得"""
@@ -910,32 +983,45 @@ class ImageManagerWidget(QWidget):
     
     def update_tree_widget(self):
         """ツリービジェットを更新"""
-        self.tree_widget.clear()
-        
-        for group in self.jan_groups:
-            # 親ノード（JANグループ）
-            if group.jan != "unknown":
-                # JANコードの.0を削除（表示用の正規化）
-                jan_text = str(group.jan).strip()
-                if jan_text.endswith(".0"):
-                    jan_text = jan_text[:-2]
-            else:
-                jan_text = "（JAN不明）"
-            title = self._get_product_title_by_jan(group.jan) if group.jan != "unknown" else ""
-            title_text = f" - {title}" if title else ""
-            parent_item = QTreeWidgetItem([f"{jan_text}{title_text} ({len(group.images)}枚)"])
-            parent_item.setData(0, Qt.UserRole, group)
-            self.tree_widget.addTopLevelItem(parent_item)
+        self._updating_tree_checks = True
+        try:
+            self.tree_widget.clear()
             
-            # 子ノード（各画像）
-            for record in group.images:
-                file_name = Path(record.path).name
-                capture_text = record.capture_dt.strftime("%Y/%m/%d %H:%M:%S") if record.capture_dt else "（日時不明）"
-                child_item = QTreeWidgetItem([f"{file_name} - {capture_text}"])
-                child_item.setData(0, Qt.UserRole, record.path)
-                parent_item.addChild(child_item)
-        
-        self.tree_widget.expandAll()
+            for group in self.jan_groups:
+                # 親ノード（JANグループ）
+                if group.jan != "unknown":
+                    # JANコードの.0を削除（表示用の正規化）
+                    jan_text = str(group.jan).strip()
+                    if jan_text.endswith(".0"):
+                        jan_text = jan_text[:-2]
+                else:
+                    jan_text = "（JAN不明）"
+                title = self._get_product_title_by_jan(group.jan) if group.jan != "unknown" else ""
+                title_text = f" - {title}" if title else ""
+                parent_item = QTreeWidgetItem([f"{jan_text}{title_text} ({len(group.images)}枚)"])
+                parent_item.setData(0, Qt.UserRole, group)
+                self.tree_widget.addTopLevelItem(parent_item)
+                
+                # 子ノード（各画像）
+                for idx, record in enumerate(group.images):
+                    file_name = Path(record.path).name
+                    capture_text = record.capture_dt.strftime("%Y/%m/%d %H:%M:%S") if record.capture_dt else "（日時不明）"
+                    child_item = QTreeWidgetItem([f"{file_name} - {capture_text}"])
+                    # 各JANグループの1枚目画像にチェックボックスを表示（デフォルトは除外＝チェックON）
+                    if idx == 0:
+                        flag = self.first_image_flags.get(record.path, True)
+                        child_item.setFlags(child_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                        child_item.setCheckState(0, Qt.Checked if flag else Qt.Unchecked)
+                        # テキストは白字にして見やすくする
+                        child_item.setForeground(0, Qt.white)
+                        # 状態を保存
+                        self.first_image_flags[record.path] = flag
+                    child_item.setData(0, Qt.UserRole, record.path)
+                    parent_item.addChild(child_item)
+            
+            self.tree_widget.expandAll()
+        finally:
+            self._updating_tree_checks = False
         has_valid_groups = any(g.jan != "unknown" for g in self.jan_groups)
         self.rename_btn.setEnabled(has_valid_groups)
     
@@ -1079,7 +1165,6 @@ class ImageManagerWidget(QWidget):
             self.progress_dialog.close()
             self.progress_dialog = None
         
-        # 結果を画像一覧に追加
         for path, image in results:
             item = QListWidgetItem(Path(path).name)
             pixmap = QPixmap.fromImage(image)
@@ -1087,7 +1172,24 @@ class ImageManagerWidget(QWidget):
             item.setData(Qt.UserRole, path)
             item.setToolTip(path)
             self.image_list.addItem(item)
-    
+
+    def on_tree_item_changed(self, item: QTreeWidgetItem, column: int):
+        """JANグループツリー内のチェックボックス変更時（1枚目を送る/送らない）"""
+        if self._updating_tree_checks:
+            return
+        if not item:
+            return
+        # 親ノード（JANグループ名）は無視し、子ノード（画像行）のみ対象
+        if not item.parent():
+            return
+        path = item.data(0, Qt.UserRole)
+        if not path:
+            return
+        if not (item.flags() & Qt.ItemIsUserCheckable):
+            return
+        # True = 除外（送らない）、False = 送る
+        self.first_image_flags[path] = (item.checkState(0) == Qt.Checked)
+
     def on_image_clicked(self, item: QListWidgetItem):
         """画像クリック時の処理"""
         image_path = item.data(Qt.UserRole)
@@ -1702,8 +1804,19 @@ class ImageManagerWidget(QWidget):
                 else:
                     updated_image_records.append(record)
             self.image_records = updated_image_records
+
+            # 4. 1枚目画像のフラグもパス変更に合わせて更新
+            if self.first_image_flags:
+                updated_flags: Dict[str, bool] = {}
+                for old_path, new_record in new_records_map.items():
+                    if old_path in self.first_image_flags:
+                        updated_flags[new_record.path] = self.first_image_flags[old_path]
+                for p, flag in self.first_image_flags.items():
+                    if p not in new_records_map:
+                        updated_flags[p] = flag
+                self.first_image_flags = updated_flags
         
-        # 4. UIの全体更新と結果報告
+        # 5. UIの全体更新と結果報告
         self.jan_groups = self.image_service.group_by_jan(self.image_records)
         self.update_tree_widget()
         self.update_image_list(self.image_records)
@@ -1852,8 +1965,11 @@ class ImageManagerWidget(QWidget):
                 # リネーム後のパスを取得（group.imagesはリネーム後に更新されているはず）
                 # 念のため、ファイルが存在しない場合はimage_dbから最新のパスを取得
                 image_paths = []
-                for img in group.images:
+                for idx, img in enumerate(group.images):
                     img_path = img.path
+                    # 各JANグループの1枚目画像はデフォルトで除外（チェックON時）
+                    if idx == 0 and self.first_image_flags.get(img_path, True):
+                        continue
                     # ファイルが存在しない場合は、image_dbから最新のパスを取得
                     if not Path(img_path).exists():
                         # image_dbから最新のパスを取得（リネーム後のパスがDBに保存されている）
@@ -2027,6 +2143,12 @@ class ImageManagerWidget(QWidget):
         self.template_file_browse_btn.setToolTip("AmazonテンプレートExcelファイルを選択します")
         self.template_file_browse_btn.clicked.connect(self.browse_template_file)
         button_layout.addWidget(self.template_file_browse_btn)
+        
+        # Amazonテンプレート保存先のデフォルトフォルダ設定ボタン
+        self.template_save_root_btn = QPushButton("保存先デフォルト")
+        self.template_save_root_btn.setToolTip("仕入れフォルダ配下など、Amazonテンプレートを書き出す起点フォルダを設定します。")
+        self.template_save_root_btn.clicked.connect(self.set_amazon_template_root_dir)
+        button_layout.addWidget(self.template_save_root_btn)
         
         # スナップショット保存／読込（実行テスト用）
         self.save_registration_snapshot_btn = QPushButton("スナップ保存")
@@ -3865,10 +3987,19 @@ class ImageManagerWidget(QWidget):
             # 出力ファイルの保存先を選択
             from datetime import datetime
             default_filename = f"ListingLoader_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsm"
+
+            # 保存ダイアログの起点となるフォルダを決定
+            # 1. ユーザーが「保存先デフォルト」で設定したルートフォルダ（仕入れフォルダなど）
+            # 2. 未設定の場合はテンプレートファイルと同じフォルダ
+            settings = QSettings("HIRIO", "SedoriApp")
+            root_dir = settings.value("amazon_template_root_dir", "")
+            base_dir = root_dir or str(template_path.parent)
+            initial_path = str(Path(base_dir) / default_filename)
+
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
                 "AmazonテンプレートExcelファイルを保存",
-                default_filename,
+                initial_path,
                 "Excelマクロ有効ファイル (*.xlsm);;すべてのファイル (*)"
             )
             
@@ -3956,6 +4087,30 @@ class ImageManagerWidget(QWidget):
         settings = QSettings("HIRIO", "SedoriApp")
         settings.setValue("amazon_template_file_path", template_path)
         settings.sync()
+
+    def set_amazon_template_root_dir(self):
+        """Amazonテンプレート書き出し用のデフォルト（起点）フォルダを設定する"""
+        settings = QSettings("HIRIO", "SedoriApp")
+        # 既に設定があればそこから、なければホームディレクトリから開始
+        start_dir = settings.value("amazon_template_root_dir", str(Path.home()))
+        
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Amazonテンプレート保存用のデフォルトフォルダを選択",
+            start_dir
+        )
+        if not directory:
+            return
+        
+        settings.setValue("amazon_template_root_dir", directory)
+        settings.sync()
+        
+        QMessageBox.information(
+            self,
+            "保存先デフォルトを設定しました",
+            f"今後、AmazonテンプレートExcelを書き出すときの起点フォルダは次の場所になります:\n\n{directory}\n\n"
+            "毎回このフォルダの中から、ルート別フォルダなどを書き出し先として選んでください。"
+        )
 
     def open_amazon_upload_page(self):
         """Amazon Seller Centralの出品ファイルアップロードページをブラウザで開く"""

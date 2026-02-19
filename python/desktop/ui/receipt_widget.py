@@ -2304,8 +2304,6 @@ class ReceiptWidget(QWidget):
             self.store_code_combo.clear()
         if hasattr(self, 'match_result_label'):
             self.match_result_label.clear()
-        if hasattr(self, 'confirm_btn'):
-            self.confirm_btn.setEnabled(False)
         if hasattr(self, 'match_btn'):
             self.match_btn.setEnabled(False)
         if hasattr(self, 'view_image_btn'):
@@ -8849,17 +8847,16 @@ class ReceiptWidget(QWidget):
                     if not account_title:
                         account_title = default_debit  # 空欄の場合は「仕入」として扱う
                     
-                    # 日付を取得（yyyy-MM-dd形式、時刻は不要）
-                    purchase_date = receipt.get('purchase_date', '')
-                    if not purchase_date:
+                    # 日付＋時刻を取得
+                    raw_purchase_date = receipt.get('purchase_date', '') or ''
+                    if not raw_purchase_date:
                         skipped_reasons["日付なし"] += 1
                         print(f"[DEBUG] 仕訳帳スキップ (receipt_id={receipt_id}): 日付なし")
                         continue
-                    # 日付から時刻部分を除去
-                    if ' ' in purchase_date:
-                        purchase_date = purchase_date.split(' ')[0]
-                    if 'T' in purchase_date:
-                        purchase_date = purchase_date.split('T')[0]
+                    # 文字列表現を正規化（例: "2025-02-17T10:30" -> "2025-02-17 10:30"）
+                    purchase_datetime = raw_purchase_date.replace('T', ' ').strip()
+                    # 検索用に「日付のみ」も保持（重複チェックは日付単位で行う）
+                    purchase_date_only = purchase_datetime.split(' ')[0]
                     
                     # 合計金額を取得
                     total_amount = receipt.get('total_amount', 0) or 0
@@ -8896,21 +8893,38 @@ class ReceiptWidget(QWidget):
                     
                     # 画像URLを取得
                     image_url = receipt.get('gcs_url') or receipt.get('image_url') or ''
-                    
-                    # 既に登録されているかチェック（画像URLで判定）
-                    existing_entries = journal_db.list_by_date(purchase_date, purchase_date)
+
+                    # 既に登録されているかチェック
+                    #   1. 同じ日付の範囲で取得
+                    #   2. まず画像URL一致を優先
+                    #   3. 見つからなければ「日付（同一日）＋金額＋摘要（店舗名）」一致で重複判定
+                    existing_entries = journal_db.list_by_date(
+                        purchase_date_only,
+                        f"{purchase_date_only} 23:59:59"
+                    )
                     existing_entry = None
-                    
-                    # 画像URLで既存エントリを検索
+
+                    # 1) 画像URLで既存エントリを検索
                     if image_url:
                         for e in existing_entries:
                             if e.get('image_url') == image_url:
                                 existing_entry = e
                                 break
-                    
+
+                    # 2) 画像URLが一致しない場合は「日付＋金額＋摘要（店舗名）」で重複判定
+                    if existing_entry is None:
+                        for e in existing_entries:
+                            if (
+                                e.get('amount') == total_amount and
+                                (e.get('description') or '') == store_name
+                            ):
+                                existing_entry = e
+                                break
+
                     # 仕訳帳エントリのデータ（借方勘定科目はレシートの科目を使用：仕入・旅費交通費・消耗品費など）
                     journal_entry = {
-                        "transaction_date": purchase_date,
+                        # 取引日付には「日付＋時刻」を保存
+                        "transaction_date": purchase_datetime,
                         "debit_account": account_title,
                         "amount": total_amount,
                         "credit_account": default_credit,
@@ -8927,7 +8941,7 @@ class ReceiptWidget(QWidget):
                             if existing_id:
                                 # 変更があるかチェック
                                 has_changes = (
-                                    existing_entry.get('transaction_date') != purchase_date or
+                                    existing_entry.get('transaction_date') != purchase_datetime or
                                     existing_entry.get('debit_account') != account_title or
                                     existing_entry.get('amount') != total_amount or
                                     existing_entry.get('credit_account') != default_credit or
@@ -8940,14 +8954,14 @@ class ReceiptWidget(QWidget):
                                 if has_changes:
                                     journal_db.update(existing_id, journal_entry)
                                     journal_count += 1
-                                    print(f"[DEBUG] 仕訳帳更新成功 (receipt_id={receipt_id}, journal_id={existing_id}): date={purchase_date}, amount={total_amount}, store={store_name}")
+                                    print(f"[DEBUG] 仕訳帳更新成功 (receipt_id={receipt_id}, journal_id={existing_id}): date={purchase_datetime}, amount={total_amount}, store={store_name}")
                                 else:
                                     print(f"[DEBUG] 仕訳帳スキップ (receipt_id={receipt_id}): 変更なし (journal_id={existing_id})")
                         else:
                             # 新規登録
                             journal_db.insert(journal_entry)
                             journal_count += 1
-                            print(f"[DEBUG] 仕訳帳登録成功 (receipt_id={receipt_id}): date={purchase_date}, amount={total_amount}, store={store_name}")
+                            print(f"[DEBUG] 仕訳帳登録成功 (receipt_id={receipt_id}): date={purchase_datetime}, amount={total_amount}, store={store_name}")
                     except Exception as e:
                         print(f"[DEBUG] 仕訳帳登録/更新エラー (receipt_id={receipt_id}): {e}")
                         error_count += 1
