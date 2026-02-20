@@ -69,6 +69,10 @@ class RouteDatabase:
                 total_item_count INTEGER,
                 purchase_success_rate REAL,
                 avg_purchase_price REAL,
+                -- 進捗管理用フラグ
+                listing_completed INTEGER DEFAULT 0,   -- 出品CSV生成完了
+                evidence_completed INTEGER DEFAULT 0,  -- 証憑（レシート）確定完了
+                images_completed INTEGER DEFAULT 0,    -- 画像登録完了
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
@@ -83,8 +87,11 @@ class RouteDatabase:
         for column, coltype in (
             ("total_purchase_amount", "REAL"),
             ("total_sales_amount", "REAL"),
-            ("expected_margin", "REAL"),  # 想定利益率（%）
-            ("expected_roi", "REAL"),     # 想定ROI（%）
+            ("expected_margin", "REAL"),   # 想定利益率（%）
+            ("expected_roi", "REAL"),      # 想定ROI（%）
+            ("listing_completed", "INTEGER"),
+            ("evidence_completed", "INTEGER"),
+            ("images_completed", "INTEGER"),
         ):
             try:
                 cursor.execute(f"ALTER TABLE route_summaries ADD COLUMN {column} {coltype} DEFAULT 0")
@@ -183,8 +190,9 @@ class RouteDatabase:
                 total_purchase_amount, total_sales_amount,
                 total_working_hours, estimated_hourly_rate,
                 total_gross_profit, total_item_count, purchase_success_rate, avg_purchase_price,
-                expected_margin, expected_roi
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                expected_margin, expected_roi,
+                listing_completed, evidence_completed, images_completed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             route_data.get('route_date'),
             route_data.get('route_code'),
@@ -205,7 +213,10 @@ class RouteDatabase:
             route_data.get('purchase_success_rate'),
             route_data.get('avg_purchase_price'),
             expected_margin,
-            expected_roi
+            expected_roi,
+            1 if route_data.get('listing_completed') else 0,
+            1 if route_data.get('evidence_completed') else 0,
+            1 if route_data.get('images_completed') else 0,
         ))
         
         conn.commit()
@@ -256,7 +267,10 @@ class RouteDatabase:
                 purchase_success_rate = ?,
                 avg_purchase_price = ?,
                 expected_margin = ?,
-                expected_roi = ?
+                expected_roi = ?,
+                listing_completed = COALESCE(?, listing_completed),
+                evidence_completed = COALESCE(?, evidence_completed),
+                images_completed = COALESCE(?, images_completed)
             WHERE id = ?
         """, (
             route_data.get('route_date'),
@@ -279,6 +293,9 @@ class RouteDatabase:
             route_data.get('avg_purchase_price'),
             expected_margin,
             expected_roi,
+            None if 'listing_completed' not in route_data else (1 if route_data.get('listing_completed') else 0),
+            None if 'evidence_completed' not in route_data else (1 if route_data.get('evidence_completed') else 0),
+            None if 'images_completed' not in route_data else (1 if route_data.get('images_completed') else 0),
             route_id
         ))
         
@@ -330,6 +347,7 @@ class RouteDatabase:
             "total_purchase_amount, total_sales_amount, "
             "total_working_hours, estimated_hourly_rate, total_gross_profit, total_item_count, "
             "purchase_success_rate, avg_purchase_price, expected_margin, expected_roi, "
+            "listing_completed, evidence_completed, images_completed, "
             "created_at, updated_at, "
             "datetime(updated_at, 'localtime') AS updated_at_local "
             "FROM route_summaries WHERE 1=1"
@@ -505,6 +523,25 @@ class RouteDatabase:
         rows = cursor.fetchall()
         return [self._row_to_dict(row) for row in rows]
     
+    def get_store_visit_aggregates(self) -> List[Dict[str, Any]]:
+        """店舗コードごとに想定粗利・仕入点数・評価を集計（store_visit_details のみ）"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        # 出発時刻・帰宅時刻・往路高速代・復路高速代は店舗ではないため集計から除外
+        cursor.execute("""
+            SELECT store_code,
+                   COALESCE(SUM(store_gross_profit), 0) AS total_gross_profit,
+                   COALESCE(SUM(store_item_count), 0) AS total_item_count,
+                   COUNT(*) AS visit_count,
+                   COALESCE(AVG(store_rating), 0) AS avg_rating
+            FROM store_visit_details
+            WHERE store_code IS NOT NULL AND store_code != ''
+              AND store_code NOT IN ('出発時刻', '帰宅時刻', '往路高速代', '復路高速代')
+            GROUP BY store_code
+        """)
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    
     def _row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
         """Rowを辞書に変換（category_breakdownをパース）"""
         visit_dict = dict(row)
@@ -554,6 +591,27 @@ class RouteDatabase:
             'avg_hourly_rate': avg_hourly_rate,
             'total_gross_profit': total_gross_profit
         }
+
+    # ==================== フラグ更新ユーティリティ ====================
+
+    def set_route_flag(self, route_id: int, flag_name: str, value: bool) -> None:
+        """route_summaries の進捗フラグを1つだけ更新する。
+
+        flag_name:
+            - 'listing_completed'
+            - 'evidence_completed'
+            - 'images_completed'
+        """
+        if flag_name not in ("listing_completed", "evidence_completed", "images_completed"):
+            raise ValueError(f"Invalid route flag name: {flag_name}")
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            f"UPDATE route_summaries SET {flag_name} = ? WHERE id = ?",
+            (1 if value else 0, route_id),
+        )
+        conn.commit()
     
     def sync_total_item_count_from_visits(self):
         """既存データの集計値を店舗訪問詳細から再計算して更新

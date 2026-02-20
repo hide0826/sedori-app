@@ -32,6 +32,7 @@ from database.store_db import StoreDatabase
 from database.account_title_db import AccountTitleDatabase
 from utils.excel_importer import ExcelImporter
 from ui.company_master_widget import CompanyMasterWidget
+from ui.store_score_widget import StoreScoreWidget
 
 # デスクトップ側servicesを優先して読み込む
 try:
@@ -2385,6 +2386,10 @@ class StoreMasterWidget(QWidget):
         # 店舗一覧タブ
         self.store_list_widget = StoreListWidget()
         self.tab_widget.addTab(self.store_list_widget, "店舗一覧")
+        
+        # 店舗スコアタブ（想定粗利・仕入点数・評価の蓄積を店舗別に集計・スコア表示）
+        self.store_score_widget = StoreScoreWidget()
+        self.tab_widget.addTab(self.store_score_widget, "店舗スコア")
         
         # 経費先タブ（店舗一覧と法人マスタの間）
         self.expense_destination_widget = ExpenseDestinationListWidget()

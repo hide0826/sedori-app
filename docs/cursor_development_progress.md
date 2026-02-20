@@ -1292,5 +1292,20 @@
   - receipt_widget.py: 店舗名プルダウンに経費先追加、最大化ボタン、経費先のstore_name_raw保存、科目非仕入時の差額OK、仕訳帳に全科目登録
 - **変更ファイル**: python/desktop/ui/inventory_widget.py, python/desktop/ui/receipt_widget.py, docs/cursor_development_progress.md
 
-**最終更新**: 2026-02-16
+### 2026-02-19（店舗スコア機能の追加・集計ロジック改善）
+- **内容**:
+  1. 店舗スコア一覧の追加（店舗マスタ＞店舗スコアタブ）：ルート名・店舗名の補完、ルート名列、カラムソート、ルート別絞り込み
+  2. 出発時刻・帰宅時刻・往路高速代・復路高速代を店舗として集計しないよう除外（route_db / route_visit_db）
+  3. 店舗一覧DBに登録されている店舗のみ集計（店舗コード列のみ有効、supplier_codeは集計対象外）
+  4. K2-001/H1-010 のようなコード形式のルート名は表示しない（_is_code_like_route_name）
+  5. 訪問回数の二重計上を解消：同一保存が store_visit_details と route_visit_logs の両方に書かれるため、集計は route_visit_logs のみに変更
+  6. 訪問時間（到着・出発のいずれか）が入っていない行は未訪問としてスコア集計から除外
+- **実装**:
+  - store_score_service.py: get_merged_store_aggregates で route_visit_logs のみ集計、valid_store_codes は store_code のみ、ルート名のコード形式非表示、merge 時は from_route を空に
+  - route_visit_db.py: get_store_visit_aggregates に訪問時間条件を追加、get_store_route_from_logs も同条件
+  - route_db.py / route_visit_db.py: 出発時刻・帰宅時刻・往路高速代・復路高速代を NOT IN で除外
+  - store_score_widget.py: ルート名列・ルート絞り込みコンボ、フッター説明（訪問回数・訪問時間条件）
+- **変更ファイル**: python/desktop/services/store_score_service.py, python/desktop/database/route_visit_db.py, python/desktop/database/route_db.py, python/desktop/ui/store_score_widget.py, docs/cursor_development_progress.md
+
+**最終更新**: 2026-02-19
 **更新者**: Agentモード（実装）

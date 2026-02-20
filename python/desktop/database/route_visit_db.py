@@ -146,6 +146,55 @@ class RouteVisitDatabase:
         rows = cur.fetchall()
         return [dict(row) for row in rows]
 
+    def get_store_visit_aggregates(self) -> List[Dict[str, Any]]:
+        """店舗コードごとに想定粗利・仕入点数・評価を集計（route_visit_logs のみ）。
+        店舗名は同一店舗のうち1件を代表で取得（MAX）。
+        訪問時間（到着・出発のいずれか）が入っていない行は「未訪問」として集計から除外する。"""
+        conn = self._get_connection()
+        cur = conn.cursor()
+        # 出発時刻・帰宅時刻・往路高速代・復路高速代は店舗ではないため集計から除外
+        # 到着時刻・出発時刻のいずれも空の行は訪問していないので集計から除外
+        cur.execute("""
+            SELECT store_code,
+                   COALESCE(SUM(store_gross_profit), 0) AS total_gross_profit,
+                   COALESCE(SUM(store_item_count), 0) AS total_item_count,
+                   COUNT(*) AS visit_count,
+                   COALESCE(AVG(store_rating), 0) AS avg_rating,
+                   MAX(store_name) AS store_name
+            FROM route_visit_logs
+            WHERE store_code IS NOT NULL AND store_code != ''
+              AND store_code NOT IN ('出発時刻', '帰宅時刻', '往路高速代', '復路高速代')
+              AND (TRIM(COALESCE(store_in_time, '')) != '' OR TRIM(COALESCE(store_out_time, '')) != '')
+            GROUP BY store_code
+        """)
+        rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def get_store_route_from_logs(self) -> Dict[str, str]:
+        """
+        店舗コードごとに「直近訪問時のルート名」を返す。
+        店舗マスタにルートが未登録でも、訪問ログからルート名を補完するために使用する。
+        訪問時間が入っている行のみ対象（未訪問は除外）。
+        """
+        conn = self._get_connection()
+        cur = conn.cursor()
+        time_cond = " (TRIM(COALESCE(r1.store_in_time, '')) != '' OR TRIM(COALESCE(r1.store_out_time, '')) != '') "
+        cur.execute(f"""
+            SELECT r1.store_code, MAX(r1.route_name) AS route_name
+            FROM route_visit_logs r1
+            WHERE r1.store_code IS NOT NULL AND r1.store_code != ''
+              AND r1.store_code NOT IN ('出発時刻', '帰宅時刻', '往路高速代', '復路高速代')
+              AND {time_cond}
+              AND r1.route_date = (
+                SELECT MAX(r2.route_date) FROM route_visit_logs r2
+                WHERE r2.store_code = r1.store_code
+                  AND (TRIM(COALESCE(r2.store_in_time, '')) != '' OR TRIM(COALESCE(r2.store_out_time, '')) != '')
+              )
+            GROUP BY r1.store_code
+        """)
+        rows = cur.fetchall()
+        return {str(row["store_code"]).strip(): (row["route_name"] or "").strip() for row in rows if row.get("store_code")}
+
     def list_route_codes(self) -> List[Dict[str, Any]]:
         """登録済みルートコードと名称の一覧を取得"""
         conn = self._get_connection()
