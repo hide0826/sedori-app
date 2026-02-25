@@ -339,7 +339,7 @@ class RepricerSettingsWidget(QWidget):
         # priceTrace設定の表示制御を更新
         self.update_price_trace_visibility()
         
-        QMessageBox.information(self, "設定読み込み完了", "設定を正常に読み込みました")
+        # 起動時は「起動しています○○%」のプログレスで案内するため、ここではポップアップしない
     
     def on_config_saved(self, success):
         """設定保存完了時の処理"""

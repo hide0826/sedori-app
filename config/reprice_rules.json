@@ -5,7 +5,7 @@
   "reprice_rules": [
     {
       "days_from": 30,
-      "action": "maintain",
+      "action": "priceTrace",
       "value": 1.0
     },
     {
@@ -69,5 +69,5 @@
       "value": 4.0
     }
   ],
-  "updated_at": "2025-10-25 14:58:35.593489"
+  "updated_at": "2026-02-18 14:01:29.470164"
 }

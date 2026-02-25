@@ -21,6 +21,8 @@ import subprocess
 import threading
 import time
 
+from ui.startup_progress_dialog import StartupProgressDialog
+
 # 重いウィジェットは setup_tabs() 内で遅延インポート（起動時間短縮のため）
 
 
@@ -154,128 +156,173 @@ class MainWindow(QMainWindow):
         # ウィンドウ表示後にタブを構築（イベントループに1回入ってから実行）
         QTimer.singleShot(0, self._deferred_setup_tabs)
         
+    # 段階的タブ構築の間隔（ミリ秒）。起動直後に最初のタブが使えるようにしつつ、残りはバックグラウンドで追加
+    _TAB_SETUP_INTERVAL_MS = 35
+
     def _deferred_setup_tabs(self):
-        """ウィンドウ表示後にタブを構築（遅延インポートで起動を短縮）"""
+        """ウィンドウ表示後にタブを段階的に構築（起動体感を短縮）"""
         if getattr(self, "_tabs_loaded", False):
             return
-        # プレースホルダタブを削除
         self.tab_widget.removeTab(0)
-        self.setup_tabs()
-        self._tabs_loaded = True
-        self.restore_tab_order()
+        # 起動プログレスダイアログを表示（起動しています ○○% ＋ スピナー）
+        self._startup_progress = StartupProgressDialog(self)
+        self._startup_progress.set_progress(0)
+        self._startup_progress.show()
         QApplication.processEvents()
+        self._setup_tab_phase = 0
+        self._run_next_tab_phase()
 
-    def setup_tabs(self):
-        """タブの設定（各ウィジェットはここで遅延インポート）"""
-        # 価格改定タブ（サブタブを持つ）
-        from ui.repricer_widget import RepricerWidget
-        from ui.repricer_settings_widget import RepricerSettingsWidget
-        self.repricer_widget = RepricerWidget(self.api_client)
-        self.repricer_settings_widget = RepricerSettingsWidget(self.api_client)
-        repricer_tabs = QTabWidget()
-        repricer_tabs.addTab(self.repricer_widget, "改定実行")
-        repricer_tabs.addTab(self.repricer_settings_widget, "改定ルール")
-        self.tab_widget.addTab(repricer_tabs, "価格改定")
-        QApplication.processEvents()
+    def _run_next_tab_phase(self):
+        """次のタブ構築フェーズを実行し、続きがあればタイマーでスケジュール"""
+        phase = getattr(self, "_setup_tab_phase", 0)
+        try:
+            done = self._setup_tabs_phase(phase)
+            # フェーズ完了ごとにプログレスを更新（8フェーズで 12, 25, 37, 50, 62, 75, 87, 100%）
+            progress_pct = round((phase + 1) * 100 / 8)
+            if hasattr(self, "_startup_progress") and self._startup_progress:
+                self._startup_progress.set_progress(progress_pct)
+                QApplication.processEvents()
+            if done:
+                self._tabs_loaded = True
+                if hasattr(self, "_startup_progress") and self._startup_progress:
+                    self._startup_progress.set_progress(100)
+                    QApplication.processEvents()
+                    self._startup_progress.close()
+                    self._startup_progress = None
+                self.restore_tab_order()
+                QApplication.processEvents()
+                return
+            self._setup_tab_phase = phase + 1
+            QTimer.singleShot(self._TAB_SETUP_INTERVAL_MS, self._run_next_tab_phase)
+        except Exception:
+            self._tabs_loaded = True
+            if hasattr(self, "_startup_progress") and self._startup_progress:
+                try:
+                    self._startup_progress.close()
+                except Exception:
+                    pass
+                self._startup_progress = None
+            self.restore_tab_order()
+            raise
 
-        # 仕入管理タブ
-        from ui.inventory_widget import InventoryWidget
-        self.inventory_widget = InventoryWidget(self.api_client)
-        self.tab_widget.addTab(self.inventory_widget, "仕入管理")
-        QApplication.processEvents()
+    def _setup_tabs_phase(self, phase: int) -> bool:
+        """タブを1フェーズずつ構築。True を返すと全タブ完了。"""
+        if phase == 0:
+            # 価格改定・仕入管理（まずここが使えるようにする）
+            from ui.repricer_widget import RepricerWidget
+            from ui.repricer_settings_widget import RepricerSettingsWidget
+            self.repricer_widget = RepricerWidget(self.api_client)
+            self.repricer_settings_widget = RepricerSettingsWidget(self.api_client)
+            repricer_tabs = QTabWidget()
+            repricer_tabs.addTab(self.repricer_widget, "改定実行")
+            repricer_tabs.addTab(self.repricer_settings_widget, "改定ルール")
+            self.tab_widget.addTab(repricer_tabs, "価格改定")
+            from ui.inventory_widget import InventoryWidget
+            from ui.condition_template_widget import ConditionTemplateWidget
+            self.inventory_widget = InventoryWidget(self.api_client)
+            self.condition_template_widget = ConditionTemplateWidget()
+            inventory_tabs = QTabWidget()
+            inventory_tabs.addTab(self.inventory_widget, "仕入データ")
+            inventory_tabs.addTab(self.condition_template_widget, "コンディション説明")
+            self.tab_widget.addTab(inventory_tabs, "仕入管理")
+            return False
 
-        # 古物台帳タブ
-        from ui.antique_widget import AntiqueWidget
-        self.antique_widget = AntiqueWidget(self.api_client, inventory_widget=self.inventory_widget)
-        self.tab_widget.addTab(self.antique_widget, "古物台帳")
+        if phase == 1:
+            # 古物台帳・ルート
+            from ui.antique_widget import AntiqueWidget
+            self.antique_widget = AntiqueWidget(self.api_client, inventory_widget=self.inventory_widget)
+            self.tab_widget.addTab(self.antique_widget, "古物台帳")
+            from ui.route_summary_widget import RouteSummaryWidget
+            from ui.route_list_widget import RouteListWidget
+            route_tabs = QTabWidget()
+            self.route_summary_widget = RouteSummaryWidget(self.api_client, inventory_widget=self.inventory_widget)
+            route_tabs.addTab(self.route_summary_widget, "ルート登録")
+            self.route_list_widget = RouteListWidget()
+            route_tabs.addTab(self.route_list_widget, "ルートサマリー")
+            self.route_summary_widget.data_saved.connect(self.route_list_widget.load_routes)
+            self.tab_widget.addTab(route_tabs, "ルート")
+            self.inventory_widget.set_route_summary_widget(self.route_summary_widget)
+            self.inventory_widget.set_antique_widget(self.antique_widget)
+            self.inventory_widget.spot_saved.connect(self.route_list_widget.load_routes)
+            return False
 
-        # ルートタブ
-        from ui.route_summary_widget import RouteSummaryWidget
-        from ui.route_list_widget import RouteListWidget
-        route_tabs = QTabWidget()
-        self.route_summary_widget = RouteSummaryWidget(self.api_client, inventory_widget=self.inventory_widget)
-        route_tabs.addTab(self.route_summary_widget, "ルート登録")
-        self.route_list_widget = RouteListWidget()
-        route_tabs.addTab(self.route_list_widget, "ルートサマリー")
-        self.route_summary_widget.data_saved.connect(self.route_list_widget.load_routes)
-        self.tab_widget.addTab(route_tabs, "ルート")
-        self.inventory_widget.set_route_summary_widget(self.route_summary_widget)
-        self.inventory_widget.set_antique_widget(self.antique_widget)
-        QApplication.processEvents()
+        if phase == 2:
+            # データベース管理（コンディション説明は仕入管理タブに移動済み）
+            from ui.store_master_widget import StoreMasterWidget
+            from ui.product_widget import ProductWidget
+            from ui.route_visit_widget import RouteVisitLogWidget
+            self.store_master_widget = StoreMasterWidget()
+            self.product_widget = ProductWidget(inventory_widget=self.inventory_widget)
+            self.inventory_widget.set_product_widget(self.product_widget)
+            self.route_visit_widget = RouteVisitLogWidget()
+            db_management_tabs = QTabWidget()
+            db_management_tabs.addTab(self.product_widget, "商品DB")
+            db_management_tabs.addTab(self.store_master_widget, "店舗マスタ")
+            db_management_tabs.addTab(self.route_visit_widget, "ルート訪問DB")
+            self.tab_widget.addTab(db_management_tabs, "データベース管理")
+            return False
 
-        # データベース管理タブ
-        from ui.store_master_widget import StoreMasterWidget
-        from ui.product_widget import ProductWidget
-        from ui.route_visit_widget import RouteVisitLogWidget
-        from ui.condition_template_widget import ConditionTemplateWidget
-        self.store_master_widget = StoreMasterWidget()
-        self.product_widget = ProductWidget(inventory_widget=self.inventory_widget)
-        self.inventory_widget.set_product_widget(self.product_widget)
-        self.route_visit_widget = RouteVisitLogWidget()
-        self.condition_template_widget = ConditionTemplateWidget()
-        db_management_tabs = QTabWidget()
-        db_management_tabs.addTab(self.product_widget, "商品DB")
-        db_management_tabs.addTab(self.store_master_widget, "店舗マスタ")
-        db_management_tabs.addTab(self.route_visit_widget, "ルート訪問DB")
-        db_management_tabs.addTab(self.condition_template_widget, "コンディション説明")
-        self.tab_widget.addTab(db_management_tabs, "データベース管理")
-        QApplication.processEvents()
+        if phase == 3:
+            # バッチ処理・分析
+            from ui.store_code_batch_widget import StoreCodeBatchWidget
+            self.store_code_batch_widget = StoreCodeBatchWidget()
+            self.tab_widget.addTab(self.store_code_batch_widget, "バッチ処理")
+            from ui.analysis_widget import AnalysisWidget
+            self.analysis_widget = AnalysisWidget()
+            self.tab_widget.addTab(self.analysis_widget, "分析")
+            return False
 
-        # バッチ処理タブ
-        from ui.store_code_batch_widget import StoreCodeBatchWidget
-        self.store_code_batch_widget = StoreCodeBatchWidget()
-        self.tab_widget.addTab(self.store_code_batch_widget, "バッチ処理")
+        if phase == 4:
+            # 証憑管理
+            from ui.evidence_manager_widget import EvidenceManagerWidget
+            self.evidence_widget = EvidenceManagerWidget(
+                self.api_client,
+                inventory_widget=self.inventory_widget,
+                product_widget=self.product_widget
+            )
+            if hasattr(self.evidence_widget, 'receipt_widget'):
+                self.evidence_widget.receipt_widget.set_evidence_widget(self.evidence_widget)
+            self.tab_widget.addTab(self.evidence_widget, "証憑管理")
+            return False
 
-        # 分析タブ
-        from ui.analysis_widget import AnalysisWidget
-        self.analysis_widget = AnalysisWidget()
-        self.tab_widget.addTab(self.analysis_widget, "分析")
+        if phase == 5:
+            # 台帳
+            from ui.purchase_ledger_widget import PurchaseLedgerWidget
+            from ui.expense_ledger_widget import ExpenseLedgerWidget
+            ledger_tabs = QTabWidget()
+            self.purchase_ledger_widget = PurchaseLedgerWidget(self.api_client)
+            ledger_tabs.addTab(self.purchase_ledger_widget, "仕入台帳")
+            self.expense_ledger_widget = ExpenseLedgerWidget(self.api_client)
+            ledger_tabs.addTab(self.expense_ledger_widget, "経費台帳")
+            self.tab_widget.addTab(ledger_tabs, "台帳")
+            return False
 
-        # 証憑管理タブ
-        from ui.evidence_manager_widget import EvidenceManagerWidget
-        self.evidence_widget = EvidenceManagerWidget(
-            self.api_client,
-            inventory_widget=self.inventory_widget,
-            product_widget=self.product_widget
-        )
-        if hasattr(self.evidence_widget, 'receipt_widget'):
-            self.evidence_widget.receipt_widget.set_evidence_widget(self.evidence_widget)
-        self.tab_widget.addTab(self.evidence_widget, "証憑管理")
-        QApplication.processEvents()
+        if phase == 6:
+            # バーコードチェッカー・画像管理
+            from ui.barcode_checker_widget import BarcodeCheckerWidget
+            self.barcode_checker_widget = BarcodeCheckerWidget()
+            self.tab_widget.addTab(self.barcode_checker_widget, "バーコードチェッカー")
+            from ui.image_manager_widget import ImageManagerWidget
+            self.image_manager_widget = ImageManagerWidget(self.api_client)
+            self.image_manager_widget.set_product_widget(self.product_widget)
+            self.tab_widget.addTab(self.image_manager_widget, "画像管理")
+            return False
 
-        # 台帳タブ
-        from ui.purchase_ledger_widget import PurchaseLedgerWidget
-        from ui.expense_ledger_widget import ExpenseLedgerWidget
-        ledger_tabs = QTabWidget()
-        self.purchase_ledger_widget = PurchaseLedgerWidget(self.api_client)
-        ledger_tabs.addTab(self.purchase_ledger_widget, "仕入台帳")
-        self.expense_ledger_widget = ExpenseLedgerWidget(self.api_client)
-        ledger_tabs.addTab(self.expense_ledger_widget, "経費台帳")
-        self.tab_widget.addTab(ledger_tabs, "台帳")
+        if phase == 7:
+            # Keepaテスト・画像テスト・設定（最後に設定タブ）
+            from ui.keepa_test_widget import KeepaTestWidget
+            from ui.image_test_widget import ImageTestWidget
+            from ui.settings_widget import SettingsWidget
+            self.keepa_test_widget = KeepaTestWidget()
+            self.tab_widget.addTab(self.keepa_test_widget, "Keepaテスト")
+            self.image_test_widget = ImageTestWidget()
+            self.tab_widget.addTab(self.image_test_widget, "画像テスト")
+            self.settings_widget = SettingsWidget(self.api_client)
+            self.settings_widget.settings_changed.connect(self.on_settings_changed)
+            self.tab_widget.addTab(self.settings_widget, "設定")
+            return True
 
-        # バーコードチェッカータブ
-        from ui.barcode_checker_widget import BarcodeCheckerWidget
-        self.barcode_checker_widget = BarcodeCheckerWidget()
-        self.tab_widget.addTab(self.barcode_checker_widget, "バーコードチェッカー")
-
-        # 画像管理タブ
-        from ui.image_manager_widget import ImageManagerWidget
-        self.image_manager_widget = ImageManagerWidget(self.api_client)
-        self.image_manager_widget.set_product_widget(self.product_widget)
-        self.tab_widget.addTab(self.image_manager_widget, "画像管理")
-        QApplication.processEvents()
-
-        # Keepaテスト・画像テスト・設定タブ
-        from ui.keepa_test_widget import KeepaTestWidget
-        from ui.image_test_widget import ImageTestWidget
-        from ui.settings_widget import SettingsWidget
-        self.keepa_test_widget = KeepaTestWidget()
-        self.tab_widget.addTab(self.keepa_test_widget, "Keepaテスト")
-        self.image_test_widget = ImageTestWidget()
-        self.tab_widget.addTab(self.image_test_widget, "画像テスト")
-        self.settings_widget = SettingsWidget(self.api_client)
-        self.settings_widget.settings_changed.connect(self.on_settings_changed)
-        self.tab_widget.addTab(self.settings_widget, "設定")
+        return True
         
     def setup_menu(self):
         """メニューバーの設定"""

@@ -13,9 +13,10 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView,
     QGroupBox, QSplitter, QMessageBox, QFrame,
     QCheckBox, QSpinBox, QDateEdit, QFileDialog,
-    QDialog, QDialogButtonBox, QSizePolicy, QInputDialog
+    QDialog, QDialogButtonBox, QSizePolicy, QInputDialog,
+    QPlainTextEdit, QScrollArea, QFormLayout, QTimeEdit
 )
-from PySide6.QtCore import Qt, QDate, Signal, QSettings
+from PySide6.QtCore import Qt, QDate, QTime, QDateTime, Signal, QSettings
 from PySide6.QtGui import QFont, QColor, QPalette
 import pandas as pd
 from pathlib import Path
@@ -36,6 +37,297 @@ from database.product_purchase_db import ProductPurchaseDatabase
 from database.route_visit_db import RouteVisitDatabase
 from database.warranty_db import WarrantyDatabase
 from ui.star_rating_widget import StarRatingWidget
+from utils.route_utils import mark_route_flags_from_folder
+
+
+def _normalize_condition_note_newlines(s: str) -> str:
+    """DBなどでリテラル '\\n' として保存された改行を実際の改行に変換（表示用）"""
+    if not s:
+        return ""
+    return str(s).replace("\\n", "\n")
+
+
+def _to_stored_newlines(s: str) -> str:
+    """実際の改行をリテラル '\\n' に変換（保存用・1行表示で行区切りに\\nが入る形）"""
+    if not s:
+        return ""
+    return str(s).replace("\r\n", "\n").replace("\n", "\\n").replace("\r", "\\n")
+
+
+class InventoryRowEditDialog(QDialog):
+    """仕入データ1行を編集するダイアログ（コンディション説明は複数行・呼び出しボタン付き）"""
+    
+    def __init__(self, column_headers: List[str], row_data: Dict[str, Any],
+                 condition_template_db, get_condition_key_func, parent=None):
+        super().__init__(parent)
+        self.column_headers = column_headers
+        self.row_data = dict(row_data) if row_data else {}
+        self.condition_template_db = condition_template_db
+        self.get_condition_key = get_condition_key_func
+        self._widgets = {}
+        self.setWindowTitle("行の編集")
+        self.setMinimumWidth(520)
+        self.setMinimumHeight(400)
+        self._build_ui()
+        self._load_row_data()
+    
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_content = QWidget()
+        form = QFormLayout(scroll_content)
+        
+        for col in self.column_headers:
+            if col == "コンディション説明":
+                w = QPlainTextEdit()
+                w.setPlaceholderText("複数行入力可。改行は\\nで保存されます。")
+                w.setMinimumHeight(120)
+                self._widgets[col] = w
+                form.addRow(QLabel(col + ":"), w)
+            elif col == "コメント":
+                w = QPlainTextEdit()
+                w.setMinimumHeight(60)
+                self._widgets[col] = w
+                form.addRow(QLabel(col + ":"), w)
+            else:
+                w = QLineEdit()
+                self._widgets[col] = w
+                form.addRow(QLabel(col + ":"), w)
+        
+        # コンディション説明呼び出しボタン（コンディション列の値にマッチするテンプレートを挿入）
+        call_btn = QPushButton("コンディション説明呼び出し")
+        call_btn.setToolTip("この行の「コンディション」に合わせて、コンディション説明タブのテンプレートを挿入します。")
+        call_btn.clicked.connect(self._on_call_condition_note)
+        form.addRow("", call_btn)
+        
+        scroll.setWidget(scroll_content)
+        layout.addWidget(scroll)
+        
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        layout.addWidget(bb)
+    
+    def _load_row_data(self):
+        for col in self.column_headers:
+            w = self._widgets.get(col)
+            if not w:
+                continue
+            val = self.row_data.get(col, "")
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                val = ""
+            val = str(val).strip() if val != "" else ""
+            if col == "コンディション説明":
+                # 保存時は改行を\nで扱うので、表示時はリテラル \n を実際の改行に
+                val = _normalize_condition_note_newlines(val)
+            if isinstance(w, QPlainTextEdit):
+                w.setPlainText(val)
+            else:
+                w.setText(val)
+    
+    def _on_call_condition_note(self):
+        cond_w = self._widgets.get("コンディション")
+        note_w = self._widgets.get("コンディション説明")
+        if not cond_w or not note_w:
+            return
+        condition_text = cond_w.text().strip() if isinstance(cond_w, QLineEdit) else cond_w.toPlainText().strip()
+        if not condition_text:
+            QMessageBox.information(self, "呼び出し", "先に「コンディション」を入力してください。")
+            return
+        condition_key = self.get_condition_key(condition_text)
+        text = self.condition_template_db.get_condition_description_text(condition_key)
+        if not text:
+            QMessageBox.information(self, "呼び出し", f"コンディション「{condition_text}」に対応する説明が登録されていません。\nコンディション説明タブで登録してください。")
+            return
+        # テンプレートは改行を "\\n" で保存しているので、表示用に実際の改行に変換（1行表示で行区切りに\nが入った状態で編集欄に表示）
+        text = _normalize_condition_note_newlines(text)
+        note_w.setPlainText(text)
+    
+    def get_result(self) -> Dict[str, Any]:
+        result = {}
+        for col in self.column_headers:
+            w = self._widgets.get(col)
+            if not w:
+                continue
+            if isinstance(w, QPlainTextEdit):
+                val = w.toPlainText().strip()
+            else:
+                val = w.text().strip()
+            if col == "コンディション説明":
+                # 保存時は改行を \n で扱う（1行表示で行区切りに\nが入る形）
+                val = _to_stored_newlines(val) if val else ""
+            result[col] = val
+        return result
+
+
+class SpotPurchaseDialog(QDialog):
+    """スポット仕入用のルート情報入力ダイアログ（1店舗・スキマ時間仕入対応）
+    
+    - 日付（ルート日付）
+    - 店舗名 / 店舗コード
+    - IN / OUT 時刻
+    
+    を入力してもらい、OK 後にルート登録タブ側で SPOT ルートを作成する。
+    """
+    
+    def __init__(self, store_db, inventory_data: Optional[pd.DataFrame], default_date: Optional[QDate] = None, parent=None):
+        super().__init__(parent)
+        self.store_db = store_db
+        self.inventory_data = inventory_data
+        self.default_date = default_date or QDate.currentDate()
+        self.stores = []
+        self._store_code_by_name = {}
+        self.setWindowTitle("スポット仕入 - ルート情報入力")
+        self.setMinimumWidth(420)
+        self._build_ui()
+        self._load_stores()
+    
+    def _build_ui(self):
+        layout = QFormLayout(self)
+        # 日付（ルート日付）
+        self.date_edit = QDateEdit()
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.date_edit.setDate(self.default_date)
+        layout.addRow("日付:", self.date_edit)
+        # 店舗名（選択で店舗コード自動挿入）
+        self.store_combo = QComboBox()
+        self.store_combo.setMinimumWidth(280)
+        self.store_combo.currentIndexChanged.connect(self._on_store_selected)
+        layout.addRow("店舗名:", self.store_combo)
+        self.store_code_edit = QLineEdit()
+        self.store_code_edit.setReadOnly(True)
+        self.store_code_edit.setPlaceholderText("店舗名を選択すると自動で入ります")
+        layout.addRow("店舗コード:", self.store_code_edit)
+        # IN/OUT時間（自由入力）
+        self.in_time_edit = QTimeEdit()
+        self.in_time_edit.setDisplayFormat("HH:mm")
+        self.in_time_edit.setTime(QTime.currentTime())
+        self.in_time_edit.timeChanged.connect(self._update_auto_fields)
+        layout.addRow("IN時間:", self.in_time_edit)
+        self.out_time_edit = QTimeEdit()
+        self.out_time_edit.setDisplayFormat("HH:mm")
+        self.out_time_edit.setTime(QTime.currentTime())
+        self.out_time_edit.timeChanged.connect(self._update_auto_fields)
+        layout.addRow("OUT時間:", self.out_time_edit)
+        # 仕入CSVから自動計算される項目（表示用＋微調整可）
+        self.stay_minutes_edit = QLineEdit()
+        self.stay_minutes_edit.setReadOnly(False)
+        self.stay_minutes_edit.setPlaceholderText("IN/OUTから自動計算")
+        layout.addRow("滞在(分):", self.stay_minutes_edit)
+        self.gross_profit_edit = QLineEdit()
+        self.gross_profit_edit.setReadOnly(False)
+        self.gross_profit_edit.setPlaceholderText("仕入CSVの見込み利益合計")
+        layout.addRow("想定粗利:", self.gross_profit_edit)
+        self.item_count_edit = QLineEdit()
+        self.item_count_edit.setReadOnly(False)
+        self.item_count_edit.setPlaceholderText("仕入点数")
+        layout.addRow("仕入れ点数:", self.item_count_edit)
+        self.rating_spin = QSpinBox()
+        self.rating_spin.setRange(0, 5)
+        self.rating_spin.setValue(0)
+        layout.addRow("評価(0-5):", self.rating_spin)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        layout.addRow(bb)
+    
+    def _load_stores(self):
+        self.stores = self.store_db.list_stores() if self.store_db else []
+        self._store_code_by_name.clear()
+        self.store_combo.clear()
+        self.store_combo.addItem("-- 店舗を選択 --", None)
+        for s in self.stores:
+            name = s.get("store_name") or ""
+            code = s.get("store_code") or s.get("supplier_code") or ""
+            if name:
+                self.store_combo.addItem(name, code)
+                self._store_code_by_name[name] = code
+        self.store_code_edit.clear()
+    
+    def _on_store_selected(self):
+        idx = self.store_combo.currentIndex()
+        if idx <= 0:
+            self.store_code_edit.clear()
+            self._update_auto_fields()
+            return
+        code = self.store_combo.currentData()
+        self.store_code_edit.setText(code or "")
+        self._update_auto_fields()
+    
+    def _update_auto_fields(self):
+        """仕入CSVから該当店舗の想定粗利・仕入れ点数を集計し、IN/OUTから滞在(分)を計算"""
+        code = self.store_code_edit.text().strip()
+        stay_min = 0
+        try:
+            in_t = self.in_time_edit.time()
+            out_t = self.out_time_edit.time()
+            in_min = in_t.hour() * 60 + in_t.minute()
+            out_min = out_t.hour() * 60 + out_t.minute()
+            if out_min >= in_min:
+                stay_min = out_min - in_min
+            else:
+                stay_min = (24 * 60 - in_min) + out_min
+        except Exception:
+            pass
+        self.stay_minutes_edit.setText(str(stay_min))
+        gross = 0
+        count = 0
+        if code and self.inventory_data is not None and len(self.inventory_data) > 0:
+            if "仕入先" in self.inventory_data.columns:
+                mask = self.inventory_data["仕入先"].astype(str).str.strip() == code
+                subset = self.inventory_data.loc[mask]
+                if "見込み利益" in subset.columns:
+                    gross = pd.to_numeric(subset["見込み利益"], errors="coerce").fillna(0).sum()
+                count = len(subset)
+        self.gross_profit_edit.setText(str(int(gross)))
+        self.item_count_edit.setText(str(count))
+        if count > 0 and gross > 0:
+            self.rating_spin.setValue(min(5, max(0, int(gross / 2000) + 1)))
+    
+    def get_route_date_qdate(self) -> QDate:
+        """ユーザーが選択したルート日付を返す"""
+        return self.date_edit.date()
+    
+    def get_in_time_str(self) -> str:
+        t = self.in_time_edit.time()
+        return f"{t.hour():02d}:{t.minute():02d}"
+    
+    def get_out_time_str(self) -> str:
+        t = self.out_time_edit.time()
+        return f"{t.hour():02d}:{t.minute():02d}"
+    
+    def accept(self):
+        store_name = self.store_combo.currentText().strip()
+        if self.store_combo.currentIndex() <= 0 or not store_name or store_name == "-- 店舗を選択 --":
+            QMessageBox.warning(self, "入力エラー", "店舗名を選択してください。")
+            return
+        code = self.store_code_edit.text().strip()
+        if not code:
+            QMessageBox.warning(self, "入力エラー", "店舗コードが取得できません。")
+            return
+        super().accept()
+    
+    def get_spot_visit(self) -> Dict[str, Any]:
+        """ルート情報テーブルに挿入するためのスポット訪問データを返す"""
+        store_name = self.store_combo.currentText().strip()
+        store_code = self.store_code_edit.text().strip()
+        in_str = self.get_in_time_str()
+        out_str = self.get_out_time_str()
+        try:
+            stay_min = int(self.stay_minutes_edit.text() or 0)
+        except ValueError:
+            stay_min = 0
+        return {
+            "visit_order": 1,
+            "store_code": store_code,
+            "store_name": store_name,
+            "store_in_time": in_str,
+            "store_out_time": out_str,
+            "stay_duration": stay_min,
+        }
 
 
 class InventoryWidget(QWidget):
@@ -44,6 +336,7 @@ class InventoryWidget(QWidget):
     # シグナル定義
     data_loaded = Signal(int)  # データ読み込み完了
     sku_generated = Signal(int)  # SKU生成完了
+    spot_saved = Signal()  # スポット仕入をルートサマリーに保存した
     
     def __init__(self, api_client):
         super().__init__()
@@ -68,7 +361,9 @@ class InventoryWidget(QWidget):
         self.route_visit_db = RouteVisitDatabase()
         self.warranty_db = WarrantyDatabase()
         from database.condition_template_db import ConditionTemplateDatabase
+        from database.route_db import RouteDatabase
         self.condition_template_db = ConditionTemplateDatabase()
+        self.route_db = RouteDatabase()
         
         # UIの初期化
         self.route_template_btn = None
@@ -258,6 +553,12 @@ class InventoryWidget(QWidget):
             }
         """)
         action_ops_layout.addWidget(self.matching_btn)
+        
+        # スポット仕入（1店舗・スキマ時間用）
+        self.spot_purchase_btn = QPushButton("スポット")
+        self.spot_purchase_btn.setToolTip("スキマ時間の1店舗スポット仕入をルート情報として登録し、ルートサマリー一覧に残します")
+        self.spot_purchase_btn.clicked.connect(self.open_spot_purchase_dialog)
+        action_ops_layout.addWidget(self.spot_purchase_btn)
         
         file_layout.addLayout(action_ops_layout)
 
@@ -603,6 +904,8 @@ class InventoryWidget(QWidget):
         
         # 選択変更時の自動スクロール・ハイライト機能
         self.data_table.itemSelectionChanged.connect(self.on_data_selection_changed)
+        # 行のダブルクリックで編集ダイアログを開く
+        self.data_table.itemDoubleClicked.connect(self._on_data_row_double_clicked)
         
         # テーブルをグループに追加（stretch factorを1に設定してスクロール可能に）
         data_layout.addWidget(self.data_table, 1)
@@ -867,6 +1170,73 @@ class InventoryWidget(QWidget):
                     s.setValue("inventory/splitter_route_height", sizes[1])
             except Exception as e:
                 print(f"スプリッター状態保存エラー: {e}")
+
+    def open_spot_purchase_dialog(self):
+        """スポット仕入用のルート情報入力ダイアログを開き、SPOTルートを自動作成する"""
+        # 仕入データから日付の初期値を推定（うまく取れなければ今日）
+        default_date = QDate.currentDate()
+        try:
+            if self.inventory_data is not None and len(self.inventory_data) > 0 and "仕入れ日" in self.inventory_data.columns:
+                raw = self.inventory_data.iloc[0]["仕入れ日"]
+                dt = pd.to_datetime(raw, errors="coerce")
+                if dt is not pd.NaT:
+                    default_date = QDate(dt.year, dt.month, dt.day)
+        except Exception:
+            pass
+        dlg = SpotPurchaseDialog(self.store_db, self.inventory_data, default_date, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            visit = dlg.get_spot_visit()
+            store_code = visit.get("store_code", "")
+            store_name = visit.get("store_name", "")
+            in_time = visit.get("store_in_time", "")
+            out_time = visit.get("store_out_time", "")
+            stay_min = visit.get("stay_duration", 0)
+            if not self.route_summary_widget:
+                QMessageBox.warning(self, "ルート機能", "ルート登録タブが初期化されていません。")
+                return
+            # ルート日付はダイアログでユーザーが選んだ日付を使用
+            route_date_q = dlg.get_route_date_qdate()
+            self.route_summary_widget.route_date_edit.setDateTime(QDateTime(route_date_q, QTime.currentTime()))
+            route_code = f"SPOT-{store_code}" if store_code else "SPOT"
+            # ルートコードコンボは「名前」ベースだが、コードが未登録ならそのまま使う
+            self.route_summary_widget.route_code_combo.setCurrentText(route_code)
+            # 店舗訪問テーブルを1行にリセットしてスポット行を追加
+            table = self.route_summary_widget.store_visits_table
+            table.setRowCount(0)
+            row = 0
+            table.insertRow(row)
+            order_item = QTableWidgetItem("1")
+            order_item.setFlags(order_item.flags() & ~Qt.ItemIsEditable)
+            table.setItem(row, 0, order_item)
+            table.setItem(row, 1, QTableWidgetItem(store_code))
+            table.setItem(row, 2, QTableWidgetItem(store_name))
+            table.setItem(row, 3, QTableWidgetItem(in_time))
+            table.setItem(row, 4, QTableWidgetItem(out_time))
+            table.setItem(row, 5, QTableWidgetItem(str(stay_min)))
+            table.setItem(row, 6, QTableWidgetItem(""))
+            table.setItem(row, 7, QTableWidgetItem(""))
+            table.setItem(row, 8, QTableWidgetItem(""))
+            star_widget = StarRatingWidget(table, rating=0.0, star_size=14)
+            star_widget.rating_changed.connect(lambda rating, r=row: self.route_summary_widget.on_star_rating_changed(r, rating))
+            table.setCellWidget(row, 9, star_widget)
+            # メモ列は店舗マスタの備考を反映
+            memo_text = ""
+            if store_code:
+                store_info = self.store_db.get_store_by_code(store_code)
+                if store_info:
+                    custom_fields = store_info.get("custom_fields", {})
+                    memo_text = custom_fields.get("notes", "")
+            table.setItem(row, 10, QTableWidgetItem(memo_text))
+            # ルートを保存して route_summaries / store_visit_details に反映
+            self.route_summary_widget.save_data()
+            # 仕入管理側のルート情報表示を最新状態に更新
+            self.refresh_route_template_view()
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"スポット仕入ルート追加中にエラーが発生しました:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def apply_route_template(self):
         """ルートテンプレートの読み込みを実行"""
@@ -2780,6 +3150,81 @@ class InventoryWidget(QWidget):
                                     
         except Exception as e:
             print(f"選択変更処理エラー: {e}")
+    
+    def _get_row_data_for_edit(self, table_row_index: int) -> Dict[str, Any]:
+        """テーブルの指定行から編集用の行データを取得（商品名はUserRoleを優先）"""
+        row_data = {}
+        for j, column in enumerate(self.column_headers):
+            if j >= self.data_table.columnCount():
+                break
+            item = self.data_table.item(table_row_index, j)
+            value = item.text() if item else ""
+            if column == "商品名" and item is not None:
+                full = item.data(Qt.UserRole)
+                if full is not None and str(full).strip():
+                    value = str(full)
+            if column == "コンディション説明":
+                value = _normalize_condition_note_newlines(value)
+            row_data[column] = value
+        return row_data
+    
+    def _apply_edited_row_to_table(self, table_row_index: int, result: Dict[str, Any]):
+        """編集結果をテーブルの指定行に反映し、filtered_data / inventory_data も更新する"""
+        for j, column in enumerate(self.column_headers):
+            if j >= self.data_table.columnCount():
+                break
+            value = result.get(column, "")
+            if value is None:
+                value = ""
+            value = str(value)
+            item = self.data_table.item(table_row_index, j)
+            if not item:
+                item = QTableWidgetItem(value)
+                self.data_table.setItem(table_row_index, j, item)
+            else:
+                item.setText(value)
+            if column == "商品名":
+                item.setToolTip(value)
+                item.setData(Qt.UserRole, value)
+                item.setText(value[:50] + "..." if len(value) > 50 else value)
+            if column == "コンディション説明":
+                item.setToolTip(_normalize_condition_note_newlines(value))
+        # filtered_data / inventory_data をテーブルから再取得して同期
+        df = self.get_table_data()
+        if df is not None and len(df) > 0 and self.filtered_data is not None:
+            # 現在の filtered_data のインデックス構造を維持して更新
+            try:
+                idx = self.filtered_data.index[table_row_index]
+                for col in self.column_headers:
+                    if col in df.columns and col in self.filtered_data.columns:
+                        self.filtered_data.at[idx, col] = df.iloc[table_row_index][col]
+                if self.inventory_data is not None and idx in self.inventory_data.index:
+                    for col in self.column_headers:
+                        if col in df.columns and col in self.inventory_data.columns:
+                            self.inventory_data.at[idx, col] = df.iloc[table_row_index][col]
+            except Exception as e:
+                # フォールバック: テーブル全体で上書き
+                self.filtered_data = df.copy()
+                self.inventory_data = df.copy()
+    
+    def _on_data_row_double_clicked(self, item: QTableWidgetItem):
+        """仕入データ一覧の行をダブルクリックしたときに編集ダイアログを開く"""
+        if item is None:
+            return
+        row_index = item.row()
+        if row_index < 0 or (self.filtered_data is not None and row_index >= len(self.filtered_data)):
+            return
+        row_data = self._get_row_data_for_edit(row_index)
+        dlg = InventoryRowEditDialog(
+            self.column_headers,
+            row_data,
+            self.condition_template_db,
+            self._get_condition_key,
+            self
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            result = dlg.get_result()
+            self._apply_edited_row_to_table(row_index, result)
         
     def update_data_count(self):
         """データ件数の更新"""
@@ -3071,7 +3516,7 @@ class InventoryWidget(QWidget):
             
         try:
             # 仕入DBに同じ仕入時間・同じASINがある場合はそこからSKUを入力（重複登録防止）
-            self.match_purchase_records_from_product_db()
+            self._auto_match_sku_from_product_db()
             
             # データを辞書形式に変換（除外商品を除く）
             all_list = self.filtered_data.to_dict('records')
@@ -3540,10 +3985,11 @@ class InventoryWidget(QWidget):
         try:
             import re
             
-            # テンプレート説明文を取得
+            # テンプレート説明文を取得（DBでは改行を "\\n" で保存しているので実際の改行に変換）
             template_text = self.condition_template_db.get_condition_description_text(condition_key)
             if not template_text:
                 template_text = ""
+            template_text = _normalize_condition_note_newlines(template_text)
             
             # 欠品情報を抽出
             missing_info = self._extract_missing_info(comment)
@@ -3803,6 +4249,14 @@ class InventoryWidget(QWidget):
                         "出品CSV生成完了",
                         f"出品CSV生成が完了しました\n出力数: {result['exported_count']}件 (除外 {excluded_count}件)\n保存先: {str(target)}"
                     )
+
+                    # ルートタブ側の「出品」チェックをONにする（対応するルートサマリーが判定できた場合）
+                    try:
+                        base_folder = selected_folder if 'selected_folder' in locals() else str(target.parent)
+                        mark_route_flags_from_folder(base_folder, listing_completed=True)
+                    except Exception as e:
+                        # ルート判定に失敗しても致命的ではないのでログのみ
+                        print(f"出品フラグ更新エラー: {e}")
             else:
                 QMessageBox.warning(self, "出品CSV生成失敗", "出品CSV生成に失敗しました")
                 

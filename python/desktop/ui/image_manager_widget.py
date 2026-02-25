@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QPixmap, QFont, QDrag, QDropEvent, QImageReader, QImage, QDesktopServices, QCursor
 
 from desktop.utils.ui_utils import save_table_header_state, restore_table_header_state
+from desktop.utils.route_utils import mark_route_flags_from_folder
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -4028,6 +4029,15 @@ class ImageManagerWidget(QWidget):
                 f"  - 画像URL: U7列から（6枚目）\n\n"
                 f"👉 このファイルをAmazon Seller Centralにアップロードしてください。"
             )
+
+            # ルートタブ側の「画像」チェックをONにする（対応するルートサマリーが判定できた場合）
+            try:
+                from pathlib import Path as _Path
+                base_folder = _Path(file_path).parent
+                mark_route_flags_from_folder(base_folder, images_completed=True)
+            except Exception as e:
+                # ルート判定に失敗しても致命的ではないのでログのみ
+                logger.warning(f"画像フラグ更新エラー: {e}")
         
         except Exception as e:
             logger.error(f"Failed to write to Amazon template Excel: {e}", exc_info=True)

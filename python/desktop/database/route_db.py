@@ -97,6 +97,10 @@ class RouteDatabase:
                 cursor.execute(f"ALTER TABLE route_summaries ADD COLUMN {column} {coltype} DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
+        try:
+            cursor.execute("ALTER TABLE route_summaries ADD COLUMN route_display_name TEXT")
+        except sqlite3.OperationalError:
+            pass
         
         # store_visit_details テーブル作成
         cursor.execute("""
@@ -184,7 +188,7 @@ class RouteDatabase:
         
         cursor.execute("""
             INSERT INTO route_summaries (
-                route_date, route_code, departure_time, return_time,
+                route_date, route_code, route_display_name, departure_time, return_time,
                 toll_fee_outbound, toll_fee_return, parking_fee,
                 meal_cost, other_expenses, remarks,
                 total_purchase_amount, total_sales_amount,
@@ -192,10 +196,11 @@ class RouteDatabase:
                 total_gross_profit, total_item_count, purchase_success_rate, avg_purchase_price,
                 expected_margin, expected_roi,
                 listing_completed, evidence_completed, images_completed
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             route_data.get('route_date'),
             route_data.get('route_code'),
+            route_data.get('route_display_name'),
             route_data.get('departure_time'),
             route_data.get('return_time'),
             route_data.get('toll_fee_outbound'),
@@ -342,7 +347,7 @@ class RouteDatabase:
         
         # updated_atはUTC保存のため、表示用にローカルタイムへ変換して返す
         query = (
-            "SELECT id, route_date, route_code, departure_time, return_time, "
+            "SELECT id, route_date, route_code, route_display_name, departure_time, return_time, "
             "toll_fee_outbound, toll_fee_return, parking_fee, meal_cost, other_expenses, remarks, "
             "total_purchase_amount, total_sales_amount, "
             "total_working_hours, estimated_hourly_rate, total_gross_profit, total_item_count, "

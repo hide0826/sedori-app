@@ -37,7 +37,7 @@ import logging
 from database.product_db import ProductDatabase
 from database.warranty_db import WarrantyDatabase
 from database.product_purchase_db import ProductPurchaseDatabase
-from database.purchase_db import PurchaseDatabase  # 古物台帳情報の参照用
+from database.purchase_db import PurchaseDatabase
 from database.store_db import StoreDatabase
 
 class SortableDateItem(QTableWidgetItem):
@@ -319,7 +319,7 @@ class ProductWidget(QWidget):
         self.db = ProductDatabase()
         self.warranty_db = WarrantyDatabase()
         self.purchase_db = ProductPurchaseDatabase()  # スナップショット用
-        self.purchase_history_db = PurchaseDatabase() # 古物台帳情報の参照用
+        self.purchase_history_db = PurchaseDatabase()
         self.store_db = StoreDatabase()
         
         from database.receipt_db import ReceiptDatabase
@@ -382,8 +382,6 @@ class ProductWidget(QWidget):
             "画像1", "画像2", "画像3", "画像4", "画像5", "画像6",
             # 画像URL列
             "画像URL1", "画像URL2", "画像URL3", "画像URL4", "画像URL5", "画像URL6",
-            # 古物台帳関連列（新規追加）
-            "品目", "品名", "氏名(個人)", "本人確認書類", "確認番号", "確認日", "確認者", "台帳登録済"
         ]
         
         # コンディション説明の位置を探して、その後にカラムを挿入
@@ -1553,7 +1551,7 @@ class ProductWidget(QWidget):
         return self._augment_purchase_records(records)
 
     def _augment_purchase_records(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """保証・レシート情報・古物台帳情報を付与"""
+        """保証・レシート情報・仕入DBのステータス等を付与"""
         augmented: List[Dict[str, Any]] = []
         for record in records:
             row = dict(record)
@@ -1655,30 +1653,10 @@ class ProductWidget(QWidget):
                     if warranty_until and "保証最終日" not in row:
                         row["保証最終日"] = warranty_until
 
-                # --- 古物台帳情報の取得（新規追加） ---
+                # --- 仕入DBからステータス等を取得 ---
                 try:
                     purchase_info = self.purchase_history_db.get_by_sku(sku)
                     if purchase_info:
-                        ledger_map = {
-                            "kobutsu_kind": "品目",
-                            "hinmoku": "品目", 
-                            "hinmei": "品名",
-                            "person_name": "氏名(個人)",
-                            "id_type": "本人確認書類",
-                            "id_number": "確認番号",
-                            "id_checked_on": "確認日",
-                            "id_checked_by": "確認者",
-                            "ledger_registered": "台帳登録済"
-                        }
-                        for db_col, disp_col in ledger_map.items():
-                            val = purchase_info.get(db_col)
-                            if val is not None:
-                                if db_col == "ledger_registered":
-                                    row[disp_col] = "済" if val else ""
-                                else:
-                                    row[disp_col] = val
-                        
-                        # ステータス情報を取得
                         status = purchase_info.get("status", "ready")
                         status_reason = purchase_info.get("status_reason", "")
                         status_set_at = purchase_info.get("status_set_at", "")
@@ -1690,7 +1668,7 @@ class ProductWidget(QWidget):
                         if status_set_at:
                             row["status_set_at"] = status_set_at
                 except Exception as e:
-                    print(f"古物台帳情報取得エラー(SKU={sku}): {e}")
+                    print(f"仕入DB情報取得エラー(SKU={sku}): {e}")
 
             augmented.append(row)
         return augmented

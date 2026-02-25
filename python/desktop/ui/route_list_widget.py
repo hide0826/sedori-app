@@ -58,6 +58,21 @@ class RouteListWidget(QWidget):
         # 統計情報
         self.update_statistics()
     
+    def _safe_float(self, v):
+        """数値以外やbytesが混ざっていても0.0にフォールバックする安全なfloat変換"""
+        if v is None:
+            return 0.0
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            try:
+                # bytesの場合は一度decodeして再トライ
+                if isinstance(v, bytes):
+                    return float(v.decode("utf-8", errors="ignore") or 0)
+            except Exception:
+                pass
+            return 0.0
+    
     def setup_action_buttons(self, parent_layout):
         """操作ボタンの設定"""
         button_group = QGroupBox("操作")
@@ -88,6 +103,20 @@ class RouteListWidget(QWidget):
         
         # ソート機能を有効化
         self.table.setSortingEnabled(True)
+        # チェックボックスを白ベースで見やすくする（ダークテーマ向け）
+        self.table.setStyleSheet("""
+            QTableView::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1px solid #cccccc;
+                background-color: #ffffff;
+            }
+            QTableView::indicator:checked {
+                image: none;
+                background-color: #007bff;
+                border: 1px solid #007bff;
+            }
+        """)
         
         # ヘッダー設定
         header = self.table.horizontalHeader()
@@ -98,6 +127,8 @@ class RouteListWidget(QWidget):
         
         # ダブルクリックで詳細表示
         self.table.itemDoubleClicked.connect(self.on_item_double_clicked)
+        # チェックボックス変更時にフラグを更新
+        self.table.itemChanged.connect(self.on_item_changed)
         
         table_layout.addWidget(self.table)
         
@@ -123,13 +154,27 @@ class RouteListWidget(QWidget):
     
     def update_table(self, routes: list):
         """テーブルを更新"""
-        # ソート機能を一時的に無効化
+        # ソート機能とシグナルを一時的に無効化（大量更新時の不要なイベント発火を防止）
         self.table.setSortingEnabled(False)
+        self.table.blockSignals(True)
         
         columns = [
-            "日付", "ルート名", "出発時間", "帰宅時間",
-            "総仕入点数", "総仕入額", "総想定販売額",
-            "総想定粗利", "想定利益率", "想定ROI", "平均仕入価格", "総稼働時間 (h)", "想定時給"
+            "日付",
+            "ルート名",
+            "出品",   # 出品CSV作成完了
+            "証憑",   # レシート確定完了
+            "画像",   # 画像テンプレ書き込み完了
+            "出発時間",
+            "帰宅時間",
+            "総仕入点数",
+            "総仕入額",
+            "総想定販売額",
+            "総想定粗利",
+            "想定利益率",
+            "想定ROI",
+            "平均仕入価格",
+            "総稼働時間 (h)",
+            "想定時給",
         ]
         
         self.table.setRowCount(len(routes))
@@ -141,48 +186,56 @@ class RouteListWidget(QWidget):
             # 日付
             self.table.setItem(i, 0, QTableWidgetItem(route.get('route_date', '')))
             
-            # ルート名（ルートコードから変換）
+            # ルート名（スポットは route_display_name、通常はルートコードから変換）
             route_code = route.get('route_code', '')
-            route_name = self.store_db.get_route_name_by_code(route_code) or route_code
-            self.table.setItem(i, 1, QTableWidgetItem(route_name))
+            route_name = route.get('route_display_name') or self.store_db.get_route_name_by_code(route_code) or route_code
+            self.table.setItem(i, 1, QTableWidgetItem(route_name or ''))
+
+            # 出品 / 証憑 / 画像 チェックボックス
+            for col_index, key in ((2, 'listing_completed'), (3, 'evidence_completed'), (4, 'images_completed')):
+                flag_item = QTableWidgetItem()
+                flag_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                checked = bool(route.get(key) or 0)
+                flag_item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+                self.table.setItem(i, col_index, flag_item)
             
             # 出発時間・帰宅時間
             dep_time = self._format_time(route.get('departure_time'))
             ret_time = self._format_time(route.get('return_time'))
-            self.table.setItem(i, 2, QTableWidgetItem(dep_time))
-            self.table.setItem(i, 3, QTableWidgetItem(ret_time))
+            self.table.setItem(i, 5, QTableWidgetItem(dep_time))
+            self.table.setItem(i, 6, QTableWidgetItem(ret_time))
             
             # 総仕入点数
             total_item_count = route.get('total_item_count', 0) or 0
             item_count_item = QTableWidgetItem()
             item_count_item.setData(Qt.EditRole, total_item_count)
             item_count_item.setText(str(total_item_count))
-            self.table.setItem(i, 4, item_count_item)
+            self.table.setItem(i, 7, item_count_item)
 
             # 総仕入額
-            total_purchase_amount = route.get('total_purchase_amount', 0) or 0
+            total_purchase_amount = self._safe_float(route.get('total_purchase_amount', 0))
             purchase_item = QTableWidgetItem()
             purchase_item.setData(Qt.EditRole, total_purchase_amount)
             purchase_item.setText(self._format_currency(total_purchase_amount))
-            self.table.setItem(i, 5, purchase_item)
+            self.table.setItem(i, 8, purchase_item)
 
             # 総想定販売額
-            total_sales_amount = route.get('total_sales_amount', 0) or 0
+            total_sales_amount = self._safe_float(route.get('total_sales_amount', 0))
             sales_item = QTableWidgetItem()
             sales_item.setData(Qt.EditRole, total_sales_amount)
             sales_item.setText(self._format_currency(total_sales_amount))
-            self.table.setItem(i, 6, sales_item)
+            self.table.setItem(i, 9, sales_item)
             
             # 総想定粗利
-            total_gross_profit = route.get('total_gross_profit', 0) or 0
+            total_gross_profit = self._safe_float(route.get('total_gross_profit', 0))
             profit_item = QTableWidgetItem()
             profit_item.setData(Qt.EditRole, total_gross_profit)
             profit_item.setText(self._format_currency(total_gross_profit))
-            self.table.setItem(i, 7, profit_item)
+            self.table.setItem(i, 10, profit_item)
             
             # 想定利益率（常に再計算して更新）
             # 計算: (総想定粗利 / 総想定販売額) * 100
-            total_sales_amount = route.get('total_sales_amount', 0) or 0
+            total_sales_amount = self._safe_float(route.get('total_sales_amount', 0))
             if total_sales_amount > 0:
                 expected_margin = (total_gross_profit / total_sales_amount) * 100
             else:
@@ -191,11 +244,11 @@ class RouteListWidget(QWidget):
             margin_item = QTableWidgetItem()
             margin_item.setData(Qt.EditRole, expected_margin)
             margin_item.setText(f"{expected_margin:.2f}")
-            self.table.setItem(i, 8, margin_item)
+            self.table.setItem(i, 11, margin_item)
             
             # 想定ROI（常に再計算して更新）
             # 計算: (総想定粗利 / 総仕入額) * 100
-            total_purchase_amount = route.get('total_purchase_amount', 0) or 0
+            total_purchase_amount = self._safe_float(route.get('total_purchase_amount', 0))
             if total_purchase_amount > 0:
                 expected_roi = (total_gross_profit / total_purchase_amount) * 100
             else:
@@ -204,7 +257,7 @@ class RouteListWidget(QWidget):
             roi_item = QTableWidgetItem()
             roi_item.setData(Qt.EditRole, expected_roi)
             roi_item.setText(f"{expected_roi:.2f}")
-            self.table.setItem(i, 9, roi_item)
+            self.table.setItem(i, 12, roi_item)
             
             # 計算した値をデータベースに保存（既存データにも適用）
             route_id = route.get('id')
@@ -233,31 +286,32 @@ class RouteListWidget(QWidget):
                     print(f"利益率・ROIの保存エラー (route_id={route_id}): {e}")
             
             # 平均仕入価格
-            avg_price = route.get('avg_purchase_price', 0) or 0
+            avg_price = self._safe_float(route.get('avg_purchase_price', 0))
             avg_item = QTableWidgetItem()
             avg_item.setData(Qt.EditRole, avg_price)
             avg_item.setText(self._format_currency(avg_price))
-            self.table.setItem(i, 10, avg_item)
+            self.table.setItem(i, 13, avg_item)
             
             # 総稼働時間
             working_hours = route.get('total_working_hours', 0) or 0
             hours_item = QTableWidgetItem()
             hours_item.setData(Qt.EditRole, working_hours)
             hours_item.setText(self._format_hours(working_hours))
-            self.table.setItem(i, 11, hours_item)
+            self.table.setItem(i, 14, hours_item)
             
             # 想定時給
             hourly_rate = route.get('estimated_hourly_rate', 0) or 0
             rate_item = QTableWidgetItem()
             rate_item.setData(Qt.EditRole, hourly_rate)
             rate_item.setText(self._format_currency(hourly_rate))
-            self.table.setItem(i, 12, rate_item)
+            self.table.setItem(i, 15, rate_item)
             
-            # 各行にIDを保持（ダブルクリック時の参照用）
+            # 各行にIDを保持（ダブルクリック時やチェック変更時の参照用）
             self.table.item(i, 0).setData(Qt.UserRole, route.get('id'))
         
-        # ソート機能を再有効化
+        # ソート機能とシグナルを再有効化
         self.table.setSortingEnabled(True)
+        self.table.blockSignals(False)
         
         # 列幅の自動調整
         self.table.resizeColumnsToContents()
@@ -291,12 +345,12 @@ class RouteListWidget(QWidget):
         """統計情報を更新"""
         routes = self.route_db.list_route_summaries()
         total_routes = len(routes)
-        total_items = sum((route.get('total_item_count') or 0) for route in routes)
-        total_purchase = sum((route.get('total_purchase_amount') or 0) for route in routes)
-        total_sales = sum((route.get('total_sales_amount') or 0) for route in routes)
-        total_profit = sum((route.get('total_gross_profit') or 0) for route in routes)
+        total_items = sum(int(route.get('total_item_count') or 0) for route in routes)
+        total_purchase = sum(self._safe_float(route.get('total_purchase_amount')) for route in routes)
+        total_sales = sum(self._safe_float(route.get('total_sales_amount')) for route in routes)
+        total_profit = sum(self._safe_float(route.get('total_gross_profit')) for route in routes)
         avg_hourly = 0.0
-        hourly_values = [route.get('estimated_hourly_rate') for route in routes if route.get('estimated_hourly_rate')]
+        hourly_values = [self._safe_float(route.get('estimated_hourly_rate')) for route in routes if route.get('estimated_hourly_rate') is not None]
         if hourly_values:
             avg_hourly = sum(hourly_values) / len(hourly_values)
         self.stats_label.setText(
@@ -312,6 +366,32 @@ class RouteListWidget(QWidget):
         route_id = item.data(Qt.UserRole)
         if route_id:
             self.route_selected.emit(route_id)
+
+    def on_item_changed(self, item: QTableWidgetItem):
+        """チェックボックス変更時にDBのフラグを更新"""
+        if not item or item.column() not in (2, 3, 4):
+            return
+
+        # 行のIDを取得
+        id_item = self.table.item(item.row(), 0)
+        if not id_item:
+            return
+        route_id = id_item.data(Qt.UserRole)
+        if not route_id:
+            return
+
+        flag_map = {2: "listing_completed", 3: "evidence_completed", 4: "images_completed"}
+        flag_name = flag_map.get(item.column())
+        if not flag_name:
+            return
+
+        try:
+            from database.route_db import RouteDatabase
+            db = RouteDatabase()
+            db.set_route_flag(route_id, flag_name, item.checkState() == Qt.Checked)
+        except Exception as e:
+            # エラーが出てもUIはそのままにしておき、コンソールにだけ出力
+            print(f"ルートフラグ更新エラー (route_id={route_id}, flag={flag_name}): {e}")
 
     # ==================== ヘルパーメソッド ====================
 

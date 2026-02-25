@@ -301,13 +301,14 @@ class ConditionTemplateWidget(QWidget):
             # データベースのデータを辞書に変換
             db_data = {cond['condition_key']: cond for cond in conditions}
             
-            # 各コンディションの説明文を設定
+            # 各コンディションの説明文を設定（DBでは改行を "\\n" で保存しているので表示用に実際の改行に変換）
             for condition in CONDITIONS:
                 key = condition['key']
                 text_edit = self.text_edits.get(key)
                 if text_edit:
                     if key in db_data:
                         description = db_data[key].get('description', '') or ''
+                        description = (description or "").replace("\\n", "\n")
                         text_edit.setText(description)
                     else:
                         text_edit.setText('')
@@ -319,7 +320,7 @@ class ConditionTemplateWidget(QWidget):
             )
     
     def save_data(self):
-        """データをデータベースに保存"""
+        """データをデータベースに保存（改行は "\\n" で保存し、1行表示で行区切りに\\nが入る形にする）"""
         try:
             for condition in CONDITIONS:
                 key = condition['key']
@@ -327,7 +328,7 @@ class ConditionTemplateWidget(QWidget):
                 text_edit = self.text_edits.get(key)
                 
                 if text_edit:
-                    description = text_edit.text()
+                    description = text_edit.text().replace("\r\n", "\n").replace("\n", "\\n").replace("\r", "\\n")
                     self.condition_db.save_condition_description(key, name, description)
             
             QMessageBox.information(

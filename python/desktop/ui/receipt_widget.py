@@ -35,6 +35,7 @@ from PySide6.QtCore import Qt, QDate, QThread, Signal, QSettings, QTimer, QUrl, 
 from PySide6.QtGui import QPixmap, QTransform, QColor, QDesktopServices, QClipboard
 
 from desktop.utils.ui_utils import save_table_header_state, restore_table_header_state
+from desktop.utils.route_utils import mark_route_flags_from_folder
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -9019,6 +9020,20 @@ class ReceiptWidget(QWidget):
                     self, "確定完了（一部エラー）",
                     message
                 )
+
+            # ルートタブ側の「証憑」チェックをONにする（対応するルートサマリーが判定できた場合）
+            try:
+                base_folder: Optional[Path] | None = None
+                if getattr(self, "current_folder", None):
+                    base_folder = self.current_folder
+                elif getattr(self, "default_folder", None):
+                    base_folder = self.default_folder
+
+                if base_folder:
+                    mark_route_flags_from_folder(base_folder, evidence_completed=True)
+            except Exception as e:
+                # ルート判定に失敗しても致命的ではないのでログのみ
+                print(f"証憑フラグ更新エラー: {e}")
         except Exception as e:
             import traceback
             QMessageBox.critical(

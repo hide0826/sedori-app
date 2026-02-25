@@ -125,21 +125,11 @@ class RouteSummaryWidget(QWidget):
         
         button_layout.addStretch()
         
-        # テンプレート生成フォルダ指定（右側に配置）
-        template_save_dir_label = QLabel("テンプレート保存フォルダ:")
-        template_save_dir_label.setStyleSheet("color: #cccccc;")
-        button_layout.addWidget(template_save_dir_label)
-        
-        self.template_save_dir_edit = QLineEdit()
-        self.template_save_dir_edit.setPlaceholderText("未設定")
-        self.template_save_dir_edit.setFixedWidth(260)
-        self.template_save_dir_edit.setText(self.template_save_default_dir)
-        self.template_save_dir_edit.editingFinished.connect(self.on_template_save_dir_edit_finished)
-        button_layout.addWidget(self.template_save_dir_edit)
-        
-        browse_save_dir_btn = QPushButton("参照…")
-        browse_save_dir_btn.clicked.connect(self.browse_template_save_dir)
-        button_layout.addWidget(browse_save_dir_btn)
+        # テンプレート保存用のデフォルトフォルダ設定ボタン（画像管理タブと同じイメージ）
+        self.template_root_btn = QPushButton("デフォルト設定")
+        self.template_root_btn.setToolTip("ルートテンプレートを保存する起点フォルダを設定します。")
+        self.template_root_btn.clicked.connect(self.set_template_root_directory)
+        button_layout.addWidget(self.template_root_btn)
         
         parent_layout.addWidget(button_group)
     
@@ -1418,31 +1408,57 @@ class RouteSummaryWidget(QWidget):
         return value_str
     
     def generate_template(self):
-        """テンプレート生成"""
+        """テンプレート生成
+
+        デフォルトフォルダ直下に
+            YYYYMMDDルート名
+        というフォルダを自動作成し、
+        その中にテンプレートファイルと
+        「商品画像」「レシート画像」フォルダを作成する。
+        """
         try:
-            route_name = self.route_code_combo.currentText().strip()
+            from pathlib import Path
+
             route_code = self.get_selected_route_code()
-            
-            # デフォルトフォルダを取得
-            default_dir = self.template_save_default_dir if self.template_save_default_dir and os.path.isdir(self.template_save_default_dir) else ""
-            default_filename = f"route_template_{route_name or 'new'}_{datetime.now().strftime('%Y%m%d')}.xlsx"
-            default_path = os.path.join(default_dir, default_filename) if default_dir else default_filename
-            
-            file_path, _ = QFileDialog.getSaveFileName(
-                self,
-                "テンプレートファイルを保存",
-                default_path,
-                "Excelファイル (*.xlsx);;CSVファイル (*.csv)"
-            )
-            
-            # 保存先フォルダを設定に保存
-            if file_path:
-                save_dir = os.path.dirname(file_path)
-                if save_dir and os.path.isdir(save_dir):
-                    self.update_template_save_default_dir(save_dir)
-            
-            if not file_path:
+            if not route_code:
+                QMessageBox.warning(self, "エラー", "ルートコードを選択してください。")
                 return None
+
+            # ルート名（日本語名）を取得（なければコードをそのまま使用）
+            route_name = self.store_db.get_route_name_by_code(route_code) or route_code
+
+            # ルート日付（YYYYMMDD）を取得
+            route_qdate = self.route_date_edit.date()
+            route_date_str = route_qdate.toString("yyyyMMdd")
+
+            # デフォルトフォルダが未設定の場合は、ユーザーに選択してもらう
+            base_dir = self.template_save_default_dir if self.template_save_default_dir and os.path.isdir(self.template_save_default_dir) else ""
+            if not base_dir:
+                base_dir = QFileDialog.getExistingDirectory(
+                    self,
+                    "テンプレート保存用のデフォルトフォルダを選択",
+                    str(Path.home()),
+                )
+                if not base_dir:
+                    return None
+                self.update_template_save_default_dir(base_dir)
+
+            base_path = Path(base_dir)
+
+            # フォルダ名: YYYYMMDDルート名（ファイル名に使えない文字は簡易的に置換）
+            unsafe_chars = '\\/:*?"<>|'
+            safe_route_name = "".join("_" if ch in unsafe_chars else ch for ch in route_name.strip())
+            folder_name = f"{route_date_str}{safe_route_name}"
+            route_folder = base_path / folder_name
+
+            # ルートフォルダとサブフォルダを作成
+            route_folder.mkdir(parents=True, exist_ok=True)
+            (route_folder / "商品画像").mkdir(exist_ok=True)
+            (route_folder / "レシート画像").mkdir(exist_ok=True)
+
+            # テンプレートファイルパス（Excel固定）
+            default_filename = f"route_template_{safe_route_name}_{route_date_str}.xlsx"
+            file_path = str(route_folder / default_filename)
             
             # 選択されたルートの店舗一覧を取得
             stores = []
@@ -1494,17 +1510,20 @@ class RouteSummaryWidget(QWidget):
                 print(traceback.format_exc())
                 route_date = None
             
-            if file_path.endswith('.xlsx'):
-                # ルート名（日本語名）とルート日付を渡してテンプレートに表示
-                print(f"Excelテンプレート生成開始: ファイル={file_path}, ルート名={route_name}, 店舗数={len(stores) if stores else len(store_codes) if store_codes else 0}, ルート日付={route_date}")
-                success = TemplateGenerator.generate_excel_template(file_path, route_name, store_codes, stores, route_date)
-            else:
-                # CSVテンプレートにもルート日付を渡す
-                print(f"CSVテンプレート生成開始: ファイル={file_path}, ルートコード={route_code}, 店舗数={len(store_codes) if store_codes else 0}, ルート日付={route_date}")
-                success = TemplateGenerator.generate_csv_template(file_path, route_code, store_codes, route_date)
+            # Excelテンプレート生成（ルート名とルート日付を渡す）
+            print(f"Excelテンプレート生成開始: ファイル={file_path}, ルート名={route_name}, 店舗数={len(stores) if stores else len(store_codes) if store_codes else 0}, ルート日付={route_date}")
+            success = TemplateGenerator.generate_excel_template(file_path, route_name, store_codes, stores, route_date)
             
             if success:
-                QMessageBox.information(self, "成功", f"テンプレートを生成しました:\n{file_path}")
+                QMessageBox.information(
+                    self,
+                    "成功",
+                    f"テンプレートを生成しました:\n{file_path}\n\n"
+                    f"以下のフォルダも自動作成しました:\n"
+                    f"  - {route_folder}\n"
+                    f"  - {route_folder / '商品画像'}\n"
+                    f"  - {route_folder / 'レシート画像'}",
+                )
             else:
                 QMessageBox.warning(self, "エラー", "テンプレートの生成に失敗しました。\n詳細はコンソールを確認してください。")
                 
@@ -1514,16 +1533,23 @@ class RouteSummaryWidget(QWidget):
             print(f"テンプレート生成エラー詳細:\n{error_detail}")
             QMessageBox.critical(self, "エラー", f"テンプレート生成中にエラーが発生しました:\n{str(e)}\n\n詳細はコンソールを確認してください。")
     
-    def browse_template_save_dir(self):
-        """テンプレート保存フォルダの選択"""
+    def set_template_root_directory(self):
+        """テンプレート保存用のデフォルト（起点）フォルダを設定"""
         current_dir = self.template_save_default_dir if self.template_save_default_dir and os.path.isdir(self.template_save_default_dir) else str(Path.home())
         selected_dir = QFileDialog.getExistingDirectory(
             self,
-            "テンプレート保存フォルダを選択",
-            current_dir
+            "テンプレート保存用のデフォルトフォルダを選択",
+            current_dir,
         )
-        if selected_dir:
-            self.update_template_save_default_dir(selected_dir)
+        if not selected_dir:
+            return
+
+        self.update_template_save_default_dir(selected_dir)
+        QMessageBox.information(
+            self,
+            "デフォルトフォルダ設定",
+            f"ルートテンプレートを保存する起点フォルダを次の場所に設定しました:\n{selected_dir}",
+        )
     
     def on_template_save_dir_edit_finished(self):
         """手入力でテンプレート保存フォルダを更新"""

@@ -15,7 +15,8 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QComboBox,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QGroupBox, QMessageBox, QDateEdit, QSpinBox, QCheckBox,
-    QFileDialog, QProgressBar, QTextEdit, QTabWidget
+    QFileDialog, QProgressBar, QTextEdit, QTabWidget,
+    QApplication,
 )
 from PySide6.QtCore import Qt, QDate, QThread, Signal, QSettings
 from PySide6.QtGui import QFont, QColor
@@ -71,6 +72,8 @@ class AntiqueWidget(QWidget):
         # 仕入管理ウィジェット（取込元）への参照
         self.inventory_widget = inventory_widget
         self.antique_data = None
+        # 閲覧・出力のDB読み込みはタブ表示時まで遅延する（起動短縮）
+        self._ledger_loaded = False
         # 13品目（区分）リスト（UI/辞書/編集ですべて共通利用）
         # 番号を削除した表示名を使用
         self.CATEGORY_CHOICES = [
@@ -135,6 +138,30 @@ class AntiqueWidget(QWidget):
         self._setup_tab_input()
         self._setup_tab_view()
         self._setup_tab_dict()
+
+    def showEvent(self, event):
+        """タブが表示されたときに初回だけDBから台帳を読み込む（遅延読み込み）"""
+        super().showEvent(event)
+        self._ensure_ledger_loaded()
+
+    def _ensure_ledger_loaded(self):
+        """未読み込みなら閲覧・出力用データをDBから読み込む。他タブから呼ばれた後の表示でも正しく反映される。"""
+        if getattr(self, "_ledger_loaded", False):
+            return
+        if not hasattr(self, "stats_label"):
+            return
+        self.stats_label.setText("読み込み中...")
+        QApplication.processEvents()
+        success = self.reload_ledger_rows()
+        if success:
+            self.update_stats()
+            # データがあれば出力・クリアボタンを有効化（古物台帳生成時と同様）
+            if self.antique_data:
+                self.export_csv_btn.setEnabled(True)
+                self.export_excel_btn.setEnabled(True)
+                self.clear_btn.setEnabled(True)
+        else:
+            self.stats_label.setText("読み込みに失敗しました。『更新』で再試行できます。")
         
     # ===== 入力・生成タブ =====
     def _setup_tab_input(self):
@@ -1179,31 +1206,6 @@ class AntiqueWidget(QWidget):
             db = LedgerDatabase()
             n = db.insert_ledger_rows(to_insert)
             
-            # 2. 仕入DB (purchases) の古物台帳情報も更新（統合対応）
-            try:
-                from desktop.database.purchase_db import PurchaseDatabase
-                pdb = PurchaseDatabase()
-                updated_purchases = 0
-                for row in to_insert:
-                    sku = row.get('sku')
-                    if sku:
-                        # 古物台帳情報を抽出
-                        ledger_info = {
-                            'kobutsu_kind': row.get('kobutsu_kind'),
-                            'hinmoku': row.get('hinmoku'),
-                            'hinmei': row.get('hinmei'),
-                            'person_name': row.get('person_name'),
-                            'id_type': row.get('id_type'),
-                            'id_number': row.get('id_number'),
-                            'id_checked_on': row.get('id_checked_on'),
-                            'id_checked_by': row.get('id_checked_by'),
-                        }
-                        if pdb.update_ledger_info(sku, ledger_info):
-                            updated_purchases += 1
-                # print(f"仕入DB同期: {updated_purchases}件")
-            except Exception as e:
-                print(f"仕入DB同期エラー: {e}")
-            
             self._imported_store_rows = []
             self._refresh_store_list_table()
             # 閲覧・出力タブを即時更新
@@ -1241,9 +1243,8 @@ class AntiqueWidget(QWidget):
         tool_row.addStretch()
         layout.addLayout(tool_row)
 
-        # データ初期ロード
+        # データはタブ表示時（showEvent）に初回読み込み。起動時はDBに触らない
         self.antique_data = []
-        self.reload_ledger_rows()
         
     def setup_date_range_selection(self, parent_layout=None):
         """日付範囲選択エリアの設定"""
@@ -1642,7 +1643,8 @@ class AntiqueWidget(QWidget):
         self.apply_column_visibility()
 
     # === データ取得/フィルタ ===
-    def reload_ledger_rows(self):
+    def reload_ledger_rows(self) -> bool:
+        """台帳をDBから再読み込みする。成功で True、失敗で False。成功時のみ _ledger_loaded を立てる。"""
         try:
             from desktop.database.ledger_db import LedgerDatabase
             db = LedgerDatabase()
@@ -1660,8 +1662,11 @@ class AntiqueWidget(QWidget):
             rows = db.query_ledger(" AND ".join(where), tuple(params))
             self.antique_data = rows
             self.apply_filters()
+            self._ledger_loaded = True
+            return True
         except Exception as e:
             print(f"台帳ロード失敗: {e}")
+            return False
 
     def get_filtered_rows(self):
         rows = self.antique_data or []
