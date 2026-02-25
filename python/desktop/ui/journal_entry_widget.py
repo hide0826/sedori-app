@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate
 )
 from PySide6.QtGui import QDesktopServices
+import logging
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -153,15 +154,34 @@ class JournalEntryWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.journal_db = JournalDatabase()
+        # 初回データ読み込みフラグ（遅延ロード用）
+        self._initial_data_loaded: bool = False
         self.setup_ui()
-        self.load_entries()
-        
-        # テーブルの列幅を復元
+        # テーブルの列幅を復元（ヘッダー構造だけ先に反映）
         restore_table_header_state(self.table, "JournalEntryWidget/TableHeaderState")
     
     def save_settings(self):
         """ウィジェットの設定（テーブルの列幅など）を保存します。"""
         save_table_header_state(self.table, "JournalEntryWidget/TableHeaderState")
+
+    def ensure_initial_data_loaded(self) -> None:
+        """
+        仕訳帳エントリの初回読み込みを遅延実行する。
+        """
+        if self._initial_data_loaded:
+            return
+        self.load_entries()
+        self._initial_data_loaded = True
+
+    def showEvent(self, event):
+        """
+        ウィジェットがタブとして表示されたタイミングで初回ロードを行う。
+        """
+        super().showEvent(event)
+        try:
+            self.ensure_initial_data_loaded()
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"JournalEntryWidget initial load error: {e}")
     
     def setup_ui(self):
         """UIの設定"""

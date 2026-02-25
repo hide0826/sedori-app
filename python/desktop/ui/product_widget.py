@@ -316,6 +316,7 @@ class ProductWidget(QWidget):
 
     def __init__(self, parent=None, inventory_widget=None):
         super().__init__(parent)
+        # DBハンドルの初期化（軽量処理）
         self.db = ProductDatabase()
         self.warranty_db = WarrantyDatabase()
         self.purchase_db = ProductPurchaseDatabase()  # スナップショット用
@@ -331,15 +332,13 @@ class ProductWidget(QWidget):
         self.sales_records: List[Dict[str, Any]] = []
         # 仕入DB行の一意IDカウンタ（ソートしても行を特定できるようにする）
         self._purchase_row_id_counter: int = 1
-        self.setup_ui()
-        self.load_products()
-        self.restore_latest_purchase_snapshot()
-        self.load_purchase_data(self.purchase_records)
-        self.load_sales_data()
+        # 重いデータ読み込みが完了しているかどうか
+        self._initial_data_loaded: bool = False
 
-        # テーブルの列幅を復元
+        self.setup_ui()
+        # テーブルの列幅を復元（データ件数に依存しない軽量処理）
         restore_table_header_state(self.table, "ProductWidget/ProductTableState")
-        # purchase_tableは列幅のみを復元（リサイズモードは常にInteractive）
+        # sales_tableもヘッダー状態のみ復元（列幅など）
         restore_table_header_state(self.sales_table, "ProductWidget/SalesTableState")
 
     def save_settings(self):
@@ -347,6 +346,35 @@ class ProductWidget(QWidget):
         save_table_header_state(self.table, "ProductWidget/ProductTableState")
         save_table_column_widths(self.purchase_table, "ProductWidget/PurchaseTableColumnWidths")
         save_table_header_state(self.sales_table, "ProductWidget/SalesTableState")
+
+    def ensure_initial_data_loaded(self) -> None:
+        """
+        商品一覧・仕入/販売DBの初回読み込みを遅延実行する。
+        - 起動直後には実行せず、タブが初めて表示されたタイミングなどで呼び出す。
+        """
+        if self._initial_data_loaded:
+            return
+
+        # 商品一覧テーブル
+        self.load_products()
+        # 仕入スナップショットから最新状態を復元
+        self.restore_latest_purchase_snapshot()
+        # 仕入・販売テーブルに反映
+        self.load_purchase_data(self.purchase_records)
+        self.load_sales_data()
+
+        self._initial_data_loaded = True
+
+    def showEvent(self, event):
+        """
+        タブとして初めて表示されたタイミングで重いデータ読み込みを行う。
+        """
+        super().showEvent(event)
+        try:
+            self.ensure_initial_data_loaded()
+        except Exception as e:
+            # 初期読み込みで例外が出てもアプリ全体が落ちないようにしておく
+            logging.getLogger(__name__).warning(f"ProductWidget initial load error: {e}")
 
     def _resolve_inventory_columns(self) -> List[str]:
         """仕入管理タブの列構成を取得（未設定時はデフォルト）"""

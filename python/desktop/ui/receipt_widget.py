@@ -441,6 +441,8 @@ class ReceiptWidget(QWidget):
         self.current_receipt_id = None
         self.current_receipt_data = None
         self.notifications_enabled = True
+        # レシート一覧の初回ロードが完了しているかどうか
+        self._initial_data_loaded: bool = False
         
         self.setup_ui()
         
@@ -477,7 +479,57 @@ class ReceiptWidget(QWidget):
     def set_evidence_widget(self, evidence_widget):
         """EvidenceManagerWidgetへの参照を設定"""
         self.evidence_widget = evidence_widget
-    
+
+    def _get_current_receipts_from_tables(self) -> List[Dict[str, Any]]:
+        """
+        現在のレシート一覧・保証書一覧に表示されている行に対応する
+        ReceiptDatabaseレコードを取得するヘルパー。
+        過去全件ではなく「今この画面で扱っている対象」に限定するために使用する。
+        """
+        receipt_ids: set[int] = set()
+
+        # レシート一覧テーブルからIDを収集
+        table = getattr(self, "receipt_table", None)
+        if table is not None:
+            for row in range(table.rowCount()):
+                item = table.item(row, 0)  # ID(内部)列
+                if not item:
+                    continue
+                text = (item.text() or "").strip()
+                if not text:
+                    continue
+                try:
+                    rid = int(text)
+                except ValueError:
+                    continue
+                receipt_ids.add(rid)
+
+        # 保証書一覧テーブルからもIDを収集（同じreceiptsテーブルを参照）
+        warranty_table = getattr(self, "warranty_table", None)
+        if warranty_table is not None:
+            for row in range(warranty_table.rowCount()):
+                item = warranty_table.item(row, 0)  # ID(内部)列
+                if not item:
+                    continue
+                text = (item.text() or "").strip()
+                if not text:
+                    continue
+                try:
+                    rid = int(text)
+                except ValueError:
+                    continue
+                receipt_ids.add(rid)
+
+        receipts: List[Dict[str, Any]] = []
+        for rid in receipt_ids:
+            try:
+                rec = self.receipt_db.get_receipt(rid)
+            except Exception:
+                rec = None
+            if rec:
+                receipts.append(rec)
+        return receipts
+
     # ==================== レシート一覧スナップショット（検証用） ====================
 
     def save_receipt_snapshot(self):
@@ -486,15 +538,15 @@ class ReceiptWidget(QWidget):
             QMessageBox.warning(self, "スナップ保存", "スナップショット保存先ディレクトリを初期化できませんでした。")
             return
 
-        # DBから現在のレシートデータを取得
+        # 現在のレシート一覧・保証書一覧に対応するレシートのみ取得
         try:
-            receipts = self.receipt_db.find_by_date_and_store(None)
+            receipts = self._get_current_receipts_from_tables()
         except Exception as e:
             QMessageBox.critical(self, "スナップ保存エラー", f"レシート一覧の取得に失敗しました:\n{e}")
             return
 
         if not receipts:
-            QMessageBox.information(self, "スナップ保存", "保存するレシートデータがありません。")
+            QMessageBox.information(self, "スナップ保存", "保存するレシートデータがありません（現在の一覧が空です）。")
             return
 
         try:
@@ -917,8 +969,8 @@ class ReceiptWidget(QWidget):
         self.verification_info_text.setPlaceholderText("照合チェックボタンをクリックすると、レシートと仕入DBの照合結果が表示されます。")
         info_layout.addWidget(self.verification_info_text)
         self.layout.addWidget(info_group)
-
-        self.refresh_receipt_list()
+        # 起動直後はレシート一覧を読み込まず、
+        # タブが実際に表示されたタイミングで初回ロードを行う
     
     def setup_receipt_splitter(self):
         """スプリッターでレシート一覧と保証書一覧の高さを調整可能にする"""
@@ -972,6 +1024,26 @@ class ReceiptWidget(QWidget):
         restore_timer.setSingleShot(True)
         restore_timer.timeout.connect(self.restore_receipt_splitter_state)
         restore_timer.start(100)  # 100ms後に復元
+
+    def ensure_initial_data_loaded(self) -> None:
+        """
+        レシート一覧・保証書一覧の初回読み込みを遅延実行する。
+        起動時ではなく、タブが実際に表示されたタイミングで呼び出す。
+        """
+        if self._initial_data_loaded:
+            return
+        self.refresh_receipt_list()
+        self._initial_data_loaded = True
+
+    def showEvent(self, event):
+        """
+        ウィジェットがタブとして表示されたタイミングで初回ロードを行う。
+        """
+        super().showEvent(event)
+        try:
+            self.ensure_initial_data_loaded()
+        except Exception as e:
+            logger.warning(f"ReceiptWidget initial load error: {e}")
     
     def save_receipt_splitter_state(self):
         """スプリッターの状態を保存（デバウンス処理付き）"""
@@ -2950,8 +3022,8 @@ class ReceiptWidget(QWidget):
         """レシート一覧の全件をGCSにアップロード"""
         from PySide6.QtWidgets import QProgressDialog
         
-        # 全レシートを取得
-        receipts = self.receipt_db.find_by_date_and_store(None)
+        # 現在のレシート一覧・保証書一覧に対応するレシートのみ取得
+        receipts = self._get_current_receipts_from_tables()
         if not receipts:
             QMessageBox.information(self, "GCSアップロード", "アップロードするレシートがありません。")
             return
@@ -3097,8 +3169,9 @@ class ReceiptWidget(QWidget):
         if not purchase_records:
             QMessageBox.warning(self, "警告", "仕入DBにデータがありません。")
             return
-        receipts = self.receipt_db.find_by_date_and_store(None)
-        print(f"[一括マッチング] 取得したレシート数: {len(receipts)}")
+        # 現在のレシート一覧・保証書一覧に対応するレシートのみ取得
+        receipts = self._get_current_receipts_from_tables()
+        print(f"[一括マッチング] 取得したレシート数（現在の一覧）: {len(receipts)}")
         updated = 0
         skipped_no_candidates = 0
         skipped_no_updates = 0
@@ -3737,8 +3810,8 @@ class ReceiptWidget(QWidget):
         from pathlib import Path
         import re
         
-        # 全レシートを取得
-        receipts = self.receipt_db.find_by_date_and_store(None)
+        # 現在のレシート一覧・保証書一覧に対応するレシートのみ取得
+        receipts = self._get_current_receipts_from_tables()
         if not receipts:
             QMessageBox.information(self, "リネーム済みファイル検出", "対象のレシートがありません。")
             return
@@ -3875,9 +3948,10 @@ class ReceiptWidget(QWidget):
             QMessageBox.warning(self, "警告", "仕入DBにデータがありません。")
             return
         
-        receipts = self.receipt_db.find_by_date_and_store(None)
+        # 現在のレシート一覧・保証書一覧に対応するレシートのみ取得
+        receipts = self._get_current_receipts_from_tables()
         if not receipts:
-            self.verification_info_text.setText("レシートが登録されていません。")
+            self.verification_info_text.setText("レシートが登録されていません（現在の一覧が空です）。")
             return
         
         from datetime import datetime
@@ -8362,9 +8436,9 @@ class ReceiptWidget(QWidget):
         error_messages = []
         
         try:
-            # レシート一覧の全レコードを取得
-            all_receipts = self.receipt_db.find_by_date_and_store(None, None)
-            print(f"[DEBUG] レシート件数: {len(all_receipts)}")
+            # 現在のレシート一覧・保証書一覧に表示されているレコードのみ取得
+            all_receipts = self._get_current_receipts_from_tables()
+            print(f"[DEBUG] レシート件数（現在の一覧）: {len(all_receipts)}")
             
             # 保証書テーブルの行数を取得
             warranty_row_count = 0

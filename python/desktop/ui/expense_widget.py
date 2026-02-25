@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QComboBox, QSpinBox, QTextEdit, QDateEdit
 )
 from PySide6.QtGui import QPixmap
+import logging
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -51,15 +52,36 @@ class ExpenseWidget(QWidget):
             "その他"
         ]
         
-        self.setup_ui()
-        self.refresh_table()
+        # 初回データ読み込みフラグ（遅延ロード用）
+        self._initial_data_loaded: bool = False
 
-        # テーブルの列幅を復元
+        self.setup_ui()
+        # テーブルの列幅を復元（データ件数に依存しない軽量処理のみ）
         restore_table_header_state(self.table, "ExpenseWidget/TableState")
 
     def save_settings(self):
         """ウィジェットの設定（テーブルの列幅など）を保存します。"""
         save_table_header_state(self.table, "ExpenseWidget/TableState")
+
+    def ensure_initial_data_loaded(self) -> None:
+        """
+        経費データの初回読み込みを遅延実行する。
+        起動直後ではなく、タブが実際に表示されたタイミングで呼び出す。
+        """
+        if self._initial_data_loaded:
+            return
+        self.refresh_table()
+        self._initial_data_loaded = True
+
+    def showEvent(self, event):
+        """
+        ウィジェットがタブとして表示されたタイミングで初回ロードを行う。
+        """
+        super().showEvent(event)
+        try:
+            self.ensure_initial_data_loaded()
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"ExpenseWidget initial load error: {e}")
 
     def setup_ui(self):
         """UIの設定"""

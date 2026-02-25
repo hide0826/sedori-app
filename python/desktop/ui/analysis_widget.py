@@ -22,6 +22,7 @@ import sys
 import os
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
+import logging
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -55,9 +56,9 @@ class AnalysisWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.route_db = RouteDatabase()
-        
+        self._initial_data_loaded = False
         self.setup_ui()
-        self.load_data()
+        # 起動直後には重い集計処理を走らせず、タブが実際に表示されたときに読み込む
     
     def setup_ui(self):
         """UIの設定"""
@@ -204,6 +205,25 @@ class AnalysisWidget(QWidget):
         ax.set_title('店舗評価推移')
         
         return canvas
+
+    def ensure_initial_data_loaded(self) -> None:
+        """
+        分析用データの初回読み込みを遅延実行する。
+        """
+        if self._initial_data_loaded:
+            return
+        self.load_data()
+        self._initial_data_loaded = True
+
+    def showEvent(self, event):
+        """
+        ウィジェットがタブとして表示されたタイミングで初回ロードを行う。
+        """
+        super().showEvent(event)
+        try:
+            self.ensure_initial_data_loaded()
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"AnalysisWidget initial load error: {e}")
     
     def load_data(self):
         """データを読み込んで表示を更新"""

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
     QFileDialog, QDateEdit,
 )
+import logging
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -37,16 +38,34 @@ class ExpenseLedgerWidget(QWidget):
         self.api_client = api_client
         self.expense_db = ExpenseDatabase()
         self.receipt_db = ReceiptDatabase()
+        self._initial_data_loaded: bool = False
 
         self.setup_ui()
-        self.refresh_table()
-
-        # テーブルの列幅を復元
+        # テーブルの列幅を復元（データ件数に依存しない軽量処理）
         restore_table_header_state(self.table, "ExpenseLedgerWidget/TableState")
 
     def save_settings(self):
         """ウィジェットの設定（テーブルの列幅など）を保存します。"""
         save_table_header_state(self.table, "ExpenseLedgerWidget/TableState")
+
+    def ensure_initial_data_loaded(self) -> None:
+        """
+        経費台帳データの初回読み込みを遅延実行する。
+        """
+        if self._initial_data_loaded:
+            return
+        self.refresh_table()
+        self._initial_data_loaded = True
+
+    def showEvent(self, event):
+        """
+        ウィジェットがタブとして表示されたタイミングで初回ロードを行う。
+        """
+        super().showEvent(event)
+        try:
+            self.ensure_initial_data_loaded()
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"ExpenseLedgerWidget initial load error: {e}")
 
     def setup_ui(self) -> None:
         """UIの設定"""
