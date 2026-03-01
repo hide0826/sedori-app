@@ -213,6 +213,8 @@ python/tmp/
 python/desktop/data/*.db
 python/desktop/data/receipts/
 python/desktop/data/credentials/
+# 仕入管理（開発）タブ用の独立DB（本番と分離）
+python/desktop/data_dev/
 *credentials*.json
 *gcv*.json
 *google*.json

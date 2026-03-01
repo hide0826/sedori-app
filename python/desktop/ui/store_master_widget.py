@@ -145,6 +145,15 @@ class StoreEditDialog(QDialog):
             
             layout.addWidget(custom_group)
         
+        # 情報取得ボタン（Google Map APIから住所・電話番号を取得）
+        info_button_layout = QHBoxLayout()
+        info_button_layout.addStretch()
+        self.fetch_info_btn = QPushButton("情報取得")
+        self.fetch_info_btn.setToolTip("店舗名からGoogle Map APIで住所と電話番号を取得します")
+        self.fetch_info_btn.clicked.connect(self.fetch_store_info)
+        info_button_layout.addWidget(self.fetch_info_btn)
+        layout.addLayout(info_button_layout)
+        
         # ボタン
         button_box = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel
@@ -152,6 +161,66 @@ class StoreEditDialog(QDialog):
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
+    
+    def fetch_store_info(self):
+        """Google Map APIから店舗情報（住所・電話）を取得して入力欄に反映"""
+        # Google Mapsサービスが利用できない場合
+        if get_store_info_from_google is None:
+            QMessageBox.warning(
+                self,
+                "エラー",
+                "Google Mapsサービスモジュールが読み込めませんでした。\n"
+                "googlemapsライブラリがインストールされているか確認してください。"
+            )
+            return
+        
+        store_name = (self.store_name_edit.text() or "").strip()
+        if not store_name:
+            QMessageBox.warning(self, "警告", "まず「店舗名」を入力してください。")
+            return
+        
+        # 既に住所や電話番号が入っている場合は上書き確認
+        current_address = (self.address_edit.text() or "").strip()
+        current_phone = (self.phone_edit.text() or "").strip()
+        if current_address or current_phone:
+            reply = QMessageBox.question(
+                self,
+                "確認",
+                "既に住所または電話番号が入力されています。\n"
+                "Google Map から取得した情報で上書きしてよろしいですか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+        
+        try:
+            info = get_store_info_from_google(store_name, language_code='ja')
+        except Exception as e:
+            QMessageBox.warning(self, "エラー", f"店舗情報の取得に失敗しました:\n{str(e)}")
+            return
+        
+        if not info:
+            QMessageBox.information(
+                self,
+                "情報",
+                "一致する店舗情報が見つかりませんでした。\n"
+                "店舗名を少し変えて再度お試しください。"
+            )
+            return
+        
+        # 情報を反映（取得できた項目のみ）
+        address = info.get("address") or ""
+        # 先頭の「日本、」や「日本,」が付いていたら削除してから反映
+        for prefix in ("日本、", "日本,"):
+            if address.startswith(prefix):
+                address = address[len(prefix):].strip()
+                break
+        phone = info.get("phone") or ""
+        if address:
+            self.address_edit.setText(address)
+        if phone:
+            self.phone_edit.setText(phone)
     
     def load_route_names(self):
         """既存のルート名一覧をロード"""
@@ -316,6 +385,8 @@ class RouteManagementDialog(QDialog):
         self.db = db or StoreDatabase()
         self.route_name = route_name  # Noneの場合は新規作成、指定されている場合は編集
         self.is_edit_mode = route_name is not None
+        # 新規作成時に一度だけ自動採番したかどうかのフラグ
+        self._route_code_generated = False
         
         self.setWindowTitle("ルート編集" if self.is_edit_mode else "新規ルート作成")
         self.setMinimumSize(900, 600)
@@ -334,6 +405,8 @@ class RouteManagementDialog(QDialog):
         
         self.route_name_edit = QLineEdit()
         self.route_name_edit.setPlaceholderText("ルート名を入力してください")
+        # ルート名入力時にルートコードを自動採番（新規作成時のみ）
+        self.route_name_edit.textChanged.connect(self.on_route_name_text_changed)
         route_name_layout.addRow("ルート名:", self.route_name_edit)
         
         self.route_code_edit = QLineEdit()
@@ -415,6 +488,55 @@ class RouteManagementDialog(QDialog):
         
         # 店舗一覧を読み込み
         self.load_all_stores()
+
+    def _get_next_route_code(self) -> Optional[str]:
+        """既存ルートから次のルートコードを採番（例: R001 → R002）"""
+        try:
+            existing_routes = self.db.list_routes_with_store_count()
+        except Exception:
+            existing_routes = []
+        
+        max_code_num = 0
+        for route in existing_routes or []:
+            route_code_str = route.get('route_code', '') or ''
+            if not route_code_str:
+                continue
+            # ルートコードから数値部分を抽出（例: "R001" -> 1）
+            import re
+            match = re.search(r'(\d+)', route_code_str)
+            if match:
+                try:
+                    code_num = int(match.group(1))
+                except ValueError:
+                    continue
+                max_code_num = max(max_code_num, code_num)
+        
+        # まだ1件もない場合は R001 から開始
+        return f"R{max_code_num + 1:03d}"
+
+    def on_route_name_text_changed(self, text: str):
+        """ルート名入力時にルートコードを自動で埋める（新規作成時のみ）"""
+        if self.is_edit_mode:
+            # 既存ルート編集時はコードを変えない
+            return
+        
+        text = (text or "").strip()
+        if not text:
+            # ルート名が空になったらコードもクリアして再採番可にする
+            self.route_code_edit.clear()
+            self._route_code_generated = False
+            return
+        
+        # すでに手動で何か入力されていれば上書きしない
+        if self.route_code_edit.text().strip():
+            return
+        
+        # まだ採番していない場合のみ採番
+        if not self._route_code_generated:
+            next_code = self._get_next_route_code()
+            if next_code:
+                self.route_code_edit.setText(next_code)
+                self._route_code_generated = True
     
     def load_all_stores(self):
         """全店舗を読み込み"""
@@ -595,18 +717,12 @@ class RouteManagementDialog(QDialog):
             route_code = self.route_code_edit.text().strip()
             if not route_code:
                 # ルートコードを自動生成（既存のルートコードの最大値+1）
-                existing_routes = self.db.list_routes_with_store_count()
-                max_code_num = 0
-                for route in existing_routes:
-                    route_code_str = route.get('route_code', '')
-                    if route_code_str:
-                        # ルートコードから数値部分を抽出（例: "R001" -> 1）
-                        import re
-                        match = re.search(r'(\d+)', route_code_str)
-                        if match:
-                            code_num = int(match.group(1))
-                            max_code_num = max(max_code_num, code_num)
-                route_code = f"R{max_code_num + 1:03d}"
+                route_code = self._get_next_route_code()
+                if not route_code:
+                    QMessageBox.warning(self, "エラー", "ルートコードの自動生成に失敗しました。")
+                    return
+                # UI側にも反映しておく
+                self.route_code_edit.setText(route_code)
             
             # 選択された店舗のIDを取得
             selected_store_ids = []

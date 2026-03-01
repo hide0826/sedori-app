@@ -1307,5 +1307,25 @@
   - store_score_widget.py: ルート名列・ルート絞り込みコンボ、フッター説明（訪問回数・訪問時間条件）
 - **変更ファイル**: python/desktop/services/store_score_service.py, python/desktop/database/route_visit_db.py, python/desktop/database/route_db.py, python/desktop/ui/store_score_widget.py, docs/cursor_development_progress.md
 
-**最終更新**: 2026-02-19
+### 2026-02-27（店舗マスタ・ルート・仕入管理開発タブ）
+- **内容**:
+  1. **店舗マスタ（店舗一覧）**
+     - ルート選択エリアではルートコード（R006等）を表示するが、店舗一覧側でのルートコード表示要否は要望として記録（列削除は未実施）
+     - 新規ルート作成ダイアログ：ルート名入力時にルートコードを自動採番して表示（R001, R002…）
+     - 店舗追加・編集ダイアログに「情報取得」ボタン追加（Google Map API で店舗名→住所・電話番号取得）
+     - 情報取得時に住所の先頭「日本、」「日本,」を削除してから入力
+  2. **ルートコードの参照先**
+     - `store_db.get_route_code_by_name()` を修正：`routes` テーブルを優先し、新規ルート作成で登録したルートも店舗追加時にルートコードが反映されるようにした
+  3. **仕入管理（開発）タブ**
+     - 仕入管理タブのコピーとして「仕入管理（開発）」タブを追加（同一機能・独立インスタンス）
+     - 開発用は `data_dev/` 配下のDB（hirio.db, hirio_inventory_route.db, hirio_product_purchase.db）と別QSettings（SedoriDesktopApp_InventoryDev）を使用し、本番DB・設定を壊さない設計
+     - 採用時は開発タブを削除するか、本番タブを差し替えるだけで正規タブにできる設計
+- **変更ファイル**:
+  - python/desktop/database/store_db.py
+  - python/desktop/ui/store_master_widget.py（ルートコード自動採番、情報取得ボタン・住所「日本、」削除、店舗一覧からルートコード列削除）
+  - python/desktop/ui/inventory_widget.py（dev_mode 対応）
+  - python/desktop/ui/main_window.py（仕入管理（開発）タブ追加・closeEvent で保存）
+  - .gitignore（data_dev/ 追加）
+
+**最終更新**: 2026-02-27
 **更新者**: Agentモード（実装）

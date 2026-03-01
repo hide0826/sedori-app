@@ -628,13 +628,39 @@ class StoreDatabase:
         return sorted(list(route_names))
     
     def get_route_code_by_name(self, route_name: str) -> Optional[str]:
-        """ルート名からルートコードを取得（最初に見つかったものを返す）"""
+        """ルート名からルートコードを取得（最初に見つかったものを返す）
+        
+        優先順位:
+        1. routes テーブル（ルートマスタ）
+        2. stores テーブル（既存データ互換用）
+        """
+        if not route_name:
+            return None
+        
         conn = self._get_connection()
         cursor = conn.cursor()
         
+        # まず routes テーブル（新しいルート管理用マスタ）を優先して参照
+        try:
+            cursor.execute(
+                "SELECT route_code FROM routes WHERE route_name = ? "
+                "AND route_code IS NOT NULL AND route_code != '' "
+                "LIMIT 1",
+                (route_name,),
+            )
+            row = cursor.fetchone()
+            if row and row[0]:
+                return row[0]
+        except sqlite3.OperationalError:
+            # routes テーブルがまだない古いDBでも落ちないようにする
+            pass
+        
+        # フォールバックとして stores テーブル側の情報も見る（後方互換用）
         cursor.execute(
-            "SELECT route_code FROM stores WHERE affiliated_route_name = ? AND route_code IS NOT NULL AND route_code != '' LIMIT 1",
-            (route_name,)
+            "SELECT route_code FROM stores WHERE affiliated_route_name = ? "
+            "AND route_code IS NOT NULL AND route_code != '' "
+            "LIMIT 1",
+            (route_name,),
         )
         row = cursor.fetchone()
         return row[0] if row else None

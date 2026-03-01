@@ -103,6 +103,8 @@ class MainWindow(QMainWindow):
             self.repricer_widget.save_settings()
         if hasattr(self, 'inventory_widget') and hasattr(self.inventory_widget, 'save_settings'):
             self.inventory_widget.save_settings()
+        if hasattr(self, 'inventory_widget_dev') and hasattr(self.inventory_widget_dev, 'save_settings'):
+            self.inventory_widget_dev.save_settings()
         if hasattr(self, 'antique_widget') and hasattr(self.antique_widget, 'save_settings'):
             self.antique_widget.save_settings()
         if hasattr(self, 'route_summary_widget') and hasattr(self.route_summary_widget, 'save_settings'):
@@ -225,6 +227,9 @@ class MainWindow(QMainWindow):
             inventory_tabs.addTab(self.inventory_widget, "仕入データ")
             inventory_tabs.addTab(self.condition_template_widget, "コンディション説明")
             self.tab_widget.addTab(inventory_tabs, "仕入管理")
+            # 仕入管理（開発）: 同一機能だが data_dev / 別QSettings で独立インスタンス（本番DBを壊さない）
+            self.inventory_widget_dev = InventoryWidget(self.api_client, dev_mode=True)
+            self.tab_widget.addTab(self.inventory_widget_dev, "仕入管理（開発）")
             return False
 
         if phase == 1:
