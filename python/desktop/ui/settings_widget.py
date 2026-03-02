@@ -182,6 +182,16 @@ class SettingsWidget(QWidget):
         advanced_widget = QWidget()
         layout = QVBoxLayout(advanced_widget)
         
+        # PRO版
+        pro_group = QGroupBox("PRO版")
+        pro_layout = QGridLayout(pro_group)
+        self.pro_enabled_cb = QCheckBox("PRO版を有効にする")
+        self.pro_enabled_cb.setToolTip("有効にすると、PRO版機能が利用できます。今後の機能追加はPRO版を前提に進めます。")
+        # チェック変更時に即QSettingsへ書き込み（他タブの3-6-9などがすぐ反映される）
+        self.pro_enabled_cb.toggled.connect(self._on_pro_toggled)
+        pro_layout.addWidget(self.pro_enabled_cb, 0, 0, 1, 2)
+        layout.addWidget(pro_group)
+        
         # パフォーマンス設定
         perf_group = QGroupBox("パフォーマンス設定")
         perf_layout = QGridLayout(perf_group)
@@ -607,7 +617,11 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         
         button_layout.addStretch()
         parent_layout.addLayout(button_layout)
-        
+
+    def _on_pro_toggled(self, checked: bool):
+        """PRO版チェック変更時に即QSettingsへ保存（保存ボタンなしで他タブに反映）"""
+        self.settings.setValue("pro/enabled", checked)
+
     def browse_directory(self, line_edit):
         """ディレクトリ選択ダイアログ"""
         directory = QFileDialog.getExistingDirectory(
@@ -770,6 +784,8 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.gemini_api_key_edit.setText(self.settings.value("ocr/gemini_api_key", ""))
         # Keepa APIキー（新規）
         self.keepa_api_key_edit.setText(self.settings.value("keepa/api_key", ""))
+        # PRO版（開発段階ではデフォルトON）
+        self.pro_enabled_cb.setChecked(self.settings.value("pro/enabled", True, type=bool))
         gemini_model = self.settings.value("ocr/gemini_model", "gemini-flash-latest")
         if gemini_model not in [self.gemini_model_combo.itemText(i) for i in range(self.gemini_model_combo.count())]:
             self.gemini_model_combo.addItem(gemini_model)
@@ -813,6 +829,8 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             self.settings.setValue("ocr/gemini_model", self.gemini_model_combo.currentText())
             # Keepa API設定
             self.settings.setValue("keepa/api_key", self.keepa_api_key_edit.text())
+            # PRO版
+            self.settings.setValue("pro/enabled", self.pro_enabled_cb.isChecked())
             
             # 設定変更シグナルを発火
             settings_dict = self.get_current_settings()
@@ -864,6 +882,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.gemini_api_key_edit.setText("")
         self.keepa_api_key_edit.setText("")
         self.gemini_model_combo.setCurrentText("gemini-flash-latest")
+        self.pro_enabled_cb.setChecked(True)  # 開発段階ではデフォルトON
         
     def get_current_settings(self):
         """現在の設定を辞書で取得"""
@@ -904,5 +923,8 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             },
             "keepa": {
                 "api_key": self.keepa_api_key_edit.text(),
+            },
+            "pro": {
+                "enabled": self.pro_enabled_cb.isChecked(),
             }
         }

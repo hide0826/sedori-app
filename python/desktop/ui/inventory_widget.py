@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QScrollArea, QFormLayout, QTimeEdit
 )
 from PySide6.QtCore import Qt, QDate, QTime, QDateTime, Signal, QSettings
-from PySide6.QtGui import QFont, QColor, QPalette
+from PySide6.QtGui import QFont, QColor, QPalette, QStandardItemModel, QStandardItem
 import pandas as pd
 from pathlib import Path
 import re
@@ -4618,8 +4618,8 @@ class InventoryWidget(QWidget):
         self.btn_save_settings.clicked.connect(self.save_sku_settings)
         lay.addWidget(self.btn_save_settings, 2, 3)
 
-        # 8スロットのプルダウン式ビルダー
-        token_choices = [
+        # 8スロットのプルダウン式ビルダー（PRO版: 3-6-9 含む）
+        self._sku_token_choices = [
             "(空)",
             "日付",
             "asin",
@@ -4629,8 +4629,10 @@ class InventoryWidget(QWidget):
             "仕入先コード",
             "仕入れ価格",
             "連番",
+            "3-6-9",  # PRO版: オフ時はグレーアウトで選択不可
             "任意の文字列",
         ]
+        self._sku_token_369_index = self._sku_token_choices.index("3-6-9")
         self.slot_types = []
         self.slot_values = []
         self.slot_seq_widths = []
@@ -4638,7 +4640,7 @@ class InventoryWidget(QWidget):
             row = 3 + i
             lay.addWidget(QLabel(f"{i+1}"), row, 0)
             cb = QComboBox()
-            cb.addItems(token_choices)
+            self._set_sku_token_choices_to_combo(cb)
             cb.setFixedHeight(30)
             self.slot_types.append(cb)
             lay.addWidget(cb, row, 1)
@@ -4664,13 +4666,45 @@ class InventoryWidget(QWidget):
         # 画面に追加（検索フィルタの直下）
         self.layout().addWidget(self.settings_group)
 
+    def _set_sku_token_choices_to_combo(self, combo: QComboBox):
+        """token_choices をコンボにセットし、PRO版オフ時は「3-6-9」を無効（グレー・選択不可）にする"""
+        from utils.settings_helper import is_pro_enabled
+        model = QStandardItemModel()
+        for text in self._sku_token_choices:
+            item = QStandardItem(text)
+            if text == "3-6-9" and not is_pro_enabled():
+                item.setEnabled(False)
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled)  # コンボで選択不可に
+            model.appendRow(item)
+        combo.setModel(model)
+
+    def _apply_pro_to_369_in_slot_combos(self):
+        """PRO版のON/OFFに応じて、各スロットコンボの「3-6-9」の有効/無効を更新する"""
+        from utils.settings_helper import is_pro_enabled
+        enabled = is_pro_enabled()
+        for cb in self.slot_types:
+            model = cb.model()
+            if model and model.rowCount() > self._sku_token_369_index:
+                item = model.item(self._sku_token_369_index)
+                if item:
+                    item.setEnabled(enabled)
+                    if enabled:
+                        item.setFlags(item.flags() | Qt.ItemIsEnabled)
+                    else:
+                        item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                    # 現在「3-6-9」選択中でPROがオフなら強制的に「(空)」へ
+                    if not enabled and cb.currentIndex() == self._sku_token_369_index:
+                        cb.setCurrentIndex(0)
+
     def toggle_settings_panel(self):
         self.settings_group.setVisible(not self.settings_group.isVisible())
         if self.settings_group.isVisible():
+            self._apply_pro_to_369_in_slot_combos()
             self.load_sku_settings()
 
     def load_sku_settings(self):
         try:
+            self._apply_pro_to_369_in_slot_combos()
             s = self.api_client.inventory_get_sku_template()
             self.tpl_edit.setText(s.get("skuTemplate", ""))
             self.seq_start_spin.setValue(int(s.get("seqStart", 1)))
@@ -4725,6 +4759,11 @@ class InventoryWidget(QWidget):
             elif t == "連番":
                 width = int(seqw.value()) if seqw else 3
                 parts.append(f"{{seq:{width}}}")
+            elif t == "3-6-9":
+                # PRO版: 3-6-9ルール用プレースホルダー（PRO版オフ時は追加しない）
+                from utils.settings_helper import is_pro_enabled
+                if is_pro_enabled():
+                    parts.append("{rule369}")
             elif t == "任意の文字列":
                 text = val.text().strip()
                 if text:

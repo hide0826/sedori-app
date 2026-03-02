@@ -548,6 +548,11 @@ class ImageManagerWidget(QWidget):
         self.scan_unknown_btn = QPushButton("JAN不明検索")
         self.scan_unknown_btn.clicked.connect(self.scan_unknown_jan_images)
         self.scan_unknown_btn.setEnabled(False)
+
+        # 仕入日を指定して仕入DBと紐付けるボタン（スキャン済みの全JANグループを対象にまとめて紐付け）
+        self.manual_link_btn = QPushButton("指定紐付け")
+        self.manual_link_btn.setToolTip("スキャン済みのJANグループを、データベース管理タブの仕入DBから選んだ仕入日で一括紐付けします。")
+        self.manual_link_btn.clicked.connect(self.manual_link_by_purchase_date)
         
         self.clear_images_btn = QPushButton("画像クリア")
         self.clear_images_btn.clicked.connect(self.clear_jan_groups)
@@ -570,6 +575,7 @@ class ImageManagerWidget(QWidget):
         folder_layout.addWidget(self.set_default_folder_btn)
         folder_layout.addWidget(self.scan_btn)
         folder_layout.addWidget(self.scan_unknown_btn)
+        folder_layout.addWidget(self.manual_link_btn)
         folder_layout.addWidget(self.clear_images_btn)
         
         layout.addWidget(folder_group)
@@ -4517,7 +4523,222 @@ class ImageManagerWidget(QWidget):
             msg += "\nすべての画像は既に仕入DB側に登録済みでした。"
 
         QMessageBox.information(self, "完了", msg)
-    
+
+    def manual_link_by_purchase_date(self):
+        """
+        仕入DBの「仕入れ日」をユーザーが指定して、
+        スキャン済みのJANグループ全体を仕入レコードに一括紐付けする。
+
+        - スキャン時の自動紐付け（撮影日時ベース）で紐付かなかったケースを補うための機能
+        - 「このフォルダの画像はこの日の仕入れだはず」という前提で、仕入日を基準に候補を絞り込む
+        """
+        if not self.product_widget:
+            QMessageBox.warning(self, "エラー", "仕入DBタブ（商品データベース）への参照がありません。")
+            return
+
+        if not getattr(self, "jan_groups", None):
+            QMessageBox.information(self, "情報", "JANグループがありません。先にスキャンを実行してください。")
+            return
+
+        # 仕入DBから仕入日の候補一覧を作成（過去3ヶ月分に絞る）
+        purchase_records = getattr(self.product_widget, "purchase_all_records", [])
+        if not purchase_records:
+            # 現在メモリに仕入データがない場合は、最新スナップショットから復元を試みる
+            try:
+                if hasattr(self.product_widget, "restore_latest_purchase_snapshot"):
+                    self.product_widget.restore_latest_purchase_snapshot()
+                    purchase_records = getattr(self.product_widget, "purchase_all_records", [])
+            except Exception:
+                purchase_records = getattr(self.product_widget, "purchase_all_records", [])
+
+        if not purchase_records:
+            QMessageBox.warning(self, "情報", "照合対象の仕入データがありません。仕入データベースの内容を確認してください。")
+            return
+
+        from datetime import date as _Date, datetime as _DateTime, timedelta as _Timedelta
+
+        today = _Date.today()
+        cutoff = today - _Timedelta(days=90)  # 過去3ヶ月分のみ
+
+        date_map: Dict[str, _Date] = {}
+        for record in purchase_records:
+            raw_date = str(
+                record.get("仕入れ日")
+                or record.get("purchase_date")
+                or ""
+            ).strip()
+            if not raw_date:
+                continue
+
+            # ProductWidget側の正規化ロジックを再利用（フォーマットの揺れを吸収）
+            try:
+                norm = self.product_widget._normalize_date_for_search(raw_date)  # type: ignore[attr-defined]
+            except Exception:
+                norm = ""
+            if not norm:
+                continue
+
+            try:
+                y, m, d = [int(x) for x in norm.split("-")[:3]]
+                dt_obj = _Date(y, m, d)
+            except Exception:
+                continue
+
+            # 過去3ヶ月より古い日付は候補から除外
+            if dt_obj < cutoff:
+                continue
+
+            label = dt_obj.strftime("%Y/%m/%d")
+            date_map[label] = dt_obj
+
+        if not date_map:
+            QMessageBox.warning(self, "情報", "仕入日の情報が存在しません。仕入データの「仕入れ日」を確認してください。")
+            return
+
+        # 新しい順に並べた日付リストを用意（最近の仕入日から選べるようにする）
+        sorted_labels = sorted(date_map.keys(), reverse=True)
+
+        # 日付選択ダイアログを表示
+        dlg = QInputDialog(self)
+        dlg.setWindowTitle("指定紐付け - 仕入日選択")
+        dlg.setLabelText("このフォルダの画像を紐付ける基準となる仕入日を選択してください。")
+        dlg.setComboBoxItems(sorted_labels)
+        dlg.setComboBoxEditable(False)
+
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        selected_label = dlg.textValue().strip()
+        if not selected_label or selected_label not in date_map:
+            return
+
+        base_date = date_map[selected_label]
+        base_dt = _DateTime(base_date.year, base_date.month, base_date.day)
+
+        # 選択した仕入日を基準に、±0日（=その日）の仕入レコードだけを対象にする
+        try:
+            day_candidates = self.product_widget.find_purchase_candidates_by_datetime(base_dt, days_window=0)
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"仕入DB候補の取得中にエラーが発生しました:\n{e}")
+            return
+
+        if not day_candidates:
+            QMessageBox.information(
+                self,
+                "候補なし",
+                f"選択した仕入日（{selected_label}）に該当する仕入データ候補が見つかりませんでした。\n"
+                "（仕入DBの取り込み状況や日付を確認してください）",
+            )
+            return
+
+        # その日の候補レコードだけを all_records として扱う
+        all_records = day_candidates
+
+        # 対象となるJANグループ（JAN不明を除外）
+        valid_groups = [g for g in self.jan_groups if g.jan != "unknown" and g.images]
+        if not valid_groups:
+            QMessageBox.information(self, "情報", "指定紐付け対象のJANグループがありません。")
+            return
+
+        # プログレスダイアログを表示
+        progress = QProgressDialog("指定紐付け処理中...", "キャンセル", 0, len(valid_groups), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        success_count = 0
+        skipped_count = 0
+        failed_groups: List[str] = []
+
+        try:
+            for i, group in enumerate(valid_groups):
+                if progress.wasCanceled():
+                    break
+
+                progress.setValue(i)
+                progress.setLabelText(
+                    f"指定紐付け処理中... ({i+1}/{len(valid_groups)}) - JAN: {group.jan} / 仕入日: {selected_label}"
+                )
+                QApplication.processEvents()
+
+                jan = group.jan
+                image_paths: List[str] = []
+                for idx, img in enumerate(group.images):
+                    img_path = img.path
+                    # 各JANグループの1枚目画像はデフォルトで除外（チェックON時）※確定処理と同じ挙動
+                    if idx == 0 and self.first_image_flags.get(img_path, True):
+                        continue
+                    if not Path(img_path).exists():
+                        db_record = self.image_db.get_by_file_path(img_path)
+                        if db_record and db_record["file_path"] != img_path:
+                            img_path = db_record["file_path"]
+                    image_paths.append(img_path)
+
+                if not image_paths:
+                    continue
+
+                try:
+                    # 対象SKUを取得（その日の仕入レコードの範囲内で絞り込む）
+                    target_sku = self._get_target_sku_for_group(group, all_records)
+
+                    # 更新処理を実行（既存画像は維持しつつ、新しい画像だけ追加）
+                    success, added_count, record_snapshot = self.product_widget.update_image_paths_for_jan(
+                        jan,
+                        image_paths,
+                        all_records,
+                        skip_existing=True,
+                        target_sku=target_sku,
+                        clear_existing=False,
+                    )
+
+                    if success:
+                        if added_count > 0:
+                            success_count += 1
+                            skipped = len(image_paths) - added_count
+                            if skipped > 0:
+                                skipped_count += skipped
+                        else:
+                            skipped_count += len(image_paths)
+                        if record_snapshot:
+                            self.add_registration_entry(record_snapshot)
+                    else:
+                        failed_groups.append(jan)
+
+                except Exception as e:
+                    logger.error(f"JAN '{jan}' の指定紐付け処理中にエラー: {e}")
+                    failed_groups.append(jan)
+
+            progress.close()
+
+            # 結果メッセージ
+            message_parts: List[str] = []
+            if success_count > 0:
+                message_parts.append(
+                    f"{success_count}件のJANグループを仕入日 {selected_label} の仕入レコードに紐付けました。"
+                )
+                if skipped_count > 0:
+                    message_parts.append(f"（{skipped_count}件の画像は既に登録済みのためスキップしました）")
+            if failed_groups:
+                message_parts.append(
+                    "\n以下のJANグループの処理に失敗しました（仕入日やJANを確認してください）:\n"
+                    + ", ".join(failed_groups)
+                )
+
+            if message_parts:
+                QMessageBox.information(self, "指定紐付け完了", "\n".join(message_parts))
+            else:
+                QMessageBox.information(self, "指定紐付け完了", "処理が完了しました。")
+
+            # 仕入DB側に商品名などが入ったので、JAN→タイトルのキャッシュをクリアしてツリーを再描画
+            try:
+                self._jan_title_cache.clear()
+            except Exception:
+                self._jan_title_cache = {}
+            self.update_tree_widget()
+
+        except Exception as e:
+            progress.close()
+            QMessageBox.critical(self, "エラー", f"指定紐付け処理中にエラーが発生しました:\n{e}")
+
     def delete_jan_group(self, group: JanGroup):
         """JANグループを削除"""
         if group.jan == "unknown":
