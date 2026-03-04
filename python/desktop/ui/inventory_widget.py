@@ -14,7 +14,8 @@ from PySide6.QtWidgets import (
     QGroupBox, QSplitter, QMessageBox, QFrame,
     QCheckBox, QSpinBox, QDateEdit, QFileDialog,
     QDialog, QDialogButtonBox, QSizePolicy, QInputDialog,
-    QPlainTextEdit, QScrollArea, QFormLayout, QTimeEdit
+    QPlainTextEdit, QScrollArea, QFormLayout, QTimeEdit,
+    QToolButton,
 )
 from PySide6.QtCore import Qt, QDate, QTime, QDateTime, Signal, QSettings
 from PySide6.QtGui import QFont, QColor, QPalette, QStandardItemModel, QStandardItem
@@ -38,6 +39,7 @@ from database.route_visit_db import RouteVisitDatabase
 from database.warranty_db import WarrantyDatabase
 from ui.star_rating_widget import StarRatingWidget
 from utils.route_utils import mark_route_flags_from_folder
+from utils.settings_helper import is_pro_enabled
 
 
 def _normalize_condition_note_newlines(s: str) -> str:
@@ -936,6 +938,13 @@ class InventoryWidget(QWidget):
         stats_layout = QHBoxLayout()
         self.stats_label = QLabel("統計: なし")
         stats_layout.addWidget(self.stats_label)
+
+        # 統計の説明ヘルプ（?ボタン、PRO版 + 開発タブ向け表示）
+        self.stats_help_button = QToolButton()
+        self.stats_help_button.setText("?")
+        self.stats_help_button.setToolTip("仕入健全度や実効利益率の計算方法を表示します。")
+        self.stats_help_button.clicked.connect(self._show_stats_help_dialog)
+        stats_layout.addWidget(self.stats_help_button)
         # 除外商品確認トグルボタン
         self.toggle_excluded_btn = QPushButton("除外商品確認")
         self.toggle_excluded_btn.setToolTip("コメントに『除外』、または発送方法がFBA以外の商品をハイライト表示します。もう一度押すと解除。")
@@ -3265,10 +3274,10 @@ class InventoryWidget(QWidget):
         if self.filtered_data is None or len(self.filtered_data) == 0:
             self.stats_label.setText("統計: なし")
             return
-            
+
         # 基本統計
         total_items = len(self.filtered_data)
-        
+
         # コンディション統計
         try:
             if "コンディション" in self.filtered_data.columns:
@@ -3292,10 +3301,285 @@ class InventoryWidget(QWidget):
         except Exception as e:
             print(f"価格統計エラー: {e}")
             price_stats = "価格統計: エラー"
-        
+
         stats_text = f"統計: {total_items}件, {condition_stats}, {price_stats}"
+
+        # PRO版かつ開発タブの場合のみ、仕入健全度スコア（件数ベース/利益ベース）を計算して表示
+        count_health = None
+        profit_health = None
+        if getattr(self, "dev_mode", False) and is_pro_enabled():
+            try:
+                count_health = self._compute_health_score_3_6_9(self.filtered_data)
+            except Exception as e:
+                print(f"仕入健全度スコア計算エラー(件数): {e}")
+                count_health = None
+            try:
+                profit_health = self._compute_health_score_3_6_9_profit(self.filtered_data)
+            except Exception as e:
+                print(f"仕入健全度スコア計算エラー(利益): {e}")
+                profit_health = None
+
+        # 仕入健全度（件数ベース）
+        if count_health:
+            ratio_3, ratio_6, ratio_9 = count_health["ratio_3"], count_health["ratio_6"], count_health["ratio_9"]
+            level = count_health["level"]
+            stats_text = (
+                f"{stats_text}, "
+                f"仕入健全度(件数3-6-9): {ratio_3}:{ratio_6}:{ratio_9}（{level}）"
+            )
+
+        # 仕入健全度（利益ベース）＋実効見込み利益
+        final_color = ""
+        if profit_health:
+            pr3, pr6, pr9 = profit_health["ratio_3"], profit_health["ratio_6"], profit_health["ratio_9"]
+            plevel = profit_health["level"]
+            eff_rate = profit_health["effective_rate"]
+            total_profit = profit_health["total_profit"]
+            effective_profit = profit_health["effective_profit"]
+            stats_text = (
+                f"{stats_text}, "
+                f"仕入健全度(金額3-6-9): {pr3}:{pr6}:{pr9}（{plevel}）, "
+                f"実効見込み利益: {effective_profit:,.0f}円 / 想定見込み利益 {total_profit:,.0f}円 "
+                f"(実現率 {eff_rate:,.1f}%)"
+            )
+            final_color = profit_health["color"]
+
+        # ラベル色は「より危険側」の色を優先（利益ベース＞件数ベース）
+        if profit_health:
+            self.stats_label.setStyleSheet(f"color: {profit_health['color']};")
+        elif count_health:
+            self.stats_label.setStyleSheet(f"color: {count_health['color']};")
+        else:
+            # 通常の統計表示（色はデフォルトに戻す）
+            self.stats_label.setStyleSheet("")
+
         self.stats_label.setText(stats_text)
-        
+
+    def _compute_health_score_3_6_9(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        """
+        コメント列に入力された数値から 3-6-9 比率を算出し、
+        仕入健全度スコア情報を返す（開発タブ用 / PRO版限定）。
+        """
+        if df is None or "コメント" not in df.columns:
+            return None
+
+        counts = {"3": 0, "6": 0, "9": 0}
+        import math
+        for v in df["コメント"]:
+            # コメント無し（NaN/None/空文字）は 6 判定
+            if v is None or (isinstance(v, float) and math.isnan(v)):
+                bucket = "6"
+            else:
+                text = str(v).strip()
+                # 「除外」「テスト」を含む行は仕入健全度の統計から除外
+                if "除外" in text or "テスト" in text:
+                    continue
+                if text == "":
+                    bucket = "6"
+                else:
+                    # 先頭の1〜2桁の数字からグループ判定し、取れなければ 6 とみなす
+                    classified = self._classify_health_bucket(text)
+                    bucket = classified if classified in counts else "6"
+
+            counts[bucket] += 1
+
+        total = counts["3"] + counts["6"] + counts["9"]
+        if total == 0:
+            return None
+
+        # 割合（%）を整数で算出し、合計が100になるように最後の値で調整
+        r3_float = counts["3"] * 100.0 / total
+        r6_float = counts["6"] * 100.0 / total
+        r9_float = counts["9"] * 100.0 / total
+
+        r3 = int(round(r3_float))
+        r6 = int(round(r6_float))
+        r9 = 100 - r3 - r6
+        if r9 < 0:
+            r9 = 0
+
+        # R9(9グループ比率) に基づいて診断レベルを判定
+        # 〜15%: 安全（グリーン）、〜25%: 注意（イエロー）、それ以上: 危険（レッド）
+        if r9 <= 15:
+            level = "安全圏"
+            color = "#4caf50"  # Green
+        elif r9 <= 25:
+            level = "注意圏"
+            color = "#ffc107"  # Yellow
+        else:
+            level = "危険域"
+            color = "#f44336"  # Red
+
+        return {
+            "ratio_3": r3,
+            "ratio_6": r6,
+            "ratio_9": r9,
+            "level": level,
+            "color": color,
+        }
+
+    def _compute_health_score_3_6_9_profit(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        """
+        コメント列の3/6/9分類と「見込み利益」から、
+        利益金額ベースの3-6-9比率と実効見込み利益を計算する。
+        """
+        if df is None or "コメント" not in df.columns or "見込み利益" not in df.columns:
+            return None
+
+        import math
+        # グループごとの理論見込み利益合計と実効見込み利益合計
+        base_profit = {"3": 0.0, "6": 0.0, "9": 0.0}
+        eff_profit = {"3": 0.0, "6": 0.0, "9": 0.0}
+
+        for _, row in df.iterrows():
+            comment_val = row.get("コメント")
+            # コメントが空欄/NaN の場合は 6 グループ
+            if comment_val is None or (isinstance(comment_val, float) and math.isnan(comment_val)):
+                bucket = "6"
+            else:
+                text = str(comment_val).strip()
+                # 「除外」「テスト」を含む行は利益計算から除外
+                if "除外" in text or "テスト" in text:
+                    continue
+                if text == "":
+                    bucket = "6"
+                else:
+                    classified = self._classify_health_bucket(text)
+                    # 先頭の1〜2桁から判定し、取れない/想定外はすべて 6 とみなす
+                    bucket = classified if classified in base_profit else "6"
+
+            profit_val = row.get("見込み利益", 0)
+            try:
+                profit = float(profit_val)
+            except Exception:
+                profit = 0.0
+            if profit <= 0:
+                continue
+
+            base_profit[bucket] += profit
+            # 発送方法に応じて係数を切り替える
+            shipping = str(row.get("発送方法", "") or "").strip()
+            is_fba = "fba" in shipping.upper() if shipping else False
+            if bucket == "3":
+                z = 0.9
+            elif bucket == "6":
+                z = 0.7
+            elif bucket == "9":
+                # 9グループは FBA長期在庫なら0.6、自己発送(非FBA)なら送料のみを見て0.9
+                z = 0.6 if is_fba else 0.9
+            else:
+                # 想定外は6グループ相当として扱う
+                z = 0.7
+
+            eff_profit[bucket] += profit * z
+
+        total_base = base_profit["3"] + base_profit["6"] + base_profit["9"]
+        total_eff = eff_profit["3"] + eff_profit["6"] + eff_profit["9"]
+        if total_base <= 0 or total_eff <= 0:
+            return None
+
+        # 実効見込み利益のグループ比率（%）
+        r3_float = eff_profit["3"] * 100.0 / total_eff
+        r6_float = eff_profit["6"] * 100.0 / total_eff
+        r9_float = eff_profit["9"] * 100.0 / total_eff
+
+        r3 = int(round(r3_float))
+        r6 = int(round(r6_float))
+        r9 = 100 - r3 - r6
+        if r9 < 0:
+            r9 = 0
+
+        # 9ヶ月グループの比率で診断レベルを判定（件数ベースと同じ閾値）
+        if r9 <= 15:
+            level = "安全圏"
+            color = "#4caf50"  # Green
+        elif r9 <= 25:
+            level = "注意圏"
+            color = "#ffc107"  # Yellow
+        else:
+            level = "危険域"
+            color = "#f44336"  # Red
+
+        # 実効見込み利益率（理論見込み利益合計に対する実効利益の割合）
+        effective_rate = (total_eff / total_base) * 100.0
+
+        return {
+            "ratio_3": r3,
+            "ratio_6": r6,
+            "ratio_9": r9,
+            "level": level,
+            "color": color,
+            "total_profit": total_base,
+            "effective_profit": total_eff,
+            "effective_rate": effective_rate,
+        }
+
+    def _classify_health_bucket(self, comment: str) -> Optional[str]:
+        """
+        コメント文字列から 3/6/9 グループを判定して返す。
+        例: 3, 4, 3n -> '3' / 6, 7, 6n -> '6' / 9, 10, 9n -> '9'
+        （3p/3n, 6p/6n, 9p/9n の違いはここでは区別しない）
+        """
+        if not comment:
+            return None
+        s = str(comment).strip().lower()
+        if not s:
+            return None
+
+        import re
+        # 最初に現れる1〜2桁の数字を取り出して判定する
+        m = re.search(r"(\d{1,2})", s)
+        if not m:
+            return None
+
+        try:
+            n = int(m.group(1))
+        except ValueError:
+            return None
+
+        # 3/4 → 3グループ, 6/7 → 6グループ, 9/10 → 9グループ
+        if n in (3, 4):
+            return "3"
+        if n in (6, 7):
+            return "6"
+        if n in (9, 10):
+            return "9"
+        # 想定外の数字（11以上など）は分類不能 → 呼び出し側で 6 扱い
+        return None
+
+    def _show_stats_help_dialog(self):
+        """
+        統計エリア右側の「?」ボタンから呼び出されるヘルプダイアログ。
+        仕入健全度(3-6-9) と実効見込み利益の計算方法を簡潔に説明する。
+        """
+        try:
+            msg = (
+                "【仕入健全度(件数3-6-9)】\n"
+                "・コメント列に 3 / 6 / 9（または 4,7,10,3n,6n,9n,3p,6p,9p）などの単一コードを入力して、\n"
+                "  それぞれ「3ヶ月以内 / 6ヶ月以内 / 9ヶ月コース」のグループに分類します。\n"
+                "・空欄は 6 として扱います。\n"
+                "・各グループの件数比率 3:6:9(%) を集計し、9グループが\n"
+                "    15%以下 → 安全圏 / 15〜25% → 注意圏 / 25%以上 → 危険域 と判定します。\n"
+                "\n"
+                "【仕入健全度(金額3-6-9)】\n"
+                "・上記と同じ3/6/9分類を使いながら、「見込み利益」列の金額で重み付けします。\n"
+                "・各行ごとに、コメントから 3/6/9 を決めたあと、\n"
+                "    3グループ: 見込み利益 × 0.9\n"
+                "    6グループ: 見込み利益 × 0.7\n"
+                "    9グループ: 発送方法がFBAなら ×0.6 / それ以外(自己発送など)は ×0.9\n"
+                "  として値崩れ・保管料・送料を織り込んだ実効見込み利益を計算します。\n"
+                "・3:6:9 = 実効見込み利益の比率(%) を表示し、9グループ比率の閾値は件数ベースと同じです。\n"
+                "\n"
+                "【実効見込み利益】\n"
+                "・想定見込み利益合計 = 全行の見込み利益の合計（除外・テストを除く）\n"
+                "・実効見込み利益合計 = 各行の「見込み利益 × 上記の係数」を足し合わせた値\n"
+                "・実現率(%) = 実効見込み利益合計 ÷ 想定見込み利益合計 × 100\n"
+                "  （= 値崩れ・保管料・送料を加味した現実的な期待利益率）\n"
+            )
+            QMessageBox.information(self, "仕入健全度と実効利益の計算式", msg)
+        except Exception as e:
+            print(f"統計ヘルプダイアログ表示エラー: {e}")
+
     def clear_data(self):
         """データのクリア（仕入データ一覧とルート情報の両方をクリア）"""
         # 仕入データのクリア

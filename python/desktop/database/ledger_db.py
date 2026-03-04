@@ -120,6 +120,7 @@ class LedgerDatabase:
               transaction_method TEXT,
               notes TEXT,
               correction_of INTEGER,
+              sku TEXT,
               created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -150,6 +151,7 @@ class LedgerDatabase:
             ("counterparty_address", "TEXT"),
             ("contact", "TEXT"),
             ("transaction_method", "TEXT"),
+            ("sku", "TEXT"),
         ):
             _ensure_column("ledger_entries", name, ctype)
 
@@ -161,7 +163,7 @@ class LedgerDatabase:
         cols = [
             'entry_date','counterparty_type','counterparty_name','counterparty_branch','counterparty_address','contact','receipt_no','platform','platform_order_id','platform_user',
             'person_name','person_address','id_type','id_number','id_checked_on','id_checked_by','id_proof_ref',
-            'kobutsu_kind','hinmoku','hinmei','qty','unit_price','amount','identifier','transaction_method','notes','correction_of'
+            'kobutsu_kind','hinmoku','hinmei','qty','unit_price','amount','identifier','transaction_method','notes','correction_of','sku'
         ]
         placeholders = ",".join(["?"] * len(cols))
         sql = f"INSERT INTO ledger_entries ({','.join(cols)}) VALUES ({placeholders})"

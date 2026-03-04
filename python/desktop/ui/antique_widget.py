@@ -18,8 +18,8 @@ from PySide6.QtWidgets import (
     QFileDialog, QProgressBar, QTextEdit, QTabWidget,
     QApplication,
 )
-from PySide6.QtCore import Qt, QDate, QThread, Signal, QSettings
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtCore import Qt, QDate, QThread, Signal, QSettings, QUrl
+from PySide6.QtGui import QFont, QColor, QDesktopServices
 from typing import Optional, List, Dict, Any
 import re
 import pandas as pd
@@ -92,6 +92,7 @@ class AntiqueWidget(QWidget):
             ("unit_price", "単価"),
             ("amount", "金額"),
             ("identifier", "識別情報"),
+            ("sku", "SKU"),
             ("counterparty_type", "相手区分"),
             ("notes", "備考"),
         ]
@@ -100,7 +101,7 @@ class AntiqueWidget(QWidget):
             ("counterparty_branch", "支店"),
             ("counterparty_address", "店舗住所"),
             ("contact", "連絡先"),
-            ("receipt_no", "レシート番号"),
+            ("receipt_no", "レシート画像URL"),
         ]
         self.FLEA_COLUMNS = [
             ("platform", "プラットフォーム"),
@@ -234,7 +235,7 @@ class AntiqueWidget(QWidget):
         self.store_branch = QLineEdit(); gs.addWidget(QLabel("支店"), sr,0); gs.addWidget(self.store_branch, sr,1); sr+=1
         self.store_address = QLineEdit(); gs.addWidget(QLabel("住所"), sr,0); gs.addWidget(self.store_address, sr,1); sr+=1
         self.store_contact = QLineEdit(); gs.addWidget(QLabel("連絡先"), sr,0); gs.addWidget(self.store_contact, sr,1); sr+=1
-        self.store_receipt = QLineEdit(); gs.addWidget(QLabel("レシート番号"), sr,0); gs.addWidget(self.store_receipt, sr,1); sr+=1
+        self.store_receipt = QLineEdit(); gs.addWidget(QLabel("レシート画像URL"), sr,0); gs.addWidget(self.store_receipt, sr,1); sr+=1
         g.addWidget(self.grp_store, row, 0, 1, 2); row += 1
 
         # フリマ
@@ -781,7 +782,8 @@ class AntiqueWidget(QWidget):
                     "amount": amount_v,
                     "identifier": identifier_v,
                     "counterparty_type": "店舗",
-                    "notes": str(notes_s.iloc[i]),
+                    # 備考は仕入管理タブのコメントからは自動移行しない（古物台帳側で別管理）
+                    "notes": None,
                     # 店舗列（支店/住所/連絡先/レシート番号は不明のため空）
                     "counterparty_name": corp_name,  # 仕入先名（法人）
                     "counterparty_branch": store_name if store_name else supplier_code,  # 支店（店舗名）
@@ -950,7 +952,8 @@ class AntiqueWidget(QWidget):
                     "amount": amount_v,
                     "identifier": identifier_v,
                     "counterparty_type": "店舗",
-                    "notes": str(notes_s.iloc[i]),
+                    # 備考は仕入管理タブのコメントからは自動移行しない（古物台帳側で別管理）
+                    "notes": None,
                     # 店舗列（支店/住所/連絡先/レシート番号は不明のため空）
                     "counterparty_name": corp_name,  # 仕入先名（法人）
                     "counterparty_branch": store_name if store_name else supplier_code,  # 支店（店舗名）
@@ -1378,6 +1381,7 @@ class AntiqueWidget(QWidget):
         # 品名列は省略表示（50文字）＋選択時は全表示
         try:
             self.data_table.itemSelectionChanged.connect(self._on_table_selection_changed)
+            self.data_table.itemDoubleClicked.connect(self._on_data_table_double_clicked)
         except Exception:
             pass
         
@@ -1527,6 +1531,16 @@ class AntiqueWidget(QWidget):
                     except:
                         pass
 
+                # レシート画像URL列はURLとして表示（ダブルクリックでブラウザ）
+                if key == "receipt_no":
+                    if value:
+                        item_widget.setToolTip(f"ダブルクリックでブラウザで表示\n{value}")
+                        item_widget.setData(Qt.UserRole, value)
+                        color = QColor(0, 122, 204)
+                        item_widget.setForeground(color)
+                        font = item_widget.font()
+                        font.setUnderline(True)
+                        item_widget.setFont(font)
                 # ツールチップはフルテキスト（他列も同様）
                 if not item_widget.toolTip():
                     item_widget.setToolTip(value)
@@ -1633,6 +1647,16 @@ class AntiqueWidget(QWidget):
                         item_widget.setText(f"{num_value:,.0f}")
                     except:
                         pass
+                # レシート画像URL列はURLとして表示（ダブルクリックでブラウザ）
+                if key == "receipt_no":
+                    if value:
+                        item_widget.setToolTip(f"ダブルクリックでブラウザで表示\n{value}")
+                        item_widget.setData(Qt.UserRole, value)
+                        color = QColor(0, 122, 204)
+                        item_widget.setForeground(color)
+                        font = item_widget.font()
+                        font.setUnderline(True)
+                        item_widget.setFont(font)
                 if not item_widget.toolTip():
                     item_widget.setToolTip(value)
                 
@@ -1660,6 +1684,12 @@ class AntiqueWidget(QWidget):
                 where.append("entry_date <= ?")
                 params.append(end)
             rows = db.query_ledger(" AND ".join(where), tuple(params))
+            # SKU からレシート画像URLを推測して反映（表示用）
+            try:
+                rows = self._attach_receipt_image_urls(rows)
+            except Exception as _e:
+                # 失敗しても致命的ではないのでログのみ
+                print(f"attach receipt urls failed: {_e}")
             self.antique_data = rows
             self.apply_filters()
             self._ledger_loaded = True
@@ -1667,6 +1697,55 @@ class AntiqueWidget(QWidget):
         except Exception as e:
             print(f"台帳ロード失敗: {e}")
             return False
+
+    def _attach_receipt_image_urls(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        SKU から商品DBのレシート画像URLを取得し、ledger_entries の receipt_no に反映（表示・出力用）。
+        既に receipt_no に値がある行は上書きしない。
+        """
+        if not rows:
+            return rows
+        try:
+            from desktop.database.product_db import ProductDatabase
+        except Exception:
+            return rows
+
+        # 遅延初期化された ProductDatabase を使う
+        product_db = getattr(self, "_product_db_for_receipts", None)
+        if product_db is None:
+            try:
+                product_db = ProductDatabase()
+                self._product_db_for_receipts = product_db
+            except Exception:
+                return rows
+
+        cache: Dict[str, str] = {}
+        for row in rows:
+            # 既にレシート番号（URL）が入っている場合はそのまま
+            existing = str(row.get("receipt_no") or "").strip()
+            if existing:
+                continue
+
+            sku = str(row.get("sku") or "").strip()
+            if not sku:
+                continue
+
+            if sku in cache:
+                url = cache[sku]
+            else:
+                try:
+                    product = product_db.get_by_sku(sku)
+                except Exception:
+                    product = None
+                url = ""
+                if product:
+                    url = str(product.get("receipt_image_url") or "").strip()
+                cache[sku] = url
+
+            if url:
+                row["receipt_no"] = url
+
+        return rows
 
     def get_filtered_rows(self):
         rows = self.antique_data or []
@@ -1678,13 +1757,38 @@ class AntiqueWidget(QWidget):
         keyword = self.search_edit.text().strip().lower() if hasattr(self, 'search_edit') else ''
         if keyword:
             def hit(r):
-                for k in [k for k,_ in self.ALL_COLUMNS]:
+                # ALL_COLUMNS は (key, label) のタプル
+                for k, _ in self.ALL_COLUMNS:
                     v = str(r.get(k, '')).lower()
                     if keyword in v:
                         return True
                 return False
             rows = [r for r in rows if hit(r)]
         return rows
+
+    def _on_data_table_double_clicked(self, item: QTableWidgetItem) -> None:
+        """閲覧・出力タブのセルをダブルクリックしたときの処理（レシート画像URLならブラウザで開く）"""
+        try:
+            if not hasattr(self, "column_keys"):
+                return
+            col = item.column()
+            if col < 0 or col >= len(self.column_keys):
+                return
+            key = self.column_keys[col]
+            if key != "receipt_no":
+                return
+            url = (item.data(Qt.UserRole) or item.text() or "").strip()
+            if not url:
+                return
+            if not (url.startswith("http://") or url.startswith("https://")):
+                return
+            qurl = QUrl(url)
+            if not qurl.isValid():
+                return
+            QDesktopServices.openUrl(qurl)
+        except Exception:
+            # ここでの失敗は致命的ではないので黙って無視
+            pass
 
     def apply_filters(self):
         rows = self.get_filtered_rows()

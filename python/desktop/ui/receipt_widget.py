@@ -893,11 +893,11 @@ class ReceiptWidget(QWidget):
         self.receipt_table = QTableWidget()
         # 0列目のIDは非表示（内部用）、1列目に種別、2列目に科目、3列目に画像ファイル名
         # 「登録番号」カラムを追加（店舗マスタと同様の登録番号T+13桁）
-        # 「画像URL」カラムを追加（SKUの右、GCSアップロード時のURLを表示）
+        # 「レシート画像URL」カラムを追加（SKUの右、GCSアップロード時のURLを表示）
         self.receipt_table.setColumnCount(13)
         self.receipt_table.setHorizontalHeaderLabels([
             "ID(内部)", "種別", "科目", "画像ファイル名", "日付",
-            "店舗名", "電話番号", "合計", "差額", "店舗コード", "登録番号", "SKU", "画像URL"
+            "店舗名", "電話番号", "合計", "差額", "店舗コード", "登録番号", "SKU", "レシート画像URL"
         ])
         self.receipt_table.horizontalHeader().setStretchLastSection(True)
         self.receipt_table.itemDoubleClicked.connect(self.on_receipt_double_clicked)
@@ -4154,11 +4154,11 @@ class ReceiptWidget(QWidget):
         self.process_image(image_path)
     
     def on_receipt_double_clicked(self, item: QTableWidgetItem):
-        """レシート一覧のダブルクリック動作を制御（詳細編集を開く、または画像URLを開く）"""
+        """レシート一覧のダブルクリック動作を制御（詳細編集を開く、またはレシート画像URLを開く）"""
         row = item.row()
         col = item.column()
         
-        # 画像URL列（12列目）をダブルクリックした場合はブラウザで開く
+        # レシート画像URL列（12列目）をダブルクリックした場合はブラウザで開く
         if col == 12:
             url = item.text().strip()
             if url:
