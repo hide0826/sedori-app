@@ -83,6 +83,11 @@ class SKUTemplateRenderer:
             v = self._get_cond_code(c)
             return v or ""
 
+        # {rule369} - コメント列から 3P/3N/6P/6N/9P/9N を判定
+        if token == "rule369":
+            comment = p.get("comment") or p.get("コメント") or ""
+            return self._get_rule369_code(comment)
+
         # {purchasePrice} / {price} - 仕入れ価格
         if token in ("purchasePrice", "price", "purchase_price"):
             val = (
@@ -123,6 +128,51 @@ class SKUTemplateRenderer:
             return token.split(":", 1)[1]
 
         return ""
+
+    def _get_rule369_code(self, comment: Any) -> str:
+        """
+        コメント列から 3-6-9 コードを判定して返す。
+
+        ルール:
+        - 3          → 3P
+        - 4, 3n      → 3N
+        - 6          → 6P
+        - 7, 6n      → 6N
+        - 9          → 9P
+        - 10, 9n     → 9N
+        - 空欄や上記以外（11,12...などの連番を含む）→ 6P
+        """
+        try:
+            s = "" if comment is None else str(comment).strip().lower()
+        except Exception:
+            s = ""
+
+        if not s:
+            return "6P"
+
+        # 先頭トークン（数字・pnコード）だけを見る
+        # 例: "3", "4", "3n", "6p", "9n", "10", "3n-テスト" など
+        m = re.match(r"^(3n|3p|6n|6p|9n|9p|10|3|4|6|7|9)\b", s)
+        if not m:
+            return "6P"
+
+        code = m.group(1)
+
+        if code in ("3", "3p"):
+            return "3P"
+        if code in ("4", "3n"):
+            return "3N"
+        if code in ("6", "6p"):
+            return "6P"
+        if code in ("7", "6n"):
+            return "6N"
+        if code in ("9", "9p"):
+            return "9P"
+        if code in ("10", "9n"):
+            return "9N"
+
+        # 想定外はすべて 6P 扱い
+        return "6P"
 
     def render_sku(self, product: Dict[str, Any], seq_offset: int = 0) -> str:
         # 連番（スコープdayのみサポート。seqStart + offset）

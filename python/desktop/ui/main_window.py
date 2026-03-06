@@ -246,9 +246,15 @@ class MainWindow(QMainWindow):
             route_tabs.addTab(self.route_list_widget, "ルートサマリー")
             self.route_summary_widget.data_saved.connect(self.route_list_widget.load_routes)
             self.tab_widget.addTab(route_tabs, "ルート")
+            # 本番用仕入管理タブと開発用仕入管理タブの両方にルートウィジェットを接続
             self.inventory_widget.set_route_summary_widget(self.route_summary_widget)
             self.inventory_widget.set_antique_widget(self.antique_widget)
             self.inventory_widget.spot_saved.connect(self.route_list_widget.load_routes)
+            # 開発タブ側でもルートテンプレ読込・照合処理を使えるようにする
+            if hasattr(self, "inventory_widget_dev") and self.inventory_widget_dev is not None:
+                self.inventory_widget_dev.set_route_summary_widget(self.route_summary_widget)
+                self.inventory_widget_dev.set_antique_widget(self.antique_widget)
+                self.inventory_widget_dev.spot_saved.connect(self.route_list_widget.load_routes)
             return False
 
         if phase == 2:

@@ -363,7 +363,7 @@ class InventoryWidget(QWidget):
             _hirio = str(_data_dev / "hirio.db")
             _inv_route = str(_data_dev / "hirio_inventory_route.db")
             _prod_purchase = str(_data_dev / "hirio_product_purchase.db")
-            self.store_db = StoreDatabase(_hirio)
+            # 仕入データやスナップショットなどは開発用DBを使用
             self.inventory_db = InventoryDatabase(_hirio)
             self.route_snapshot_db = InventoryRouteSnapshotDatabase(_inv_route)
             self.product_db = ProductDatabase(_hirio)
@@ -372,8 +372,11 @@ class InventoryWidget(QWidget):
             self.warranty_db = WarrantyDatabase(_hirio)
             from database.condition_template_db import ConditionTemplateDatabase
             from database.route_db import RouteDatabase
-            self.condition_template_db = ConditionTemplateDatabase(_hirio)
-            self.route_db = RouteDatabase(_hirio)
+            # 店舗マスタ・ルート定義・コンディションテンプレは本番DBを共有
+            # （店舗コード→店舗名の解決やルートテンプレの参照を本番と揃えるため）
+            self.store_db = StoreDatabase()
+            self.condition_template_db = ConditionTemplateDatabase()
+            self.route_db = RouteDatabase()
         else:
             self.store_db = StoreDatabase()
             self.inventory_db = InventoryDatabase()
@@ -915,6 +918,14 @@ class InventoryWidget(QWidget):
             "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
             "発送方法", "仕入先", "コンディション説明"
         ]
+        # 開発用タブでは、店舗コードの右に「3-6-9」カラムを追加
+        if self.dev_mode:
+            try:
+                base_idx = self.column_headers.index("仕入先") + 1
+            except ValueError:
+                base_idx = len(self.column_headers)
+            extra_columns = ["3-6-9"]
+            self.column_headers[base_idx:base_idx] = extra_columns
         
         self.data_table.setColumnCount(len(self.column_headers))
         # 表示用のヘッダーラベルを作成（「仕入先」→「店舗コード」に置き換え）
@@ -2652,6 +2663,22 @@ class InventoryWidget(QWidget):
             
             # 列マッピングと並び替え
             self.inventory_data = self._map_and_reorder_columns(df)
+            # 開発タブの場合のみ、コメント列から 3-6-9 コードを自動判定して「3-6-9」列に反映
+            # （ルールは services/sku_template.py の _get_rule369_code と同一）
+            if self.dev_mode and self.inventory_data is not None and "3-6-9" in self.inventory_data.columns:
+                try:
+                    for idx, row in self.inventory_data.iterrows():
+                        # 既に値が入っている場合はユーザー編集を優先してスキップ
+                        current_val = str(self.inventory_data.at[idx, "3-6-9"]).strip()
+                        if current_val not in ("", "nan", "None"):
+                            continue
+                        comment_val = row.get("コメント") or row.get("comment")
+                        code = self._infer_rule369_from_comment(comment_val)
+                        self.inventory_data.at[idx, "3-6-9"] = code
+                except Exception as e:
+                    # 自動判定全体の失敗も、CSV取込自体は継続
+                    print(f"3-6-9 自動判定処理でエラー: {e}")
+
             self.filtered_data = self.inventory_data.copy()
             
             # SKU自動マッチング処理（商品DBから仕入れ日・ASINで検索）
@@ -3546,6 +3573,51 @@ class InventoryWidget(QWidget):
             return "9"
         # 想定外の数字（11以上など）は分類不能 → 呼び出し側で 6 扱い
         return None
+
+    def _infer_rule369_from_comment(self, comment: Any) -> str:
+        """
+        コメント文字列から 3P/3N/6P/6N/9P/9N コードを判定して返す。
+        ルールは services/sku_template.py の SKUTemplateRenderer._get_rule369_code と同一:
+        - 3          → 3P
+        - 4, 3n      → 3N
+        - 6          → 6P
+        - 7, 6n      → 6N
+        - 9          → 9P
+        - 10, 9n     → 9N
+        - 空欄や上記以外（11,12...などの連番を含む）→ 6P
+        """
+        try:
+            s = "" if comment is None else str(comment).strip().lower()
+        except Exception:
+            s = ""
+
+        if not s:
+            return "6P"
+
+        import re
+        # 先頭トークン（数字・pnコード）だけを見る
+        # 例: "3", "4", "3n", "6p", "9n", "10", "3n-テスト" など
+        m = re.match(r"^(3n|3p|6n|6p|9n|9p|10|3|4|6|7|9)\b", s)
+        if not m:
+            return "6P"
+
+        code = m.group(1)
+
+        if code in ("3", "3p"):
+            return "3P"
+        if code in ("4", "3n"):
+            return "3N"
+        if code in ("6", "6p"):
+            return "6P"
+        if code in ("7", "6n"):
+            return "6N"
+        if code in ("9", "9p"):
+            return "9P"
+        if code in ("10", "9n"):
+            return "9N"
+
+        # 想定外はすべて 6P 扱い
+        return "6P"
 
     def _show_stats_help_dialog(self):
         """
