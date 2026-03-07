@@ -355,40 +355,19 @@ class InventoryWidget(QWidget):
         self.antique_widget = None  # 古物台帳ウィジェットへの参照
         self.product_widget = None  # 商品DBウィジェットへの参照
         
-        # 開発モード時は data_dev 配下のDBを使用し、本番DBを壊さない
-        if self.dev_mode:
-            _base = Path(__file__).resolve().parent.parent
-            _data_dev = _base / "data_dev"
-            _data_dev.mkdir(parents=True, exist_ok=True)
-            _hirio = str(_data_dev / "hirio.db")
-            _inv_route = str(_data_dev / "hirio_inventory_route.db")
-            _prod_purchase = str(_data_dev / "hirio_product_purchase.db")
-            # 仕入データやスナップショットなどは開発用DBを使用
-            self.inventory_db = InventoryDatabase(_hirio)
-            self.route_snapshot_db = InventoryRouteSnapshotDatabase(_inv_route)
-            self.product_db = ProductDatabase(_hirio)
-            self.product_purchase_db = ProductPurchaseDatabase(_prod_purchase)
-            self.route_visit_db = RouteVisitDatabase(_hirio)
-            self.warranty_db = WarrantyDatabase(_hirio)
-            from database.condition_template_db import ConditionTemplateDatabase
-            from database.route_db import RouteDatabase
-            # 店舗マスタ・ルート定義・コンディションテンプレは本番DBを共有
-            # （店舗コード→店舗名の解決やルートテンプレの参照を本番と揃えるため）
-            self.store_db = StoreDatabase()
-            self.condition_template_db = ConditionTemplateDatabase()
-            self.route_db = RouteDatabase()
-        else:
-            self.store_db = StoreDatabase()
-            self.inventory_db = InventoryDatabase()
-            self.route_snapshot_db = InventoryRouteSnapshotDatabase()
-            self.product_db = ProductDatabase()
-            self.product_purchase_db = ProductPurchaseDatabase()
-            self.route_visit_db = RouteVisitDatabase()
-            self.warranty_db = WarrantyDatabase()
-            from database.condition_template_db import ConditionTemplateDatabase
-            from database.route_db import RouteDatabase
-            self.condition_template_db = ConditionTemplateDatabase()
-            self.route_db = RouteDatabase()
+        # 仕入管理（開発）タブも実仕入で使うため、統合保存・DB保存は本番と同じDBを使用する
+        # （dev_mode は 3-6-9 列の表示やPRO統計などUI差のみ。保存先は本番と同一）
+        self.store_db = StoreDatabase()
+        self.inventory_db = InventoryDatabase()
+        self.route_snapshot_db = InventoryRouteSnapshotDatabase()
+        self.product_db = ProductDatabase()
+        self.product_purchase_db = ProductPurchaseDatabase()
+        self.route_visit_db = RouteVisitDatabase()
+        self.warranty_db = WarrantyDatabase()
+        from database.condition_template_db import ConditionTemplateDatabase
+        from database.route_db import RouteDatabase
+        self.condition_template_db = ConditionTemplateDatabase()
+        self.route_db = RouteDatabase()
         
         # UIの初期化
         self.route_template_btn = None
