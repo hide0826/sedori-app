@@ -265,6 +265,9 @@ class MainWindow(QMainWindow):
             self.store_master_widget = StoreMasterWidget()
             self.product_widget = ProductWidget(inventory_widget=self.inventory_widget)
             self.inventory_widget.set_product_widget(self.product_widget)
+            # 仕入管理（開発）からDB保存したときも仕入DBタブに即反映するため参照を渡す
+            if hasattr(self, "inventory_widget_dev") and self.inventory_widget_dev is not None:
+                self.inventory_widget_dev.set_product_widget(self.product_widget)
             self.route_visit_widget = RouteVisitLogWidget()
             db_management_tabs = QTabWidget()
             db_management_tabs.addTab(self.product_widget, "商品DB")

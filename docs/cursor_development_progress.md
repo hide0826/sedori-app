@@ -1400,3 +1400,37 @@
 
 **最終更新**: 2026-03-04
 **更新者**: Agentモード（実装）
+
+### 2026-03-08（仕入管理(開発)SKU途切れ防止・仕入DB列整理）
+- **内容**:
+-  1. **仕入管理（開発）タブから仕入DBへのSKU途切れ防止**
+     - `inventory_widget.py`:
+       - DB保存時に必ず `filtered_data` をソースとし、本番タブと同じ列セット（仕入れ日/コンディション/SKU/ASIN/JAN/商品名/仕入れ個数/価格系/コメント/発送方法/仕入先/コンディション説明）のみを仕入DBスナップショットに保存するよう変更。開発タブ固有の「3-6-9」列は仕入DBには保存しない。
+       - テーブル表示用セルの `Qt.UserRole` にフルSKUを保持し、`get_table_data()` や保存時には常に UserRole の値を優先して使用することで、列幅や省略表示（...）の影響でSKUが途中で切れて保存される問題を防止。
+       - `sync_inventory_data_from_table()` でテーブル→`inventory_data` へ同期する際、SKUが「...」で終わる値は上書きしないようにし、本来のフルSKUを維持。
+       - 既存スナップショットとマージする際、新しいレコード側のSKUが「...」で既存レコード側がフルSKUの場合は既存のSKUを優先して残すようにし、過去の完全なSKUが省略版で潰れないようにした。
+       - DB保存完了後に、`product_widget` へ参照を渡している場合は最新スナップショットを読み込み直し、仕入DBタブのテーブルを即時に再描画するようにして、アプリ再起動なしで反映されるよう改善。
+     - `main_window.py`:
+       - データベース管理タブ初期化時に、本番用 `inventory_widget` だけでなく開発用 `inventory_widget_dev` にも `product_widget` の参照を渡し、開発タブからのDB保存でも商品DBタブ（仕入DB）の表示が即座に更新されるようにした。
+-  2. **仕入DBタブのSKU表示安定化と古物台帳カラムの整理**
+     - `product_widget.py`:
+       - 仕入DBテーブル `purchase_table` に対して `setTextElideMode(Qt.ElideNone)` を設定し、SKUや商品名が列幅の都合で「...」に省略されないように変更。
+       - SKUセルにも `Qt.UserRole` でフルSKUを保持し、「仕入DB保存」処理では `item.text()` ではなく UserRole を優先して保存することで、表示が省略されていてもDBには常にフルSKUが残るようにした。商品名についても同様にUserRole優先で保存。
+       - 列幅復元後にSKU列の最小幅を300pxに補正し、3-6-9を含む長いSKUでも基本的にフルで読めるように調整。
+       - 仕入DBテーブル列をレコードのキーから自動追加する処理で、古物台帳用のカラム（「品目」「品名」「氏名(個人)」「本人確認書類」「確認番号」「確認日」「確認者」「台帳登録済」および対応する英字キー: `person_name`/`person_address`/`id_type`/`id_number`/`id_checked_on`/`id_checked_by`/`id_proof_ref`/`kobutsu_kind`/`hinmoku`/`hinmei`）を除外し、仕入DBタブからこれらの残骸列が表示されないよう整理。
+-  3. **開発ルールと設定のメモ更新**
+     - `.cursor/rules/hirio-rule.mdc`:
+       - 将来的に Reflex への移行でPWA化したいこと、および近い将来に SP-API を利用した実装を進める予定であることを明文化し、実装時にこれらを意識した設計を行うようルールに追記。
+     - `config/inventory_settings.json`:
+       - 画像管理タブ用の「直近使用したディレクトリ」として、`image_manager_last_directory` を追加し、CSV/画像作業の際に直前のフォルダから開きやすくするための実験的なメモを保存。
+
+- **変更ファイル**:
+-  - .cursor/rules/hirio-rule.mdc
+-  - config/inventory_settings.json
+-  - python/desktop/ui/inventory_widget.py
+-  - python/desktop/ui/main_window.py
+-  - python/desktop/ui/product_widget.py
+-  - docs/cursor_development_progress.md
+
+**最終更新**: 2026-03-08
+**更新者**: Agentモード（実装）

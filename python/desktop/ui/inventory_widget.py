@@ -1645,17 +1645,32 @@ class InventoryWidget(QWidget):
         
         # 1. 仕入データ一覧を商品DBの仕入DBに保存（仕入DBタブの取り込みと同じ処理）
         try:
-            # テーブルから最新データを取得（手入力商品も含む）
-            df = self.get_table_data()
-            if df is None or len(df) == 0:
-                df = self.inventory_data
-            if df is None or len(df) == 0:
+            # 本番仕入管理タブと同じ列だけ使う（開発タブの「3-6-9」は仕入DBに保存しない＝表示・保存を本番と同じにすることでSKU途切れを防ぐ）
+            BASE_COLUMNS_FOR_PURCHASE_DB = [
+                "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
+                "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
+                "発送方法", "仕入先", "コンディション説明"
+            ]
+            if self.filtered_data is not None and len(self.filtered_data) > 0:
+                cols = [c for c in BASE_COLUMNS_FOR_PURCHASE_DB if c in self.filtered_data.columns]
+                df = self.filtered_data[cols].fillna("").copy()
+                purchase_records = df.to_dict(orient="records")
+            else:
+                df = self.get_table_data()
+                if df is None or len(df) == 0:
+                    df = self.inventory_data
+                if df is None or len(df) == 0:
+                    purchase_records = []
+                else:
+                    df = df.fillna("")
+                    cols = [c for c in BASE_COLUMNS_FOR_PURCHASE_DB if c in df.columns]
+                    if cols:
+                        df = df[cols]
+                    purchase_records = df.to_dict(orient="records")
+            
+            if not purchase_records:
                 messages.append("仕入データ: データがありません")
             else:
-                # DataFrameを辞書形式に変換
-                df = df.fillna("")
-                purchase_records = df.to_dict(orient="records")
-                
                 # 保証・レシート情報を付与
                 purchase_records = self._augment_purchase_records_for_db(purchase_records)
                 
@@ -1696,6 +1711,14 @@ class InventoryWidget(QWidget):
                     key = self._get_purchase_record_key(record)
                     if key and key in existing_index:
                         # 既存データを更新（同じキーの既存レコードを置き換え）
+                        existing_rec = existing_all_records[existing_index[key]]
+                        new_sku = str(record.get("SKU") or record.get("sku") or "").strip()
+                        existing_sku = str(existing_rec.get("SKU") or existing_rec.get("sku") or "").strip()
+                        # 新しいSKUが省略(...)で既存がフルの場合は既存SKUを維持（途切れ防止）
+                        if new_sku.endswith("...") and existing_sku and not existing_sku.endswith("..."):
+                            record = dict(record)
+                            record["SKU"] = existing_sku
+                            record["sku"] = existing_sku
                         existing_all_records[existing_index[key]] = record
                         updated_count += 1
                     else:
@@ -1711,12 +1734,16 @@ class InventoryWidget(QWidget):
                 self.product_purchase_db.save_snapshot("自動保存(仕入DB)", existing_all_records)
                 purchase_saved = True
                 
-                # 仕入DBタブの表示を更新（参照があれば）
+                # 仕入DBタブの表示を即時更新（参照があれば）
                 if self.product_widget:
                     try:
                         # 最新スナップショットを読み込んで表示を更新
                         self.product_widget.restore_latest_purchase_snapshot()
                         self.product_widget.load_purchase_data(existing_all_records)
+                        # テーブルを即再描画して反映させる
+                        if hasattr(self.product_widget, "purchase_table") and self.product_widget.purchase_table is not None:
+                            self.product_widget.purchase_table.viewport().update()
+                            self.product_widget.purchase_table.updateGeometry()
                     except Exception as e:
                         print(f"仕入DBタブの表示更新エラー: {e}")
                 
@@ -2916,12 +2943,13 @@ class InventoryWidget(QWidget):
                         value = ""
                     value = str(value) if pd.notna(value) else ""
                     
-                    # SKU列の特別処理（空の場合は「未実装」と表示）
+                    # SKU列の特別処理（空の場合は「未実装」と表示・フル値をUserRoleで保持）
                     if column == "SKU":
                         if not value or value == "" or value == "nan" or pd.isna(value):
                             item = QTableWidgetItem("未実装")
                         else:
                             item = QTableWidgetItem(str(value))
+                            item.setData(Qt.UserRole, str(value))  # 保存時にフルSKUを使うため
                     # 商品名列の特別処理（50文字制限+ツールチップ）
                     elif column == "商品名":
                         original_value = value
@@ -3224,6 +3252,8 @@ class InventoryWidget(QWidget):
                 item.setToolTip(value)
                 item.setData(Qt.UserRole, value)
                 item.setText(value[:50] + "..." if len(value) > 50 else value)
+            if column == "SKU":
+                item.setData(Qt.UserRole, value)  # フルSKUを保持（保存時に使用）
             if column == "コンディション説明":
                 item.setToolTip(_normalize_condition_note_newlines(value))
         # filtered_data / inventory_data をテーブルから再取得して同期
@@ -3234,11 +3264,18 @@ class InventoryWidget(QWidget):
                 idx = self.filtered_data.index[table_row_index]
                 for col in self.column_headers:
                     if col in df.columns and col in self.filtered_data.columns:
-                        self.filtered_data.at[idx, col] = df.iloc[table_row_index][col]
+                        val = df.iloc[table_row_index][col]
+                        # SKUが省略表示(...)の場合は上書きしない（本番と同じフル値を維持）
+                        if col == "SKU" and isinstance(val, str) and val.strip().endswith("..."):
+                            continue
+                        self.filtered_data.at[idx, col] = val
                 if self.inventory_data is not None and idx in self.inventory_data.index:
                     for col in self.column_headers:
                         if col in df.columns and col in self.inventory_data.columns:
-                            self.inventory_data.at[idx, col] = df.iloc[table_row_index][col]
+                            val = df.iloc[table_row_index][col]
+                            if col == "SKU" and isinstance(val, str) and val.strip().endswith("..."):
+                                continue
+                            self.inventory_data.at[idx, col] = val
             except Exception as e:
                 # フォールバック: テーブル全体で上書き
                 self.filtered_data = df.copy()
@@ -4103,8 +4140,12 @@ class InventoryWidget(QWidget):
                                 row_data[column] = round(float(value_str), 2)
                         except (ValueError, TypeError):
                             row_data[column] = 0.0
-                    # SKU列の特別処理（「未実装」は空文字に変換）
+                    # SKU列の特別処理（UserRoleにフル値を保持している場合はそれを優先、「未実装」は空文字に変換）
                     elif column == "SKU":
+                        if item is not None:
+                            full_sku = item.data(Qt.UserRole)
+                            if full_sku is not None and str(full_sku).strip():
+                                value = str(full_sku)
                         if value == "未実装":
                             row_data[column] = ""
                         else:

@@ -644,6 +644,8 @@ class ProductWidget(QWidget):
         # （レシート画像や画像URLをダブルクリックしたときに画像/URLを開く）
         self.purchase_table.cellDoubleClicked.connect(self.on_purchase_table_cell_clicked)
         self.purchase_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        # SKU・商品名など長いテキストを省略表示（...）にしない（仕入管理（開発）保存時などでフル表示）
+        self.purchase_table.setTextElideMode(Qt.ElideNone)
         
         layout.addWidget(self.purchase_table)
 
@@ -854,6 +856,15 @@ class ProductWidget(QWidget):
                     continue
                 cell_item = self.purchase_table.item(row, col)
                 value = cell_item.text() if cell_item else ""
+                # SKU・商品名はUserRoleにフル値を保持している場合はそれを優先（表示が...で切れていても保存はフルで）
+                if header == "SKU" and cell_item:
+                    full = cell_item.data(Qt.UserRole)
+                    if full is not None and str(full).strip():
+                        value = str(full).strip()
+                if header == "商品名" and cell_item:
+                    full = cell_item.data(Qt.UserRole)
+                    if full is not None and str(full).strip():
+                        value = str(full).strip()
                 row_data[header] = value
                 
                 # レシート画像列の場合は、UserRoleに保存されているファイルパスも取得
@@ -1712,9 +1723,18 @@ class ProductWidget(QWidget):
         columns = list(base_columns)
         seen = set(col.upper() for col in columns)
         
-        # レコードから追加の列を取得（既にcolumnsに含まれているものは除外）
+        # 古物台帳用カラムは ledger_db に保存するため仕入DBには表示しない（残骸列の除外）
+        _purchase_table_exclude_columns = frozenset({
+            "品目", "品名", "氏名(個人)", "本人確認書類", "確認番号", "確認日", "確認者", "台帳登録済",
+            "person_name", "person_address", "id_type", "id_number", "id_checked_on", "id_checked_by", "id_proof_ref",
+            "kobutsu_kind", "hinmoku", "hinmei",
+        })
+        
+        # レコードから追加の列を取得（既にcolumnsに含まれているもの・古物台帳用除外リストは除外）
         for record in records:
             for key in record.keys():
+                if key in _purchase_table_exclude_columns:
+                    continue
                 upper_key = key.upper()
                 if upper_key not in seen:
                     seen.add(upper_key)
@@ -2106,6 +2126,9 @@ class ProductWidget(QWidget):
                     # 編集時の処理は、itemChangedシグナルで処理（後で接続）
                 else:
                     item = QTableWidgetItem(str(value))
+                    # SKUはUserRoleにフル値を保持（表示幅で...になっても保存時はフルで使う）
+                    if header == "SKU" and value is not None and str(value).strip():
+                        item.setData(Qt.UserRole, str(value).strip())
                 
                 if header != "ステータス":  # ステータス列はセルウィジェットを設定済み
                     self.purchase_table.setItem(row, col, item)
@@ -2146,6 +2169,12 @@ class ProductWidget(QWidget):
         # SKU列が無い場合は安全に終了
         if sku_col_idx is None:
             sku_col_idx = None
+        
+        # 表示問題対策: SKU列をフル表示するため最小幅を確保（DBには全文入っているが表示で...になるのを防ぐ）
+        if sku_col_idx is not None:
+            MIN_SKU_COLUMN_WIDTH = 300
+            if header.sectionSize(sku_col_idx) < MIN_SKU_COLUMN_WIDTH:
+                header.resizeSection(sku_col_idx, MIN_SKU_COLUMN_WIDTH)
         
         if status_reason_col_idx is not None:
             # 既存のitemChangedシグナル接続を解除（重複接続を防ぐ）
