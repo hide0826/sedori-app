@@ -2,7 +2,7 @@ import pandas as pd
 import io
 import json
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 from datetime import datetime
 import json
 from pathlib import Path
@@ -55,7 +55,7 @@ class InventoryService:
         return df, stats
 
     @staticmethod
-    def generate_sku_bulk(products: List[dict]) -> dict:
+    def generate_sku_bulk(products: List[dict], sku_date: Optional[str] = None) -> dict:
         """
         SKUを一括生成（店舗マスタ連携対応）
         
@@ -82,7 +82,8 @@ class InventoryService:
         except Exception:
             settings = default_settings
 
-        renderer = SKUTemplateRenderer(settings)
+        # オプションのSKU日付（"YYYYMMDD" など）を受け取り、テンプレート側で使用する
+        renderer = SKUTemplateRenderer(settings, sku_date=sku_date)
 
         results = []
         for idx, product in enumerate(products):

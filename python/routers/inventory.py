@@ -79,8 +79,11 @@ async def generate_bulk_sku(request: BulkSKUGenerationRequest):
     """
     一括SKU生成（アップロードされた全商品）
     """
-    # Delegate to InventoryService class
-    response_data = InventoryService.generate_sku_bulk(request.products)
+    # Delegate to InventoryService class（オプションでSKU日付を指定可能）
+    response_data = InventoryService.generate_sku_bulk(
+        request.products,
+        sku_date=request.sku_date,
+    )
     return BulkSKUGenerationResponse(**response_data)
 
 

@@ -285,8 +285,8 @@ class APIClient:
                 'columns': 17
             }
     
-    def inventory_generate_sku(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """SKU生成"""
+    def inventory_generate_sku(self, data: List[Dict[str, Any]], sku_date: Optional[str] = None) -> Dict[str, Any]:
+        """SKU生成（任意の日付指定対応）"""
         try:
             # NaN/inf を JSON に通る形にクリーン
             def _clean(obj):
@@ -303,6 +303,8 @@ class APIClient:
                 return obj
 
             payload = { 'products': _clean(data) }
+            if sku_date:
+                payload['sku_date'] = sku_date
             # 既存のFastAPIエンドポイントを活用
             response = self.session.post(
                 f"{self.base_url}/api/inventory/generate-sku-bulk",

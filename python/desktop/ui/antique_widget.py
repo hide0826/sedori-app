@@ -1721,9 +1721,11 @@ class AntiqueWidget(QWidget):
 
         cache: Dict[str, str] = {}
         for row in rows:
-            # 既にレシート番号（URL）が入っている場合はそのまま
+            # 既にレシート番号（URL）が入っている場合は、その値が「有効なURL」のときだけ維持し、
+            # ローカルファイル名やプレーンテキストの場合は上書き対象とする。
             existing = str(row.get("receipt_no") or "").strip()
-            if existing:
+            if existing and (existing.startswith("http://") or existing.startswith("https://")):
+                # すでにHTTP(S) URLが入っている行は変更しない
                 continue
 
             sku = str(row.get("sku") or "").strip()

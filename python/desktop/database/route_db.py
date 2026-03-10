@@ -69,6 +69,12 @@ class RouteDatabase:
                 total_item_count INTEGER,
                 purchase_success_rate REAL,
                 avg_purchase_price REAL,
+                -- 仕入健全度・実効利益関連（PRO版、仕入管理（開発）タブ由来）
+                health_score_count TEXT,      -- 仕入健全度(件数3-6-9) 表示用文字列
+                health_score_amount TEXT,     -- 仕入健全度(金額3-6-9) 表示用文字列
+                effective_profit REAL,        -- 実効見込み利益
+                theoretical_profit REAL,      -- 想定見込み利益（理論）
+                effective_rate REAL,          -- 実現率(%)
                 -- 進捗管理用フラグ
                 listing_completed INTEGER DEFAULT 0,   -- 出品CSV生成完了
                 evidence_completed INTEGER DEFAULT 0,  -- 証憑（レシート）確定完了
@@ -92,6 +98,11 @@ class RouteDatabase:
             ("listing_completed", "INTEGER"),
             ("evidence_completed", "INTEGER"),
             ("images_completed", "INTEGER"),
+            ("health_score_count", "TEXT"),
+            ("health_score_amount", "TEXT"),
+            ("effective_profit", "REAL"),
+            ("theoretical_profit", "REAL"),
+            ("effective_rate", "REAL"),
         ):
             try:
                 cursor.execute(f"ALTER TABLE route_summaries ADD COLUMN {column} {coltype} DEFAULT 0")
@@ -195,8 +206,9 @@ class RouteDatabase:
                 total_working_hours, estimated_hourly_rate,
                 total_gross_profit, total_item_count, purchase_success_rate, avg_purchase_price,
                 expected_margin, expected_roi,
-                listing_completed, evidence_completed, images_completed
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                listing_completed, evidence_completed, images_completed,
+                health_score_count, health_score_amount, effective_profit, theoretical_profit, effective_rate
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             route_data.get('route_date'),
             route_data.get('route_code'),
@@ -222,6 +234,11 @@ class RouteDatabase:
             1 if route_data.get('listing_completed') else 0,
             1 if route_data.get('evidence_completed') else 0,
             1 if route_data.get('images_completed') else 0,
+            route_data.get('health_score_count'),
+            route_data.get('health_score_amount'),
+            route_data.get('effective_profit'),
+            route_data.get('theoretical_profit'),
+            route_data.get('effective_rate'),
         ))
         
         conn.commit()
@@ -275,7 +292,12 @@ class RouteDatabase:
                 expected_roi = ?,
                 listing_completed = COALESCE(?, listing_completed),
                 evidence_completed = COALESCE(?, evidence_completed),
-                images_completed = COALESCE(?, images_completed)
+                images_completed = COALESCE(?, images_completed),
+                health_score_count = COALESCE(?, health_score_count),
+                health_score_amount = COALESCE(?, health_score_amount),
+                effective_profit = COALESCE(?, effective_profit),
+                theoretical_profit = COALESCE(?, theoretical_profit),
+                effective_rate = COALESCE(?, effective_rate)
             WHERE id = ?
         """, (
             route_data.get('route_date'),
@@ -301,6 +323,11 @@ class RouteDatabase:
             None if 'listing_completed' not in route_data else (1 if route_data.get('listing_completed') else 0),
             None if 'evidence_completed' not in route_data else (1 if route_data.get('evidence_completed') else 0),
             None if 'images_completed' not in route_data else (1 if route_data.get('images_completed') else 0),
+            route_data.get('health_score_count'),
+            route_data.get('health_score_amount'),
+            route_data.get('effective_profit'),
+            route_data.get('theoretical_profit'),
+            route_data.get('effective_rate'),
             route_id
         ))
         
@@ -352,6 +379,7 @@ class RouteDatabase:
             "total_purchase_amount, total_sales_amount, "
             "total_working_hours, estimated_hourly_rate, total_gross_profit, total_item_count, "
             "purchase_success_rate, avg_purchase_price, expected_margin, expected_roi, "
+            "health_score_count, health_score_amount, effective_profit, theoretical_profit, effective_rate, "
             "listing_completed, evidence_completed, images_completed, "
             "created_at, updated_at, "
             "datetime(updated_at, 'localtime') AS updated_at_local "

@@ -72,7 +72,17 @@ class RouteSummaryWidget(QWidget):
         self.matching_service = RouteMatchingService() if RouteMatchingService else None
         self.calc_service = CalculationService() if CalculationService else None
         self.api_client = api_client
-        self.inventory_widget = inventory_widget
+        # 本番用・開発用それぞれの仕入管理ウィジェットを保持
+        self.inventory_widget_main = None
+        self.inventory_widget_dev = None
+        self.inventory_widget = None  # 従来コードとの互換用（主に本番タブを指す）
+        if inventory_widget is not None:
+            if getattr(inventory_widget, "dev_mode", False):
+                self.inventory_widget_dev = inventory_widget
+            else:
+                self.inventory_widget_main = inventory_widget
+        # 互換用ポインタ（本番→開発の優先順で設定）
+        self.inventory_widget = self.inventory_widget_main or self.inventory_widget_dev
         
         self.current_route_id = None
         self.route_data = {}
@@ -2306,6 +2316,12 @@ class RouteSummaryWidget(QWidget):
                 route_data['total_sales_amount'] = metrics.get('total_sales_amount', 0.0)
                 route_data['total_working_hours'] = metrics.get('total_working_hours', 0.0)
                 route_data['estimated_hourly_rate'] = metrics.get('estimated_hourly_rate', 0.0)
+                # 仕入健全度・実効見込み利益（PRO版＋開発タブの統計結果）を引き継ぐ
+                route_data['health_score_count'] = metrics.get('health_score_count')
+                route_data['health_score_amount'] = metrics.get('health_score_amount')
+                route_data['effective_profit'] = metrics.get('effective_profit')
+                route_data['theoretical_profit'] = metrics.get('theoretical_profit')
+                route_data['effective_rate'] = metrics.get('effective_rate')
             else:
                 def _int_safe(x):
                     try:
@@ -2601,14 +2617,23 @@ class RouteSummaryWidget(QWidget):
             return int(round(val))
 
         inventory_df = None
-        if self.inventory_widget and hasattr(self.inventory_widget, 'inventory_data'):
+        # 仕入管理（開発）タブにデータがあれば優先的に使用し、無ければ本番タブのデータを使う
+        candidate_widgets = []
+        if getattr(self, "inventory_widget_dev", None) is not None:
+            candidate_widgets.append(self.inventory_widget_dev)
+        if getattr(self, "inventory_widget_main", None) is not None:
+            candidate_widgets.append(self.inventory_widget_main)
+
+        for inv_widget in candidate_widgets:
             try:
-                data = self.inventory_widget.inventory_data
+                data = getattr(inv_widget, "inventory_data", None)
                 if data is not None:
-                    if hasattr(data, 'iterrows'):
+                    if hasattr(data, "iterrows"):
                         inventory_df = data.copy()
                     elif isinstance(data, list):
                         inventory_df = pd.DataFrame(data)
+                if inventory_df is not None and len(inventory_df) > 0:
+                    break
             except Exception:
                 inventory_df = None
 
@@ -2616,6 +2641,12 @@ class RouteSummaryWidget(QWidget):
         total_sales = 0.0
         total_profit = 0.0
         total_items = 0
+        # 仕入健全度・実効見込み利益（開発タブ + PRO版のみ）
+        health_score_count = None
+        health_score_amount = None
+        effective_profit = None
+        theoretical_profit = None
+        effective_rate = None
 
         if inventory_df is not None and len(inventory_df) > 0:
             for _, row in inventory_df.iterrows():
@@ -2642,6 +2673,32 @@ class RouteSummaryWidget(QWidget):
                 total_sales = total_purchase + total_profit
             if total_profit == 0 and total_sales and total_purchase:
                 total_profit = total_sales - total_purchase
+
+            # PRO版かつ開発タブのデータがあれば、仕入健全度・実効見込み利益も計算
+            from utils.settings_helper import is_pro_enabled
+            dev_widget = getattr(self, "inventory_widget_dev", None)
+            if dev_widget is not None and getattr(dev_widget, "dev_mode", False) and is_pro_enabled():
+                try:
+                    # inventory_widget.py のロジックを流用
+                    count_health = dev_widget._compute_health_score_3_6_9(inventory_df)
+                    profit_health = dev_widget._compute_health_score_3_6_9_profit(inventory_df)
+                    if count_health:
+                        r3, r6, r9 = count_health.get("ratio_3"), count_health.get("ratio_6"), count_health.get("ratio_9")
+                        level = count_health.get("level")
+                        health_score_count = f"{r3}:{r6}:{r9}（{level}）"
+                    if profit_health:
+                        pr3, pr6, pr9 = profit_health.get("ratio_3"), profit_health.get("ratio_6"), profit_health.get("ratio_9")
+                        plevel = profit_health.get("level")
+                        eff_rate = profit_health.get("effective_rate")
+                        total_profit_th = profit_health.get("total_profit")
+                        effective_profit_val = profit_health.get("effective_profit")
+                        health_score_amount = f"{pr3}:{pr6}:{pr9}（{plevel}）"
+                        effective_profit = effective_profit_val
+                        theoretical_profit = total_profit_th
+                        effective_rate = eff_rate
+                except Exception:
+                    # 健全度計算でエラーが出ても、他のルート集計は継続
+                    pass
 
         table_items = 0
         table_profit = 0.0
@@ -2680,6 +2737,11 @@ class RouteSummaryWidget(QWidget):
             'avg_purchase_price': avg_purchase_price,
             'total_working_hours': working_hours,
             'estimated_hourly_rate': hourly_rate,
+            'health_score_count': health_score_count,
+            'health_score_amount': health_score_amount,
+            'effective_profit': effective_profit,
+            'theoretical_profit': theoretical_profit,
+            'effective_rate': effective_rate,
         }
 
     def _get_table_item(self, row: int, col: int) -> str:

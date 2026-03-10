@@ -2,5 +2,6 @@
   "skuTemplate": "{date:YYYYMMDD}-{supplier}-{purchasePrice}-{rule369}-{seq:3}",
   "seqScope": "day",
   "seqStart": 1,
+  "image_manager_default_root_dir": "D:/せどり総合/店舗せどり仕入リスト入れ/仕入帳",
   "image_manager_last_directory": "D:/せどり総合/店舗せどり仕入リスト入れ/仕入帳/20260307千葉流山ー埼玉東川口ルート/商品画像"
 }

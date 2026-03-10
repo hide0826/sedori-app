@@ -131,10 +131,15 @@ class ProductDatabase:
         if "jan" in product and product["jan"]:
             product["jan"] = normalize_jan(product["jan"])
 
+        # products テーブルに保存するフィールド一覧
+        # レシート画像URL（receipt_image_url）もここで永続化する
         fields = [
-            "sku","jan","asin","product_name","purchase_date","purchase_price","quantity",
-            "store_code","store_name","receipt_id","warranty_period_days","warranty_until",
-            "warranty_product_name","warranty_image_path"
+            "sku", "jan", "asin", "product_name",
+            "purchase_date", "purchase_price", "quantity",
+            "store_code", "store_name",
+            "receipt_id", "receipt_image_url",
+            "warranty_period_days", "warranty_until",
+            "warranty_product_name", "warranty_image_path",
         ]
         values = [product.get(k) for k in fields]
 

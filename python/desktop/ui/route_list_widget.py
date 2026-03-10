@@ -175,6 +175,10 @@ class RouteListWidget(QWidget):
             "平均仕入価格",
             "総稼働時間 (h)",
             "想定時給",
+            "仕入健全度（件数）",
+            "仕入健全度（金額）",
+            "実効見込み利益",
+            "実現率(%)",
         ]
         
         self.table.setRowCount(len(routes))
@@ -305,6 +309,34 @@ class RouteListWidget(QWidget):
             rate_item.setData(Qt.EditRole, hourly_rate)
             rate_item.setText(self._format_currency(hourly_rate))
             self.table.setItem(i, 15, rate_item)
+
+            # 仕入健全度（件数）/（金額）/ 実効見込み利益 / 実現率
+            from utils.settings_helper import is_pro_enabled
+            if is_pro_enabled():
+                # 件数
+                count_text = route.get('health_score_count') or ""
+                self.table.setItem(i, 16, QTableWidgetItem(str(count_text)))
+                # 金額
+                amount_text = route.get('health_score_amount') or ""
+                self.table.setItem(i, 17, QTableWidgetItem(str(amount_text)))
+                # 実効見込み利益
+                eff_profit_val = self._safe_float(route.get('effective_profit'))
+                eff_item = QTableWidgetItem()
+                eff_item.setData(Qt.EditRole, eff_profit_val)
+                eff_item.setText(self._format_currency(eff_profit_val))
+                self.table.setItem(i, 18, eff_item)
+                # 実現率(%)
+                eff_rate_val = self._safe_float(route.get('effective_rate'))
+                ratep_item = QTableWidgetItem()
+                ratep_item.setData(Qt.EditRole, eff_rate_val)
+                ratep_item.setText(f"{eff_rate_val:.1f}" if eff_rate_val is not None else "")
+                self.table.setItem(i, 19, ratep_item)
+            else:
+                # PRO版でない場合は空欄
+                self.table.setItem(i, 16, QTableWidgetItem(""))
+                self.table.setItem(i, 17, QTableWidgetItem(""))
+                self.table.setItem(i, 18, QTableWidgetItem(""))
+                self.table.setItem(i, 19, QTableWidgetItem(""))
             
             # 各行にIDを保持（ダブルクリック時やチェック変更時の参照用）
             self.table.item(i, 0).setData(Qt.UserRole, route.get('id'))
@@ -353,12 +385,26 @@ class RouteListWidget(QWidget):
         hourly_values = [self._safe_float(route.get('estimated_hourly_rate')) for route in routes if route.get('estimated_hourly_rate') is not None]
         if hourly_values:
             avg_hourly = sum(hourly_values) / len(hourly_values)
+        # 実効見込み利益・実現率（PRO版のみ集計）
+        from utils.settings_helper import is_pro_enabled
+        eff_profit_total = 0.0
+        eff_rate_avg = 0.0
+        if is_pro_enabled():
+            eff_profit_total = sum(self._safe_float(route.get('effective_profit')) for route in routes)
+            eff_rates = [self._safe_float(route.get('effective_rate')) for route in routes if route.get('effective_rate') is not None]
+            if eff_rates:
+                eff_rate_avg = sum(eff_rates) / len(eff_rates)
         self.stats_label.setText(
             f"統計: ルート数 {total_routes}件 / 総仕入点数 {total_items:,}点 / "
             f"総仕入額 {self._format_currency(total_purchase)} / "
             f"総想定販売額 {self._format_currency(total_sales)} / "
             f"総想定粗利 {self._format_currency(total_profit)} / "
             f"平均想定時給 {self._format_currency(avg_hourly)}"
+            + (
+                f" / 総実効見込み利益 {self._format_currency(eff_profit_total)} / "
+                f"平均実現率 {eff_rate_avg:.1f}%"
+                if is_pro_enabled() else ""
+            )
         )
     
     def on_item_double_clicked(self, item: QTableWidgetItem):

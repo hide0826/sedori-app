@@ -1434,3 +1434,71 @@
 
 **最終更新**: 2026-03-08
 **更新者**: Agentモード（実装）
+
+### 2026-03-10（SKU日付指定・ルートサマリー健全度・古物台帳レシートURL修正）
+- **内容**:
+-  1. **SKUテンプレートに任意の日付指定機能を追加**
+     - `inventory_widget.py`:
+       - SKUテンプレート設定パネルに「SKU日付(任意)」の `QDateEdit` を追加。デフォルトは当日。
+       - SKU生成時に選択日付を `yyyyMMdd` 形式の文字列として API クライアントへ渡すよう変更し、生成完了後は日付を当日にリセット。
+     - `desktop/api/client.py`:
+       - `inventory_generate_sku(products, sku_date=None)` に拡張し、`sku_date` を `/api/inventory/generate-sku-bulk` の JSON に含めるよう変更。
+     - `schemas/inventory_schemas.py`:
+       - `BulkSKUGenerationRequest` に `sku_date: Optional[str] = None` を追加。
+     - `routers/inventory.py`:
+       - `InventoryService.generate_sku_bulk(request.products, sku_date=request.sku_date)` に委譲するよう変更。
+     - `services/inventory_service.py`:
+       - `generate_sku_bulk(products: List[dict], sku_date: Optional[str] = None)` で SKU日付を受け取り、`SKUTemplateRenderer(settings, sku_date=sku_date)` に渡すよう変更。
+     - `services/sku_template.py`:
+       - `SKUTemplateRenderer` に `sku_date` パラメータと `_override_date` を追加し、指定があれば `{date:...}` と `_today()` の基準日を上書きするよう修正（`YYYYMMDD` / `YYYY-MM-DD` / `YYYY/MM/DD` 形式対応）。
+-  2. **仕入管理（開発）タブとルートサマリーの統計連携（仕入健全度・実効見込み利益）**
+     - `route_summary_widget.py`:
+       - 本番・開発それぞれの仕入管理ウィジェット参照を `inventory_widget_main` / `inventory_widget_dev` として保持し、`_calculate_summary_metrics` で開発タブの在庫データを優先して集計するよう変更（なければ本番タブを使用）。
+       - 開発タブ + PRO版有効時のみ、`InventoryWidget` の `_compute_health_score_3_6_9` / `_compute_health_score_3_6_9_profit` を内部的に呼び出し、ルート単位の
+         - 仕入健全度（件数3-6-9）表示用テキスト
+         - 仕入健全度（金額3-6-9）表示用テキスト
+         - 実効見込み利益 / 想定見込み利益 / 実現率(%)
+         を算出して `metrics` に含め、`save_data()` で `route_summaries` に保存。
+     - `route_db.py`:
+       - `route_summaries` スキーマに以下のカラムを追加し、既存DBには `ALTER TABLE` でマイグレーション:
+         - `health_score_count` TEXT
+         - `health_score_amount` TEXT
+         - `effective_profit` REAL
+         - `theoretical_profit` REAL
+         - `effective_rate` REAL
+       - `add_route_summary()` / `update_route_summary()` / `list_route_summaries()` で上記カラムを入出力対象に追加。
+     - `route_list_widget.py`:
+       - ルート一覧テーブルに4カラムを追加:
+         - 「仕入健全度（件数）」「仕入健全度（金額）」「実効見込み利益」「実現率(%)」
+       - PRO版有効時のみ、`health_score_count` / `health_score_amount` / `effective_profit` / `effective_rate` を各列に表示し、統計ラベルにも「総実効見込み利益 / 平均実現率」を追加。PRO版無効時はカラムは空欄のまま表示。
+     - `inventory_widget.py`:
+       - `set_route_summary_widget()` から `RouteSummaryWidget.inventory_widget_main` / `inventory_widget_dev` を適切に設定し、従来の `inventory_widget` ポインタも本番→開発の優先順で保持するよう修正（既存の照合処理などとの互換性維持）。
+-  3. **古物台帳のレシート画像URL連携の不具合修正**
+     - `product_db.py`:
+       - `ProductDatabase.upsert()` のフィールドリストに `receipt_image_url` を追加し、証憑管理の「確定」処理から渡されたレシート画像URLが `products.receipt_image_url` に永続化されるよう修正（従来はメモリ上のみ反映でDB未保存だった）。
+     - `receipt_widget.py`:
+       - 確定処理内で、GCSアップロード済みのレシートについて
+         - 仕入DBレコード（`purchase_all_records` / `inventory_data` / `filtered_data`）の `レシート画像URL` 列を更新
+         - `ProductDatabase` の該当SKUに `receipt_image_url` を保存（既存作法どおり）
+         する既存コードを活かしつつ、ProductDBに値が確実に残るよう上記 `upsert` 修正と整合。
+     - `antique_widget.py`:
+       - `reload_ledger_rows()` 内で `LedgerDatabase.query_ledger()` の結果に対し `_attach_receipt_image_urls()` を適用する既存処理を保持。
+       - `_attach_receipt_image_urls()` を修正し、`receipt_no` が既に値を持つ場合でも
+         - その値が `http://` / `https://` で始まる有効なURLのときだけ維持し、
+         - それ以外（ローカルファイル名やプレーンテキストなど）の場合は `ProductDatabase.receipt_image_url` で上書きするように仕様変更。これにより、仕入DB・商品DBまでURLが入っていれば、古物台帳の「更新」ボタンでレシートURLが確実に反映される。
+- **変更ファイル**:
+  - `python/desktop/ui/inventory_widget.py`
+  - `python/desktop/api/client.py`
+  - `python/routers/inventory.py`
+  - `python/schemas/inventory_schemas.py`
+  - `python/services/inventory_service.py`
+  - `python/services/sku_template.py`
+  - `python/desktop/ui/route_summary_widget.py`
+  - `python/desktop/ui/route_list_widget.py`
+  - `python/desktop/database/route_db.py`
+  - `python/desktop/database/product_db.py`
+  - `python/desktop/ui/antique_widget.py`
+  - `python/desktop/ui/receipt_widget.py`
+
+**最終更新**: 2026-03-10
+**更新者**: Agentモード（実装）

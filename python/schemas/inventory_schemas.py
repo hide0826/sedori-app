@@ -45,6 +45,7 @@ class SKUGenerationResponse(BaseModel):
 class BulkSKUGenerationRequest(BaseModel):
     """一括SKU生成リクエスト"""
     products: List[dict]  # [{purchase_date, condition, product_name, ...}, ...]
+    sku_date: Optional[str] = None  # 任意のSKU日付（UIから指定、例: "20250301"）
 
 class BulkSKUGenerationResponse(BaseModel):
     """一括SKU生成レスポンス"""

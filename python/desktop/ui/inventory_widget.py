@@ -376,6 +376,14 @@ class InventoryWidget(QWidget):
     
     def set_route_summary_widget(self, widget):
         self.route_summary_widget = widget
+        # ルート登録側に本番/開発どちらの仕入管理ウィジェットかを伝える
+        if widget is not None:
+            if getattr(self, "dev_mode", False):
+                widget.inventory_widget_dev = self
+            else:
+                widget.inventory_widget_main = self
+            # 従来互換用ポインタも更新（本番優先 / なければ開発）
+            widget.inventory_widget = widget.inventory_widget_main or widget.inventory_widget_dev
         if self.route_template_btn:
             self.route_template_btn.setEnabled(widget is not None)
         if self.matching_btn:
@@ -490,18 +498,6 @@ class InventoryWidget(QWidget):
         # アクションボタンセクション
         action_ops_layout = QHBoxLayout()
         
-        # スタートボタン（一括処理）※色はワークフロー状態で _apply_start_button_style により更新
-        self.start_workflow_btn = QPushButton("スタート")
-        self.start_workflow_btn.clicked.connect(self.start_inventory_workflow)
-        self.start_workflow_btn.setToolTip("ワークフローを開始。一時停止中は押すと再開/終了を選択できます。")
-        self._apply_start_button_style("idle")
-        action_ops_layout.addWidget(self.start_workflow_btn)
-
-        # スタート時の実行モード（1工程ずつ確認するか）
-        self.step_by_step_checkbox = QCheckBox("1工程ずつ確認")
-        self.step_by_step_checkbox.setToolTip("チェックすると、スタート実行時に各工程ごとに実行確認ダイアログを表示します。")
-        action_ops_layout.addWidget(self.step_by_step_checkbox)
-        
         # SKU生成ボタン
         self.generate_sku_btn = QPushButton("SKU生成")
         self.generate_sku_btn.clicked.connect(self.generate_sku)
@@ -520,6 +516,13 @@ class InventoryWidget(QWidget):
             }
         """)
         action_ops_layout.addWidget(self.generate_sku_btn)
+
+        # SKUクリアボタン（SKU列だけ「未実装」に戻す）
+        self.clear_sku_btn = QPushButton("SKUクリア")
+        self.clear_sku_btn.setToolTip("仕入データは残したまま、SKU列だけをすべて『未実装』に戻します。")
+        self.clear_sku_btn.clicked.connect(self.clear_sku)
+        self.clear_sku_btn.setEnabled(False)
+        action_ops_layout.addWidget(self.clear_sku_btn)
         
         # 出品CSV生成ボタン
         self.export_listing_btn = QPushButton("出品CSV生成")
@@ -2067,6 +2070,8 @@ class InventoryWidget(QWidget):
                 if len(self.inventory_data) > 0:
                     self.export_btn.setEnabled(True)
                     self.clear_btn.setEnabled(True)
+                    if hasattr(self, "clear_sku_btn"):
+                        self.clear_sku_btn.setEnabled(True)
                     self.generate_sku_btn.setEnabled(True)
                     self.export_listing_btn.setEnabled(True)
                     self.antique_register_btn.setEnabled(True)
@@ -2079,6 +2084,8 @@ class InventoryWidget(QWidget):
                 # ボタンの無効化（データが空の場合）
                 self.export_btn.setEnabled(False)
                 self.clear_btn.setEnabled(False)
+                if hasattr(self, "clear_sku_btn"):
+                    self.clear_sku_btn.setEnabled(False)
                 self.generate_sku_btn.setEnabled(False)
                 self.export_listing_btn.setEnabled(False)
                 self.antique_register_btn.setEnabled(False)
@@ -2307,56 +2314,8 @@ class InventoryWidget(QWidget):
         ワークフロー状態に応じてスタートボタンの色を変更
         state: "idle"=通常, "paused"=一時停止（再開可能）, "completed"=工程8まで完了
         """
-        if not hasattr(self, "start_workflow_btn") or self.start_workflow_btn is None:
-            return
-        if state == "paused":
-            # 一時停止中（緑系＝再開可能）
-            self.start_workflow_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #2196f3;
-                    color: white;
-                    border: none;
-                    padding: 8px 16px;
-                    border-radius: 4px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #1976d2;
-                }
-            """)
-            self.start_workflow_btn.setText("スタート（再開）")
-        elif state == "completed":
-            # 工程8まで完了（グレー系）
-            self.start_workflow_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #607d8b;
-                    color: white;
-                    border: none;
-                    padding: 8px 16px;
-                    border-radius: 4px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #546e7a;
-                }
-            """)
-            self.start_workflow_btn.setText("スタート")
-        else:
-            # idle: 通常（オレンジ）
-            self.start_workflow_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #ff9800;
-                    color: white;
-                    border: none;
-                    padding: 8px 16px;
-                    border-radius: 4px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #fb8c00;
-                }
-            """)
-            self.start_workflow_btn.setText("スタート")
+        # 現在はスタートボタンをUIから削除しているため、スタイル変更は行わない
+        return
 
     def _stop_workflow_paused_state(self):
         """ワークフロー一時停止状態を解除し、スタートボタンを通常表示に戻す"""
@@ -2371,18 +2330,8 @@ class InventoryWidget(QWidget):
         「1工程ずつ確認」がOFFのときは常にTrueを返し、そのまま進める。
         ONのときは、ユーザーに確認ダイアログを表示し、Yesのときだけ実行を続行する。
         """
-        # チェックボックスが無い、または未チェックなら確認なしで進む
-        if not hasattr(self, "step_by_step_checkbox") or not self.step_by_step_checkbox.isChecked():
-            return True
-        
-        reply = QMessageBox.question(
-            self,
-            title,
-            f"{description}\n\nこの工程を実行しますか？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
-        )
-        return reply == QMessageBox.Yes
+        # 「1工程ずつ確認」UIを削除したため、常に確認なしで進む
+        return True
 
     def start_inventory_workflow(self):
         """
@@ -2696,6 +2645,8 @@ class InventoryWidget(QWidget):
             # ボタンの有効化
             self.export_btn.setEnabled(True)
             self.clear_btn.setEnabled(True)
+            if hasattr(self, "clear_sku_btn"):
+                self.clear_sku_btn.setEnabled(True)
             self.generate_sku_btn.setEnabled(True)
             self.export_listing_btn.setEnabled(True)
             self.antique_register_btn.setEnabled(True)
@@ -3693,6 +3644,8 @@ class InventoryWidget(QWidget):
         # ボタンの無効化
         self.export_btn.setEnabled(False)
         self.clear_btn.setEnabled(False)
+        if hasattr(self, "clear_sku_btn"):
+            self.clear_sku_btn.setEnabled(False)
         self.generate_sku_btn.setEnabled(False)
         self.export_listing_btn.setEnabled(False)
         self.antique_register_btn.setEnabled(False)
@@ -3728,6 +3681,8 @@ class InventoryWidget(QWidget):
             # ボタンの無効化
             self.export_btn.setEnabled(False)
             self.clear_btn.setEnabled(False)
+            if hasattr(self, "clear_sku_btn"):
+                self.clear_sku_btn.setEnabled(False)
             self.generate_sku_btn.setEnabled(False)
             self.export_listing_btn.setEnabled(False)
             self.antique_register_btn.setEnabled(False)
@@ -3739,6 +3694,38 @@ class InventoryWidget(QWidget):
             # 表示のクリア
             self.data_count_label.setText("データ件数: 0")
             self.stats_label.setText("統計: なし")
+
+    def clear_sku(self):
+        """SKU列だけをクリア（『未実装』に戻す）"""
+        # データがない場合は何もしない
+        if self.filtered_data is None or "SKU" not in getattr(self.filtered_data, "columns", []):
+            QMessageBox.information(self, "SKUクリア", "SKU列を持つ仕入データがありません。")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "確認",
+            "表示中の仕入データのSKUをすべて『未実装』に戻しますか？\n"
+            "（仕入データ自体は残ります）",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            # DataFrame上のSKU列を『未実装』に統一
+            if self.inventory_data is not None and "SKU" in self.inventory_data.columns:
+                self.inventory_data["SKU"] = "未実装"
+            if self.filtered_data is not None and "SKU" in self.filtered_data.columns:
+                self.filtered_data["SKU"] = "未実装"
+
+            # テーブルを再描画（SKUの「未実装」表示ロジックもここで反映される）
+            self.update_table()
+
+            QMessageBox.information(self, "SKUクリア", "SKUをすべて『未実装』に戻しました。")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"SKUクリア中にエラーが発生しました:\n{e}")
     
     def delete_selected_inventory_rows(self):
         """選択された仕入データの行を削除"""
@@ -3960,8 +3947,15 @@ class InventoryWidget(QWidget):
                     warning_msg += f"\n他 {len(unique_warnings) - 5}件..."
                 QMessageBox.warning(self, "店舗情報警告", warning_msg)
             
-            # APIクライアントでSKU生成
-            result = self.api_client.inventory_generate_sku(enriched_data)
+            # SKUテンプレート用の日付（任意指定）。未指定ならNoneのまま＝当日扱い。
+            sku_date_str = None
+            if hasattr(self, "sku_date_edit") and self.sku_date_edit is not None:
+                d = self.sku_date_edit.date()
+                if d.isValid():
+                    sku_date_str = d.toString("yyyyMMdd")
+
+            # APIクライアントでSKU生成（任意のSKU日付を渡す）
+            result = self.api_client.inventory_generate_sku(enriched_data, sku_date=sku_date_str)
             
             if result['status'] == 'success':
                 # 生成されたSKUをテーブルに反映
@@ -3983,6 +3977,10 @@ class InventoryWidget(QWidget):
                 
                 # シグナル発火
                 self.sku_generated.emit(result['generated_count'])
+
+                # SKU日付は毎回リセットして当日に戻す
+                if hasattr(self, "sku_date_edit") and self.sku_date_edit is not None:
+                    self.sku_date_edit.setDate(QDate.currentDate())
             else:
                 QMessageBox.warning(self, "SKU生成失敗", "SKU生成に失敗しました")
                 
@@ -4971,28 +4969,37 @@ class InventoryWidget(QWidget):
         self.tpl_edit.setFixedHeight(30)
         lay.addWidget(self.tpl_edit, 0, 1, 1, 3)
 
-        lay.addWidget(QLabel("連番開始:"), 1, 0)
+        # SKU日付（任意指定。未指定時は当日を使用）
+        lay.addWidget(QLabel("SKU日付(任意):"), 1, 0)
+        self.sku_date_edit = QDateEdit()
+        self.sku_date_edit.setCalendarPopup(True)
+        self.sku_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.sku_date_edit.setDate(QDate.currentDate())
+        self.sku_date_edit.setFixedHeight(30)
+        lay.addWidget(self.sku_date_edit, 1, 1)
+
+        lay.addWidget(QLabel("連番開始:"), 2, 0)
         self.seq_start_spin = QSpinBox()
         self.seq_start_spin.setRange(1, 9999)
         self.seq_start_spin.setValue(1)
         self.seq_start_spin.setFixedHeight(30)
-        lay.addWidget(self.seq_start_spin, 1, 1)
+        lay.addWidget(self.seq_start_spin, 2, 1)
 
-        lay.addWidget(QLabel("スコープ:"), 1, 2)
+        lay.addWidget(QLabel("スコープ:"), 2, 2)
         self.seq_scope_combo = QComboBox()
         self.seq_scope_combo.addItems(["day"])  # まずはdayのみ
         self.seq_scope_combo.setFixedHeight(30)
-        lay.addWidget(self.seq_scope_combo, 1, 3)
+        lay.addWidget(self.seq_scope_combo, 2, 3)
 
         self.btn_load_settings = QPushButton("読込")
         self.btn_load_settings.setFixedHeight(30)
         self.btn_load_settings.clicked.connect(self.load_sku_settings)
-        lay.addWidget(self.btn_load_settings, 2, 2)
+        lay.addWidget(self.btn_load_settings, 3, 2)
 
         self.btn_save_settings = QPushButton("保存")
         self.btn_save_settings.setFixedHeight(30)
         self.btn_save_settings.clicked.connect(self.save_sku_settings)
-        lay.addWidget(self.btn_save_settings, 2, 3)
+        lay.addWidget(self.btn_save_settings, 3, 3)
 
         # 8スロットのプルダウン式ビルダー（PRO版: 3-6-9 含む）
         self._sku_token_choices = [
@@ -5013,7 +5020,7 @@ class InventoryWidget(QWidget):
         self.slot_values = []
         self.slot_seq_widths = []
         for i in range(8):
-            row = 3 + i
+            row = 4 + i
             lay.addWidget(QLabel(f"{i+1}"), row, 0)
             cb = QComboBox()
             self._set_sku_token_choices_to_combo(cb)
@@ -5088,6 +5095,9 @@ class InventoryWidget(QWidget):
             idx = self.seq_scope_combo.findText(scope)
             if idx >= 0:
                 self.seq_scope_combo.setCurrentIndex(idx)
+            # SKU日付は毎回クリアして当日に戻す（設定としては保存しない）
+            if hasattr(self, "sku_date_edit"):
+                self.sku_date_edit.setDate(QDate.currentDate())
         except Exception as e:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "エラー", f"設定の読込に失敗しました:\n{e}")

@@ -26,7 +26,7 @@ COND_CODE_MAP = {
 
 
 class SKUTemplateRenderer:
-    def __init__(self, settings: Dict[str, Any]):
+    def __init__(self, settings: Dict[str, Any], sku_date: Optional[str] = None):
         self.settings = settings or {}
         self.template: str = self.settings.get(
             "skuTemplate",
@@ -36,8 +36,25 @@ class SKUTemplateRenderer:
         self.seq_start: int = int(self.settings.get("seqStart", 1))
         self.date_cache: Optional[str] = None
 
+        # SKU日付の上書き指定（UIからの任意日付指定用）
+        self._override_date: Optional[datetime] = None
+        if sku_date:
+            # "YYYYMMDD" 形式を優先して解釈し、失敗した場合は他のよく使う形式も試す
+            for fmt in ("%Y%m%d", "%Y-%m-%d", "%Y/%m/%d"):
+                try:
+                    self._override_date = datetime.strptime(sku_date, fmt)
+                    break
+                except Exception:
+                    continue
+
     def _today(self) -> str:
-        return datetime.now().strftime("%Y%m%d")
+        base = self._override_date or datetime.now()
+        return base.strftime("%Y%m%d")
+
+    def _format_date(self, fmt_py: str) -> str:
+        """UIで指定されたSKU日付があればそれを、なければ現在日付を指定フォーマットで返す。"""
+        base = self._override_date or datetime.now()
+        return base.strftime(fmt_py)
 
     def _get_cond_num(self, condition: str) -> Optional[int]:
         return COND_NUM_MAP.get(condition)
@@ -63,7 +80,7 @@ class SKUTemplateRenderer:
             parts = token.split(":")
             fmt = parts[1] if len(parts) > 1 else "YYYYMMDD"
             fmt_py = fmt.replace("YYYY", "%Y").replace("MM", "%m").replace("DD", "%d")
-            return datetime.now().strftime(fmt_py)
+            return self._format_date(fmt_py)
 
         # {ASIN|JAN} or {asin}/{jan}
         if token in ("ASIN|JAN", "ASIN_JAN"):
