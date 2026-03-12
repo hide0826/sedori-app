@@ -262,6 +262,7 @@ class MainWindow(QMainWindow):
             from ui.store_master_widget import StoreMasterWidget
             from ui.product_widget import ProductWidget
             from ui.route_visit_widget import RouteVisitLogWidget
+            from ui.data_acquisition_widget import DataAcquisitionWidget
             self.store_master_widget = StoreMasterWidget()
             self.product_widget = ProductWidget(inventory_widget=self.inventory_widget)
             self.inventory_widget.set_product_widget(self.product_widget)
@@ -274,6 +275,9 @@ class MainWindow(QMainWindow):
             db_management_tabs.addTab(self.store_master_widget, "店舗マスタ")
             db_management_tabs.addTab(self.route_visit_widget, "ルート訪問DB")
             self.tab_widget.addTab(db_management_tabs, "データベース管理")
+            # 基礎データ取得タブ（Amazonレポート/SP-API 連携の入口）
+            self.data_acquisition_widget = DataAcquisitionWidget()
+            self.tab_widget.addTab(self.data_acquisition_widget, "データ取得")
             return False
 
         if phase == 3:

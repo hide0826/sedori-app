@@ -1699,6 +1699,8 @@ class ProductWidget(QWidget):
                         status = purchase_info.get("status", "ready")
                         status_reason = purchase_info.get("status_reason", "")
                         status_set_at = purchase_info.get("status_set_at", "")
+                        listed_date = purchase_info.get("listed_date") or ""
+
                         row["ステータス"] = status
                         row["status"] = status
                         if status_reason:
@@ -1706,6 +1708,10 @@ class ProductWidget(QWidget):
                             row["status_reason"] = status_reason
                         if status_set_at:
                             row["status_set_at"] = status_set_at
+                        # 出品日は視認用。値がなければ空文字のまま
+                        if listed_date:
+                            row["出品日"] = listed_date
+                            row["listed_date"] = listed_date
                 except Exception as e:
                     print(f"仕入DB情報取得エラー(SKU={sku}): {e}")
 
@@ -1720,7 +1726,16 @@ class ProductWidget(QWidget):
         base_columns = list(self.inventory_columns)
         if not base_columns:
             base_columns = self._resolve_inventory_columns()
+
+        # 仕入DBテーブルでは「仕入れ日」の右に「出品日」カラムを追加しておく
         columns = list(base_columns)
+        try:
+            if "出品日" not in columns:
+                purchase_date_idx = columns.index("仕入れ日")
+                columns.insert(purchase_date_idx + 1, "出品日")
+        except ValueError:
+            # 「仕入れ日」列が存在しない場合はそのまま（開発用などの特殊レイアウト想定）
+            pass
         seen = set(col.upper() for col in columns)
         
         # 古物台帳用カラムは ledger_db に保存するため仕入DBには表示しない（残骸列の除外）
@@ -2039,6 +2054,10 @@ class ProductWidget(QWidget):
                     status_combo.addItem("登録不可", "unlistable")
                     status_combo.addItem("保管中", "storage")
                     status_combo.addItem("次回出品予定", "pending")
+                    status_combo.addItem("販売中", "selling")
+                    status_combo.addItem("販売済み", "sold")
+                    status_combo.addItem("販売開始済み", "selling")
+                    status_combo.addItem("販売済み", "sold")
                     
                     # 現在の値を設定
                     current_index = 0
@@ -2139,6 +2158,36 @@ class ProductWidget(QWidget):
                 if first_item is not None:
                     first_item.setData(Qt.UserRole + 1, row_id)
             except Exception:
+                pass
+
+            # 出品日が入っていて、ステータスが未設定（ready 相当）の場合は自動で「販売中」にする
+            try:
+                listed_date_raw = record.get("出品日") or record.get("listed_date") or ""
+                status_raw = record.get("ステータス") or record.get("status") or ""
+                listed_date_str = str(listed_date_raw).strip()
+                status_str = str(status_raw).strip().lower()
+                if listed_date_str and (not status_str or status_str == "ready"):
+                    # レコード側の値も更新
+                    record["ステータス"] = "selling"
+                    record["status"] = "selling"
+                    # テーブル上のコンボボックスも更新（シグナルは発火させない）
+                    if "ステータス" in columns:
+                        status_col_idx = columns.index("ステータス")
+                        widget = self.purchase_table.cellWidget(row, status_col_idx)
+                        from PySide6.QtWidgets import QComboBox as _QComboForStatus
+                        if isinstance(widget, _QComboForStatus):
+                            old_block = widget.blockSignals(True)
+                            try:
+                                for i in range(widget.count()):
+                                    if widget.itemData(i) == "selling":
+                                        widget.setCurrentIndex(i)
+                                        break
+                            finally:
+                                widget.blockSignals(old_block)
+                    # 行の色も更新
+                    self._update_row_color_by_status(row, "selling")
+            except Exception:
+                # 自動設定に失敗してもアプリ全体には影響させない
                 pass
         
         # すべての行の背景色を設定（ステータスに応じて）
@@ -2365,6 +2414,8 @@ class ProductWidget(QWidget):
             "unlistable": QColor(80, 50, 20),  # 登録不可：オレンジ系
             "storage": QColor(20, 30, 80),  # 保管中：青系
             "pending": QColor(80, 70, 20),  # 次回出品予定：黄色系
+            "selling": QColor(20, 80, 40),  # 販売中：緑系
+            "sold": QColor(60, 60, 60),  # 販売済み：やや暗め
         }
         
         bg_color = color_map.get(status, QColor(50, 50, 50))

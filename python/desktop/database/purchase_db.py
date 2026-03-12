@@ -96,6 +96,8 @@ class PurchaseDatabase:
             ("status", "TEXT DEFAULT 'ready'"),  # 'ready': 出品可能, 'damaged': 破損, 'unlistable': 登録不可, 'storage': 保管中, 'pending': 次回出品予定
             ("status_reason", "TEXT"),  # ステータス設定の理由・詳細
             ("status_set_at", "DATETIME"),  # ステータスを設定した日時
+            # 出品日（在庫DBとの連携用・視認用）
+            ("listed_date", "TEXT"),
         ]
 
         for col_name, col_def in new_columns:
@@ -126,10 +128,24 @@ class PurchaseDatabase:
         existing = self.get_by_sku(purchase["sku"])
 
         fields = [
-            "product_id", "sku", "purchase_date", "purchase_price", "quantity",
-            "store_code", "store_name", "condition_code", "condition_note",
-            "receipt_id", "comment", "other_cost", "expected_margin", "expected_roi",
-            "status", "status_reason", "status_set_at"
+            "product_id",
+            "sku",
+            "purchase_date",
+            "purchase_price",
+            "quantity",
+            "store_code",
+            "store_name",
+            "condition_code",
+            "condition_note",
+            "receipt_id",
+            "comment",
+            "other_cost",
+            "expected_margin",
+            "expected_roi",
+            "status",
+            "status_reason",
+            "status_set_at",
+            "listed_date",
         ]
         # purchase辞書に含まれるキーのみを対象とする
         

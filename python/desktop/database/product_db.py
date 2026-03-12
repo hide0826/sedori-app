@@ -102,6 +102,8 @@ class ProductDatabase:
             ("image_url_4", "TEXT"),
             ("image_url_5", "TEXT"),
             ("image_url_6", "TEXT"),
+            # 出品日（視認用）
+            ("listed_date", "TEXT"),
         ):
             _ensure_column("products", name, ctype)
 
@@ -112,7 +114,8 @@ class ProductDatabase:
             raise ValueError("sku is required")
 
         # 既存判定
-        exists = self.get_by_sku(product["sku"]) is not None
+        existing = self.get_by_sku(product["sku"])
+        exists = existing is not None
 
         # JANコードの.0を削除（数値として読み込まれた場合の正規化）
         def normalize_jan(jan_value):
@@ -134,24 +137,39 @@ class ProductDatabase:
         # products テーブルに保存するフィールド一覧
         # レシート画像URL（receipt_image_url）もここで永続化する
         fields = [
-            "sku", "jan", "asin", "product_name",
-            "purchase_date", "purchase_price", "quantity",
-            "store_code", "store_name",
-            "receipt_id", "receipt_image_url",
-            "warranty_period_days", "warranty_until",
-            "warranty_product_name", "warranty_image_path",
+            "sku",
+            "jan",
+            "asin",
+            "product_name",
+            "purchase_date",
+            "purchase_price",
+            "quantity",
+            "store_code",
+            "store_name",
+            "receipt_id",
+            "receipt_image_url",
+            "warranty_period_days",
+            "warranty_until",
+            "warranty_product_name",
+            "warranty_image_path",
+            "listed_date",
         ]
-        values = [product.get(k) for k in fields]
-
         cur = self.conn.cursor()
         if exists:
-            set_clause = ",".join([f"{k}=?" for k in fields if k != "sku"]) + ", updated_at=CURRENT_TIMESTAMP"
-            update_values = [product.get(k) for k in fields if k != "sku"] + [product["sku"]]
+            # 更新時は指定されたキーのみ更新し、未指定のカラムはそのまま残す
+            update_fields = [k for k in fields if k != "sku" and k in product]
+            if not update_fields:
+                return
+            set_clause = ",".join([f"{k}=?" for k in update_fields]) + ", updated_at=CURRENT_TIMESTAMP"
+            update_values = [product.get(k) for k in update_fields] + [product["sku"]]
             cur.execute(f"UPDATE products SET {set_clause} WHERE sku=?", update_values)
         else:
-            placeholders = ",".join(["?"] * len(fields))
+            # 挿入時は sku と、product に含まれるフィールドだけを対象にする
+            insert_fields = [k for k in fields if k == "sku" or k in product]
+            placeholders = ",".join(["?"] * len(insert_fields))
+            values = [product.get(k) for k in insert_fields]
             cur.execute(
-                f"INSERT INTO products ({','.join(fields)}) VALUES ({placeholders})",
+                f"INSERT INTO products ({','.join(insert_fields)}) VALUES ({placeholders})",
                 values,
             )
         self.conn.commit()
