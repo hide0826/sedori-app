@@ -51,6 +51,8 @@ class SalesDatabase:
               sales_method TEXT NOT NULL,
               platform TEXT NOT NULL,
               sale_price INTEGER NOT NULL,
+              quantity INTEGER DEFAULT 1,
+              title TEXT,
               platform_fee INTEGER DEFAULT 0,
               shipping_fee INTEGER DEFAULT 0,
               fba_fee INTEGER DEFAULT 0,
@@ -66,6 +68,18 @@ class SalesDatabase:
             )
             """
         )
+
+        # 既存テーブルに不足カラムがない場合に追加（後方互換用）
+        try:
+            cur.execute("PRAGMA table_info(sales)")
+            cols = [row[1] for row in cur.fetchall()]
+            if "quantity" not in cols:
+                cur.execute("ALTER TABLE sales ADD COLUMN quantity INTEGER DEFAULT 1")
+            if "title" not in cols:
+                cur.execute("ALTER TABLE sales ADD COLUMN title TEXT")
+        except Exception:
+            # 古いSQLiteなどで失敗してもアプリ全体は止めない
+            pass
 
         # インデックス作成
         cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_sku ON sales(sku)")
@@ -104,7 +118,7 @@ class SalesDatabase:
 
         fields = [
             "purchase_id", "inventory_status_id", "sku", "sale_date",
-            "sales_method", "platform", "sale_price", "platform_fee",
+            "sales_method", "platform", "sale_price", "quantity", "title", "platform_fee",
             "shipping_fee", "fba_fee", "storage_fee", "other_fees",
             "net_profit", "order_id", "buyer_name", "transaction_method"
         ]
@@ -209,6 +223,12 @@ class SalesDatabase:
         cur.execute("DELETE FROM sales WHERE id = ?", (sale_id,))
         self.conn.commit()
         return cur.rowcount > 0
+
+    def delete_all(self) -> None:
+        """全ての販売情報を削除（再取り込み用）"""
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM sales")
+        self.conn.commit()
 
     def close(self) -> None:
         if self.conn:

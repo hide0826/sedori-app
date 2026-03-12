@@ -39,6 +39,7 @@ from database.warranty_db import WarrantyDatabase
 from database.product_purchase_db import ProductPurchaseDatabase
 from database.purchase_db import PurchaseDatabase
 from database.store_db import StoreDatabase
+from desktop.database.sales_db import SalesDatabase
 
 class SortableDateItem(QTableWidgetItem):
     """日付ソート対応のQTableWidgetItem"""
@@ -322,6 +323,7 @@ class ProductWidget(QWidget):
         self.purchase_db = ProductPurchaseDatabase()  # スナップショット用
         self.purchase_history_db = PurchaseDatabase()
         self.store_db = StoreDatabase()
+        self.sales_db = SalesDatabase()
         
         from database.receipt_db import ReceiptDatabase
         self.receipt_db = ReceiptDatabase()
@@ -664,8 +666,8 @@ class ProductWidget(QWidget):
         layout.addLayout(controls_layout)
         
         self.sales_table = QTableWidget()
-        self.sales_table.setColumnCount(5)
-        self.sales_table.setHorizontalHeaderLabels(["販売日", "商品名", "販売価格", "手数料", "利益"])
+        self.sales_table.setColumnCount(7)
+        self.sales_table.setHorizontalHeaderLabels(["販売日", "SKU", "商品名", "販売価格", "個数", "手数料", "利益"])
         layout.addWidget(self.sales_table)
 
     def get_all_purchase_records(self) -> List[Dict[str, Any]]:
@@ -1198,8 +1200,75 @@ class ProductWidget(QWidget):
                     QDesktopServices.openUrl(QUrl.fromLocalFile(image_path))
 
     def load_sales_data(self):
-        """販売データを読み込み（仮実装）"""
-        pass
+        """販売データを読み込み、販売DBタブに表示する。"""
+        try:
+            # sales テーブルから全販売情報を取得（新しい順）
+            sales = self.sales_db.list_all()
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"販売データの読み込みに失敗しました:\n{e}")
+            return
+
+        self.sales_table.setRowCount(0)
+
+        for row_idx, sale in enumerate(sales):
+            self.sales_table.insertRow(row_idx)
+
+            # 販売日
+            sale_date = str(sale.get("sale_date") or "")
+            self.sales_table.setItem(row_idx, 0, QTableWidgetItem(sale_date))
+
+            # SKU
+            sku = str(sale.get("sku") or "")
+            sku_item = QTableWidgetItem(sku)
+            self.sales_table.setItem(row_idx, 1, sku_item)
+
+            # 商品名（product_db からSKUで引ければ商品名）
+            product_name = ""
+            try:
+                product = self.db.get_by_sku(sku)
+                if product:
+                    product_name = str(product.get("product_name") or product.get("商品名") or "")
+            except Exception:
+                product = None
+            # 商品名が取得できなかった場合は sales.title を利用、それも無ければSKUを表示
+            if not product_name:
+                title = sale.get("title") or ""
+                if title:
+                    product_name = str(title)
+            if not product_name:
+                product_name = sku
+            item_name = QTableWidgetItem(product_name)
+            # フルのSKUをUserRoleに保持しておく
+            item_name.setData(Qt.UserRole, sku)
+            self.sales_table.setItem(row_idx, 2, item_name)
+
+            # 販売価格
+            sale_price = sale.get("sale_price") or 0
+            item_price = QTableWidgetItem(f"{sale_price:,}")
+            item_price.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.sales_table.setItem(row_idx, 3, item_price)
+
+            # 個数
+            quantity = sale.get("quantity") or 1
+            item_qty = QTableWidgetItem(str(quantity))
+            item_qty.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.sales_table.setItem(row_idx, 4, item_qty)
+
+            # 手数料（platform_fee + fba_fee + other_fees）
+            fee_total = (sale.get("platform_fee") or 0) + (sale.get("fba_fee") or 0) + (sale.get("other_fees") or 0)
+            item_fee = QTableWidgetItem(f"{fee_total:,}")
+            item_fee.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.sales_table.setItem(row_idx, 5, item_fee)
+
+            # 利益（net_profit。なければ sale_price - 手数料）
+            net_profit = sale.get("net_profit")
+            if net_profit is None:
+                net_profit = (sale_price or 0) - fee_total
+            item_profit = QTableWidgetItem(f"{net_profit:,}")
+            item_profit.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.sales_table.setItem(row_idx, 6, item_profit)
+
+        self.sales_table.resizeColumnsToContents()
 
     # --- 仕入DB関連 ---
     def load_purchase_data(self, records: List[Dict[str, Any]]):
