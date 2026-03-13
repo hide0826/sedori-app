@@ -136,6 +136,42 @@
 - Git:
   - chore: 商品一覧タブを非表示化
 
+## 2026-03-12 トランザクションレポート取り込み・販売DB連携
+
+- 追加: `python/desktop/ui/data_acquisition_widget.py`
+  - データベース管理＞「データ取得」タブ内に **「トランザクション」タブ** を追加。
+    - Seller Central の「レポートリポジトリ」への直リンクURLを設定・編集可能な入力欄を用意。
+    - トランザクションCSV用のデフォルトフォルダ設定、ファイル選択ボタン、ドラッグ＆ドロップ対応テキストエリアを実装。
+    - 「販売DBに取り込む」ボタンで、Amazon月次トランザクションCSV（`日付/時間`, `トランザクションの種類`, `注文番号`, `SKU`, `数量`, `説明`, 各種金額列）から販売情報を解析し、`sales` テーブルに取り込む処理を実装。
+  - トランザクションCSVは先頭に説明行が入るフォーマットのため、
+    - `日付/時間` と `SKU` を含む行を自動検出してそこをヘッダー行として扱うようにし、
+    - その行以降だけを `pandas.read_csv` で読み込む方式にして安定動作を確保。
+- 変更: `python/desktop/database/sales_db.py`
+  - `sales` テーブル（販売DB）のスキーマを拡張。
+    - 既存の `sale_price`, 各種手数料に加え、`quantity INTEGER DEFAULT 1`, `title TEXT` カラムを追加。
+    - 既存DB環境向けに `PRAGMA table_info(sales)` を使って不足カラムがある場合のみ `ALTER TABLE` する後方互換ロジックを実装。
+  - `insert()` のフィールドに `quantity`, `title` を追加し、`net_profit` は `sale_price - 各種手数料合計` で自動計算。
+  - トランザクション再取り込み時には `delete_all()` で sales テーブルを一度クリアしてから、CSVの内容で再構成する運用に統一。
+- 変更: `python/desktop/ui/product_widget.py`
+  - 商品DB画面における販売DBタブのテーブル構成を以下の7列に拡張：
+    - `販売日`, `SKU`, `商品名`, `販売価格`, `個数`, `手数料`, `利益`
+  - 販売DBタブの表示ロジック:
+    - `販売日` = `sales.sale_date`
+    - `SKU` = `sales.sku`
+    - `商品名` = 優先順に
+      1. `products.product_name` / `商品名`（`ProductDatabase.get_by_sku(sku)`）
+      2. トランザクションCSVの「説明」列 → `sales.title`
+      3. 上記が空の場合はSKU
+    - `販売価格` = `sales.sale_price`（カンマ区切り・右寄せ）
+    - `個数` = `sales.quantity`（デフォルト1）
+    - `手数料` = `platform_fee + fba_fee + other_fees`
+    - `利益` = `sales.net_profit`（なければ `販売価格 − 手数料合計` で算出）
+- 備考:
+  - 現時点では「返品（トランザクションの種類 = 返金）」行はまだ取り込んでおらず、今後の拡張として
+    - 返金行も `sales` に保存し、
+    - `inventory_status.status` を「返品」「一部返品」などに更新する
+    設計方針を検討中。
+
 ## 2025-11-03 SKUテンプレート機能追加
 
 - 追加: `python/services/sku_template.py` テンプレレンダラ
