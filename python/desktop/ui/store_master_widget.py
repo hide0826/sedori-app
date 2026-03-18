@@ -1629,6 +1629,17 @@ class StoreListWidget(QWidget):
         
         # カスタムフィールド定義を取得
         self.load_custom_fields()
+
+        # 店舗名の重複判定用（前後空白を除去して比較）
+        def _norm_store_name(name: Any) -> str:
+            return str(name or "").strip()
+
+        name_counts: Dict[str, int] = {}
+        for s in stores:
+            n = _norm_store_name(s.get("store_name", ""))
+            if not n:
+                continue
+            name_counts[n] = name_counts.get(n, 0) + 1
         
         # 基本カラム + カスタムフィールドカラム
         # 「登録番号」カラムを追加
@@ -1687,6 +1698,7 @@ class StoreListWidget(QWidget):
                     display_route_name = ",".join(ordered_names)
 
             registration_col_index = basic_columns.index("登録番号")
+            store_name_col_index = basic_columns.index("店舗名")
             for col, value in enumerate([
                 display_route_name,
                 route_code_str,
@@ -1697,6 +1709,12 @@ class StoreListWidget(QWidget):
                 store.get('registration_number', '')
             ], start=1):
                 item = QTableWidgetItem(str(value) if value else '')
+                # 店舗名が重複している場合は赤字にする（店舗名セルのみ）
+                if col == store_name_col_index:
+                    nm = _norm_store_name(value)
+                    if nm and name_counts.get(nm, 0) >= 2:
+                        item.setForeground(QColor(200, 0, 0))
+                        item.setToolTip(f"店舗名が重複しています: {nm}")
                 if col == registration_col_index:
                     # 登録番号カラムは編集可能 + store_idをUserRoleに保持
                     item.setData(Qt.UserRole, store_id)

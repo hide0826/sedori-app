@@ -1707,6 +1707,7 @@ class AntiqueWidget(QWidget):
             return rows
         try:
             from desktop.database.product_db import ProductDatabase
+            from desktop.database.ledger_db import LedgerDatabase
         except Exception:
             return rows
 
@@ -1720,6 +1721,8 @@ class AntiqueWidget(QWidget):
                 return rows
 
         cache: Dict[str, str] = {}
+        # DB へ書き戻すための (id, url) リスト
+        updates: List[tuple[int, str]] = []
         for row in rows:
             # 既にレシート番号（URL）が入っている場合は、その値が「有効なURL」のときだけ維持し、
             # ローカルファイル名やプレーンテキストの場合は上書き対象とする。
@@ -1746,6 +1749,27 @@ class AntiqueWidget(QWidget):
 
             if url:
                 row["receipt_no"] = url
+                # id が分かる行については ledger_entries にも書き戻して「消えない」ようにする
+                try:
+                    entry_id = int(row.get("id"))
+                except Exception:
+                    entry_id = None
+                if entry_id:
+                    updates.append((entry_id, url))
+
+        # 見つかったURLを ledger_entries.receipt_no に永続化（後続の読み込みでも必ず表示されるようにする）
+        if updates:
+            try:
+                ledger_db = LedgerDatabase()
+                cur = ledger_db.conn.cursor()  # type: ignore[union-attr]
+                cur.executemany(
+                    "UPDATE ledger_entries SET receipt_no = ? WHERE id = ?",
+                    [(url, entry_id) for (entry_id, url) in updates],
+                )
+                ledger_db.conn.commit()  # type: ignore[union-attr]
+            except Exception:
+                # 永続化に失敗しても画面表示自体は続行する
+                pass
 
         return rows
 

@@ -95,6 +95,11 @@ class PurchaseDatabase:
             # 商品ステータス管理
             ("status", "TEXT DEFAULT 'ready'"),  # 'ready': 出品可能, 'damaged': 破損, 'unlistable': 登録不可, 'storage': 保管中, 'pending': 次回出品予定
             ("status_reason", "TEXT"),  # ステータス設定の理由・詳細
+            # 旧: ta1/ta2 → 新: tp1/tp2（後方互換のため ta1/ta2 も残す）
+            ("ta1", "TEXT"),
+            ("ta2", "TEXT"),
+            ("tp1", "TEXT"),
+            ("tp2", "TEXT"),
             ("status_set_at", "DATETIME"),  # ステータスを設定した日時
             # 出品日（在庫DBとの連携用・視認用）
             ("listed_date", "TEXT"),
@@ -108,6 +113,15 @@ class PurchaseDatabase:
                 except Exception as e:
                     print(f"Error adding column {col_name}: {e}")
         
+        # 旧カラム ta1/ta2 に値があり、新カラム tp1/tp2 が空なら移行
+        try:
+            if "tp1" in existing_cols or "tp2" in existing_cols:
+                # 既存_cols は ALTER 前のスナップショットなので、列の有無はSQL側で吸収しておく
+                pass
+            cur.execute("UPDATE purchases SET tp1 = ta1 WHERE (tp1 IS NULL OR tp1 = '') AND ta1 IS NOT NULL AND ta1 <> ''")
+            cur.execute("UPDATE purchases SET tp2 = ta2 WHERE (tp2 IS NULL OR tp2 = '') AND ta2 IS NOT NULL AND ta2 <> ''")
+        except Exception:
+            pass
         self.conn.commit()
 
     # ========= 基本操作 =========
@@ -127,6 +141,12 @@ class PurchaseDatabase:
         # 既存判定
         existing = self.get_by_sku(purchase["sku"])
 
+        # 後方互換: 呼び出し側が ta1/ta2 を渡してきた場合は tp1/tp2 に寄せる
+        if "tp1" not in purchase and purchase.get("ta1"):
+            purchase["tp1"] = purchase.get("ta1")
+        if "tp2" not in purchase and purchase.get("ta2"):
+            purchase["tp2"] = purchase.get("ta2")
+
         fields = [
             "product_id",
             "sku",
@@ -144,6 +164,11 @@ class PurchaseDatabase:
             "expected_roi",
             "status",
             "status_reason",
+            # 旧: ta1/ta2（残す）、新: tp1/tp2（主にこちらを使う）
+            "ta1",
+            "ta2",
+            "tp1",
+            "tp2",
             "status_set_at",
             "listed_date",
         ]

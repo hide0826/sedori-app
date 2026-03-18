@@ -399,6 +399,8 @@ class ProductWidget(QWidget):
         insert_after_condition_note = [
             "ステータス",
             "ステータス理由",
+            "TP1",
+            "TP2",
             "レシート画像",
             "レシート画像URL",  # レシート画像の後に追加
             "保証書画像",  # 保証書IDから変更
@@ -1332,6 +1334,7 @@ class ProductWidget(QWidget):
             existing_skus = {r.get("SKU") or r.get("sku") for r in self.purchase_all_records}
             new_count = 0
             for r in records:
+                self._fill_tp_from_comment(r)  # コメントの1ta/1tp/2ta/2tpからTP1/TP2を補完
                 sku = r.get("SKU") or r.get("sku")
                 if sku and sku not in existing_skus:
                     self.purchase_all_records.append(r)
@@ -1677,6 +1680,8 @@ class ProductWidget(QWidget):
             if comment_warranty:
                 # コメントから取得した保証期間は保証最終日として扱う
                 row["保証最終日"] = comment_warranty
+            # コメントの「1ta/1tp数字」「2ta/2tp数字」からTP1/TP2を補完
+            self._fill_tp_from_comment(row)
 
             if sku:
                 try:
@@ -1775,6 +1780,14 @@ class ProductWidget(QWidget):
                         if status_reason:
                             row["ステータス理由"] = status_reason
                             row["status_reason"] = status_reason
+                        tp1 = purchase_info.get("tp1") or purchase_info.get("ta1") or ""
+                        tp2 = purchase_info.get("tp2") or purchase_info.get("ta2") or ""
+                        if tp1:
+                            row["TP1"] = tp1
+                            row["tp1"] = tp1
+                        if tp2:
+                            row["TP2"] = tp2
+                            row["tp2"] = tp2
                         if status_set_at:
                             row["status_set_at"] = status_set_at
                         # 出品日は視認用。値がなければ空文字のまま
@@ -1824,6 +1837,13 @@ class ProductWidget(QWidget):
                     seen.add(upper_key)
                     columns.append(key)
         self.purchase_columns = columns
+        # 行ID(_row_id) → レコード へのマッピングを作成しておく（テーブル行→レコードを一意にたどるため）
+        try:
+            self._purchase_row_map = {
+                rec.get("_row_id"): rec for rec in records if rec.get("_row_id") is not None
+            }
+        except Exception:
+            self._purchase_row_map = {}
 
         # テーブル内容をクリアし、更新中はソート/シグナルを止める（穴あき防止）
         self.purchase_table.blockSignals(True)
@@ -2163,10 +2183,14 @@ class ProductWidget(QWidget):
                             try:
                                 # ステータス理由も取得して保存
                                 status_reason = rec.get("ステータス理由") or rec.get("status_reason") or ""
+                                tp1 = rec.get("TP1") or rec.get("tp1") or rec.get("TA1") or rec.get("ta1") or ""
+                                tp2 = rec.get("TP2") or rec.get("tp2") or rec.get("TA2") or rec.get("ta2") or ""
                                 purchase_data = {
                                     "sku": sku,
                                     "status": new_status,
                                     "status_reason": status_reason,
+                                    "tp1": tp1,
+                                    "tp2": tp2,
                                     "status_set_at": rec["status_set_at"]
                                 }
                                 self.purchase_history_db.upsert(purchase_data)
@@ -2226,6 +2250,19 @@ class ProductWidget(QWidget):
                 first_item = self.purchase_table.item(row, 0)
                 if first_item is not None:
                     first_item.setData(Qt.UserRole + 1, row_id)
+                # さらにSKUセルにも行IDを保持（列構成変更やセルウィジェット混在でも確実に特定できるようにする）
+                if "SKU" in columns:
+                    sku_col_idx = columns.index("SKU")
+                    sku_item = self.purchase_table.item(row, sku_col_idx)
+                    if sku_item is not None:
+                        sku_item.setData(Qt.UserRole + 1, row_id)
+                # 最後の保険: 行内の最初のitemにも保持
+                if first_item is None:
+                    for c in range(self.purchase_table.columnCount()):
+                        it = self.purchase_table.item(row, c)
+                        if it is not None:
+                            it.setData(Qt.UserRole + 1, row_id)
+                            break
             except Exception:
                 pass
 
@@ -2362,12 +2399,30 @@ class ProductWidget(QWidget):
                                     current_status = t_rec.get("ステータス") or t_rec.get("status") or "ready"
                                     break
 
-                    # データベースに保存（ステータスも一緒に保存）
+                    # データベースに保存（ステータス・TP1・TP2も一緒に保存）
+                    tp1 = ""
+                    tp2 = ""
+                    if 0 <= row < len(records):
+                        tp1 = records[row].get("TP1") or records[row].get("tp1") or records[row].get("TA1") or records[row].get("ta1") or ""
+                        tp2 = records[row].get("TP2") or records[row].get("tp2") or records[row].get("TA2") or records[row].get("ta2") or ""
+                    # テーブル上のTP1/TP2の現在値を取得
+                    if "TP1" in columns:
+                        idx = columns.index("TP1")
+                        item_tp1 = self.purchase_table.item(row, idx)
+                        if item_tp1 and item_tp1.text():
+                            tp1 = item_tp1.text()
+                    if "TP2" in columns:
+                        idx = columns.index("TP2")
+                        item_tp2 = self.purchase_table.item(row, idx)
+                        if item_tp2 and item_tp2.text():
+                            tp2 = item_tp2.text()
                     try:
                         purchase_data = {
                             "sku": sku_val,
                             "status": current_status,
-                            "status_reason": new_reason
+                            "status_reason": new_reason,
+                            "tp1": tp1,
+                            "tp2": tp2,
                         }
                         self.purchase_history_db.upsert(purchase_data)
                         print(f"ステータス理由保存成功: SKU={sku_val}, status={current_status}, status_reason={new_reason}")
@@ -2504,8 +2559,9 @@ class ProductWidget(QWidget):
         """コンテキストメニューを表示"""
         menu = QMenu()
         
-        # クリックされたセルの列を取得
+        # クリックされたセルの列を取得（編集メニューでどの行を開くか渡す用）
         item = self.purchase_table.itemAt(position)
+        row_for_edit: Optional[int] = item.row() if item is not None else None
         if item:
             row = item.row()
             col = item.column()
@@ -2525,6 +2581,12 @@ class ProductWidget(QWidget):
         # 選択行削除（行削除ボタンと同じ処理）
         delete_row_action = menu.addAction("選択行を削除")
         delete_row_action.triggered.connect(self.on_delete_purchase_row)
+        menu.addSeparator()
+        edit_action = menu.addAction("編集（Keepa・TA価格）")
+        if row_for_edit is not None:
+            edit_action.triggered.connect(lambda checked, r=row_for_edit: self._open_purchase_row_edit(r))
+        else:
+            edit_action.triggered.connect(self._open_purchase_row_edit)
         menu.addSeparator()
         amazon_action = menu.addAction("Amazon商品ページを開く")
         amazon_action.triggered.connect(self._open_amazon_link)
@@ -2963,16 +3025,84 @@ class ProductWidget(QWidget):
                     QMessageBox.warning(self, "警告", f"画像ファイルが見つかりません:\n{file_path}")
             else:
                 QMessageBox.information(self, "情報", f"{header_text}が設定されていません。")
-    
+        else:
+            # その他の列をダブルクリックした場合は Keepa 編集ダイアログを開く
+            self._open_purchase_row_edit(row)
+
+    def _open_purchase_row_edit(self, row: Optional[int] = None) -> None:
+        """仕入DB行の編集ダイアログ（Keepa・TP1/TP2 編集）を開く"""
+        if row is None:
+            row = self.purchase_table.currentRow()
+        if row < 0:
+            QMessageBox.warning(self, "編集", "行を選択してください。")
+            return
+        # テーブル表示元（フィルタ後）レコード
+        view_records = getattr(self, "purchase_records", None) or getattr(self, "purchase_all_records", [])
+        if not view_records:
+            QMessageBox.warning(self, "編集", "該当するデータがありません。")
+            return
+        # ソート後は表示行と records の並びが一致しないため、行の _row_id でレコードを特定する
+        row_id = None
+        # 行内のどこかのセルに埋めた UserRole+1 を探す（列構成やセルウィジェット混在でもズレない）
+        try:
+            for c in range(self.purchase_table.columnCount()):
+                it = self.purchase_table.item(row, c)
+                if it is None:
+                    continue
+                v = it.data(Qt.UserRole + 1)
+                if v is not None:
+                    row_id = v
+                    break
+        except Exception:
+            row_id = None
+        record = None
+        # まずは _row_id → レコード のマップがあればそこから取得（最も信頼できる）
+        row_map = getattr(self, "_purchase_row_map", {}) or {}
+        if row_id is not None and row_map:
+            record = row_map.get(row_id)
+        if record is None:
+            # _row_id がない古いデータ用フォールバック: 表示行の SKU で照合
+            sku_in_cell = self._get_value_from_row(row, ["SKU", "sku"])
+            if sku_in_cell:
+                for rec in view_records:
+                    if (rec.get("SKU") or rec.get("sku") or "").strip() == (sku_in_cell or "").strip():
+                        record = rec
+                        break
+        if record is None:
+            # 最終フォールバック（ズレる可能性があるので極力避ける）
+            record = view_records[row] if row < len(view_records) else None
+        if record is None:
+            QMessageBox.warning(self, "編集", "該当するデータがありません。")
+            return
+        try:
+            from ui.purchase_row_edit_dialog import PurchaseRowEditDialog
+        except ImportError:
+            from desktop.ui.purchase_row_edit_dialog import PurchaseRowEditDialog
+        dialog = PurchaseRowEditDialog(record, product_widget=self)
+        dialog.exec_()
+
     def _get_value_from_row(self, row: int, keys: List[str]) -> Optional[str]:
         for col in range(self.purchase_table.columnCount()):
             header = self.purchase_table.horizontalHeaderItem(col).text()
             if header in keys:
                 item = self.purchase_table.item(row, col)
+                if not item:
+                    return None
+                # SKU は省略表示される可能性があるので、UserRole にフル値があればそれを優先する
+                if header.upper() == "SKU":
+                    full = item.data(Qt.UserRole)
+                    if full is not None and str(full).strip():
+                        return str(full).strip()
                 return item.text() if item else None
             for key in keys:
                 if header.upper() == key.upper():
                     item = self.purchase_table.item(row, col)
+                    if not item:
+                        return None
+                    if header.upper() == "SKU":
+                        full = item.data(Qt.UserRole)
+                        if full is not None and str(full).strip():
+                            return str(full).strip()
                     return item.text() if item else None
         return None
 
@@ -2982,6 +3112,35 @@ class ProductWidget(QWidget):
         if match:
             return match.group(1)
         return None
-        
+
+    def _fill_tp_from_comment(self, row: Dict[str, Any]) -> None:
+        """
+        コメントに「1ta6200」「1tp6200」「2ta5800」「2tp5800」のような文字列があれば、
+        (ta|tp) の次に来る数字を TP1/TP2 に設定する（既に値がある場合は上書きしない）。
+        """
+        comment = str(row.get("コメント") or row.get("comment") or "")
+        if not comment:
+            return
+
+        # 旧キー(TA*)が残っている場合は TP* へ寄せておく（上書きしない）
+        if not (row.get("TP1") or row.get("tp1")) and (row.get("TA1") or row.get("ta1")):
+            v = row.get("TA1") or row.get("ta1")
+            row["TP1"] = str(v)
+            row["tp1"] = str(v)
+        if not (row.get("TP2") or row.get("tp2")) and (row.get("TA2") or row.get("ta2")):
+            v = row.get("TA2") or row.get("ta2")
+            row["TP2"] = str(v)
+            row["tp2"] = str(v)
+
+        # 1(ta|tp)数字 → TP1、2(ta|tp)数字 → TP2（直後の数字を採用）
+        m1 = re.search(r"1(?:ta|tp)(\d+)", comment, re.IGNORECASE)
+        if m1 and not (row.get("TP1") or row.get("tp1")):
+            row["TP1"] = m1.group(1)
+            row["tp1"] = m1.group(1)
+        m2 = re.search(r"2(?:ta|tp)(\d+)", comment, re.IGNORECASE)
+        if m2 and not (row.get("TP2") or row.get("tp2")):
+            row["TP2"] = m2.group(1)
+            row["tp2"] = m2.group(1)
+
     def _calculate_product_name_width(self) -> int:
         return 300
