@@ -394,13 +394,19 @@ class ProductWidget(QWidget):
                 "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "コメント",
                 "発送方法", "仕入先", "コンディション説明"
             ]
-        
+
+        # 商品名の右に TP1 / TP2 を挿入（重複は避ける）
+        if "商品名" in base:
+            insert_pos = base.index("商品名") + 1
+            for col in ["TP1", "TP2"]:
+                if col not in base:
+                    base.insert(insert_pos, col)
+                    insert_pos += 1
+
         # コンディション説明の後に挿入するカラム（順序重要）
         insert_after_condition_note = [
             "ステータス",
             "ステータス理由",
-            "TP1",
-            "TP2",
             "レシート画像",
             "レシート画像URL",  # レシート画像の後に追加
             "保証書画像",  # 保証書IDから変更
@@ -593,6 +599,12 @@ class ProductWidget(QWidget):
         self.view_status_button.setCheckable(True)
         self.view_status_button.clicked.connect(lambda: self.toggle_view_mode("status"))
         controls_layout.addWidget(self.view_status_button)
+        
+        # TP列だけにフォーカスする表示切り替えボタン
+        self.view_tp_button = QPushButton("TP")
+        self.view_tp_button.setCheckable(True)
+        self.view_tp_button.clicked.connect(lambda: self.toggle_view_mode("tp"))
+        controls_layout.addWidget(self.view_tp_button)
         
         self.view_image_button = QPushButton("画像")
         self.view_image_button.setCheckable(True)
@@ -1492,6 +1504,7 @@ class ProductWidget(QWidget):
         # ボタンの状態を更新
         self.view_all_button.setChecked(mode == "all")
         self.view_status_button.setChecked(mode == "status")
+        self.view_tp_button.setChecked(mode == "tp")
         self.view_image_button.setChecked(mode == "image")
         self.view_ledger_button.setChecked(mode == "ledger")
         
@@ -1559,6 +1572,19 @@ class ProductWidget(QWidget):
                     break
             if ledger_start is not None and ledger_end is not None:
                 visible_ranges = [(ledger_start, ledger_end)]
+            else:
+                visible_ranges = []
+        elif self.purchase_view_mode == "tp":
+            # TP1/TP2 だけにフォーカス
+            tp_start = None
+            tp_end = None
+            for i, col_name in enumerate(self.purchase_columns):
+                if col_name == "TP1" and tp_start is None:
+                    tp_start = i
+                if col_name == "TP2":
+                    tp_end = i + 1
+            if tp_start is not None and tp_end is not None:
+                visible_ranges = [(tp_start, tp_end)]
             else:
                 visible_ranges = []
         else:
@@ -1825,6 +1851,8 @@ class ProductWidget(QWidget):
             "品目", "品名", "氏名(個人)", "本人確認書類", "確認番号", "確認日", "確認者", "台帳登録済",
             "person_name", "person_address", "id_type", "id_number", "id_checked_on", "id_checked_by", "id_proof_ref",
             "kobutsu_kind", "hinmoku", "hinmei",
+            # TA1/TA2 系の古い列は今後は表示しない
+            "TA1", "TA2", "ta1", "ta2",
         })
         
         # レコードから追加の列を取得（既にcolumnsに含まれているもの・古物台帳用除外リストは除外）
@@ -1833,6 +1861,9 @@ class ProductWidget(QWidget):
                 if key in _purchase_table_exclude_columns:
                     continue
                 upper_key = key.upper()
+                if upper_key in ("TA1", "TA2"):
+                    # 念のため大文字マッチでも除外
+                    continue
                 if upper_key not in seen:
                     seen.add(upper_key)
                     columns.append(key)
@@ -3122,15 +3153,19 @@ class ProductWidget(QWidget):
         if not comment:
             return
 
-        # 旧キー(TA*)が残っている場合は TP* へ寄せておく（上書きしない）
-        if not (row.get("TP1") or row.get("tp1")) and (row.get("TA1") or row.get("ta1")):
+        # 旧キー(TA*)が残っている場合は TP* へ寄せておく（上書きしない）＋ TA* 側はクリアする
+        if (row.get("TA1") or row.get("ta1")) and not (row.get("TP1") or row.get("tp1")):
             v = row.get("TA1") or row.get("ta1")
             row["TP1"] = str(v)
             row["tp1"] = str(v)
-        if not (row.get("TP2") or row.get("tp2")) and (row.get("TA2") or row.get("ta2")):
+        if (row.get("TA2") or row.get("ta2")) and not (row.get("TP2") or row.get("tp2")):
             v = row.get("TA2") or row.get("ta2")
             row["TP2"] = str(v)
             row["tp2"] = str(v)
+        # TA* キーは今後使用しないので削除しておく
+        for k in ("TA1", "ta1", "TA2", "ta2"):
+            if k in row:
+                row.pop(k, None)
 
         # 1(ta|tp)数字 → TP1、2(ta|tp)数字 → TP2（直後の数字を採用）
         m1 = re.search(r"1(?:ta|tp)(\d+)", comment, re.IGNORECASE)
