@@ -44,10 +44,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 try:
     from services.receipt_service import ReceiptService  # python/desktop/services
     from services.receipt_matching_service import ReceiptMatchingService
+    from services.purchase_break_even import compute_break_even_for_record
 except Exception:
     # 明示的パス指定のフォールバック
     from desktop.services.receipt_service import ReceiptService
     from desktop.services.receipt_matching_service import ReceiptMatchingService
+    from desktop.services.purchase_break_even import compute_break_even_for_record
 from database.receipt_db import ReceiptDatabase
 from database.inventory_db import InventoryDatabase
 from database.store_db import StoreDatabase
@@ -3502,14 +3504,16 @@ class ReceiptWidget(QWidget):
                                             expected_profit = planned_price - new_price if planned_price > 0 else 0
                                             record['見込み利益'] = expected_profit
                                             
-                                            # 損益分岐点の計算
                                             other_cost = record.get('その他費用') or record.get('other_cost') or 0
                                             try:
                                                 other_cost = float(other_cost) if other_cost else 0
                                             except (ValueError, TypeError):
                                                 other_cost = 0
-                                            break_even = new_price + other_cost
-                                            record['損益分岐点'] = break_even
+                                            be = compute_break_even_for_record(record)
+                                            if be is not None:
+                                                record["損益分岐点"] = round(be, 2)
+                                            else:
+                                                record["損益分岐点"] = new_price + other_cost
                                             
                                             # 利益率 = (見込み利益 / 販売予定価格) * 100
                                             if planned_price > 0:
@@ -7515,14 +7519,16 @@ class ReceiptWidget(QWidget):
                                 expected_profit = planned_price - new_price if planned_price > 0 else 0
                                 record['見込み利益'] = expected_profit
                                 
-                                # 損益分岐点の計算（簡易版：仕入れ価格 + その他費用）
                                 other_cost = record.get('その他費用') or record.get('other_cost') or 0
                                 try:
                                     other_cost = float(other_cost) if other_cost else 0
                                 except (ValueError, TypeError):
                                     other_cost = 0
-                                break_even = new_price + other_cost
-                                record['損益分岐点'] = break_even
+                                be = compute_break_even_for_record(record)
+                                if be is not None:
+                                    record["損益分岐点"] = round(be, 2)
+                                else:
+                                    record["損益分岐点"] = new_price + other_cost
                                 
                                 # 利益率 = (見込み利益 / 販売予定価格) * 100
                                 if planned_price > 0:

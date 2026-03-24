@@ -1561,3 +1561,29 @@
 
 **最終更新**: 2026-03-15
 **更新者**: Agentモード（実装）
+
+### 2026-03-24（Keepaテスト offers 化・出品詳細・仕入DB損益分岐点修正）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. **Keepaテストタブ**
+     - `keepa_service.py`: 価格取得を **`data`/stats ではなく live `offers`**（`only_live_offers`・件数上限）に変更。各オファーは **本体＋送料**（`offerCSV`）で集計。新品・中古（非常に良い／良い／可）の最安を表示。JP の 1/100 スケールは既存 `_maybe_scale_to_jpy` で補正。
+     - `KeepaOfferRow`・`build_live_offer_display_rows()`・`fetch_product_with_raw()` を追加（生 product 辞書を UI へ渡すため）。
+     - `keepa_test_widget.py`: 中古を3条件列表示、**「詳細」** 列とボタンを追加。
+     - `keepa_offer_detail_dialog.py`: **出品価格情報**ダイアログ（新品／中古の2カラム、コンディション・FBA／自己発送・金額・セラー表示）。
+  2. **仕入DBの損益分岐点が仕入れ価格と同一になる問題**
+     - **原因**: レシート連携で `損益分岐点 = 仕入れ価格 + その他費用` のみとしていたこと、および見込み利益が「販売予定−仕入」だけで手数料未反映の行では内部的に控除ゼロ扱いになっていたこと。
+     - **対応**: `purchase_break_even.py` を新設（販売予定・仕入・見込み利益から控除率を推定し利益ゼロ販売価格を算出。控除が取れない場合は最低 12% または 400 円の仮定。`amazon-fee` / `shipping-price` 列があれば優先）。
+     - `receipt_widget.py`: 仕入価格更新時の損益分岐点を上記ロジックで再計算。
+     - `product_widget.py`: テーブル描画時、保存値が仕入とほぼ同じかつ「粗利のみ」の行だけ再計算してレコード更新（価格改定 CSV の akaji など既に異なる値は尊重）。
+- **変更ファイル**:
+  - `python/desktop/services/keepa_service.py`
+  - `python/desktop/ui/keepa_test_widget.py`
+  - `python/desktop/ui/keepa_offer_detail_dialog.py`（新規）
+  - `python/desktop/services/purchase_break_even.py`（新規）
+  - `python/desktop/ui/product_widget.py`
+  - `python/desktop/ui/receipt_widget.py`
+  - `docs/cursor_development_progress.md`
+- **次回**: Keepa オファー件数・FBA 限定表示の設定化、損益分岐の手数料モデルを設定ファイル連携で精密化（任意）
+
+**最終更新**: 2026-03-24
+**更新者**: Agentモード（実装）

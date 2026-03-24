@@ -41,6 +41,17 @@ from database.purchase_db import PurchaseDatabase
 from database.store_db import StoreDatabase
 from desktop.database.sales_db import SalesDatabase
 
+try:
+    from desktop.services.purchase_break_even import (
+        compute_break_even_for_record,
+        should_recompute_break_even,
+    )
+except ImportError:
+    from services.purchase_break_even import (  # type: ignore
+        compute_break_even_for_record,
+        should_recompute_break_even,
+    )
+
 class SortableDateItem(QTableWidgetItem):
     """日付ソート対応のQTableWidgetItem"""
     
@@ -2132,6 +2143,76 @@ class ProductWidget(QWidget):
                         item = QTableWidgetItem(f"{value_float:.2f}")
                     else:
                         item = QTableWidgetItem("")
+                elif header == "損益分岐点":
+                    purchase_v = None
+                    for key in ("仕入れ価格", "仕入価格", "purchase_price", "cost"):
+                        if key in record and record[key] not in (None, ""):
+                            try:
+                                purchase_v = float(
+                                    str(record[key]).replace(",", "").strip()
+                                )
+                            except (ValueError, TypeError):
+                                purchase_v = None
+                            break
+                    planned_v = None
+                    for key in ("販売予定価格", "planned_price", "price"):
+                        if key in record and record[key] not in (None, ""):
+                            try:
+                                planned_v = float(
+                                    str(record[key]).replace(",", "").strip()
+                                )
+                            except (ValueError, TypeError):
+                                planned_v = None
+                            break
+                    profit_v = 0.0
+                    for key in ("見込み利益", "expected_profit", "profit"):
+                        if key in record and record[key] not in (None, ""):
+                            try:
+                                profit_v = float(
+                                    str(record[key]).replace(",", "").strip()
+                                )
+                            except (ValueError, TypeError):
+                                profit_v = 0.0
+                            break
+                    try:
+                        other_v = float(
+                            str(
+                                record.get("その他費用")
+                                or record.get("other_cost")
+                                or 0
+                            ).replace(",", "").strip()
+                        )
+                    except (ValueError, TypeError):
+                        other_v = 0.0
+                    stored_be = value
+                    recomputed = compute_break_even_for_record(record)
+                    if (
+                        recomputed is not None
+                        and purchase_v is not None
+                        and planned_v is not None
+                        and should_recompute_break_even(
+                            stored_be,
+                            purchase_v,
+                            planned_v,
+                            profit_v,
+                            other_v,
+                        )
+                    ):
+                        record["損益分岐点"] = round(recomputed, 2)
+                        display_val = int(round(recomputed))
+                        item = QTableWidgetItem(str(display_val))
+                    else:
+                        try:
+                            if stored_be not in (None, ""):
+                                fv = float(str(stored_be).replace(",", "").strip())
+                                item = QTableWidgetItem(
+                                    str(int(fv)) if fv == int(fv) else f"{fv:.2f}"
+                                )
+                            else:
+                                item = QTableWidgetItem("")
+                        except (ValueError, TypeError):
+                            item = QTableWidgetItem(str(stored_be) if stored_be else "")
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 elif header == "仕入れ日" or header.upper() == "PURCHASE_DATE":
                     # 仕入れ日列の処理：ソート用の値を設定
                     date_str = str(value) if value else ""

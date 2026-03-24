@@ -5,8 +5,8 @@
 ASIN から以下の情報を取得するための薄いラッパー:
 - タイトル
 - 画像URL（1枚目）
-- 新品価格
-- 中古価格
+- 新品・中古コンディション別の最安（**live offers** から **price+送料** の合計で集計）
+- JP で 1/100 スケールのときは円に補正
 - ランキング
 - カテゴリ名（簡易。productGroup などから取得）
 
@@ -18,7 +18,7 @@ ASIN から以下の情報を取得するための薄いラッパー:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Literal
 
 from PySide6.QtCore import QSettings
 
@@ -32,9 +32,28 @@ class KeepaProductInfo:
     title: Optional[str]
     image_url: Optional[str]
     new_price: Optional[float]
-    used_price: Optional[float]
+    new_price_state: Literal["ok", "no_seller", "no_data"]
+    used_very_good: Optional[float]
+    used_very_good_state: Literal["ok", "no_seller", "no_data"]
+    used_good: Optional[float]
+    used_good_state: Literal["ok", "no_seller", "no_data"]
+    used_acceptable: Optional[float]
+    used_acceptable_state: Literal["ok", "no_seller", "no_data"]
     sales_rank: Optional[int]
     category_name: Optional[str]
+
+
+@dataclass
+class KeepaOfferRow:
+    """live offer 1件分（UI 表示用・円は fetch 時と同じスケール補正済み）。"""
+
+    condition_label: str
+    is_fba: bool
+    is_amazon: bool
+    seller_note: str
+    price_jpy: int
+    ship_jpy: int
+    total_jpy: int
 
 
 class KeepaService:
@@ -112,32 +131,234 @@ class KeepaService:
                 return int(v)
         return None
 
-    def fetch_product_by_asin(self, asin: str) -> KeepaProductInfo:
-        """ASIN から商品情報を取得する。
+    # live offers を取るときのオファー本数（Keepa トークンとトレードオフ）
+    _LIVE_OFFERS_LIMIT: int = 60
 
-        エラー時は RuntimeError を投げるので、呼び出し側で QMessageBox などで通知してください。
-        """
-        self._ensure_client()
-
+    @staticmethod
+    def _offer_last_landed_list_price(offer: Dict[str, Any]) -> Optional[float]:
+        """offerCSV の末尾から (本体+送料) を取得。値はリスト価格系と同様に 100 で割った単位。"""
+        csv = offer.get("offerCSV")
+        if not csv:
+            return None
         try:
-            # 日本の Amazon.co.jp を明示的に指定して ASIN を問い合わせる
-            products = self._client.query(asin, domain="JP")
-        except Exception as e:  # noqa: BLE001
-            raise RuntimeError(f"Keepa API 呼び出しに失敗しました: {e}") from e
+            seq = list(csv)
+        except TypeError:
+            return None
+        if len(seq) < 3:
+            return None
+        # Keepa: [時刻, 価格, 送料, 時刻, 価格, 送料, ...] — 価格は index 1,4,7,...（len-2 から 3 刻み）
+        for i in range(len(seq) - 2, -1, -3):
+            if i + 1 >= len(seq):
+                continue
+            try:
+                price = float(seq[i])
+                ship_raw = seq[i + 1]
+                ship = float(ship_raw) if ship_raw is not None else 0.0
+            except (TypeError, ValueError):
+                continue
+            if price <= 0:
+                continue
+            if ship < 0:
+                ship = 0.0
+            return (price + ship) / 100.0
+        return None
 
-        if not products:
-            raise RuntimeError(f"ASIN {asin} に対応する商品が見つかりませんでした。")
+    @staticmethod
+    def _offer_last_price_ship_list_units(offer: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+        """offerCSV 末尾トリプレットから (本体, 送料) をリスト単位で返す（各々 /100 済み）。"""
+        csv = offer.get("offerCSV")
+        if not csv:
+            return None, None
+        try:
+            seq = list(csv)
+        except TypeError:
+            return None, None
+        if len(seq) < 3:
+            return None, None
+        for i in range(len(seq) - 2, -1, -3):
+            if i + 1 >= len(seq):
+                continue
+            try:
+                price = float(seq[i])
+                ship_raw = seq[i + 1]
+                ship = float(ship_raw) if ship_raw is not None else 0.0
+            except (TypeError, ValueError):
+                continue
+            if price <= 0:
+                continue
+            if ship < 0:
+                ship = 0.0
+            return price / 100.0, ship / 100.0
+        return None, None
 
-        p: Dict[str, Any] = products[0]
+    _CONDITION_LABEL_JP: Dict[int, str] = {
+        0: "新品",
+        1: "ほぼ新品",
+        2: "非常に良い",
+        3: "良い",
+        4: "可",
+    }
 
+    @classmethod
+    def _condition_label_jp(cls, code: int) -> str:
+        if code < 0:
+            return "不明"
+        return cls._CONDITION_LABEL_JP.get(code, f"条件{code}")
+
+    @staticmethod
+    def _offer_is_fba(offer: Dict[str, Any]) -> bool:
+        return bool(
+            offer.get("isFBA")
+            or offer.get("isAmazonFulfilled")
+            or offer.get("is_amazon_fulfilled")
+        )
+
+    @staticmethod
+    def _offer_is_amazon_retail(offer: Dict[str, Any]) -> bool:
+        return bool(offer.get("isAmazon") or offer.get("is_amazon"))
+
+    @staticmethod
+    def _offer_seller_note(offer: Dict[str, Any]) -> str:
+        sid = offer.get("sellerId") or offer.get("seller_id")
+        name = offer.get("sellerName") or offer.get("seller_name")
+        if sid and name:
+            return f"{name} ({sid})"
+        if sid:
+            return str(sid)
+        if name:
+            return str(name)
+        return "-"
+
+    def build_live_offer_display_rows(
+        self,
+        raw_product: Dict[str, Any],
+    ) -> Tuple[List[KeepaOfferRow], List[KeepaOfferRow]]:
+        """
+        live offers を新品 / 中古に分け、出品者向けの行リストにする。
+        価格スケールは extract_min_landed_prices と同じ _maybe_scale_to_jpy を一括適用。
+        """
+        offers = raw_product.get("offers") or []
+        if not isinstance(offers, list) or not offers:
+            return [], []
+
+        landed_by_key: Dict[str, float] = {}
+        meta_by_key: Dict[str, Tuple[Dict[str, Any], float, float]] = {}
+
+        for i, offer in enumerate(offers):
+            if not isinstance(offer, dict):
+                continue
+            pr, sh = self._offer_last_price_ship_list_units(offer)
+            if pr is None:
+                continue
+            landed = pr + sh
+            if landed <= 0:
+                continue
+            key = str(i)
+            landed_by_key[key] = landed
+            meta_by_key[key] = (offer, pr, sh)
+
+        if not landed_by_key:
+            return [], []
+
+        scaled_landed = self._maybe_scale_to_jpy(
+            {k: float(v) for k, v in landed_by_key.items()},
+            reference_jpy=None,
+        )
+
+        new_rows: List[KeepaOfferRow] = []
+        used_rows: List[KeepaOfferRow] = []
+
+        for key, landed_raw in landed_by_key.items():
+            offer, pr, sh = meta_by_key[key]
+            scaled_total = scaled_landed.get(key)
+            if scaled_total is None:
+                continue
+            try:
+                cond_i = int(offer.get("condition"))
+            except (TypeError, ValueError):
+                cond_i = -1
+
+            fac = float(scaled_total) / landed_raw if landed_raw > 0 else 1.0
+            price_jpy = int(round(pr * fac))
+            ship_jpy = int(round(sh * fac))
+            total_jpy = int(round(float(scaled_total)))
+
+            row = KeepaOfferRow(
+                condition_label=self._condition_label_jp(cond_i),
+                is_fba=self._offer_is_fba(offer),
+                is_amazon=self._offer_is_amazon_retail(offer),
+                seller_note=self._offer_seller_note(offer),
+                price_jpy=price_jpy,
+                ship_jpy=ship_jpy,
+                total_jpy=total_jpy,
+            )
+            if cond_i == 0:
+                new_rows.append(row)
+            else:
+                used_rows.append(row)
+
+        new_rows.sort(key=lambda r: (r.total_jpy, r.price_jpy))
+        used_rows.sort(key=lambda r: (r.total_jpy, r.price_jpy))
+        return new_rows, used_rows
+
+    def extract_min_landed_prices_from_live_offers(
+        self,
+        raw_product: Dict[str, Any],
+    ) -> Tuple[Dict[str, Optional[float]], bool]:
+        """
+        live offers からコンディション別の「本体+送料」最安を集計する（FBA/自己発送どちらも含む）。
+
+        戻り値:
+        - 辞書キー: new, used_very_good, used_good, used_acceptable
+        - bool: offers リストが 1 件以上あったか（空なら別扱いで UI が分かるように）
+        """
+        offers = raw_product.get("offers") or []
+        if not isinstance(offers, list):
+            return (
+                {"new": None, "used_very_good": None, "used_good": None, "used_acceptable": None},
+                False,
+            )
+
+        # Keepa condition: 0 NEW, 1 Like New, 2 Very Good, 3 Good, 4 Acceptable
+        cond_to_key: Dict[int, str] = {
+            0: "new",
+            2: "used_very_good",
+            3: "used_good",
+            4: "used_acceptable",
+        }
+        mins: Dict[str, Optional[float]] = {
+            "new": None,
+            "used_very_good": None,
+            "used_good": None,
+            "used_acceptable": None,
+        }
+
+        for offer in offers:
+            if not isinstance(offer, dict):
+                continue
+            try:
+                cond_i = int(offer.get("condition"))
+            except (TypeError, ValueError):
+                continue
+            key = cond_to_key.get(cond_i)
+            if not key:
+                continue
+            landed = self._offer_last_landed_list_price(offer)
+            if landed is None or landed <= 0:
+                continue
+            cur = mins.get(key)
+            if cur is None or landed < cur:
+                mins[key] = landed
+
+        return mins, len(offers) > 0
+
+    def _build_keepa_product_info(self, asin: str, p: Dict[str, Any]) -> KeepaProductInfo:
         title = p.get("title")
 
-        # 画像 URL（imagesCSV があれば優先）
         image_url: Optional[str] = None
         images_csv = p.get("imagesCSV")
         if isinstance(images_csv, str) and images_csv:
             key = images_csv.split(",")[0]
-            # フルURLでなければベースURLを付与する
             image_url = key if key.startswith("http") else IMAGE_BASE_URL + key
         else:
             images_list = p.get("images")
@@ -146,12 +367,33 @@ class KeepaService:
                 image_url = key if isinstance(key, str) and key.startswith("http") else IMAGE_BASE_URL + str(key)
 
         data: Dict[str, Any] = p.get("data", {}) or {}
-        new_price = self._extract_latest_price(data.get("NEW"))
-        used_price = self._extract_latest_price(data.get("USED"))
         sales_rank = self._extract_latest_rank(data.get("SALES"))
 
-        # カテゴリ名は厳密には category ツリーを引く必要があるが、
-        # ここではコストを抑えるため productGroup や productCategory を優先して使う。
+        mins_raw, had_any_offers = self.extract_min_landed_prices_from_live_offers(p)
+
+        to_scale: Dict[str, float] = {}
+        for k, v in mins_raw.items():
+            if v is not None and v > 0:
+                to_scale[k] = float(v)
+
+        scaled = self._maybe_scale_to_jpy(
+            {k: float(v) for k, v in to_scale.items()},
+            reference_jpy=None,
+        )
+
+        def _state_for_key(key: str) -> Tuple[Literal["ok", "no_seller", "no_data"], Optional[float]]:
+            v = mins_raw.get(key)
+            if v is not None and v > 0:
+                return ("ok", scaled.get(key))
+            if had_any_offers:
+                return ("no_seller", None)
+            return ("no_data", None)
+
+        new_st, new_price = _state_for_key("new")
+        vg_st, used_very_good = _state_for_key("used_very_good")
+        g_st, used_good = _state_for_key("used_good")
+        acc_st, used_acceptable = _state_for_key("used_acceptable")
+
         category_name: Optional[str] = (
             p.get("productGroup")
             or p.get("productCategory")
@@ -163,10 +405,44 @@ class KeepaService:
             title=title,
             image_url=image_url,
             new_price=new_price,
-            used_price=used_price,
+            new_price_state=new_st,
+            used_very_good=used_very_good,
+            used_very_good_state=vg_st,
+            used_good=used_good,
+            used_good_state=g_st,
+            used_acceptable=used_acceptable,
+            used_acceptable_state=acc_st,
             sales_rank=sales_rank,
             category_name=category_name,
         )
+
+    def fetch_product_with_raw(self, asin: str) -> Tuple[KeepaProductInfo, Dict[str, Any]]:
+        """ASIN から商品情報と Keepa 生 product 辞書を返す（offers 詳細表示用）。"""
+        self._ensure_client()
+
+        try:
+            products = self._client.query(
+                asin,
+                domain="JP",
+                offers=self._LIVE_OFFERS_LIMIT,
+                only_live_offers=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"Keepa API 呼び出しに失敗しました: {e}") from e
+
+        if not products:
+            raise RuntimeError(f"ASIN {asin} に対応する商品が見つかりませんでした。")
+
+        p: Dict[str, Any] = products[0]
+        return self._build_keepa_product_info(asin, p), p
+
+    def fetch_product_by_asin(self, asin: str) -> KeepaProductInfo:
+        """ASIN から商品情報を取得する。
+
+        エラー時は RuntimeError を投げるので、呼び出し側で QMessageBox などで通知してください。
+        """
+        info, _ = self.fetch_product_with_raw(asin)
+        return info
 
     def fetch_raw_product_by_asin(
         self,
