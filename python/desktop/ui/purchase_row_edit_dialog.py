@@ -3,7 +3,7 @@
 """
 仕入DB行編集ダイアログ
 
-商品情報と TP1/TP2 価格を編集するコンパクトなダイアログ。
+商品情報と TP0/TP1/TP2/TP3 価格を編集するコンパクトなダイアログ。
 Keepa はブラウザで開き、このウィンドウは前面に保ったまま TA を入力できる。
 """
 
@@ -201,9 +201,22 @@ class PurchaseRowEditDialog(QDialog):
         open_keepa_btn.clicked.connect(self._open_keepa_in_browser)
         layout.addWidget(open_keepa_btn)
 
-        # --- TP1 / TP2 編集 ---
+        # --- TP0 / TP1 / TP2 / TP3 編集 ---
         ta_group = QGroupBox("TP 価格（Keepa で確認しながら入力）")
         ta_layout = QFormLayout()
+        self._ta0_edit = QLineEdit()
+        self._ta0_edit.setPlaceholderText("例: 6400")
+        self._ta0_edit.setText(
+            self._record_str("TP0") or self._record_str("tp0") or self._record_str("TA0") or self._record_str("ta0") or ""
+        )
+        self._ta0_edit.textChanged.connect(self._update_ta_labels)
+        ta_layout.addRow("TP0 価格:", self._ta0_edit)
+        self._ta0_profit_label = QLabel("-")
+        ta_layout.addRow("TP0 概算利益（利益率）:", self._ta0_profit_label)
+        self._ta0_rate_edit = QLineEdit()
+        self._ta0_rate_edit.setPlaceholderText("例: 20（%）")
+        self._ta0_rate_edit.textChanged.connect(lambda _text: self._on_ta_rate_changed(0))
+        ta_layout.addRow("TP0 目標利益率(%):", self._ta0_rate_edit)
         self._ta1_edit = QLineEdit()
         self._ta1_edit.setPlaceholderText("例: 6200")
         self._ta1_edit.setText(self._record_str("TP1") or self._record_str("tp1") or self._record_str("TA1") or self._record_str("ta1") or "")
@@ -226,6 +239,20 @@ class PurchaseRowEditDialog(QDialog):
         self._ta2_rate_edit.setPlaceholderText("例: 25（%）")
         self._ta2_rate_edit.textChanged.connect(lambda _text: self._on_ta_rate_changed(2))
         ta_layout.addRow("TP2 目標利益率(%):", self._ta2_rate_edit)
+
+        self._ta3_edit = QLineEdit()
+        self._ta3_edit.setPlaceholderText("例: 5600")
+        self._ta3_edit.setText(
+            self._record_str("TP3") or self._record_str("tp3") or self._record_str("TA3") or self._record_str("ta3") or ""
+        )
+        self._ta3_edit.textChanged.connect(self._update_ta_labels)
+        ta_layout.addRow("TP3 価格:", self._ta3_edit)
+        self._ta3_profit_label = QLabel("-")
+        ta_layout.addRow("TP3 概算利益（利益率）:", self._ta3_profit_label)
+        self._ta3_rate_edit = QLineEdit()
+        self._ta3_rate_edit.setPlaceholderText("例: 25（%）")
+        self._ta3_rate_edit.textChanged.connect(lambda _text: self._on_ta_rate_changed(3))
+        ta_layout.addRow("TP3 目標利益率(%):", self._ta3_rate_edit)
         ta_group.setLayout(ta_layout)
         layout.addWidget(ta_group)
         self._update_ta_labels()
@@ -265,8 +292,10 @@ class PurchaseRowEditDialog(QDialog):
         # 概算利益 = 今出てる見込み利益 - (値下げ幅 × 0.89)、その横に想定利益率 = 概算利益/TA価格×100
         current_profit = self._current_profit_value
         sale = self._sale_price_value
+        ta0 = _parse_number(self._ta0_edit.text())
         ta1 = _parse_number(self._ta1_edit.text())
         ta2 = _parse_number(self._ta2_edit.text())
+        ta3 = _parse_number(self._ta3_edit.text())
 
         def _ta_profit_and_rate(ta_price: float) -> tuple:
             if not ta_price or sale <= 0:
@@ -276,13 +305,21 @@ class PurchaseRowEditDialog(QDialog):
             rate = (profit / ta_price * 100) if ta_price else None
             return profit, rate
 
+        p0, r0 = _ta_profit_and_rate(ta0)
         p1, r1 = _ta_profit_and_rate(ta1)
         p2, r2 = _ta_profit_and_rate(ta2)
+        p3, r3 = _ta_profit_and_rate(ta3)
+        self._ta0_profit_label.setText(
+            f"{_format_price(p0)}（{r0:.1f}%）" if p0 is not None and r0 is not None else "-"
+        )
         self._ta1_profit_label.setText(
             f"{_format_price(p1)}（{r1:.1f}%）" if p1 is not None and r1 is not None else "-"
         )
         self._ta2_profit_label.setText(
             f"{_format_price(p2)}（{r2:.1f}%）" if p2 is not None and r2 is not None else "-"
+        )
+        self._ta3_profit_label.setText(
+            f"{_format_price(p3)}（{r3:.1f}%）" if p3 is not None and r3 is not None else "-"
         )
 
     def _on_ta_rate_changed(self, which: int) -> None:
@@ -292,12 +329,19 @@ class PurchaseRowEditDialog(QDialog):
         if sale <= 0:
             return
 
-        if which == 1:
+        if which == 0:
+            edit = self._ta0_rate_edit
+            target_edit = self._ta0_edit
+        elif which == 1:
             edit = self._ta1_rate_edit
             target_edit = self._ta1_edit
-        else:
+        elif which == 2:
             edit = self._ta2_rate_edit
             target_edit = self._ta2_edit
+        else:
+            # which == 3
+            edit = self._ta3_rate_edit
+            target_edit = self._ta3_edit
 
         rate_percent = _parse_number(edit.text())
         if rate_percent <= 0:
@@ -318,12 +362,18 @@ class PurchaseRowEditDialog(QDialog):
 
     def _apply(self) -> None:
         """仕入DBに反映する（ダイアログは閉じない＝ブラウザを見たまま続けられる）"""
+        tp0 = self._ta0_edit.text().strip()
         tp1 = self._ta1_edit.text().strip()
         tp2 = self._ta2_edit.text().strip()
+        tp3 = self._ta3_edit.text().strip()
+        self.record["TP0"] = tp0
+        self.record["tp0"] = tp0
         self.record["TP1"] = tp1
         self.record["tp1"] = tp1
         self.record["TP2"] = tp2
         self.record["tp2"] = tp2
+        self.record["TP3"] = tp3
+        self.record["tp3"] = tp3
         # 親が ProductWidget なら hirio.db とスナップショットにも保存
         if self._product_widget and hasattr(self._product_widget, "purchase_history_db"):
             sku = self._record_str("SKU") or self._record_str("sku")
@@ -335,8 +385,10 @@ class PurchaseRowEditDialog(QDialog):
                         "sku": sku,
                         "status": status,
                         "status_reason": reason,
+                        "tp0": tp0,
                         "tp1": tp1,
                         "tp2": tp2,
+                        "tp3": tp3,
                     })
                 except Exception as e:
                     QMessageBox.warning(self, "反映", f"DB 保存でエラー: {e}")
@@ -350,7 +402,7 @@ class PurchaseRowEditDialog(QDialog):
             records = getattr(self._product_widget, "purchase_records", None) or getattr(self._product_widget, "purchase_all_records", [])
             if records:
                 self._product_widget.populate_purchase_table(records)
-        QMessageBox.information(self, "反映", "TP1/TP2 を仕入DBに反映しました。\nダイアログは開いたままです。閉じる場合は「閉じる」を押してください。")
+        QMessageBox.information(self, "反映", "TP0/TP1/TP2/TP3 を仕入DBに反映しました。\nダイアログは開いたままです。閉じる場合は「閉じる」を押してください。")
 
     def accept(self) -> None:
         """閉じる時に Keepa ブラウザも最小化する（閉じた後に遅延実行）"""

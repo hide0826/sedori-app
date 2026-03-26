@@ -95,9 +95,11 @@ class PurchaseDatabase:
             # 商品ステータス管理
             ("status", "TEXT DEFAULT 'ready'"),  # 'ready': 出品可能, 'damaged': 破損, 'unlistable': 登録不可, 'storage': 保管中, 'pending': 次回出品予定
             ("status_reason", "TEXT"),  # ステータス設定の理由・詳細
-            # TA1/TA2 は廃止し、今後は TP1/TP2 のみを使用する
+            # TA1/TA2/TA3 は廃止し、今後は TP0/TP1/TP2/TP3 のみを使用する
+            ("tp0", "TEXT"),
             ("tp1", "TEXT"),
             ("tp2", "TEXT"),
+            ("tp3", "TEXT"),
             ("status_set_at", "DATETIME"),  # ステータスを設定した日時
             # 出品日（在庫DBとの連携用・視認用）
             ("listed_date", "TEXT"),
@@ -111,13 +113,14 @@ class PurchaseDatabase:
                 except Exception as e:
                     print(f"Error adding column {col_name}: {e}")
         
-        # 旧カラム ta1/ta2 に値があり、新カラム tp1/tp2 が空なら移行（互換用ワンショット）
+        # 旧カラム ta1/ta2/ta3 に値があり、新カラム tp1/tp2/tp3 が空なら移行（互換用ワンショット）
         try:
             if "tp1" in existing_cols or "tp2" in existing_cols:
                 # 既存_cols は ALTER 前のスナップショットなので、列の有無はSQL側で吸収しておく
                 pass
             cur.execute("UPDATE purchases SET tp1 = ta1 WHERE (tp1 IS NULL OR tp1 = '') AND ta1 IS NOT NULL AND ta1 <> ''")
             cur.execute("UPDATE purchases SET tp2 = ta2 WHERE (tp2 IS NULL OR tp2 = '') AND ta2 IS NOT NULL AND ta2 <> ''")
+            cur.execute("UPDATE purchases SET tp3 = ta3 WHERE (tp3 IS NULL OR tp3 = '') AND ta3 IS NOT NULL AND ta3 <> ''")
         except Exception:
             pass
         self.conn.commit()
@@ -156,9 +159,11 @@ class PurchaseDatabase:
             "expected_roi",
             "status",
             "status_reason",
-            # TP1/TP2 のみを使用（旧 ta1/ta2 は読み取り専用の互換カラムとして残す）
+            # TP0/TP1/TP2/TP3 のみを使用（旧 ta1/ta2/ta3 は読み取り専用の互換カラムとして残す）
+            "tp0",
             "tp1",
             "tp2",
+            "tp3",
             "status_set_at",
             "listed_date",
         ]

@@ -406,10 +406,10 @@ class ProductWidget(QWidget):
                 "発送方法", "仕入先", "コンディション説明"
             ]
 
-        # 商品名の右に TP1 / TP2 を挿入（重複は避ける）
+        # 商品名の右に TP0 / TP1 / TP2 / TP3 を挿入（重複は避ける）
         if "商品名" in base:
             insert_pos = base.index("商品名") + 1
-            for col in ["TP1", "TP2"]:
+            for col in ["TP0", "TP1", "TP2", "TP3"]:
                 if col not in base:
                     base.insert(insert_pos, col)
                     insert_pos += 1
@@ -1586,13 +1586,13 @@ class ProductWidget(QWidget):
             else:
                 visible_ranges = []
         elif self.purchase_view_mode == "tp":
-            # TP1/TP2 だけにフォーカス
+            # TP0/TP1/TP2 だけにフォーカス
             tp_start = None
             tp_end = None
             for i, col_name in enumerate(self.purchase_columns):
-                if col_name == "TP1" and tp_start is None:
+                if col_name == "TP0" and tp_start is None:
                     tp_start = i
-                if col_name == "TP2":
+                if col_name == "TP3":
                     tp_end = i + 1
             if tp_start is not None and tp_end is not None:
                 visible_ranges = [(tp_start, tp_end)]
@@ -1817,14 +1817,22 @@ class ProductWidget(QWidget):
                         if status_reason:
                             row["ステータス理由"] = status_reason
                             row["status_reason"] = status_reason
+                        tp0 = purchase_info.get("tp0") or purchase_info.get("ta0") or ""
                         tp1 = purchase_info.get("tp1") or purchase_info.get("ta1") or ""
                         tp2 = purchase_info.get("tp2") or purchase_info.get("ta2") or ""
+                        tp3 = purchase_info.get("tp3") or purchase_info.get("ta3") or ""
+                        if tp0:
+                            row["TP0"] = tp0
+                            row["tp0"] = tp0
                         if tp1:
                             row["TP1"] = tp1
                             row["tp1"] = tp1
                         if tp2:
                             row["TP2"] = tp2
                             row["tp2"] = tp2
+                        if tp3:
+                            row["TP3"] = tp3
+                            row["tp3"] = tp3
                         if status_set_at:
                             row["status_set_at"] = status_set_at
                         # 出品日は視認用。値がなければ空文字のまま
@@ -2295,14 +2303,18 @@ class ProductWidget(QWidget):
                             try:
                                 # ステータス理由も取得して保存
                                 status_reason = rec.get("ステータス理由") or rec.get("status_reason") or ""
+                                tp0 = rec.get("TP0") or rec.get("tp0") or rec.get("TA0") or rec.get("ta0") or ""
                                 tp1 = rec.get("TP1") or rec.get("tp1") or rec.get("TA1") or rec.get("ta1") or ""
                                 tp2 = rec.get("TP2") or rec.get("tp2") or rec.get("TA2") or rec.get("ta2") or ""
+                                tp3 = rec.get("TP3") or rec.get("tp3") or rec.get("TA3") or rec.get("ta3") or ""
                                 purchase_data = {
                                     "sku": sku,
                                     "status": new_status,
                                     "status_reason": status_reason,
+                                    "tp0": tp0,
                                     "tp1": tp1,
                                     "tp2": tp2,
+                                    "tp3": tp3,
                                     "status_set_at": rec["status_set_at"]
                                 }
                                 self.purchase_history_db.upsert(purchase_data)
@@ -2511,13 +2523,22 @@ class ProductWidget(QWidget):
                                     current_status = t_rec.get("ステータス") or t_rec.get("status") or "ready"
                                     break
 
-                    # データベースに保存（ステータス・TP1・TP2も一緒に保存）
+                    # データベースに保存（ステータス・TP0/TP1/TP2も一緒に保存）
+                    tp0 = ""
                     tp1 = ""
                     tp2 = ""
+                    tp3 = ""
                     if 0 <= row < len(records):
+                        tp0 = records[row].get("TP0") or records[row].get("tp0") or records[row].get("TA0") or records[row].get("ta0") or ""
                         tp1 = records[row].get("TP1") or records[row].get("tp1") or records[row].get("TA1") or records[row].get("ta1") or ""
                         tp2 = records[row].get("TP2") or records[row].get("tp2") or records[row].get("TA2") or records[row].get("ta2") or ""
-                    # テーブル上のTP1/TP2の現在値を取得
+                        tp3 = records[row].get("TP3") or records[row].get("tp3") or records[row].get("TA3") or records[row].get("ta3") or ""
+                    # テーブル上のTP0/TP1/TP2の現在値を取得
+                    if "TP0" in columns:
+                        idx = columns.index("TP0")
+                        item_tp0 = self.purchase_table.item(row, idx)
+                        if item_tp0 and item_tp0.text():
+                            tp0 = item_tp0.text()
                     if "TP1" in columns:
                         idx = columns.index("TP1")
                         item_tp1 = self.purchase_table.item(row, idx)
@@ -2528,13 +2549,20 @@ class ProductWidget(QWidget):
                         item_tp2 = self.purchase_table.item(row, idx)
                         if item_tp2 and item_tp2.text():
                             tp2 = item_tp2.text()
+                    if "TP3" in columns:
+                        idx = columns.index("TP3")
+                        item_tp3 = self.purchase_table.item(row, idx)
+                        if item_tp3 and item_tp3.text():
+                            tp3 = item_tp3.text()
                     try:
                         purchase_data = {
                             "sku": sku_val,
                             "status": current_status,
                             "status_reason": new_reason,
+                            "tp0": tp0,
                             "tp1": tp1,
                             "tp2": tp2,
+                            "tp3": tp3,
                         }
                         self.purchase_history_db.upsert(purchase_data)
                         print(f"ステータス理由保存成功: SKU={sku_val}, status={current_status}, status_reason={new_reason}")
@@ -3227,14 +3255,18 @@ class ProductWidget(QWidget):
 
     def _fill_tp_from_comment(self, row: Dict[str, Any]) -> None:
         """
-        コメントに「1ta6200」「1tp6200」「2ta5800」「2tp5800」のような文字列があれば、
-        (ta|tp) の次に来る数字を TP1/TP2 に設定する（既に値がある場合は上書きしない）。
+        コメントに「0ta6200」「0tp6200」「1ta6200」「1tp6200」「2ta5800」「2tp5800」「3taXXXX」「3tpXXXX」のような文字列があれば、
+        (ta|tp) の次に来る数字を TP0/TP1/TP2/TP3 に設定する（既に値がある場合は上書きしない）。
         """
         comment = str(row.get("コメント") or row.get("comment") or "")
         if not comment:
             return
 
         # 旧キー(TA*)が残っている場合は TP* へ寄せておく（上書きしない）＋ TA* 側はクリアする
+        if (row.get("TA0") or row.get("ta0")) and not (row.get("TP0") or row.get("tp0")):
+            v = row.get("TA0") or row.get("ta0")
+            row["TP0"] = str(v)
+            row["tp0"] = str(v)
         if (row.get("TA1") or row.get("ta1")) and not (row.get("TP1") or row.get("tp1")):
             v = row.get("TA1") or row.get("ta1")
             row["TP1"] = str(v)
@@ -3243,12 +3275,20 @@ class ProductWidget(QWidget):
             v = row.get("TA2") or row.get("ta2")
             row["TP2"] = str(v)
             row["tp2"] = str(v)
+        if (row.get("TA3") or row.get("ta3")) and not (row.get("TP3") or row.get("tp3")):
+            v = row.get("TA3") or row.get("ta3")
+            row["TP3"] = str(v)
+            row["tp3"] = str(v)
         # TA* キーは今後使用しないので削除しておく
-        for k in ("TA1", "ta1", "TA2", "ta2"):
+        for k in ("TA0", "ta0", "TA1", "ta1", "TA2", "ta2", "TA3", "ta3"):
             if k in row:
                 row.pop(k, None)
 
-        # 1(ta|tp)数字 → TP1、2(ta|tp)数字 → TP2（直後の数字を採用）
+        # 0(ta|tp)数字 → TP0、1(ta|tp)数字 → TP1、2(ta|tp)数字 → TP2（直後の数字を採用）
+        m0 = re.search(r"0(?:ta|tp)(\d+)", comment, re.IGNORECASE)
+        if m0 and not (row.get("TP0") or row.get("tp0")):
+            row["TP0"] = m0.group(1)
+            row["tp0"] = m0.group(1)
         m1 = re.search(r"1(?:ta|tp)(\d+)", comment, re.IGNORECASE)
         if m1 and not (row.get("TP1") or row.get("tp1")):
             row["TP1"] = m1.group(1)
@@ -3257,6 +3297,10 @@ class ProductWidget(QWidget):
         if m2 and not (row.get("TP2") or row.get("tp2")):
             row["TP2"] = m2.group(1)
             row["tp2"] = m2.group(1)
+        m3 = re.search(r"3(?:ta|tp)(\d+)", comment, re.IGNORECASE)
+        if m3 and not (row.get("TP3") or row.get("tp3")):
+            row["TP3"] = m3.group(1)
+            row["tp3"] = m3.group(1)
 
     def _calculate_product_name_width(self) -> int:
         return 300

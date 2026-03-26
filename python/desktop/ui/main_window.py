@@ -101,6 +101,8 @@ class MainWindow(QMainWindow):
         # 各ウィジェットの設定を保存
         if hasattr(self, 'repricer_widget') and hasattr(self.repricer_widget, 'save_settings'):
             self.repricer_widget.save_settings()
+        if hasattr(self, 'repricer_widget_369') and hasattr(self.repricer_widget_369, 'save_settings'):
+            self.repricer_widget_369.save_settings()
         if hasattr(self, 'inventory_widget') and hasattr(self.inventory_widget, 'save_settings'):
             self.inventory_widget.save_settings()
         if hasattr(self, 'inventory_widget_dev') and hasattr(self.inventory_widget_dev, 'save_settings'):
@@ -219,6 +221,15 @@ class MainWindow(QMainWindow):
             repricer_tabs.addTab(self.repricer_widget, "改定実行")
             repricer_tabs.addTab(self.repricer_settings_widget, "改定ルール")
             self.tab_widget.addTab(repricer_tabs, "価格改定")
+
+            # 既存の価格改定タブを複製した「3-6-9価格改定」タブ
+            self.repricer_widget_369 = RepricerWidget(self.api_client)
+            self.repricer_settings_widget_369 = RepricerSettingsWidget(self.api_client)
+            repricer_tabs_369 = QTabWidget()
+            repricer_tabs_369.addTab(self.repricer_widget_369, "改定実行")
+            repricer_tabs_369.addTab(self.repricer_settings_widget_369, "改定ルール")
+            self.tab_widget.addTab(repricer_tabs_369, "3-6-9価格改定")
+
             from ui.inventory_widget import InventoryWidget
             from ui.condition_template_widget import ConditionTemplateWidget
             self.inventory_widget = InventoryWidget(self.api_client)
