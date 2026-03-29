@@ -1,3 +1,18 @@
+## 2026-03-29 仕入DB・3-6-9改定連携と仕入行編集（Keepa）ダイアログ改善
+
+- **追加**: `python/desktop/services/purchase_tp_autofill_369.py`
+  - SKU（3P/6N等）から3・6・9プロファイル判定。TP自動は「損益分岐点＋保持率×(販売予定−損益分岐点)」でTP0〜TP3を補完（販売予定超えない）。0%帯・逆算不能時は損益分岐点。`ta_price_from_target_margin_percent`は行編集ダイアログと共用。
+- **変更**: `python/desktop/ui/product_widget.py`
+  - 「TP自動(369)」「TPクリア(開発)」ボタン。一括処理中は`QProgressDialog`で進捗・キャンセル。`api_client`受け取りで369設定API参照。
+- **変更**: `python/desktop/ui/main_window.py`
+  - `ProductWidget`生成時に`api_client`を渡す。
+- **変更**: `python/desktop/ui/repricer_settings_widget.py`
+  - 3-6-9サブタブ名を「3ルール／6ルール／9ルール」に。TP保持率ラベルから日数括弧を削除。
+- **変更**: `python/desktop/ui/purchase_row_edit_dialog.py`
+  - 概算利益を対称式（販売予定より高いTPでも利益が増える表示）。目標利益率は`QDoubleSpinBox`（`keyboardTracking`オフ、▲▼）。開封時・価格欄`editingFinished`でスピンに概算利益率を同期。TP0〜3の色分け・行順（価格→目標利益率→概算利益）。
+- **設定**: `config/reprice_rules.json`（環境により差分あり）
+- **Git**: feat: 仕入DBのTP自動(369)・クリア・進捗表示と仕入行編集の利益率UI改善
+
 ## 2025-01-XX Amazon TSVファイル生成機能とGCSアップロード機能実装
 
 - 追加: `python/services/amazon_inventory_loader_service.py`

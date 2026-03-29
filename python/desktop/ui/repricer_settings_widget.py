@@ -121,17 +121,17 @@ class RepricerSettingsWidget(QWidget):
         self.profile_tab = QTabWidget()
         self.profile_rule_tables = {}
         self.profile_tp_spins = {}
-        for profile_key, label_text in [("3", "3ヶ月ルール"), ("6", "6ヶ月ルール"), ("9", "9ヶ月ルール")]:
+        for profile_key, label_text in [("3", "3ルール"), ("6", "6ルール"), ("9", "9ルール")]:
             tab = QWidget()
             tab_layout = QVBoxLayout(tab)
             tp_group = QGroupBox("TP保持率設定")
             tp_layout = QGridLayout(tp_group)
             self.profile_tp_spins[profile_key] = {}
             tp_labels = [
-                ("tp0", "TP0（1-90日）の利益保持率(%)"),
-                ("tp1", "TP1（91-180日）の利益保持率(%)"),
-                ("tp2", "TP2（181-270日）の利益保持率(%)"),
-                ("tp3", "TP3（271-365日）の利益保持率(%)"),
+                ("tp0", "TP0の利益保持率(%)"),
+                ("tp1", "TP1の利益保持率(%)"),
+                ("tp2", "TP2の利益保持率(%)"),
+                ("tp3", "TP3の利益保持率(%)"),
             ]
             for row, (tp_key, tp_label) in enumerate(tp_labels):
                 tp_layout.addWidget(QLabel(tp_label), row, 0)

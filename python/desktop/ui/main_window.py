@@ -275,7 +275,10 @@ class MainWindow(QMainWindow):
             from ui.route_visit_widget import RouteVisitLogWidget
             from ui.data_acquisition_widget import DataAcquisitionWidget
             self.store_master_widget = StoreMasterWidget()
-            self.product_widget = ProductWidget(inventory_widget=self.inventory_widget)
+            self.product_widget = ProductWidget(
+                inventory_widget=self.inventory_widget,
+                api_client=self.api_client,
+            )
             self.inventory_widget.set_product_widget(self.product_widget)
             # 仕入管理（開発）からDB保存したときも仕入DBタブに即反映するため参照を渡す
             if hasattr(self, "inventory_widget_dev") and self.inventory_widget_dev is not None:

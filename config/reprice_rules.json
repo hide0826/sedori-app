@@ -72,27 +72,228 @@
   "rule_profiles": {
     "3": {
       "tp_rates": {
-        "tp0": 95,
-        "tp1": 75,
-        "tp2": 60,
-        "tp3": 0
-      }
+        "tp0": 95.0,
+        "tp1": 75.0,
+        "tp2": 60.0,
+        "tp3": 10.0
+      },
+      "reprice_rules": [
+        {
+          "days_from": 30,
+          "action": "priceTrace",
+          "value": 1
+        },
+        {
+          "days_from": 60,
+          "action": "priceTrace",
+          "value": 1
+        },
+        {
+          "days_from": 90,
+          "action": "priceTrace",
+          "value": 1
+        },
+        {
+          "days_from": 120,
+          "action": "price_down_1",
+          "value": 4
+        },
+        {
+          "days_from": 150,
+          "action": "price_down_1",
+          "value": 3
+        },
+        {
+          "days_from": 180,
+          "action": "price_down_1",
+          "value": 4
+        },
+        {
+          "days_from": 210,
+          "action": "price_down_2",
+          "value": 5
+        },
+        {
+          "days_from": 240,
+          "action": "price_down_2",
+          "value": 3
+        },
+        {
+          "days_from": 270,
+          "action": "price_down_2",
+          "value": 0
+        },
+        {
+          "days_from": 300,
+          "action": "price_down_ignore",
+          "value": 1
+        },
+        {
+          "days_from": 330,
+          "action": "price_down_ignore",
+          "value": 3
+        },
+        {
+          "days_from": 360,
+          "action": "price_down_ignore",
+          "value": 4
+        },
+        {
+          "days_from": 999,
+          "action": "price_down_2",
+          "value": 4
+        }
+      ]
     },
     "6": {
       "tp_rates": {
-        "tp0": 90,
-        "tp1": 70,
-        "tp2": 55,
-        "tp3": 0
-      }
+        "tp0": 95.0,
+        "tp1": 70.0,
+        "tp2": 55.0,
+        "tp3": 10.0
+      },
+      "reprice_rules": [
+        {
+          "days_from": 30,
+          "action": "priceTrace",
+          "value": 1
+        },
+        {
+          "days_from": 60,
+          "action": "priceTrace",
+          "value": 1
+        },
+        {
+          "days_from": 90,
+          "action": "priceTrace",
+          "value": 1
+        },
+        {
+          "days_from": 120,
+          "action": "price_down_1",
+          "value": 4
+        },
+        {
+          "days_from": 150,
+          "action": "price_down_1",
+          "value": 3
+        },
+        {
+          "days_from": 180,
+          "action": "price_down_1",
+          "value": 4
+        },
+        {
+          "days_from": 210,
+          "action": "price_down_2",
+          "value": 5
+        },
+        {
+          "days_from": 240,
+          "action": "price_down_2",
+          "value": 3
+        },
+        {
+          "days_from": 270,
+          "action": "price_down_2",
+          "value": 0
+        },
+        {
+          "days_from": 300,
+          "action": "price_down_ignore",
+          "value": 1
+        },
+        {
+          "days_from": 330,
+          "action": "price_down_ignore",
+          "value": 3
+        },
+        {
+          "days_from": 360,
+          "action": "price_down_ignore",
+          "value": 4
+        },
+        {
+          "days_from": 999,
+          "action": "price_down_2",
+          "value": 4
+        }
+      ]
     },
     "9": {
       "tp_rates": {
-        "tp0": 85,
-        "tp1": 65,
-        "tp2": 50,
-        "tp3": 0
-      }
+        "tp0": 95.0,
+        "tp1": 95.0,
+        "tp2": 95.0,
+        "tp3": 70.0
+      },
+      "reprice_rules": [
+        {
+          "days_from": 30,
+          "action": "maintain",
+          "value": 1
+        },
+        {
+          "days_from": 60,
+          "action": "maintain",
+          "value": 1
+        },
+        {
+          "days_from": 90,
+          "action": "maintain",
+          "value": 1
+        },
+        {
+          "days_from": 120,
+          "action": "maintain",
+          "value": 4
+        },
+        {
+          "days_from": 150,
+          "action": "maintain",
+          "value": 3
+        },
+        {
+          "days_from": 180,
+          "action": "maintain",
+          "value": 4
+        },
+        {
+          "days_from": 210,
+          "action": "maintain",
+          "value": 5
+        },
+        {
+          "days_from": 240,
+          "action": "maintain",
+          "value": 3
+        },
+        {
+          "days_from": 270,
+          "action": "maintain",
+          "value": 0
+        },
+        {
+          "days_from": 300,
+          "action": "maintain",
+          "value": 1
+        },
+        {
+          "days_from": 330,
+          "action": "maintain",
+          "value": 3
+        },
+        {
+          "days_from": 360,
+          "action": "maintain",
+          "value": 4
+        },
+        {
+          "days_from": 999,
+          "action": "maintain",
+          "value": 4
+        }
+      ]
     }
   },
   "default_profile": "6",
@@ -101,5 +302,5 @@
     "enabled": true,
     "reason_prefix": "ALERT"
   },
-  "updated_at": "2026-02-18 14:01:29.470164"
+  "updated_at": "2026-03-29 07:31:28.223995"
 }

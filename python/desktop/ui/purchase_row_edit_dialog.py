@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QLabel,
@@ -28,6 +29,25 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+# ダークUI向け：TP0〜TP3 でラベル・入力・概算の色を分ける
+_TP_DIALOG_TIER_COLORS = ("#6ecff6", "#7ae495", "#f0c674", "#e8a0bf")
+
+
+def _style_tp_tier_text(color: str, *widgets: QWidget) -> None:
+    for w in widgets:
+        w.setStyleSheet(f"color: {color};")
+
+try:
+    from desktop.services.purchase_tp_autofill_369 import (
+        ta_price_from_target_margin_percent,
+        break_even_price_int_for_record,
+    )
+except ImportError:
+    from services.purchase_tp_autofill_369 import (  # type: ignore
+        ta_price_from_target_margin_percent,
+        break_even_price_int_for_record,
+    )
 
 
 def _parse_number(val: Any) -> float:
@@ -156,6 +176,7 @@ class PurchaseRowEditDialog(QDialog):
         self.setMinimumSize(380, 280)
         self.setMaximumSize(420, 420)
         self._positioned_at_topleft = False
+        self._tp_field_sync_guard = False
         self._setup_ui()
 
     def showEvent(self, event) -> None:
@@ -201,61 +222,65 @@ class PurchaseRowEditDialog(QDialog):
         open_keepa_btn.clicked.connect(self._open_keepa_in_browser)
         layout.addWidget(open_keepa_btn)
 
-        # --- TP0 / TP1 / TP2 / TP3 編集 ---
+        # --- TP0 / TP1 / TP2 / TP3 編集（各帯：価格 → 目標利益率 → 概算利益、色分け）---
         ta_group = QGroupBox("TP 価格（Keepa で確認しながら入力）")
         ta_layout = QFormLayout()
-        self._ta0_edit = QLineEdit()
-        self._ta0_edit.setPlaceholderText("例: 6400")
-        self._ta0_edit.setText(
-            self._record_str("TP0") or self._record_str("tp0") or self._record_str("TA0") or self._record_str("ta0") or ""
-        )
-        self._ta0_edit.textChanged.connect(self._update_ta_labels)
-        ta_layout.addRow("TP0 価格:", self._ta0_edit)
-        self._ta0_profit_label = QLabel("-")
-        ta_layout.addRow("TP0 概算利益（利益率）:", self._ta0_profit_label)
-        self._ta0_rate_edit = QLineEdit()
-        self._ta0_rate_edit.setPlaceholderText("例: 20（%）")
-        self._ta0_rate_edit.textChanged.connect(lambda _text: self._on_ta_rate_changed(0))
-        ta_layout.addRow("TP0 目標利益率(%):", self._ta0_rate_edit)
-        self._ta1_edit = QLineEdit()
-        self._ta1_edit.setPlaceholderText("例: 6200")
-        self._ta1_edit.setText(self._record_str("TP1") or self._record_str("tp1") or self._record_str("TA1") or self._record_str("ta1") or "")
-        self._ta1_edit.textChanged.connect(self._update_ta_labels)
-        ta_layout.addRow("TP1 価格:", self._ta1_edit)
-        self._ta1_profit_label = QLabel("-")
-        ta_layout.addRow("TP1 概算利益（利益率）:", self._ta1_profit_label)
-        self._ta1_rate_edit = QLineEdit()
-        self._ta1_rate_edit.setPlaceholderText("例: 20（%）")
-        self._ta1_rate_edit.textChanged.connect(lambda _text: self._on_ta_rate_changed(1))
-        ta_layout.addRow("TP1 目標利益率(%):", self._ta1_rate_edit)
-        self._ta2_edit = QLineEdit()
-        self._ta2_edit.setPlaceholderText("例: 5800")
-        self._ta2_edit.setText(self._record_str("TP2") or self._record_str("tp2") or self._record_str("TA2") or self._record_str("ta2") or "")
-        self._ta2_edit.textChanged.connect(self._update_ta_labels)
-        ta_layout.addRow("TP2 価格:", self._ta2_edit)
-        self._ta2_profit_label = QLabel("-")
-        ta_layout.addRow("TP2 概算利益（利益率）:", self._ta2_profit_label)
-        self._ta2_rate_edit = QLineEdit()
-        self._ta2_rate_edit.setPlaceholderText("例: 25（%）")
-        self._ta2_rate_edit.textChanged.connect(lambda _text: self._on_ta_rate_changed(2))
-        ta_layout.addRow("TP2 目標利益率(%):", self._ta2_rate_edit)
 
-        self._ta3_edit = QLineEdit()
-        self._ta3_edit.setPlaceholderText("例: 5600")
-        self._ta3_edit.setText(
-            self._record_str("TP3") or self._record_str("tp3") or self._record_str("TA3") or self._record_str("ta3") or ""
-        )
-        self._ta3_edit.textChanged.connect(self._update_ta_labels)
-        ta_layout.addRow("TP3 価格:", self._ta3_edit)
-        self._ta3_profit_label = QLabel("-")
-        ta_layout.addRow("TP3 概算利益（利益率）:", self._ta3_profit_label)
-        self._ta3_rate_edit = QLineEdit()
-        self._ta3_rate_edit.setPlaceholderText("例: 25（%）")
-        self._ta3_rate_edit.textChanged.connect(lambda _text: self._on_ta_rate_changed(3))
-        ta_layout.addRow("TP3 目標利益率(%):", self._ta3_rate_edit)
+        def _add_tp_block(
+            tier: int,
+            price_key_variants: tuple[str, ...],
+            price_placeholder: str,
+        ) -> None:
+            color = _TP_DIALOG_TIER_COLORS[tier]
+            lbl_price = QLabel(f"TP{tier} 価格:")
+            edit = QLineEdit()
+            edit.setPlaceholderText(price_placeholder)
+            txt = ""
+            for k in price_key_variants:
+                v = self._record_str(k)
+                if v:
+                    txt = v
+                    break
+            edit.setText(txt)
+            edit.textChanged.connect(lambda _t=None, tr=tier: self._on_ta_price_text_changed(tr))
+            edit.editingFinished.connect(lambda tr=tier: self._sync_rate_spin_from_price(tr))
+
+            lbl_rate = QLabel(f"TP{tier} 目標利益率(%):")
+            rate_spin = QDoubleSpinBox()
+            rate_spin.setRange(-100.0, 300.0)
+            rate_spin.setDecimals(2)
+            rate_spin.setSingleStep(0.5)
+            rate_spin.setSuffix(" %")
+            rate_spin.setKeyboardTracking(False)
+            rate_spin.setMinimumWidth(118)
+            rate_spin.setToolTip(
+                "現在の TP 価格に対する概算利益率(%)が表示されます。▲▼ で増減すると価格が連動します。\n"
+                "価格をキーで直したときは、Enter か別の欄へ移動して確定すると利益率も更新されます。"
+            )
+            rate_spin.valueChanged.connect(lambda _v, tr=tier: self._on_ta_rate_spin_changed(tr))
+
+            lbl_profit = QLabel(f"TP{tier} 概算利益（利益率）:")
+            profit_lbl = QLabel("-")
+
+            _style_tp_tier_text(color, lbl_price, edit, lbl_rate, rate_spin, lbl_profit, profit_lbl)
+            ta_layout.addRow(lbl_price, edit)
+            ta_layout.addRow(lbl_rate, rate_spin)
+            ta_layout.addRow(lbl_profit, profit_lbl)
+
+            setattr(self, f"_ta{tier}_edit", edit)
+            setattr(self, f"_ta{tier}_rate_spin", rate_spin)
+            setattr(self, f"_ta{tier}_profit_label", profit_lbl)
+
+        _add_tp_block(0, ("TP0", "tp0", "TA0", "ta0"), "例: 6400")
+        _add_tp_block(1, ("TP1", "tp1", "TA1", "ta1"), "例: 6200")
+        _add_tp_block(2, ("TP2", "tp2", "TA2", "ta2"), "例: 5800")
+        _add_tp_block(3, ("TP3", "tp3", "TA3", "ta3"), "例: 5600")
+
         ta_group.setLayout(ta_layout)
         layout.addWidget(ta_group)
         self._update_ta_labels()
+        for tr in range(4):
+            self._sync_rate_spin_from_price(tr)
 
         # --- ボタン（反映後もダイアログは開いたまま＝ブラウザを参照し続けられる）---
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
@@ -288,8 +313,56 @@ class PurchaseRowEditDialog(QDialog):
             return ""
         return str(v).strip()
 
+    def _ta_price_edit(self, which: int) -> QLineEdit:
+        return (self._ta0_edit, self._ta1_edit, self._ta2_edit, self._ta3_edit)[which]
+
+    def _ta_rate_spin(self, which: int) -> QDoubleSpinBox:
+        return (self._ta0_rate_spin, self._ta1_rate_spin, self._ta2_rate_spin, self._ta3_rate_spin)[which]
+
+    def _implied_margin_percent(self, ta_price: float) -> Optional[float]:
+        """TP 価格 ta に対する概算利益率(%) = 概算利益 / ta × 100（_update_ta_labels と同じ利益定義）。"""
+        sale = self._sale_price_value
+        if not ta_price or sale <= 0:
+            return None
+        current_profit = self._current_profit_value
+        profit = current_profit - 0.89 * (sale - ta_price)
+        return (profit / ta_price * 100) if ta_price else None
+
+    def _sync_rate_spin_from_price(self, which: int) -> None:
+        """TP 価格から逆算した利益率(%)をスピンに反映（概算利益行と同じ値）。編集確定時・初期表示用。"""
+        if self._tp_field_sync_guard:
+            return
+        price_edit = self._ta_price_edit(which)
+        spin = self._ta_rate_spin(which)
+        raw = price_edit.text().strip()
+        spin.blockSignals(True)
+        try:
+            if not raw:
+                spin.setValue(0.0)
+                return
+            ta = _parse_number(raw)
+            if ta <= 0:
+                spin.setValue(0.0)
+                return
+            imp = self._implied_margin_percent(ta)
+            if imp is None:
+                spin.setValue(0.0)
+            else:
+                lo, hi = spin.minimum(), spin.maximum()
+                spin.setValue(max(lo, min(hi, imp)))
+        finally:
+            spin.blockSignals(False)
+
+    def _on_ta_price_text_changed(self, which: int) -> None:
+        """価格のキー入力では利益率スピンを書き換えない（バックスペースと競合しない）。"""
+        if self._tp_field_sync_guard:
+            self._update_ta_labels()
+            return
+        self._update_ta_labels()
+
     def _update_ta_labels(self) -> None:
-        # 概算利益 = 今出てる見込み利益 - (値下げ幅 × 0.89)、その横に想定利益率 = 概算利益/TA価格×100
+        # 販売予定 sale での見込み利益を基準に、TP 価格との差を 0.89 倍して利益に反映する。
+        # 概算利益 = 見込み利益 - 0.89 × (販売予定 - TP価格) ＝ 価格が上がれば利益も増える（対称）。
         current_profit = self._current_profit_value
         sale = self._sale_price_value
         ta0 = _parse_number(self._ta0_edit.text())
@@ -300,8 +373,7 @@ class PurchaseRowEditDialog(QDialog):
         def _ta_profit_and_rate(ta_price: float) -> tuple:
             if not ta_price or sale <= 0:
                 return None, None
-            drop = max(0.0, sale - ta_price)  # 値下げ幅（TAが販売予定より高い場合は0）
-            profit = current_profit - (drop * 0.89)
+            profit = current_profit - 0.89 * (sale - ta_price)
             rate = (profit / ta_price * 100) if ta_price else None
             return profit, rate
 
@@ -322,43 +394,39 @@ class PurchaseRowEditDialog(QDialog):
             f"{_format_price(p3)}（{r3:.1f}%）" if p3 is not None and r3 is not None else "-"
         )
 
-    def _on_ta_rate_changed(self, which: int) -> None:
-        """TA目標利益率(%)から逆算して TA 価格を自動入力する"""
+    def _on_ta_rate_spin_changed(self, which: int) -> None:
+        """スピン（▲▼ または確定したキー入力）で目標利益率が変わったときだけ TP 価格を逆算する。"""
+        if self._tp_field_sync_guard:
+            return
         sale = self._sale_price_value
         current_profit = self._current_profit_value
         if sale <= 0:
             return
 
-        if which == 0:
-            edit = self._ta0_rate_edit
-            target_edit = self._ta0_edit
-        elif which == 1:
-            edit = self._ta1_rate_edit
-            target_edit = self._ta1_edit
-        elif which == 2:
-            edit = self._ta2_rate_edit
-            target_edit = self._ta2_edit
-        else:
-            # which == 3
-            edit = self._ta3_rate_edit
-            target_edit = self._ta3_edit
-
-        rate_percent = _parse_number(edit.text())
+        spin = self._ta_rate_spin(which)
+        target_edit = self._ta_price_edit(which)
+        rate_percent = float(spin.value())
         if rate_percent <= 0:
             return
 
-        r = rate_percent / 100.0  # 利益率(小数)
-        # 概算利益 = current_profit - 0.89*(sale - ta)
-        # 想定利益率 r = 概算利益 / ta
-        # => (current_profit - 0.89*sale + 0.89*ta) = r * ta
-        # => (r - 0.89) * ta = current_profit - 0.89*sale
-        denom = r - 0.89
-        if abs(denom) < 1e-6:
+        ta_price = ta_price_from_target_margin_percent(sale, current_profit, rate_percent)
+        if ta_price is None:
+            ta_price = break_even_price_int_for_record(self.record)
+        if ta_price is None:
             return
-        ta_price = (current_profit - 0.89 * sale) / denom
-        if ta_price <= 0:
-            return
-        target_edit.setText(str(int(ta_price)))
+
+        self._tp_field_sync_guard = True
+        try:
+            target_edit.setText(str(ta_price))
+            imp = self._implied_margin_percent(float(ta_price))
+            if imp is not None:
+                lo, hi = spin.minimum(), spin.maximum()
+                spin.blockSignals(True)
+                spin.setValue(max(lo, min(hi, imp)))
+                spin.blockSignals(False)
+        finally:
+            self._tp_field_sync_guard = False
+        self._update_ta_labels()
 
     def _apply(self) -> None:
         """仕入DBに反映する（ダイアログは閉じない＝ブラウザを見たまま続けられる）"""

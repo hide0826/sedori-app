@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QGroupBox, QFormLayout, QLineEdit, QDialog, QDialogButtonBox,
     QMessageBox, QLabel, QTabWidget, QHeaderView, QFileDialog, QMenu, QApplication,
-    QAbstractItemView, QComboBox
+    QAbstractItemView, QComboBox, QProgressDialog,
 )
 from PySide6.QtGui import QDrag, QPixmap, QDesktopServices, QCursor
 
@@ -326,8 +326,9 @@ PRODUCT_NAME_DISPLAY_LIMIT = 50
 class ProductWidget(QWidget):
     """商品データ＋仕入/販売DBタブ"""
 
-    def __init__(self, parent=None, inventory_widget=None):
+    def __init__(self, parent=None, inventory_widget=None, api_client=None):
         super().__init__(parent)
+        self.api_client = api_client
         # DBハンドルの初期化（軽量処理）
         self.db = ProductDatabase()
         self.warranty_db = WarrantyDatabase()
@@ -616,6 +617,24 @@ class ProductWidget(QWidget):
         self.view_tp_button.setCheckable(True)
         self.view_tp_button.clicked.connect(lambda: self.toggle_view_mode("tp"))
         controls_layout.addWidget(self.view_tp_button)
+
+        self.autofill_tp369_button = QPushButton("TP自動(369)")
+        self.autofill_tp369_button.setToolTip(
+            "TP0〜TP3 が空欄の行だけ、SKU の 3P/6N などと「3-6-9価格改定」の TP 利益保持率(%)で自動入力します。\n"
+            "価格は「損益分岐点 + 保持率×(販売予定−損益分岐点)」で求め、販売予定価格を超えません。\n"
+            "保持率 0%% の帯は損益分岐点。損益分岐が取れないときは列の値または従来のフォールバックを使います。\n"
+            "既に値がある列は上書きしません。"
+        )
+        self.autofill_tp369_button.clicked.connect(self.autofill_purchase_tp_from_369_rules)
+        controls_layout.addWidget(self.autofill_tp369_button)
+
+        self.clear_tp_dev_button = QPushButton("TPクリア(開発)")
+        self.clear_tp_dev_button.setToolTip(
+            "【開発用】仕入DBの全行から TP0〜TP3（および旧 TA0〜TA3）を空にします。\n"
+            "スナップショットと hiroi.db の該当 SKU にも反映します。取り消しはできません。"
+        )
+        self.clear_tp_dev_button.clicked.connect(self.clear_all_purchase_tp_for_dev)
+        controls_layout.addWidget(self.clear_tp_dev_button)
         
         self.view_image_button = QPushButton("画像")
         self.view_image_button.setCheckable(True)
@@ -828,6 +847,229 @@ class ProductWidget(QWidget):
             f"更新: {updated}件\n"
             f"スキップ: {skipped}件"
         )
+
+    def _tp_batch_progress_open(self, title: str, label: str, maximum: int) -> QProgressDialog:
+        prog = QProgressDialog(self)
+        prog.setWindowTitle(title)
+        prog.setLabelText(label)
+        prog.setRange(0, max(0, int(maximum)))
+        prog.setCancelButtonText("キャンセル")
+        prog.setWindowModality(Qt.WindowModal)
+        prog.setMinimumDuration(0)
+        prog.setValue(0)
+        prog.show()
+        QApplication.processEvents()
+        return prog
+
+    def _tp_batch_progress_set_save_phase(self, prog: QProgressDialog) -> None:
+        prog.setRange(0, 0)
+        prog.setLabelText("テーブル更新・スナップショット保存中…")
+        prog.setCancelButton(None)
+        QApplication.processEvents()
+
+    def autofill_purchase_tp_from_369_rules(self) -> None:
+        """
+        TP0〜TP3 が空の行に、SKU と 3-6-9 改定ルールの TP 利益保持率で価格を入れる。
+        仕入行編集ダイアログと同じ逆算式。既存の TP 値は上書きしない。
+        """
+        if not getattr(self, "purchase_all_records", None):
+            QMessageBox.information(self, "情報", "仕入DBにデータがありません。")
+            return
+
+        try:
+            from desktop.services.purchase_tp_autofill_369 import (
+                load_369_repricer_config,
+                fill_purchase_record_tp_from_369,
+            )
+        except ImportError:
+            from services.purchase_tp_autofill_369 import (  # type: ignore
+                load_369_repricer_config,
+                fill_purchase_record_tp_from_369,
+            )
+
+        config = load_369_repricer_config(getattr(self, "api_client", None))
+        if not isinstance(config, dict) or not config.get("rule_profiles"):
+            QMessageBox.warning(
+                self,
+                "設定",
+                "3-6-9 改定ルール（rule_profiles）を読み込めませんでした。\n"
+                "FastAPI を起動してから試すか、config/reprice_rules.json を確認してください。",
+            )
+            return
+
+        total = len(self.purchase_all_records)
+        prog = self._tp_batch_progress_open(
+            "TP自動(369)",
+            f"0 / {total} 行を処理中…",
+            total,
+        )
+        changed_rows = 0
+        db_errors: List[str] = []
+        canceled = False
+        update_every = max(1, min(50, total // 100 or 1))
+
+        for i, record in enumerate(self.purchase_all_records):
+            if prog.wasCanceled():
+                canceled = True
+                break
+            if fill_purchase_record_tp_from_369(record, config):
+                changed_rows += 1
+                sku = str(record.get("SKU") or record.get("sku") or "").strip()
+                if sku and hasattr(self, "purchase_history_db"):
+                    try:
+                        status = record.get("ステータス") or record.get("status") or "ready"
+                        reason = record.get("ステータス理由") or record.get("status_reason") or ""
+                        self.purchase_history_db.upsert({
+                            "sku": sku,
+                            "status": status,
+                            "status_reason": reason,
+                            "tp0": record.get("tp0") or record.get("TP0") or "",
+                            "tp1": record.get("tp1") or record.get("TP1") or "",
+                            "tp2": record.get("tp2") or record.get("TP2") or "",
+                            "tp3": record.get("tp3") or record.get("TP3") or "",
+                        })
+                    except Exception as e:
+                        db_errors.append(f"{sku}: {e}")
+            if (i + 1) % update_every == 0 or i + 1 == total:
+                prog.setValue(i + 1)
+                prog.setLabelText(f"{i + 1} / {total} 行を処理中…")
+                QApplication.processEvents()
+
+        if not canceled:
+            prog.setValue(total)
+        self._tp_batch_progress_set_save_phase(prog)
+
+        try:
+            self.purchase_all_records_master = copy.deepcopy(self.purchase_all_records)
+        except Exception:
+            pass
+
+        self.filter_purchase_records()
+        QApplication.processEvents()
+
+        try:
+            self.save_purchase_snapshot()
+        except Exception as e:
+            print(f"TP自動(369) 後のスナップショット保存エラー: {e}")
+
+        prog.close()
+
+        msg = (
+            f"処理が完了しました。\n\n"
+            f"TP を補完した行: {changed_rows} 件\n"
+            f"（空欄の TP のみ。販売予定価格が 0 以下の行はスキップされます）"
+        )
+        if canceled:
+            msg = (
+                "キャンセルしました。\n"
+                f"その時点まで TP を補完した行: {changed_rows} 件\n\n"
+                "表示とスナップショットは、処理したところまで反映済みです。"
+            )
+        if db_errors:
+            msg += "\n\nhirio.db 反映でエラー:\n" + "\n".join(db_errors[:5])
+            if len(db_errors) > 5:
+                msg += f"\n…他 {len(db_errors) - 5} 件"
+        QMessageBox.information(self, "TP自動(369)", msg)
+
+    def clear_all_purchase_tp_for_dev(self) -> None:
+        """【開発用】全仕入レコードの TP0〜TP3 を空にする。"""
+        if not getattr(self, "purchase_all_records", None):
+            QMessageBox.information(self, "情報", "仕入DBにデータがありません。")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "確認（開発用）",
+            "仕入DBの全行について、TP0〜TP3 をすべて空にしますか？\n"
+            "（スナップショット保存まで行います。元に戻せません）",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        tp_keys = (
+            "TP0", "tp0", "TA0", "ta0",
+            "TP1", "tp1", "TA1", "ta1",
+            "TP2", "tp2", "TA2", "ta2",
+            "TP3", "tp3", "TA3", "ta3",
+        )
+        total = len(self.purchase_all_records)
+        prog = self._tp_batch_progress_open(
+            "TPクリア(開発)",
+            f"0 / {total} 行を処理中…",
+            total,
+        )
+        cleared_rows = 0
+        db_errors: List[str] = []
+        canceled = False
+        update_every = max(1, min(50, total // 100 or 1))
+
+        for i, record in enumerate(self.purchase_all_records):
+            if prog.wasCanceled():
+                canceled = True
+                break
+            had_any = any(
+                str(record.get(k) or "").strip() and str(record.get(k) or "").strip() != "-"
+                for k in tp_keys
+            )
+            for k in tp_keys:
+                record[k] = ""
+            if had_any:
+                cleared_rows += 1
+
+            sku = str(record.get("SKU") or record.get("sku") or "").strip()
+            if sku and hasattr(self, "purchase_history_db"):
+                try:
+                    status = record.get("ステータス") or record.get("status") or "ready"
+                    reason = record.get("ステータス理由") or record.get("status_reason") or ""
+                    self.purchase_history_db.upsert({
+                        "sku": sku,
+                        "status": status,
+                        "status_reason": reason,
+                        "tp0": "",
+                        "tp1": "",
+                        "tp2": "",
+                        "tp3": "",
+                    })
+                except Exception as e:
+                    db_errors.append(f"{sku}: {e}")
+            if (i + 1) % update_every == 0 or i + 1 == total:
+                prog.setValue(i + 1)
+                prog.setLabelText(f"{i + 1} / {total} 行を処理中…")
+                QApplication.processEvents()
+
+        if not canceled:
+            prog.setValue(total)
+        self._tp_batch_progress_set_save_phase(prog)
+
+        try:
+            self.purchase_all_records_master = copy.deepcopy(self.purchase_all_records)
+        except Exception:
+            pass
+
+        self.filter_purchase_records()
+        QApplication.processEvents()
+
+        try:
+            self.save_purchase_snapshot()
+        except Exception as e:
+            print(f"TPクリア(開発) 後のスナップショット保存エラー: {e}")
+
+        prog.close()
+
+        msg = f"TP を空にした行: {cleared_rows} 件（全 {len(self.purchase_all_records)} 行を処理）"
+        if canceled:
+            msg = (
+                "キャンセルしました。\n"
+                f"TP を空にした行（その時点まで）: {cleared_rows} 件\n\n"
+                "表示とスナップショットは、処理したところまで反映済みです。"
+            )
+        if db_errors:
+            msg += "\n\nhirio.db 反映でエラー:\n" + "\n".join(db_errors[:5])
+            if len(db_errors) > 5:
+                msg += f"\n…他 {len(db_errors) - 5} 件"
+        QMessageBox.information(self, "TPクリア(開発)", msg)
 
     def save_purchase_from_table(self):
         """
