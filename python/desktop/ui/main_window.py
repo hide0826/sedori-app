@@ -215,16 +215,16 @@ class MainWindow(QMainWindow):
             # 価格改定・仕入管理（まずここが使えるようにする）
             from ui.repricer_widget import RepricerWidget
             from ui.repricer_settings_widget import RepricerSettingsWidget
-            self.repricer_widget = RepricerWidget(self.api_client)
-            self.repricer_settings_widget = RepricerSettingsWidget(self.api_client)
+            self.repricer_widget = RepricerWidget(self.api_client, mode="standard")
+            self.repricer_settings_widget = RepricerSettingsWidget(self.api_client, mode="standard")
             repricer_tabs = QTabWidget()
             repricer_tabs.addTab(self.repricer_widget, "改定実行")
             repricer_tabs.addTab(self.repricer_settings_widget, "改定ルール")
             self.tab_widget.addTab(repricer_tabs, "価格改定")
 
             # 既存の価格改定タブを複製した「3-6-9価格改定」タブ
-            self.repricer_widget_369 = RepricerWidget(self.api_client)
-            self.repricer_settings_widget_369 = RepricerSettingsWidget(self.api_client)
+            self.repricer_widget_369 = RepricerWidget(self.api_client, mode="369")
+            self.repricer_settings_widget_369 = RepricerSettingsWidget(self.api_client, mode="369")
             repricer_tabs_369 = QTabWidget()
             repricer_tabs_369.addTab(self.repricer_widget_369, "改定実行")
             repricer_tabs_369.addTab(self.repricer_settings_widget_369, "改定ルール")
@@ -342,7 +342,7 @@ class MainWindow(QMainWindow):
             from ui.keepa_test_widget import KeepaTestWidget
             from ui.image_test_widget import ImageTestWidget
             from ui.settings_widget import SettingsWidget
-            self.keepa_test_widget = KeepaTestWidget()
+            self.keepa_test_widget = KeepaTestWidget(product_widget=getattr(self, "product_widget", None))
             self.tab_widget.addTab(self.keepa_test_widget, "Keepaテスト")
             self.image_test_widget = ImageTestWidget()
             self.tab_widget.addTab(self.image_test_widget, "画像テスト")

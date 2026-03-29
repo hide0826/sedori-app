@@ -1614,3 +1614,33 @@
 
 **最終更新**: 2026-03-24
 **更新者**: Agentモード（実装）
+
+### 2026-03-29（Keepaテスト AITP・下限TP・AI根拠全文／3-6-9価格改定の継続実装）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. **Keepaテストタブの拡張**
+     - `keepa_test_widget.py`: 列追加（コンディション・ASIN・SKU・仕入/販売/利益・損益分岐点・想定利益率/ROI・TP・下限TP0〜3・AITP0〜3・AI根拠）。仕入DB（商品DB）からの行選択ダイアログ、右クリック（Keepaグラフを開く等）。画面上部で **TP0〜TP3 の利益率（%）** を設定し、**実質コスト率 `r` から下限TP0〜3を一括入力**。**Gemini による AI判定（AITP入力）**（手入力TPは参照させず、Keepa生データ＋分析サマリを主入力とする方針）。JSON 抽出の頑健化、モデル候補の順試行と `list_models` 連携、タイムアウト時の再取得（`stats` 付きフォールバック）。**検証用スナップショット**の保存・読込。テーブル下に **「AI根拠（全文）」** の `QTextEdit` を追加（セル省略対策）。AIが不適切な「分析なし」文を返した場合は、取得済みサマリから機械的に根拠文を組み立てるフォールバック。
+     - `keepa_service.py`: Keepa API のリトライ、**3-6-9 向けの価格帯分析**（`analyze_keepa_for_369` 等）、Gemini 解釈・売れやすさ推定の土台となる関数群を追加。
+     - `main_window.py`: `KeepaTestWidget` に `product_widget` 参照を渡し、仕入DB連携を可能に。
+     - **メモ**: ランキングドロップ等の履歴を根拠文に豊かに載せる件は、当面は機械的な下限TP（%）運用で十分とし、余裕が出た段階で継続する。
+  2. **3-6-9 価格改定まわり（設定・バックエンド・デスクトップUI）**
+     - `repricer_weekly.py`: `load_config(mode="369")` 時のデフォルト補完、`rule_profiles`（3/6/9 別 TP 率）、SKU からのプロファイル判定、経過日数に応じた TP バンド等のロジック拡張。
+     - `config/reprice_rules.json`: 上記に合わせたルール定義の追記・調整。
+     - `routers/repricer.py` / `desktop/api/client.py`: API 連携の追随。
+     - `repricer_settings_widget.py` / `repricer_widget.py`: 設定画面・実行画面側の対応。
+- **変更ファイル**:
+  - `python/desktop/ui/keepa_test_widget.py`
+  - `python/desktop/services/keepa_service.py`
+  - `python/desktop/ui/main_window.py`
+  - `config/reprice_rules.json`
+  - `python/services/repricer_weekly.py`
+  - `python/routers/repricer.py`
+  - `python/desktop/api/client.py`
+  - `python/desktop/ui/repricer_settings_widget.py`
+  - `python/desktop/ui/repricer_widget.py`
+  - `.gitignore`（Keepaテスト用ローカルスナップショット JSON を除外）
+  - `docs/cursor_development_progress.md`
+- **次回（任意）**: Keepa 履歴を AI 根拠に安定反映する分析の強化。価格改定の運用に合わせたルール微調整。
+
+**最終更新**: 2026-03-29
+**更新者**: Agentモード（実装）

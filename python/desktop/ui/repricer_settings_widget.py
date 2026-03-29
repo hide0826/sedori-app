@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QLineEdit, QComboBox,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QCheckBox, QSpinBox, QDoubleSpinBox, QGroupBox,
+    QCheckBox, QSpinBox, QDoubleSpinBox, QGroupBox, QTabWidget,
     QMessageBox, QFrame, QSplitter
 )
 from PySide6.QtCore import Qt, QThread, Signal
@@ -29,22 +29,23 @@ class RepricerSettingsWorker(QThread):
     config_saved = Signal(bool)
     error_occurred = Signal(str)
     
-    def __init__(self, api_client, action="load", config_data=None):
+    def __init__(self, api_client, action="load", config_data=None, mode="standard"):
         super().__init__()
         self.api_client = api_client
         self.action = action
         self.config_data = config_data
+        self.mode = mode
         
     def run(self):
         """ルール設定の処理"""
         try:
             if self.action == "load":
                 # 設定の取得
-                config = self.api_client.get_repricer_config()
+                config = self.api_client.get_repricer_config(mode=self.mode)
                 self.config_loaded.emit(config)
             elif self.action == "save":
                 # 設定の保存
-                success = self.api_client.update_repricer_config(self.config_data)
+                success = self.api_client.update_repricer_config(self.config_data, mode=self.mode)
                 self.config_saved.emit(success)
                 
         except Exception as e:
@@ -54,9 +55,10 @@ class RepricerSettingsWorker(QThread):
 class RepricerSettingsWidget(QWidget):
     """価格改定ルール設定ウィジェット"""
     
-    def __init__(self, api_client):
+    def __init__(self, api_client, mode="standard"):
         super().__init__()
         self.api_client = api_client
+        self.mode = mode if mode in ("standard", "369") else "standard"
         self.config_data = None
         self.rules_table = None
         
@@ -71,12 +73,16 @@ class RepricerSettingsWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
-        
+
         # 上部：基本設定エリア
         self.setup_basic_settings()
-        
-        # 中央：ルール設定テーブル
-        self.setup_rules_table()
+
+        # 3-6-9用か通常用かで設定UIを分岐
+        if self.mode == "369":
+            self.setup_369_rules_panel()
+        else:
+            # 中央：ルール設定テーブル（通常タブのみ）
+            self.setup_rules_table()
         
         # 下部：アクションボタン
         self.setup_action_buttons()
@@ -106,37 +112,101 @@ class RepricerSettingsWidget(QWidget):
         basic_layout.addWidget(self.excluded_skus_edit, 2, 1)
         
         self.layout().addWidget(basic_group)
+
+    def setup_369_rules_panel(self):
+        """3-6-9価格改定の専用設定UI"""
+        profile_group = QGroupBox("3-6-9 改定ルール設定")
+        profile_layout = QVBoxLayout(profile_group)
+
+        self.profile_tab = QTabWidget()
+        self.profile_rule_tables = {}
+        self.profile_tp_spins = {}
+        for profile_key, label_text in [("3", "3ヶ月ルール"), ("6", "6ヶ月ルール"), ("9", "9ヶ月ルール")]:
+            tab = QWidget()
+            tab_layout = QVBoxLayout(tab)
+            tp_group = QGroupBox("TP保持率設定")
+            tp_layout = QGridLayout(tp_group)
+            self.profile_tp_spins[profile_key] = {}
+            tp_labels = [
+                ("tp0", "TP0（1-90日）の利益保持率(%)"),
+                ("tp1", "TP1（91-180日）の利益保持率(%)"),
+                ("tp2", "TP2（181-270日）の利益保持率(%)"),
+                ("tp3", "TP3（271-365日）の利益保持率(%)"),
+            ]
+            for row, (tp_key, tp_label) in enumerate(tp_labels):
+                tp_layout.addWidget(QLabel(tp_label), row, 0)
+                spin = QDoubleSpinBox()
+                spin.setRange(0.0, 300.0)
+                spin.setSingleStep(1.0)
+                spin.setSuffix("%")
+                self.profile_tp_spins[profile_key][tp_key] = spin
+                tp_layout.addWidget(spin, row, 1)
+            tp_layout.setColumnStretch(2, 1)
+            tab_layout.addWidget(tp_group)
+            table = self._create_rules_table_widget(profile_key=profile_key)
+            self.profile_rule_tables[profile_key] = table
+            self.setup_default_rules(table=table, connect_signals=True)
+            tab_layout.addWidget(table)
+            self.profile_tab.addTab(tab, label_text)
+        profile_layout.addWidget(self.profile_tab)
+        self.layout().addWidget(profile_group)
+
+        common_group = QGroupBox("3-6-9 共通設定")
+        common_layout = QGridLayout(common_group)
+        common_layout.addWidget(QLabel("改定間隔(日):"), 0, 0)
+        self.interval_days_spin = QSpinBox()
+        self.interval_days_spin.setRange(1, 90)
+        self.interval_days_spin.setValue(7)
+        common_layout.addWidget(self.interval_days_spin, 0, 1)
+
+        common_layout.addWidget(QLabel("デフォルトプロファイル:"), 1, 0)
+        self.default_profile_combo = QComboBox()
+        self.default_profile_combo.addItem("3ルール", "3")
+        self.default_profile_combo.addItem("6ルール", "6")
+        self.default_profile_combo.addItem("9ルール", "9")
+        common_layout.addWidget(self.default_profile_combo, 1, 1)
+
+        self.alert_enabled_check = QCheckBox("アラートを理由欄に表示する")
+        self.alert_enabled_check.setChecked(True)
+        common_layout.addWidget(self.alert_enabled_check, 2, 0, 1, 2)
+
+        common_layout.addWidget(QLabel("アラート接頭辞:"), 3, 0)
+        self.alert_prefix_edit = QLineEdit()
+        self.alert_prefix_edit.setText("ALERT")
+        common_layout.addWidget(self.alert_prefix_edit, 3, 1)
+
+        common_layout.setColumnStretch(2, 1)
+        self.layout().addWidget(common_group)
         
     def setup_rules_table(self):
         """ルール設定テーブルの設定"""
         rules_group = QGroupBox("価格改定ルール設定")
         rules_layout = QVBoxLayout(rules_group)
-        
+
         # テーブルの作成
-        self.rules_table = QTableWidget()
-        self.rules_table.setAlternatingRowColors(True)
-        self.rules_table.horizontalHeader().setStretchLastSection(True)
-        
-        # スクロール防止設定
-        self.rules_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.rules_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        
-        # セルの編集を無効化（誤設定防止）
-        self.rules_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        
-        # 列の設定
-        columns = ['出品日数', 'アクション', 'priceTrace設定']
-        self.rules_table.setColumnCount(len(columns))
-        self.rules_table.setHorizontalHeaderLabels(columns)
+        self.rules_table = self._create_rules_table_widget()
         
         # デフォルトルールの設定
-        self.setup_default_rules()
+        self.setup_default_rules(table=self.rules_table, connect_signals=True)
         
         rules_layout.addWidget(self.rules_table)
         self.layout().addWidget(rules_group)
-        
-    def setup_default_rules(self):
+
+    def _create_rules_table_widget(self, profile_key=None):
+        table = QTableWidget()
+        table.setAlternatingRowColors(True)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        columns = ['出品日数', 'アクション', 'priceTrace設定']
+        table.setColumnCount(len(columns))
+        table.setHorizontalHeaderLabels(columns)
+        return table
+
+    def setup_default_rules(self, table=None, connect_signals=False):
         """デフォルトルールの設定"""
+        table = table or self.rules_table
         # 出品日数の範囲設定
         day_ranges = [
             (1, 30), (31, 60), (61, 90), (91, 120), (121, 150),
@@ -144,7 +214,7 @@ class RepricerSettingsWidget(QWidget):
             (271, 300), (301, 330), (331, 360), (361, 999)
         ]
         
-        self.rules_table.setRowCount(len(day_ranges))
+        table.setRowCount(len(day_ranges))
         
         # アクションの選択肢（日本語）
         actions = [
@@ -179,7 +249,7 @@ class RepricerSettingsWidget(QWidget):
                 days_text = f"{start_day}-{end_day}日"
             days_item = QTableWidgetItem(days_text)
             days_item.setFlags(days_item.flags() & ~Qt.ItemIsEditable)
-            self.rules_table.setItem(i, 0, days_item)
+            table.setItem(i, 0, days_item)
             
             # アクション選択
             action_combo = QComboBox()
@@ -187,9 +257,9 @@ class RepricerSettingsWidget(QWidget):
                 action_combo.addItem(action_text, action_key)
             # スクロール無効化（誤設定防止）
             action_combo.setEditable(False)
-            # アクション変更時のイベント接続
-            action_combo.currentTextChanged.connect(lambda text, row=i: self.on_action_changed(row, text))
-            self.rules_table.setCellWidget(i, 1, action_combo)
+            if connect_signals:
+                action_combo.currentTextChanged.connect(lambda text, row=i, tbl=table: self.on_action_changed(row, text, tbl))
+            table.setCellWidget(i, 1, action_combo)
             
             # priceTrace設定
             price_trace_combo = QComboBox()
@@ -197,18 +267,18 @@ class RepricerSettingsWidget(QWidget):
                 price_trace_combo.addItem(text, value)
             # スクロール無効化（誤設定防止）
             price_trace_combo.setEditable(False)
-            self.rules_table.setCellWidget(i, 2, price_trace_combo)
+            table.setCellWidget(i, 2, price_trace_combo)
         
         # 列幅の調整
-        self.rules_table.resizeColumnsToContents()
+        table.resizeColumnsToContents()
         
         # 列幅の固定設定
-        self.rules_table.setColumnWidth(0, 120)  # 出品日数
-        self.rules_table.setColumnWidth(1, 200)  # アクション
-        self.rules_table.setColumnWidth(2, 150)  # priceTrace設定
+        table.setColumnWidth(0, 120)  # 出品日数
+        table.setColumnWidth(1, 200)  # アクション
+        table.setColumnWidth(2, 150)  # priceTrace設定
         
         # 初期状態でpriceTrace設定を非表示
-        self.update_price_trace_visibility()
+        self.update_price_trace_visibility(table)
         
     def setup_action_buttons(self):
         """アクションボタンエリアの設定"""
@@ -250,7 +320,7 @@ class RepricerSettingsWidget(QWidget):
         """設定の読み込み"""
         try:
             # ワーカースレッドの作成と実行
-            self.worker = RepricerSettingsWorker(self.api_client, "load")
+            self.worker = RepricerSettingsWorker(self.api_client, "load", mode=self.mode)
             self.worker.config_loaded.connect(self.on_config_loaded)
             self.worker.error_occurred.connect(self.on_error)
             self.worker.start()
@@ -265,7 +335,7 @@ class RepricerSettingsWidget(QWidget):
             config_data = self.collect_current_config()
             
             # ワーカースレッドの作成と実行
-            self.worker = RepricerSettingsWorker(self.api_client, "save", config_data)
+            self.worker = RepricerSettingsWorker(self.api_client, "save", config_data, mode=self.mode)
             self.worker.config_saved.connect(self.on_config_saved)
             self.worker.error_occurred.connect(self.on_error)
             self.worker.start()
@@ -275,6 +345,8 @@ class RepricerSettingsWidget(QWidget):
     
     def collect_current_config(self):
         """現在の設定を収集"""
+        if self.mode == "369":
+            return self.collect_current_config_369()
         config = {
             "profit_guard_percentage": self.profit_guard_spin.value(),
             "q4_rule_enabled": self.q4_rule_check.isChecked(),
@@ -282,36 +354,72 @@ class RepricerSettingsWidget(QWidget):
             "reprice_rules": []  # リスト形式に変更
         }
         
-        # テーブルからルールを収集
-        for i in range(self.rules_table.rowCount()):
-            days_item = self.rules_table.item(i, 0)
-            if days_item:
-                days_text = days_item.text()
-                # "1-30日" から "30" を抽出、"361日～" の場合は 999 を使用
-                if "～" in days_text:
-                    end_day = 999
-                else:
-                    end_day = int(days_text.split("-")[1].replace("日", ""))
-                
-                action_combo = self.rules_table.cellWidget(i, 1)
-                price_trace_combo = self.rules_table.cellWidget(i, 2)
-                
-                if action_combo and price_trace_combo:
-                    action = action_combo.currentData()  # 内部値（英語）を取得
-                    price_trace = price_trace_combo.currentData()
-                    
-                    # 利益無視値下げのアクション名を既存API形式に変換
-                    if action.startswith("price_down_ignore_"):
-                        action = "price_down_ignore"
-                    
-                    # リスト形式で追加
-                    config["reprice_rules"].append({
-                        "days_from": end_day,
-                        "action": action,
-                        "value": price_trace
-                    })
+        config["reprice_rules"] = self._collect_rules_from_table(self.rules_table)
         
         return config
+
+    def collect_current_config_369(self):
+        """3-6-9専用設定を収集"""
+        default_tp_rates = {
+            "3": {"tp0": 95, "tp1": 75, "tp2": 60, "tp3": 0},
+            "6": {"tp0": 90, "tp1": 70, "tp2": 55, "tp3": 0},
+            "9": {"tp0": 85, "tp1": 65, "tp2": 50, "tp3": 0},
+        }
+        existing_profiles = {}
+        if isinstance(self.config_data, dict):
+            existing_profiles = self.config_data.get("rule_profiles", {}) or {}
+        rule_profiles = {}
+        for profile_key, table in self.profile_rule_tables.items():
+            existing_tp = (existing_profiles.get(profile_key, {}) or {}).get("tp_rates", {})
+            spin_map = self.profile_tp_spins.get(profile_key, {})
+            rule_profiles[profile_key] = {
+                "tp_rates": {
+                    "tp0": float(spin_map.get("tp0").value() if spin_map.get("tp0") else existing_tp.get("tp0", default_tp_rates[profile_key]["tp0"])),
+                    "tp1": float(spin_map.get("tp1").value() if spin_map.get("tp1") else existing_tp.get("tp1", default_tp_rates[profile_key]["tp1"])),
+                    "tp2": float(spin_map.get("tp2").value() if spin_map.get("tp2") else existing_tp.get("tp2", default_tp_rates[profile_key]["tp2"])),
+                    "tp3": float(spin_map.get("tp3").value() if spin_map.get("tp3") else existing_tp.get("tp3", default_tp_rates[profile_key]["tp3"])),
+                },
+                "reprice_rules": self._collect_rules_from_table(table),
+            }
+        config = {
+            "profit_guard_percentage": self.profit_guard_spin.value(),
+            "q4_rule_enabled": self.q4_rule_check.isChecked(),
+            "excluded_skus": [sku.strip() for sku in self.excluded_skus_edit.text().split(",") if sku.strip()],
+            "reprice_rules": self.config_data.get("reprice_rules", []) if isinstance(self.config_data, dict) else [],
+            "rule_profiles": rule_profiles,
+            "default_profile": self.default_profile_combo.currentData(),
+            "interval_days": self.interval_days_spin.value(),
+            "alerts": {
+                "enabled": self.alert_enabled_check.isChecked(),
+                "reason_prefix": self.alert_prefix_edit.text().strip() or "ALERT",
+            },
+        }
+        return config
+
+    def _collect_rules_from_table(self, table):
+        rules = []
+        for i in range(table.rowCount()):
+            days_item = table.item(i, 0)
+            if not days_item:
+                continue
+            days_text = days_item.text()
+            if "～" in days_text:
+                end_day = 999
+            else:
+                end_day = int(days_text.split("-")[1].replace("日", ""))
+            action_combo = table.cellWidget(i, 1)
+            price_trace_combo = table.cellWidget(i, 2)
+            if action_combo and price_trace_combo:
+                action = action_combo.currentData()
+                price_trace = price_trace_combo.currentData()
+                if isinstance(action, str) and action.startswith("price_down_ignore_"):
+                    action = "price_down_ignore"
+                rules.append({
+                    "days_from": end_day,
+                    "action": action,
+                    "value": price_trace
+                })
+        return rules
     
     def on_config_loaded(self, config):
         """設定読み込み完了時の処理"""
@@ -324,20 +432,23 @@ class RepricerSettingsWidget(QWidget):
         excluded_skus = config.get("excluded_skus", [])
         self.excluded_skus_edit.setText(", ".join(excluded_skus))
         
-        # ルール設定の更新（リスト形式から辞書形式に変換）
-        rules_list = config.get("reprice_rules", [])
-        rules_dict = {}
-        for rule in rules_list:
-            days_from = rule.get("days_from")
-            if days_from:
-                rules_dict[str(days_from)] = {
-                    "action": rule.get("action", "maintain"),
-                    "priceTrace": rule.get("value", 0)
-                }
-        self.update_rules_table(rules_dict)
-        
-        # priceTrace設定の表示制御を更新
-        self.update_price_trace_visibility()
+        if self.mode == "369":
+            self.apply_369_config(config)
+        else:
+            # ルール設定の更新（リスト形式から辞書形式に変換）
+            rules_list = config.get("reprice_rules", [])
+            rules_dict = {}
+            for rule in rules_list:
+                days_from = rule.get("days_from")
+                if days_from:
+                    rules_dict[str(days_from)] = {
+                        "action": rule.get("action", "maintain"),
+                        "priceTrace": rule.get("value", 0)
+                    }
+            self.update_rules_table(rules_dict)
+            
+            # priceTrace設定の表示制御を更新
+            self.update_price_trace_visibility()
         
         # 起動時は「起動しています○○%」のプログレスで案内するため、ここではポップアップしない
     
@@ -347,15 +458,65 @@ class RepricerSettingsWidget(QWidget):
             QMessageBox.information(self, "設定保存完了", "設定を正常に保存しました")
         else:
             QMessageBox.warning(self, "設定保存失敗", "設定の保存に失敗しました")
+
+    def apply_369_config(self, config):
+        """3-6-9設定反映"""
+        default_rules = config.get("reprice_rules", [])
+        rules_dict_default = {}
+        for rule in default_rules:
+            days_from = rule.get("days_from")
+            if days_from:
+                rules_dict_default[str(days_from)] = {
+                    "action": rule.get("action", "maintain"),
+                    "priceTrace": rule.get("value", 0),
+                }
+        profiles = config.get("rule_profiles", {}) or {}
+        for profile_key, table in self.profile_rule_tables.items():
+            tp_rates = (profiles.get(profile_key) or {}).get("tp_rates", {})
+            default_tp = {
+                "3": {"tp0": 95, "tp1": 75, "tp2": 60, "tp3": 0},
+                "6": {"tp0": 90, "tp1": 70, "tp2": 55, "tp3": 0},
+                "9": {"tp0": 85, "tp1": 65, "tp2": 50, "tp3": 0},
+            }
+            spin_map = self.profile_tp_spins.get(profile_key, {})
+            for tp_key, spin in spin_map.items():
+                spin.setValue(float(tp_rates.get(tp_key, default_tp.get(profile_key, {}).get(tp_key, 0))))
+
+            profile_rules = (profiles.get(profile_key) or {}).get("reprice_rules", [])
+            if not profile_rules:
+                self.update_rules_table(rules_dict_default, table=table)
+                continue
+            rules_dict = {}
+            for rule in profile_rules:
+                days_from = rule.get("days_from")
+                if days_from:
+                    rules_dict[str(days_from)] = {
+                        "action": rule.get("action", "maintain"),
+                        "priceTrace": rule.get("value", 0),
+                    }
+            self.update_rules_table(rules_dict, table=table)
+
+        interval_days = int(config.get("interval_days", 7) or 7)
+        self.interval_days_spin.setValue(max(1, interval_days))
+
+        default_profile = str(config.get("default_profile", "6"))
+        index = self.default_profile_combo.findData(default_profile)
+        if index >= 0:
+            self.default_profile_combo.setCurrentIndex(index)
+
+        alerts = config.get("alerts", {}) or {}
+        self.alert_enabled_check.setChecked(bool(alerts.get("enabled", True)))
+        self.alert_prefix_edit.setText(str(alerts.get("reason_prefix", "ALERT")))
     
     def on_error(self, error_message):
         """エラー時の処理"""
         QMessageBox.critical(self, "エラー", f"処理中にエラーが発生しました:\n{error_message}")
     
-    def update_rules_table(self, rules_dict):
+    def update_rules_table(self, rules_dict, table=None):
         """ルールテーブルの更新"""
-        for i in range(self.rules_table.rowCount()):
-            days_item = self.rules_table.item(i, 0)
+        table = table or self.rules_table
+        for i in range(table.rowCount()):
+            days_item = table.item(i, 0)
             if days_item:
                 days_text = days_item.text()
                 # "361日～" の場合は 999 を使用
@@ -368,7 +529,7 @@ class RepricerSettingsWidget(QWidget):
                     rule = rules_dict[end_day]
                     
                     # アクションの設定
-                    action_combo = self.rules_table.cellWidget(i, 1)
+                    action_combo = table.cellWidget(i, 1)
                     if action_combo:
                         action = rule.get("action", "maintain")
                         
@@ -382,7 +543,7 @@ class RepricerSettingsWidget(QWidget):
                             action_combo.setCurrentIndex(index)
                     
                     # priceTrace設定
-                    price_trace_combo = self.rules_table.cellWidget(i, 2)
+                    price_trace_combo = table.cellWidget(i, 2)
                     if price_trace_combo:
                         price_trace = rule.get("priceTrace", 0)
                         index = price_trace_combo.findData(price_trace)
@@ -404,22 +565,42 @@ class RepricerSettingsWidget(QWidget):
             self.profit_guard_spin.setValue(1.1)
             self.q4_rule_check.setChecked(False)
             self.excluded_skus_edit.clear()
-            
-            # デフォルトルールの適用
-            self.setup_default_rules()
+            if self.mode == "369":
+                for table in self.profile_rule_tables.values():
+                    self.setup_default_rules(table=table, connect_signals=False)
+                    self.update_price_trace_visibility(table)
+                default_tp = {
+                    "3": {"tp0": 95, "tp1": 75, "tp2": 60, "tp3": 0},
+                    "6": {"tp0": 90, "tp1": 70, "tp2": 55, "tp3": 0},
+                    "9": {"tp0": 85, "tp1": 65, "tp2": 50, "tp3": 0},
+                }
+                for profile_key, spin_map in self.profile_tp_spins.items():
+                    for tp_key, spin in spin_map.items():
+                        spin.setValue(float(default_tp.get(profile_key, {}).get(tp_key, 0)))
+                self.default_profile_combo.setCurrentIndex(self.default_profile_combo.findData("6"))
+                self.interval_days_spin.setValue(7)
+                self.alert_enabled_check.setChecked(True)
+                self.alert_prefix_edit.setText("ALERT")
+            else:
+                # デフォルトルールの適用
+                self.setup_default_rules(table=self.rules_table, connect_signals=False)
+                self.update_price_trace_visibility(self.rules_table)
             
             QMessageBox.information(self, "リセット完了", "デフォルト設定にリセットしました")
     
-    def on_action_changed(self, row, action_text):
+    def on_action_changed(self, row, action_text, table=None):
         """アクション変更時の処理"""
         # priceTrace設定の表示制御を更新
-        self.update_price_trace_visibility()
+        self.update_price_trace_visibility(table)
     
-    def update_price_trace_visibility(self):
+    def update_price_trace_visibility(self, table=None):
         """priceTrace設定の表示制御"""
-        for i in range(self.rules_table.rowCount()):
-            action_combo = self.rules_table.cellWidget(i, 1)
-            price_trace_combo = self.rules_table.cellWidget(i, 2)
+        table = table or self.rules_table
+        if table is None:
+            return
+        for i in range(table.rowCount()):
+            action_combo = table.cellWidget(i, 1)
+            price_trace_combo = table.cellWidget(i, 2)
             
             if action_combo and price_trace_combo:
                 current_action = action_combo.currentData()

@@ -1,6 +1,6 @@
-﻿from fastapi import APIRouter, UploadFile, File, Body, HTTPException
+from fastapi import APIRouter, UploadFile, File, Body, HTTPException, Query
 from pydantic import BaseModel, Field
-from typing import Dict, Optional, Literal
+from typing import Dict, Optional, Literal, Any
 import pandas as pd
 from datetime import datetime
 import json
@@ -121,14 +121,22 @@ class RepriceRule(BaseModel):
     value: Optional[float] = None
 
 class RepriceConfig(BaseModel):
-    profit_guard_percentage: float
+    profit_guard_percentage: float = 1.1
     excluded_skus: list[str] = []
     q4_rule_enabled: bool = False
-    reprice_rules: list[RepriceRule]
+    reprice_rules: list[RepriceRule] = []
+    rule_profiles: Dict[str, Any] = {}
+    default_profile: Optional[str] = "6"
+    interval_days: Optional[int] = 7
+    alerts: Dict[str, Any] = {}
     updated_at: Optional[datetime] = None
+
+
+def _normalize_mode(mode: Optional[str]) -> str:
+    return "369" if str(mode or "").strip() == "369" else "standard"
 # --- Config Endpoints ---
 @router.get("/config")
-def get_config():
+def get_config(mode: Optional[str] = Query(default="standard")):
     """Get repricer config and convert rules to a list."""
     try:
         if not CONFIG_PATH.exists():
@@ -136,6 +144,20 @@ def get_config():
         
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             config_data = json.load(f)
+        normalized_mode = _normalize_mode(mode)
+
+        if normalized_mode == "369":
+            return {
+                "profit_guard_percentage": config_data.get("profit_guard_percentage", 1.1),
+                "excluded_skus": config_data.get("excluded_skus", []),
+                "q4_rule_enabled": config_data.get("q4_rule_enabled", False),
+                "reprice_rules": config_data.get("reprice_rules", []),
+                "rule_profiles": config_data.get("rule_profiles", {}),
+                "default_profile": config_data.get("default_profile", "6"),
+                "interval_days": config_data.get("interval_days", 7),
+                "alerts": config_data.get("alerts", {"enabled": True, "reason_prefix": "ALERT"}),
+                "updated_at": config_data.get("updated_at"),
+            }
         
         # Convert reprice_rules from dict to list (if needed)
         rules_data = config_data.get("reprice_rules", [])
@@ -162,19 +184,38 @@ def get_config():
         raise HTTPException(status_code=500, detail=f"Config取得エラー: {str(e)}")
 
 @router.put("/config", response_model=RepriceConfig)
-def update_config(config: RepriceConfig = Body(...)):
+def update_config(config: RepriceConfig = Body(...), mode: Optional[str] = Query(default="standard")):
     """Update repricer config"""
     config.updated_at = datetime.now()
+    normalized_mode = _normalize_mode(mode)
     try:
+        existing_data = {}
+        if CONFIG_PATH.exists():
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                existing_data = json.load(f)
+        payload = config.dict()
+        if normalized_mode == "369":
+            existing_data["rule_profiles"] = payload.get("rule_profiles", existing_data.get("rule_profiles", {}))
+            existing_data["default_profile"] = payload.get("default_profile", existing_data.get("default_profile", "6"))
+            existing_data["interval_days"] = payload.get("interval_days", existing_data.get("interval_days", 7))
+            existing_data["alerts"] = payload.get("alerts", existing_data.get("alerts", {"enabled": True, "reason_prefix": "ALERT"}))
+            existing_data["updated_at"] = payload.get("updated_at")
+            output_data = existing_data
+        else:
+            output_data = payload
+            output_data["rule_profiles"] = existing_data.get("rule_profiles", output_data.get("rule_profiles", {}))
+            output_data["default_profile"] = existing_data.get("default_profile", output_data.get("default_profile", "6"))
+            output_data["interval_days"] = existing_data.get("interval_days", output_data.get("interval_days", 7))
+            output_data["alerts"] = existing_data.get("alerts", output_data.get("alerts", {"enabled": True, "reason_prefix": "ALERT"}))
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(config.dict(), f, indent=2, default=str)
+            json.dump(output_data, f, indent=2, default=str)
         return config
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write config file: {e}")
 
 # --- Repricing Endpoints ---
 @router.post("/preview")
-async def preview(file: UploadFile = File(...)):
+async def preview(file: UploadFile = File(...), mode: Optional[str] = Query(default="standard")):
     try:
         print(f"[DEBUG] プレビューAPI呼び出し開始: ファイル名={file.filename}")
         content = await file.read()
@@ -195,7 +236,7 @@ async def preview(file: UploadFile = File(...)):
         print(f"[DEBUG] 前処理完了: 行数={len(df)}")
 
         print("[DEBUG] 価格改定ルール適用開始...")
-        outputs = apply_repricing_rules(df, today=datetime.now())
+        outputs = apply_repricing_rules(df, today=datetime.now(), mode=_normalize_mode(mode))
         print(f"[DEBUG] 価格改定ルール適用完了")
 
         # ---- safe summary (no-attr errors) ----
@@ -266,7 +307,7 @@ async def preview(file: UploadFile = File(...)):
         )
 
 @router.post("/apply")
-async def apply(file: UploadFile = File(...)):
+async def apply(file: UploadFile = File(...), mode: Optional[str] = Query(default="standard")):
     try:
         print(f"[DEBUG] apply: 価格改定実行API呼び出し開始")
         content = await file.read()
@@ -284,7 +325,7 @@ async def apply(file: UploadFile = File(...)):
         print(f"[DEBUG] apply: 前処理完了: 行数={len(df)}")
 
         print("[DEBUG] apply: 価格改定ルール適用開始...")
-        outputs = apply_repricing_rules(df, today=datetime.now())
+        outputs = apply_repricing_rules(df, today=datetime.now(), mode=_normalize_mode(mode))
         print(f"[DEBUG] apply: 価格改定ルール適用完了")
         _fill_price_trace_change_on_items(outputs, trace_label="FBA譛螳牙､")
 

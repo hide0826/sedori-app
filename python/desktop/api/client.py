@@ -41,7 +41,7 @@ class APIClient:
             return False
     
     # 価格改定API
-    def repricer_preview(self, csv_file_path: str) -> Dict[str, Any]:
+    def repricer_preview(self, csv_file_path: str, mode: str = "standard") -> Dict[str, Any]:
         """価格改定プレビュー"""
         try:
             # 実際のFastAPI呼び出し
@@ -52,6 +52,7 @@ class APIClient:
                 response = self.session.post(
                     f"{self.base_url}/repricer/preview",
                     files=files,
+                    params={"mode": mode},
                     timeout=30
                 )
             
@@ -68,7 +69,7 @@ class APIClient:
             # エラーをそのまま伝播（ダミーデータは返さない）
             raise Exception(f"価格改定プレビューに失敗しました: {str(e)}")
     
-    def repricer_apply(self, csv_file_path: str) -> Dict[str, Any]:
+    def repricer_apply(self, csv_file_path: str, mode: str = "standard") -> Dict[str, Any]:
         """価格改定実行"""
         try:
             # 実際のFastAPI呼び出し
@@ -79,6 +80,7 @@ class APIClient:
                 response = self.session.post(
                     f"{self.base_url}/repricer/apply",
                     files=files,
+                    params={"mode": mode},
                     timeout=60
                 )
             
@@ -671,11 +673,12 @@ class APIClient:
             }
     
     # 価格改定ルール設定API
-    def get_repricer_config(self) -> Dict[str, Any]:
+    def get_repricer_config(self, mode: str = "standard") -> Dict[str, Any]:
         """価格改定ルール設定の取得"""
         try:
             response = self.session.get(
                 f"{self.base_url}/repricer/config",
+                params={"mode": mode},
                 timeout=30  # タイムアウトを10秒から30秒に延長
             )
             
@@ -714,12 +717,13 @@ class APIClient:
             ]
         }
     
-    def update_repricer_config(self, config_data: Dict[str, Any]) -> bool:
+    def update_repricer_config(self, config_data: Dict[str, Any], mode: str = "standard") -> bool:
         """価格改定ルール設定の更新"""
         try:
             response = self.session.put(
                 f"{self.base_url}/repricer/config",
                 json=config_data,
+                params={"mode": mode},
                 timeout=30  # タイムアウトを10秒から30秒に延長
             )
             

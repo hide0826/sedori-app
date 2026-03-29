@@ -215,6 +215,8 @@ python/desktop/data/receipts/
 python/desktop/data/credentials/
 # 仕入管理（開発）タブ用の独立DB（本番と分離）
 python/desktop/data_dev/
+# Keepaテストタブのローカル検証用スナップショット（再起動後の一覧復元用・個人環境向け）
+python/desktop/data/keepa_test_snapshot*.json
 *credentials*.json
 *gcv*.json
 *google*.json

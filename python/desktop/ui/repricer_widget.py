@@ -43,11 +43,12 @@ class RepricerWorker(QThread):
     result_ready = Signal(dict)
     error_occurred = Signal(str)
     
-    def __init__(self, csv_path, api_client, is_preview=True):
+    def __init__(self, csv_path, api_client, is_preview=True, mode="standard"):
         super().__init__()
         self.csv_path = csv_path
         self.api_client = api_client
         self.is_preview = is_preview
+        self.mode = mode
         
     def run(self):
         """価格改定処理の実行"""
@@ -63,9 +64,9 @@ class RepricerWorker(QThread):
             
             # 実際のAPI呼び出し
             if self.is_preview:
-                result = self.api_client.repricer_preview(self.csv_path)
+                result = self.api_client.repricer_preview(self.csv_path, mode=self.mode)
             else:
-                result = self.api_client.repricer_apply(self.csv_path)
+                result = self.api_client.repricer_apply(self.csv_path, mode=self.mode)
             
             self.progress_updated.emit(100)
             
@@ -79,9 +80,10 @@ class RepricerWorker(QThread):
 class RepricerWidget(QWidget):
     """価格改定ウィジェット"""
     
-    def __init__(self, api_client):
+    def __init__(self, api_client, mode="standard"):
         super().__init__()
         self.api_client = api_client
+        self.mode = mode if mode in ("standard", "369") else "standard"
         self.csv_path = None
         self.repricing_result = None
         self.error_handler = ErrorHandler(self)
@@ -516,7 +518,7 @@ class RepricerWidget(QWidget):
         self.preview_btn.setEnabled(False)
         
         # ワーカースレッドの作成と実行（プレビューモード）
-        self.worker = RepricerWorker(self.csv_path, self.api_client, is_preview=True)
+        self.worker = RepricerWorker(self.csv_path, self.api_client, is_preview=True, mode=self.mode)
         self.worker.progress_updated.connect(self.progress_bar.setValue)
         self.worker.result_ready.connect(self.on_preview_completed)
         self.worker.error_occurred.connect(self.on_preview_error)
@@ -782,7 +784,7 @@ class RepricerWidget(QWidget):
         self.execute_btn.setEnabled(False)
         
         # ワーカースレッドの作成と実行（実行モード）
-        self.worker = RepricerWorker(self.csv_path, self.api_client, is_preview=False)
+        self.worker = RepricerWorker(self.csv_path, self.api_client, is_preview=False, mode=self.mode)
         self.worker.progress_updated.connect(self.progress_bar.setValue)
         self.worker.result_ready.connect(self.on_repricing_completed)
         self.worker.error_occurred.connect(self.on_repricing_error)

@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Tuple, NamedTuple
 import json
 import re
+import math
 from core.config import CONFIG_PATH
 from core.csv_utils import normalize_dataframe_for_cp932
 
@@ -85,7 +86,7 @@ class RepriceOutputs(NamedTuple):
     excluded_df: pd.DataFrame
     items: List[Dict[str, Any]]
 
-def load_config():
+def load_config(mode: str = "standard"):
     """設定ファイルを読み込む"""
     import os
     from pathlib import Path
@@ -121,6 +122,17 @@ def load_config():
         # excluded_skusが存在しない場合は空リストを設定
         if 'excluded_skus' not in config:
             config['excluded_skus'] = []
+        
+        # 3-6-9モードで必要なキーのデフォルト補完
+        if mode == "369":
+            config.setdefault("rule_profiles", {
+                "3": {"tp_rates": {"tp0": 95, "tp1": 75, "tp2": 60, "tp3": 0}},
+                "6": {"tp_rates": {"tp0": 90, "tp1": 70, "tp2": 55, "tp3": 0}},
+                "9": {"tp_rates": {"tp0": 85, "tp1": 65, "tp2": 50, "tp3": 0}},
+            })
+            config.setdefault("default_profile", "6")
+            config.setdefault("interval_days", 7)
+            config.setdefault("alerts", {"enabled": True, "reason_prefix": "ALERT"})
         
         return config
     except FileNotFoundError as e:
@@ -265,12 +277,160 @@ def calculate_new_price_and_trace(price: float, akaji: float, rule: Dict[str, An
 
     return action, reason, new_price, new_price_trace
 
-def apply_repricing_rules(df: pd.DataFrame, today: datetime) -> RepriceOutputs:
+def _to_float_or_none(value: Any) -> float:
+    try:
+        if value is None:
+            return None
+        s = str(value).strip()
+        if s == "":
+            return None
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def detect_369_profile_from_sku(sku: str, default_profile: str) -> Tuple[str, bool]:
+    """SKU文字列から3/6/9プロファイルを判定。判定不可時はdefault_profile。"""
+    if not isinstance(sku, str):
+        return default_profile, True
+    text = sku.upper()
+    patterns = [
+        (r"(^|[-_])3([PN])?($|[-_])", "3"),
+        (r"(^|[-_])6([PN])?($|[-_])", "6"),
+        (r"(^|[-_])9([PN])?($|[-_])", "9"),
+        (r"(3P|3N)", "3"),
+        (r"(6P|6N)", "6"),
+        (r"(9P|9N)", "9"),
+    ]
+    for pattern, profile in patterns:
+        if re.search(pattern, text):
+            return profile, False
+    return default_profile, True
+
+
+def _get_tp_band(days_since_listed: int) -> Tuple[str, int]:
+    if days_since_listed <= 90:
+        return "tp0", 90
+    if days_since_listed <= 180:
+        return "tp1", 180
+    if days_since_listed <= 270:
+        return "tp2", 270
+    return "tp3", 365
+
+
+def _get_tp_floor(price: float, akaji: float, tp_rate: float) -> float:
+    base = akaji if akaji and akaji > 0 else price
+    return round(max(0.0, base) * (max(0.0, tp_rate) / 100.0))
+
+
+def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[str, Any]) -> RepriceOutputs:
+    log_data = []
+    updated_inventory_data = []
+    excluded_inventory_data = []
+    excluded_skus = set(config.get("excluded_skus", []))
+    profiles = config.get("rule_profiles", {})
+    default_profile = str(config.get("default_profile", "6"))
+    interval_days = max(1, int(config.get("interval_days", 7)))
+    alert_cfg = config.get("alerts", {}) or {}
+    alert_enabled = bool(alert_cfg.get("enabled", True))
+    alert_prefix = str(alert_cfg.get("reason_prefix", "ALERT")).strip() or "ALERT"
+
+    for _, row in df.iterrows():
+        sku = row.get("SKU", "")
+        if isinstance(sku, str) and sku.startswith('="') and sku.endswith('"'):
+            sku = sku[2:-1]
+        price = float(row.get("price", 0) or 0)
+        akaji = float(row.get("akaji", 0) or 0)
+        price_trace = row.get("priceTrace", 0)
+        asin = row.get("ASIN", "")
+        title = row.get("title", "")
+
+        if sku in excluded_skus:
+            log_data.append({
+                "sku": sku, "asin": asin, "title": title, "days": -1, "action": "除外",
+                "reason": "除外SKU（設定で除外指定）", "price": price,
+                "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace,
+                "priceTraceChange": 0, "priceTraceChangeDisplay": "無し"
+            })
+            excluded_inventory_data.append(row.to_dict())
+            continue
+
+        days_since_listed = get_days_since_listed(sku, today)
+        if days_since_listed == -1:
+            log_data.append({
+                "sku": sku, "asin": asin, "title": title, "days": -1, "action": "維持",
+                "reason": "日付不明（維持）", "price": price,
+                "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace,
+                "priceTraceChange": 0, "priceTraceChangeDisplay": "無し"
+            })
+            updated_inventory_data.append(row.to_dict())
+            continue
+        if days_since_listed > 365:
+            log_data.append({
+                "sku": sku, "asin": asin, "title": title, "days": days_since_listed, "action": "除外",
+                "reason": f"{days_since_listed}日経過: 365日超過（要手動対応）", "price": price,
+                "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace,
+                "priceTraceChange": 0, "priceTraceChangeDisplay": "無し"
+            })
+            excluded_inventory_data.append(row.to_dict())
+            continue
+
+        profile, is_fallback = detect_369_profile_from_sku(str(sku), default_profile)
+        tp_key, period_end = _get_tp_band(days_since_listed)
+        tp_rates = ((profiles.get(profile) or {}).get("tp_rates") or {})
+        tp_rate = float(tp_rates.get(tp_key, 0) or 0)
+        tp_floor = _get_tp_floor(price, akaji, tp_rate)
+
+        reason_tokens = [f"{days_since_listed}日経過: 3-6-9改定({profile}ルール/{tp_key.upper()})"]
+        if is_fallback:
+            reason_tokens.append(f"PROFILE_FALLBACK: SKUタグ判定不可のため{profile}ルール適用")
+
+        keepa_min = _to_float_or_none(row.get("keepa_min_same_condition"))
+        if keepa_min is None:
+            new_price = max(tp_floor, round(price))
+            reason_tokens.append("KEEPA_MISSING: keepa_min_same_condition 未入力のため維持寄り")
+        elif keepa_min < tp_floor:
+            new_price = tp_floor
+            if alert_enabled:
+                reason_tokens.append(
+                    f"{alert_prefix}: keepa_min({round(keepa_min)}) < {tp_key.upper()}_floor({tp_floor}) のためTP下限で固定"
+                )
+        else:
+            start_price = min(price, keepa_min)
+            remaining_days = max(0, period_end - days_since_listed)
+            steps = max(1, math.ceil(remaining_days / interval_days))
+            delta = (start_price - tp_floor) / steps if steps > 0 else 0
+            new_price = max(tp_floor, round(start_price - delta))
+
+        action_jp = "3-6-9改定"
+        reason = " / ".join(reason_tokens)
+        row_dict = row.to_dict()
+        row_dict["price"] = new_price
+        row_dict["priceTrace"] = price_trace
+        updated_inventory_data.append(row_dict)
+        log_data.append({
+            "sku": sku, "asin": asin, "title": title, "days": days_since_listed, "action": action_jp,
+            "reason": reason, "price": price, "new_price": new_price,
+            "priceTrace": price_trace, "new_priceTrace": price_trace,
+            "priceTraceChange": 0, "priceTraceChangeDisplay": "無し"
+        })
+
+    log_df = pd.DataFrame(log_data)
+    updated_df = pd.DataFrame(updated_inventory_data)
+    excluded_df = pd.DataFrame(excluded_inventory_data)
+    items_list = log_df.to_dict(orient='records')
+    return RepriceOutputs(log_df=log_df, updated_df=updated_df, excluded_df=excluded_df, items=items_list)
+
+
+def apply_repricing_rules(df: pd.DataFrame, today: datetime, mode: str = "standard") -> RepriceOutputs:
     """
     30日間隔価格改定システム - 最新仕様対応
     注: preprocessは呼び出し元（repricer.py）で実行済み
     """
-    config = load_config()
+    normalized_mode = "369" if str(mode) == "369" else "standard"
+    config = load_config(mode=normalized_mode)
+    if normalized_mode == "369":
+        return _apply_repricing_rules_369(df, today, config)
     log_data = []
     updated_inventory_data = []
     excluded_inventory_data = []
