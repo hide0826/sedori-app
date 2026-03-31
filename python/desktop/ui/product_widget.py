@@ -1627,11 +1627,18 @@ class ProductWidget(QWidget):
         row_ids_to_delete = set()
         for row in rows:
             try:
-                item0 = self.purchase_table.item(row, 0)
-                if item0 is not None:
-                    row_id = item0.data(Qt.UserRole + 1)
-                    if row_id is not None:
-                        row_ids_to_delete.add(row_id)
+                for c in range(self.purchase_table.columnCount()):
+                    it = self.purchase_table.item(row, c)
+                    if it is None:
+                        continue
+                    v = it.data(Qt.UserRole + 1)
+                    if v is None:
+                        continue
+                    try:
+                        row_ids_to_delete.add(int(v))
+                    except (TypeError, ValueError):
+                        continue
+                    break
             except Exception:
                 continue
 
@@ -1645,10 +1652,15 @@ class ProductWidget(QWidget):
 
         # _row_id をキーに、内部リストから該当レコードを削除（スナップショット用DBのみ）
         def _filter_by_row_id(lst):
-            return [
-                rec for rec in (lst or [])
-                if rec.get("_row_id") not in row_ids_to_delete
-            ]
+            out = []
+            for rec in lst or []:
+                try:
+                    rid = int(rec.get("_row_id")) if rec.get("_row_id") is not None else None
+                except (TypeError, ValueError):
+                    rid = None
+                if rid is None or rid not in row_ids_to_delete:
+                    out.append(rec)
+            return out
 
         if hasattr(self, "purchase_records"):
             self.purchase_records = _filter_by_row_id(getattr(self, "purchase_records", []))
@@ -2049,6 +2061,14 @@ class ProductWidget(QWidget):
                 try:
                     purchase_info = self.purchase_history_db.get_by_sku(sku)
                     if purchase_info:
+                        # 画像URLは PurchaseDatabase 側を正として補完する。
+                        # products テーブル未作成SKUでも、仕入DBタブで URL が消えないようにする。
+                        for i in range(1, 7):
+                            image_url_col = f"画像URL{i}"
+                            if image_url_col not in row or not row.get(image_url_col):
+                                url_val = purchase_info.get(f"image_url_{i}")
+                                if url_val:
+                                    row[image_url_col] = url_val
                         status = purchase_info.get("status", "ready")
                         status_reason = purchase_info.get("status_reason", "")
                         status_set_at = purchase_info.get("status_set_at", "")
@@ -2129,13 +2149,9 @@ class ProductWidget(QWidget):
                     seen.add(upper_key)
                     columns.append(key)
         self.purchase_columns = columns
-        # 行ID(_row_id) → レコード へのマッピングを作成しておく（テーブル行→レコードを一意にたどるため）
-        try:
-            self._purchase_row_map = {
-                rec.get("_row_id"): rec for rec in records if rec.get("_row_id") is not None
-            }
-        except Exception:
-            self._purchase_row_map = {}
+        # _row_id は下のループ内で欠けている行に採番する。採番前にマップを作るとキーが欠落し、
+        # 編集時に row_map ミス→SKU先頭一致で別商品が開く不具合になるため、ここでは空にしてループ内で登録する。
+        self._purchase_row_map = {}
 
         # テーブル内容をクリアし、更新中はソート/シグナルを止める（穴あき防止）
         self.purchase_table.blockSignals(True)
@@ -2158,11 +2174,18 @@ class ProductWidget(QWidget):
             header.setSectionResizeMode(col_idx, QHeaderView.Interactive)
 
         for row, record in enumerate(records):
-            # レコードに行IDを付与（なければ採番）
+            # レコードに行IDを付与（なければ採番し、型は int に揃える）
             if "_row_id" not in record or record.get("_row_id") is None:
                 record["_row_id"] = self._purchase_row_id_counter
                 self._purchase_row_id_counter += 1
-            row_id = record.get("_row_id")
+            try:
+                row_id = int(record.get("_row_id"))
+            except (TypeError, ValueError):
+                record["_row_id"] = self._purchase_row_id_counter
+                self._purchase_row_id_counter += 1
+                row_id = int(record["_row_id"])
+            record["_row_id"] = row_id
+            self._purchase_row_map[row_id] = record
 
             for col, header in enumerate(columns):
                 value = self._get_record_value(record, [header])
@@ -2393,6 +2416,19 @@ class ProductWidget(QWidget):
                         item = QTableWidgetItem(f"{value_float:.2f}")
                     else:
                         item = QTableWidgetItem("")
+                elif header in ("仕入れ価格", "見込み利益"):
+                    try:
+                        fv = float(str(value).replace(",", "").strip()) if value not in (None, "") else None
+                    except (ValueError, TypeError):
+                        fv = None
+                    if fv is None:
+                        item = QTableWidgetItem("")
+                    else:
+                        rounded_yen = int(round(fv))
+                        # 金額列は整数円で扱う（表示と内部値を揃える）
+                        record[header] = rounded_yen
+                        item = QTableWidgetItem(str(rounded_yen))
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 elif header == "損益分岐点":
                     purchase_v = None
                     for key in ("仕入れ価格", "仕入価格", "purchase_price", "cost"):
@@ -2448,16 +2484,16 @@ class ProductWidget(QWidget):
                             other_v,
                         )
                     ):
-                        record["損益分岐点"] = round(recomputed, 2)
                         display_val = int(round(recomputed))
+                        record["損益分岐点"] = display_val
                         item = QTableWidgetItem(str(display_val))
                     else:
                         try:
                             if stored_be not in (None, ""):
                                 fv = float(str(stored_be).replace(",", "").strip())
-                                item = QTableWidgetItem(
-                                    str(int(fv)) if fv == int(fv) else f"{fv:.2f}"
-                                )
+                                display_val = int(round(fv))
+                                record["損益分岐点"] = display_val
+                                item = QTableWidgetItem(str(display_val))
                             else:
                                 item = QTableWidgetItem("")
                         except (ValueError, TypeError):
@@ -2611,24 +2647,13 @@ class ProductWidget(QWidget):
                 if header != "ステータス":  # ステータス列はセルウィジェットを設定済み
                     self.purchase_table.setItem(row, col, item)
 
-            # 1列目のUserRole+1に行IDを保存（ソート後も元レコードを特定するため）
+            # 行IDを各セルの UserRole+1 に保存（ソート後も編集対象を一意に特定する）
+            # ステータス列はセルウィジェットのため item が無い → 他列すべてに付与しておく
             try:
-                first_item = self.purchase_table.item(row, 0)
-                if first_item is not None:
-                    first_item.setData(Qt.UserRole + 1, row_id)
-                # さらにSKUセルにも行IDを保持（列構成変更やセルウィジェット混在でも確実に特定できるようにする）
-                if "SKU" in columns:
-                    sku_col_idx = columns.index("SKU")
-                    sku_item = self.purchase_table.item(row, sku_col_idx)
-                    if sku_item is not None:
-                        sku_item.setData(Qt.UserRole + 1, row_id)
-                # 最後の保険: 行内の最初のitemにも保持
-                if first_item is None:
-                    for c in range(self.purchase_table.columnCount()):
-                        it = self.purchase_table.item(row, c)
-                        if it is not None:
-                            it.setData(Qt.UserRole + 1, row_id)
-                            break
+                for c in range(self.purchase_table.columnCount()):
+                    it = self.purchase_table.item(row, c)
+                    if it is not None:
+                        it.setData(Qt.UserRole + 1, row_id)
             except Exception:
                 pass
 
@@ -2941,9 +2966,21 @@ class ProductWidget(QWidget):
         """コンテキストメニューを表示"""
         menu = QMenu()
         
-        # クリックされたセルの列を取得（編集メニューでどの行を開くか渡す用）
+        # クリックされた行を取得（ステータス列は QComboBox のため itemAt が None になりやすい → indexAt を優先）
+        row_for_edit: Optional[int] = None
+        idx = self.purchase_table.indexAt(position)
+        if idx.isValid():
+            row_for_edit = idx.row()
+        else:
+            item = self.purchase_table.itemAt(position)
+            if item is not None:
+                row_for_edit = item.row()
+        if row_for_edit is None:
+            sel = self.purchase_table.selectionModel().selectedRows()
+            if len(sel) == 1:
+                row_for_edit = sel[0].row()
+
         item = self.purchase_table.itemAt(position)
-        row_for_edit: Optional[int] = item.row() if item is not None else None
         if item:
             row = item.row()
             col = item.column()
@@ -3423,36 +3460,71 @@ class ProductWidget(QWidget):
         if not view_records:
             QMessageBox.warning(self, "編集", "該当するデータがありません。")
             return
-        # ソート後は表示行と records の並びが一致しないため、行の _row_id でレコードを特定する
-        row_id = None
-        # 行内のどこかのセルに埋めた UserRole+1 を探す（列構成やセルウィジェット混在でもズレない）
+        sku_vis = (self._get_value_from_row(row, ["SKU", "sku"]) or "").strip()
+        asin_vis = (self._get_value_from_row(row, ["ASIN", "asin"]) or "").strip()
+
+        row_id: Optional[int] = None
         try:
             for c in range(self.purchase_table.columnCount()):
                 it = self.purchase_table.item(row, c)
                 if it is None:
                     continue
                 v = it.data(Qt.UserRole + 1)
-                if v is not None:
-                    row_id = v
-                    break
+                if v is None:
+                    continue
+                try:
+                    row_id = int(v)
+                except (TypeError, ValueError):
+                    continue
+                break
         except Exception:
             row_id = None
-        record = None
-        # まずは _row_id → レコード のマップがあればそこから取得（最も信頼できる）
+
+        def _rec_sku(rec: Dict[str, Any]) -> str:
+            return (rec.get("SKU") or rec.get("sku") or "").strip()
+
+        def _rec_asin(rec: Dict[str, Any]) -> str:
+            return (rec.get("ASIN") or rec.get("asin") or "").strip()
+
+        record: Optional[Dict[str, Any]] = None
         row_map = getattr(self, "_purchase_row_map", {}) or {}
         if row_id is not None and row_map:
-            record = row_map.get(row_id)
+            candidate = row_map.get(row_id)
+            if candidate is not None:
+                if (not sku_vis or _rec_sku(candidate) == sku_vis) and (
+                    not asin_vis or _rec_asin(candidate) == asin_vis
+                ):
+                    record = candidate
+
+        if record is None and (sku_vis or asin_vis):
+            candidates = []
+            for rec in view_records:
+                if sku_vis and _rec_sku(rec) != sku_vis:
+                    continue
+                if asin_vis and _rec_asin(rec) != asin_vis:
+                    continue
+                candidates.append(rec)
+            if len(candidates) == 1:
+                record = candidates[0]
+            elif len(candidates) > 1 and row_id is not None:
+                for rec in candidates:
+                    try:
+                        if int(rec.get("_row_id")) == row_id:
+                            record = rec
+                            break
+                    except (TypeError, ValueError):
+                        continue
+                if record is None:
+                    record = candidates[0]
+
         if record is None:
-            # _row_id がない古いデータ用フォールバック: 表示行の SKU で照合
-            sku_in_cell = self._get_value_from_row(row, ["SKU", "sku"])
-            if sku_in_cell:
-                for rec in view_records:
-                    if (rec.get("SKU") or rec.get("sku") or "").strip() == (sku_in_cell or "").strip():
-                        record = rec
-                        break
-        if record is None:
-            # 最終フォールバック（ズレる可能性があるので極力避ける）
-            record = view_records[row] if row < len(view_records) else None
+            # 最終フォールバック: 未ソート時のみ一致。ソート済みでは行番号≠リスト添字のため使わない
+            if not self.purchase_table.isSortingEnabled() and row < len(view_records):
+                rec = view_records[row]
+                if (not sku_vis or _rec_sku(rec) == sku_vis) and (
+                    not asin_vis or _rec_asin(rec) == asin_vis
+                ):
+                    record = rec
         if record is None:
             QMessageBox.warning(self, "編集", "該当するデータがありません。")
             return

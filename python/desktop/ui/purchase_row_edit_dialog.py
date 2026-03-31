@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -48,6 +49,13 @@ except ImportError:
         ta_price_from_target_margin_percent,
         break_even_price_int_for_record,
     )
+
+try:
+    from desktop.services.keepa_service import KeepaService
+    from desktop.ui.keepa_offer_detail_dialog import KeepaOfferDetailDialog
+except ImportError:
+    from services.keepa_service import KeepaService  # type: ignore
+    from ui.keepa_offer_detail_dialog import KeepaOfferDetailDialog  # type: ignore
 
 
 def _parse_number(val: Any) -> float:
@@ -201,6 +209,10 @@ class PurchaseRowEditDialog(QDialog):
         info_layout.addRow("商品名:", self._title_label)
         info_layout.addRow("ASIN:", QLabel(self._record_str("ASIN") or "-"))
         info_layout.addRow("SKU:", QLabel(self._record_str("SKU") or "-"))
+        self._condition_label = QLabel(self._record_condition_label_text())
+        self._condition_label.setWordWrap(True)
+        self._condition_label.setMaximumWidth(340)
+        info_layout.addRow("コンディション:", self._condition_label)
         sale_price = _parse_number(self.record.get("販売予定価格") or self.record.get("expected_price"))
         self._sale_price_value = sale_price
         purchase_price = _parse_number(self.record.get("仕入れ価格") or self.record.get("purchase_price") or self.record.get("仕入価格"))
@@ -216,11 +228,20 @@ class PurchaseRowEditDialog(QDialog):
         info_group.setLayout(info_layout)
         layout.addWidget(info_group)
 
-        # --- Keepaを開くボタン ---
+        # --- Keepa：ブラウザ / API 出品者一覧 ---
+        keepa_btn_row = QHBoxLayout()
+        keepa_btn_row.setSpacing(8)
         open_keepa_btn = QPushButton("Keepa をブラウザで開く")
         open_keepa_btn.setToolTip("Keepa を開きます。Windows では約2秒後にブラウザを前面に出し、画面の右半分にリサイズします（編集ダイアログは左上に表示）。")
         open_keepa_btn.clicked.connect(self._open_keepa_in_browser)
-        layout.addWidget(open_keepa_btn)
+        keepa_btn_row.addWidget(open_keepa_btn, 1)
+        seller_info_btn = QPushButton("出品者情報取得")
+        seller_info_btn.setToolTip(
+            "Keepa API で live offers（出品者・価格・送料）を取得し、Keepaテストの「詳細」と同じ一覧ウィンドウで表示します。"
+        )
+        seller_info_btn.clicked.connect(self._show_keepa_offer_details)
+        keepa_btn_row.addWidget(seller_info_btn, 1)
+        layout.addLayout(keepa_btn_row)
 
         # --- TP0 / TP1 / TP2 / TP3 編集（各帯：価格 → 目標利益率 → 概算利益、色分け）---
         ta_group = QGroupBox("TP 価格（Keepa で確認しながら入力）")
@@ -306,6 +327,68 @@ class PurchaseRowEditDialog(QDialog):
         # ブラウザが開いてタブタイトルが Keepa になるまで待ってから、前面に出して左半分にリサイズ（Windows のみ・2回試行）
         QTimer.singleShot(1500, _try_resize_browser_half_screen_win)
         QTimer.singleShot(3500, _try_resize_browser_half_screen_win)
+
+    def _show_keepa_offer_details(self) -> None:
+        """Keepa API から live offers を取得し、詳細ダイアログで表示（Keepaテストタブの「詳細」と同じ）。"""
+        asin = self._record_str("ASIN") or self._record_str("asin")
+        if not asin:
+            QMessageBox.warning(self, "出品者情報", "ASIN がありません。")
+            return
+        title = (self._title_label.text() or "").strip() or "(タイトルなし)"
+        try:
+            svc = KeepaService()
+            _info, raw = svc.fetch_product_with_raw(asin)
+        except RuntimeError as e:
+            QMessageBox.critical(self, "Keepa エラー", str(e))
+            return
+        except Exception as e:
+            QMessageBox.critical(self, "出品者情報", f"取得に失敗しました:\n{e}")
+            return
+        new_rows, used_rows = svc.build_live_offer_display_rows(raw)
+        dlg = KeepaOfferDetailDialog(
+            self,
+            asin=asin,
+            title=title,
+            new_rows=new_rows,
+            used_rows=used_rows,
+        )
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _condition_grade_only_for_label(self, text: str) -> str:
+        """
+        コンディション列に Amazon 風の長文（【動作確認】…）が1本で入っている場合でも、
+        グレード名（例: 中古(非常に良い)）だけをラベル用に切り出す。
+        """
+        if not text:
+            return ""
+        t = str(text).replace("\\n", "\n").strip()
+        line = t.split("\n")[0].strip()
+        if " (" in line:
+            head, tail = line.split(" (", 1)
+            if len(tail) > 40 or "【" in tail:
+                line = head.strip()
+        elif ")（" in line and "【" in line:
+            head, _ = line.split(")（", 1)
+            line = head.rstrip()
+            if line and not line.endswith(")"):
+                line = line + ")"
+        return line.strip()
+
+    def _record_condition_label_text(self) -> str:
+        """仕入DBのコンディション列（と同義キー）のみ。コンディション説明列とは混ぜない。"""
+        main = ""
+        for k in ("コンディション", "condition", "状態"):
+            v = self._record_str(k)
+            if v:
+                main = v
+                break
+        if not main:
+            return "-"
+        # 過去データで1セルに長文が入っていた場合の保険（通常の「中古(非常に良い)」はそのまま通る）
+        short = self._condition_grade_only_for_label(main)
+        return short if short else main
 
     def _record_str(self, key: str) -> str:
         v = self.record.get(key)

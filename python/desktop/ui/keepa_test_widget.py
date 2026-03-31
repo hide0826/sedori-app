@@ -185,6 +185,7 @@ class KeepaTestWidget(QWidget):
             "タイトル",
             "画像URL",
             "新品価格",
+            "中古・ほぼ新品",
             "中古・非常に良い",
             "中古・良い",
             "中古・可",
@@ -229,7 +230,7 @@ class KeepaTestWidget(QWidget):
     def _set_info_row(self, message: str) -> None:
         """テーブルに情報メッセージだけを表示する。"""
         self.result_table.clearContents()
-        self.result_table.removeCellWidget(0, 8)
+        self.result_table.removeCellWidget(0, self._detail_column_index())
         self._last_raw_product = None
         self._last_title = ""
         self._selected_purchase_record = None
@@ -242,7 +243,7 @@ class KeepaTestWidget(QWidget):
     def _set_product_row(self, info: KeepaProductInfo) -> None:
         """取得した商品情報をテーブルに反映する。"""
         self.result_table.clearContents()
-        self.result_table.removeCellWidget(0, 8)
+        self.result_table.removeCellWidget(0, self._detail_column_index())
 
         def _set(col: int, text: str) -> None:
             item = QTableWidgetItem(text)
@@ -262,17 +263,18 @@ class KeepaTestWidget(QWidget):
         _set(0, info.title or "(タイトルなし)")
         _set(1, info.image_url or "-")
         _set(2, _format_price_jpy(info.new_price_state, info.new_price))
-        _set(3, _format_price_jpy(info.used_very_good_state, info.used_very_good))
-        _set(4, _format_price_jpy(info.used_good_state, info.used_good))
-        _set(5, _format_price_jpy(info.used_acceptable_state, info.used_acceptable))
-        _set(6, str(info.sales_rank) if info.sales_rank is not None else "-")
-        _set(7, info.category_name or "-")
+        _set(3, _format_price_jpy(info.used_like_new_state, info.used_like_new))
+        _set(4, _format_price_jpy(info.used_very_good_state, info.used_very_good))
+        _set(5, _format_price_jpy(info.used_good_state, info.used_good))
+        _set(6, _format_price_jpy(info.used_acceptable_state, info.used_acceptable))
+        _set(7, str(info.sales_rank) if info.sales_rank is not None else "-")
+        _set(8, info.category_name or "-")
         self._set_extra_columns(self._selected_purchase_record)
 
         detail_btn = QPushButton("詳細")
         detail_btn.setToolTip("live offers の出品者別・価格・送料を表示します")
         detail_btn.clicked.connect(self._on_detail_clicked)
-        self.result_table.setCellWidget(0, 8, detail_btn)
+        self.result_table.setCellWidget(0, self._detail_column_index(), detail_btn)
 
     def _set_extra_columns(self, record: Optional[Dict[str, Any]]) -> None:
         record = record or {}
@@ -316,7 +318,7 @@ class KeepaTestWidget(QWidget):
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             if col_name == "AI根拠" and txt:
                 item.setToolTip(txt)
-            self.result_table.setItem(0, 9 + idx, item)
+            self.result_table.setItem(0, self._detail_column_index() + 1 + idx, item)
             if col_name == "AI根拠":
                 self._set_ai_reason_text(txt)
 
@@ -370,7 +372,7 @@ class KeepaTestWidget(QWidget):
         row = data.get("row", {}) or {}
 
         self.result_table.clearContents()
-        self.result_table.removeCellWidget(0, 8)
+        self.result_table.removeCellWidget(0, self._detail_column_index())
         for col in range(self.result_table.columnCount()):
             header_item = self.result_table.horizontalHeaderItem(col)
             if not header_item:
@@ -431,6 +433,10 @@ class KeepaTestWidget(QWidget):
             if header_item and header_item.text() == header_name:
                 return col
         return -1
+
+    def _detail_column_index(self) -> int:
+        idx = self._get_table_column_index("詳細")
+        return idx if idx >= 0 else 9
 
     def _parse_float(self, value: Any) -> Optional[float]:
         if value is None:
@@ -1118,9 +1124,10 @@ class KeepaTestWidget(QWidget):
         self._last_raw_product = None
 
         self.result_table.clearContents()
-        self.result_table.removeCellWidget(0, 8)
+        self.result_table.removeCellWidget(0, self._detail_column_index())
         base_values = [
             self._last_title or "(タイトルなし)",
+            "-",
             "-",
             "-",
             "-",
@@ -1137,7 +1144,7 @@ class KeepaTestWidget(QWidget):
 
         info_item = QTableWidgetItem("※ Keepa価格は『Keepa から取得』で更新できます。")
         info_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-        self.result_table.setItem(0, 8, info_item)
+        self.result_table.setItem(0, self._detail_column_index(), info_item)
         try:
             self._save_snapshot()
         except Exception:
@@ -1162,7 +1169,9 @@ class KeepaTestWidget(QWidget):
             new_rows=new_rows,
             used_rows=used_rows,
         )
-        dlg.exec()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def on_fetch_clicked(self) -> None:
         asin = self.asin_edit.text().strip()

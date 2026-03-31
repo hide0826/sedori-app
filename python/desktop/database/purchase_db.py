@@ -88,6 +88,7 @@ class PurchaseDatabase:
             ("image_url_3", "TEXT"),
             ("image_url_4", "TEXT"),
             ("image_url_5", "TEXT"),
+            ("image_url_6", "TEXT"),
             ("barcode_image_url", "TEXT"),  # バーコード画像用（識別用、Amazon Lファイルには使用しない）
             # 利益率とROI
             ("expected_margin", "REAL"),  # 想定利益率（%）
@@ -171,7 +172,7 @@ class PurchaseDatabase:
         
         # 画像カラムが含まれている場合は追加
         image_fields = [
-            "image_url_1", "image_url_2", "image_url_3", "image_url_4", "image_url_5",
+            "image_url_1", "image_url_2", "image_url_3", "image_url_4", "image_url_5", "image_url_6",
             "barcode_image_url"
         ]
         for img_field in image_fields:

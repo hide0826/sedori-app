@@ -45,11 +45,13 @@ try:
     from services.receipt_service import ReceiptService  # python/desktop/services
     from services.receipt_matching_service import ReceiptMatchingService
     from services.purchase_break_even import compute_break_even_for_record
+    from services.receipt_purchase_price_policy import RECEIPT_MUTATES_PURCHASE_DB_PRICE
 except Exception:
     # 明示的パス指定のフォールバック
     from desktop.services.receipt_service import ReceiptService
     from desktop.services.receipt_matching_service import ReceiptMatchingService
     from desktop.services.purchase_break_even import compute_break_even_for_record
+    from desktop.services.receipt_purchase_price_policy import RECEIPT_MUTATES_PURCHASE_DB_PRICE
 from database.receipt_db import ReceiptDatabase
 from database.inventory_db import InventoryDatabase
 from database.store_db import StoreDatabase
@@ -3421,8 +3423,13 @@ class ReceiptWidget(QWidget):
                 if updates:
                     # 10円以下の差額の場合は自動修正を提案
                     difference = updates.get("price_difference")
-                    if difference is not None and abs(difference) <= 10 and abs(difference) > 0:
-                        # 自動修正の確認ダイアログ
+                    if (
+                        difference is not None
+                        and abs(difference) <= 10
+                        and abs(difference) > 0
+                        and RECEIPT_MUTATES_PURCHASE_DB_PRICE
+                    ):
+                        # 自動修正の確認ダイアログ（仕入DBの価格を変えるため、ポリシーが True のときのみ）
                         reply = QMessageBox.question(
                             self,
                             "差額自動修正",
@@ -7496,8 +7503,13 @@ class ReceiptWidget(QWidget):
                     updates['linked_skus'] = None
                     updates['price_difference'] = 0
                 
-                # 仕入DBの価格を更新し、見込み利益・損益分岐点・利益率・ROIを再計算（科目が「仕入」の場合のみ）
-                if is_purchase and sku_price_updates and self.product_widget:
+                # 仕入DBの価格を更新し、見込み利益・損益分岐点・利益率・ROIを再計算（科目が「仕入」かつポリシー許可時のみ）
+                if (
+                    RECEIPT_MUTATES_PURCHASE_DB_PRICE
+                    and is_purchase
+                    and sku_price_updates
+                    and self.product_widget
+                ):
                     try:
                         purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
                         updated_count = 0

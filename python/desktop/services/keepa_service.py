@@ -38,6 +38,8 @@ class KeepaProductInfo:
     image_url: Optional[str]
     new_price: Optional[float]
     new_price_state: Literal["ok", "no_seller", "no_data"]
+    used_like_new: Optional[float]
+    used_like_new_state: Literal["ok", "no_seller", "no_data"]
     used_very_good: Optional[float]
     used_very_good_state: Literal["ok", "no_seller", "no_data"]
     used_good: Optional[float]
@@ -59,6 +61,7 @@ class KeepaOfferRow:
     price_jpy: int
     ship_jpy: int
     total_jpy: int
+    seller_id: Optional[str] = None
 
 
 @dataclass
@@ -179,14 +182,42 @@ class KeepaService:
     _LIVE_OFFERS_LIMIT: int = 60
 
     @staticmethod
-    def _offer_last_landed_list_price(offer: Dict[str, Any]) -> Optional[float]:
-        """offerCSV の末尾から (本体+送料) を取得。値はリスト価格系と同様に 100 で割った単位。"""
-        csv = offer.get("offerCSV")
-        if not csv:
+    def _offer_csv_numbers(csv: Any) -> Optional[List[float]]:
+        """offerCSV を数値リストに正規化する（list / numpy / カンマ区切り文字列に対応）。"""
+        if csv is None:
             return None
+        if isinstance(csv, str):
+            s = csv.strip()
+            if not s:
+                return None
+            parts = [p.strip() for p in s.split(",") if p.strip() != ""]
+            if not parts:
+                return None
+            out: List[float] = []
+            for p in parts:
+                try:
+                    out.append(float(p))
+                except (TypeError, ValueError):
+                    return None
+            return out
         try:
             seq = list(csv)
         except TypeError:
+            return None
+        out: List[float] = []
+        for x in seq:
+            try:
+                out.append(float(x))
+            except (TypeError, ValueError):
+                return None
+        return out if out else None
+
+    @staticmethod
+    def _offer_last_landed_list_price(offer: Dict[str, Any]) -> Optional[float]:
+        """offerCSV の末尾から (本体+送料) を取得。値はリスト価格系と同様に 100 で割った単位。"""
+        csv = offer.get("offerCSV")
+        seq = KeepaService._offer_csv_numbers(csv)
+        if not seq:
             return None
         if len(seq) < 3:
             return None
@@ -211,13 +242,8 @@ class KeepaService:
     def _offer_last_price_ship_list_units(offer: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
         """offerCSV 末尾トリプレットから (本体, 送料) をリスト単位で返す（各々 /100 済み）。"""
         csv = offer.get("offerCSV")
-        if not csv:
-            return None, None
-        try:
-            seq = list(csv)
-        except TypeError:
-            return None, None
-        if len(seq) < 3:
+        seq = KeepaService._offer_csv_numbers(csv)
+        if not seq or len(seq) < 3:
             return None, None
         for i in range(len(seq) - 2, -1, -3):
             if i + 1 >= len(seq):
@@ -235,12 +261,20 @@ class KeepaService:
             return price / 100.0, ship / 100.0
         return None, None
 
+    # Keepa Offer.condition（公式 Offer.java と同一）
+    # 0 不明, 1 新品, 2 中古・ほぼ新品, 3 中古・非常に良い, 4 中古・良い, 5 中古・可, 6 再生品, 7–10 コレクティブル各種
     _CONDITION_LABEL_JP: Dict[int, str] = {
-        0: "新品",
-        1: "ほぼ新品",
-        2: "非常に良い",
-        3: "良い",
-        4: "可",
+        0: "不明",
+        1: "新品",
+        2: "ほぼ新品",
+        3: "非常に良い",
+        4: "良い",
+        5: "可",
+        6: "再生品",
+        7: "コレクティブル・ほぼ新品",
+        8: "コレクティブル・非常に良い",
+        9: "コレクティブル・良い",
+        10: "コレクティブル・可",
     }
 
     @classmethod
@@ -248,6 +282,50 @@ class KeepaService:
         if code < 0:
             return "不明"
         return cls._CONDITION_LABEL_JP.get(code, f"条件{code}")
+
+    def _reference_price_jpy_from_product(self, raw_product: Dict[str, Any]) -> Optional[float]:
+        """live offers のスケール合わせ用。stats.current（円ベース）を優先し、無ければ履歴 data を使う。"""
+        if not isinstance(raw_product, dict):
+            return None
+        from_stats: List[float] = []
+        try:
+            stats = raw_product.get("stats") or {}
+            cur = stats.get("current")
+            if isinstance(cur, list) and cur:
+                for idx in (18, 21, 20, 22, 19, 2, 1, 10):
+                    if idx < 0 or idx >= len(cur):
+                        continue
+                    v = cur[idx]
+                    try:
+                        fv = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                    if fv > 0:
+                        from_stats.append(fv)
+        except Exception:
+            pass
+        if from_stats:
+            return max(from_stats)
+
+        candidates: List[float] = []
+        data: Dict[str, Any] = raw_product.get("data", {}) or {}
+        for key in (
+            "BUY_BOX_SHIPPING",
+            "NEW_FBA_SHIPPING",
+            "NEW_SHIPPING",
+            "USED_GOOD_SHIPPING",
+            "USED_VERY_GOOD_SHIPPING",
+            "USED_ACCEPTABLE_SHIPPING",
+            "USED_NEW_SHIPPING",
+            "USED_SHIPPING",
+            "USED",
+            "NEW_FBA",
+            "NEW",
+        ):
+            p = self._extract_latest_price(data.get(key))
+            if p is not None and p > 0:
+                candidates.append(float(p))
+        return max(candidates) if candidates else None
 
     @staticmethod
     def _offer_is_fba(offer: Dict[str, Any]) -> bool:
@@ -262,13 +340,21 @@ class KeepaService:
         return bool(offer.get("isAmazon") or offer.get("is_amazon"))
 
     @staticmethod
-    def _offer_seller_note(offer: Dict[str, Any]) -> str:
+    def _offer_seller_id(offer: Dict[str, Any]) -> Optional[str]:
         sid = offer.get("sellerId") or offer.get("seller_id")
+        if sid is None:
+            return None
+        s = str(sid).strip()
+        return s.upper() if s else None
+
+    @classmethod
+    def _offer_seller_note(cls, offer: Dict[str, Any]) -> str:
+        sid_raw = offer.get("sellerId") or offer.get("seller_id")
         name = offer.get("sellerName") or offer.get("seller_name")
-        if sid and name:
-            return f"{name} ({sid})"
-        if sid:
-            return str(sid)
+        if sid_raw and name:
+            return f"{name} ({sid_raw})"
+        if sid_raw:
+            return str(sid_raw)
         if name:
             return str(name)
         return "-"
@@ -304,9 +390,10 @@ class KeepaService:
         if not landed_by_key:
             return [], []
 
+        ref_jpy = self._reference_price_jpy_from_product(raw_product)
         scaled_landed = self._maybe_scale_to_jpy(
             {k: float(v) for k, v in landed_by_key.items()},
-            reference_jpy=None,
+            reference_jpy=ref_jpy,
         )
 
         new_rows: List[KeepaOfferRow] = []
@@ -335,8 +422,10 @@ class KeepaService:
                 price_jpy=price_jpy,
                 ship_jpy=ship_jpy,
                 total_jpy=total_jpy,
+                seller_id=self._offer_seller_id(offer),
             )
-            if cond_i == 0:
+            # Keepa: 1=新品のみが新品列。0=不明・2以降は中古側に出す
+            if cond_i == 1:
                 new_rows.append(row)
             else:
                 used_rows.append(row)
@@ -353,25 +442,33 @@ class KeepaService:
         live offers からコンディション別の「本体+送料」最安を集計する（FBA/自己発送どちらも含む）。
 
         戻り値:
-        - 辞書キー: new, used_very_good, used_good, used_acceptable
+        - 辞書キー: new, used_like_new, used_very_good, used_good, used_acceptable
         - bool: offers リストが 1 件以上あったか（空なら別扱いで UI が分かるように）
         """
         offers = raw_product.get("offers") or []
         if not isinstance(offers, list):
             return (
-                {"new": None, "used_very_good": None, "used_good": None, "used_acceptable": None},
+                {
+                    "new": None,
+                    "used_like_new": None,
+                    "used_very_good": None,
+                    "used_good": None,
+                    "used_acceptable": None,
+                },
                 False,
             )
 
-        # Keepa condition: 0 NEW, 1 Like New, 2 Very Good, 3 Good, 4 Acceptable
+        # Keepa Offer.condition（Offer.java）
         cond_to_key: Dict[int, str] = {
-            0: "new",
-            2: "used_very_good",
-            3: "used_good",
-            4: "used_acceptable",
+            1: "new",
+            2: "used_like_new",
+            3: "used_very_good",
+            4: "used_good",
+            5: "used_acceptable",
         }
         mins: Dict[str, Optional[float]] = {
             "new": None,
+            "used_like_new": None,
             "used_very_good": None,
             "used_good": None,
             "used_acceptable": None,
@@ -422,7 +519,7 @@ class KeepaService:
 
         scaled = self._maybe_scale_to_jpy(
             {k: float(v) for k, v in to_scale.items()},
-            reference_jpy=None,
+            reference_jpy=self._reference_price_jpy_from_product(p),
         )
 
         def _state_for_key(key: str) -> Tuple[Literal["ok", "no_seller", "no_data"], Optional[float]]:
@@ -434,6 +531,7 @@ class KeepaService:
             return ("no_data", None)
 
         new_st, new_price = _state_for_key("new")
+        ln_st, used_like_new = _state_for_key("used_like_new")
         vg_st, used_very_good = _state_for_key("used_very_good")
         g_st, used_good = _state_for_key("used_good")
         acc_st, used_acceptable = _state_for_key("used_acceptable")
@@ -450,6 +548,8 @@ class KeepaService:
             image_url=image_url,
             new_price=new_price,
             new_price_state=new_st,
+            used_like_new=used_like_new,
+            used_like_new_state=ln_st,
             used_very_good=used_very_good,
             used_very_good_state=vg_st,
             used_good=used_good,
@@ -470,6 +570,7 @@ class KeepaService:
                 domain="JP",
                 offers=self._LIVE_OFFERS_LIMIT,
                 only_live_offers=True,
+                stats=90,
             )
         except Exception as e:  # noqa: BLE001
             raise RuntimeError(
@@ -526,16 +627,17 @@ class KeepaService:
         Keepa/keepaライブラリの価格が 1/100 スケールで返るケース（JPで起きがち）を吸収する。
 
         例: 7,900円が 79.0 として返る -> 100倍して 7,900 に補正。
-        - reference_jpy が与えられる場合は、それと桁が合わないときに補正する。
-        - reference_jpy が無い場合は、最大値が小さすぎる場合に補正する（安全寄りのヒューリスティック）。
+        - reference_jpy（stats.current や履歴から取った代表価格）が 1000円以上かつ
+          集計値の最大が 300 未満のときは ×100（live offers と stats の桁ずれ吸収）。
+        - reference_jpy が無い場合は、最大値が 200 未満なら ×100（ヒューリスティック）。
         """
         vals = [v for v in prices.values() if isinstance(v, (int, float)) and v is not None and v > 0]
         if not vals:
             return prices
         max_v = max(float(v) for v in vals)
 
-        # 参照価格（販売予定価格など）が 1000円以上なのに Keepa側が 300未満なら 1/100 スケールとみなす
-        if reference_jpy is not None and reference_jpy >= 1000 and max_v < 300:
+        # 参照価格（履歴・stats 等）が十分高いのに offer 集計が桁違いに低い → さらに ×100 が必要なケース（JP）
+        if reference_jpy is not None and reference_jpy >= 1000 and max_v > 0 and max_v < 300:
             return {k: (None if v is None else round(float(v) * 100.0, 2)) for k, v in prices.items()}
 
         # 参照が無い場合: 価格の最大が 200未満なら 1/100 の可能性が高い（JPの実価格としては不自然）
@@ -662,13 +764,12 @@ class KeepaService:
                 "used_acceptable_fba": None,
             }
 
-        # Keepaのoffer conditionコード（経験則 & 一般的な対応）
-        # 0: NEW, 1: USED - Like New, 2: USED - Very Good, 3: USED - Good, 4: USED - Acceptable
+        # Keepa Offer.condition（Offer.java）。新品(1)はこの集計から除外（中古帯のみ）
         cond_to_key = {
-            1: "used_like_new_fba",
-            2: "used_very_good_fba",
-            3: "used_good_fba",
-            4: "used_acceptable_fba",
+            2: "used_like_new_fba",
+            3: "used_very_good_fba",
+            4: "used_good_fba",
+            5: "used_acceptable_fba",
         }
 
         mins: Dict[str, Optional[float]] = {v: None for v in cond_to_key.values()}

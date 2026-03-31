@@ -2559,6 +2559,30 @@ class ImageManagerWidget(QWidget):
         except Exception as e:
             logger.warning(f"Failed to update purchase snapshot DB with image URLs: {e}")
 
+        # 画面上の仕入DBキャッシュにも即時反映（この後のスナップ保存で逆上書きされるのを防ぐ）
+        try:
+            if self.product_widget and sku_to_image_urls:
+                touched = 0
+                for lst_name in ("purchase_all_records", "purchase_all_records_master", "purchase_records"):
+                    records = getattr(self.product_widget, lst_name, None)
+                    if not isinstance(records, list):
+                        continue
+                    for row in records:
+                        sku = (row.get("SKU") or row.get("sku") or "").strip()
+                        if not sku:
+                            continue
+                        urls = sku_to_image_urls.get(sku)
+                        if not urls:
+                            continue
+                        for i in range(1, 7):
+                            row[f"画像URL{i}"] = urls[i - 1] if i - 1 < len(urls) else ""
+                        touched += 1
+                if touched > 0 and hasattr(self.product_widget, "populate_purchase_table"):
+                    current_rows = getattr(self.product_widget, "purchase_records", []) or []
+                    self.product_widget.populate_purchase_table(current_rows)
+        except Exception as e:
+            logger.warning(f"Failed to sync image URLs to ProductWidget cache: {e}")
+
         QMessageBox.information(
             self,
             "DBに保存",

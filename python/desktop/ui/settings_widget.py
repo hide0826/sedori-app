@@ -335,6 +335,18 @@ class SettingsWidget(QWidget):
         ocr_layout.addWidget(self.test_ocr_btn, 6, 0, 1, 3)
         
         layout.addWidget(ocr_group)
+
+        # Amazon（自店セラーID — Keepa オファー表示などとの突き合わせ用）
+        amazon_group = QGroupBox("Amazon")
+        amazon_layout = QGridLayout(amazon_group)
+        amazon_layout.addWidget(QLabel("自店のセラーID:"), 0, 0)
+        self.amazon_seller_id_edit = QLineEdit()
+        self.amazon_seller_id_edit.setPlaceholderText(
+            "例: A1VC38T7YXB528（Seller Central のマーチャントID。Keepaの sellerId と一致する場合があります）"
+        )
+        self.amazon_seller_id_edit.setClearButtonEnabled(True)
+        amazon_layout.addWidget(self.amazon_seller_id_edit, 0, 1)
+        layout.addWidget(amazon_group)
         
         layout.addStretch()
         parent.addTab(advanced_widget, "詳細設定")
@@ -784,6 +796,8 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.gemini_api_key_edit.setText(self.settings.value("ocr/gemini_api_key", ""))
         # Keepa APIキー（新規）
         self.keepa_api_key_edit.setText(self.settings.value("keepa/api_key", ""))
+        # Amazon 自店セラーID
+        self.amazon_seller_id_edit.setText(self.settings.value("amazon/seller_id", ""))
         # PRO版（開発段階ではデフォルトON）
         self.pro_enabled_cb.setChecked(self.settings.value("pro/enabled", True, type=bool))
         gemini_model = self.settings.value("ocr/gemini_model", "gemini-flash-latest")
@@ -829,6 +843,8 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             self.settings.setValue("ocr/gemini_model", self.gemini_model_combo.currentText())
             # Keepa API設定
             self.settings.setValue("keepa/api_key", self.keepa_api_key_edit.text())
+            # Amazon 自店セラーID
+            self.settings.setValue("amazon/seller_id", self.amazon_seller_id_edit.text().strip())
             # PRO版
             self.settings.setValue("pro/enabled", self.pro_enabled_cb.isChecked())
             
@@ -881,6 +897,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.gcv_credentials_edit.setText("")
         self.gemini_api_key_edit.setText("")
         self.keepa_api_key_edit.setText("")
+        self.amazon_seller_id_edit.setText("")
         self.gemini_model_combo.setCurrentText("gemini-flash-latest")
         self.pro_enabled_cb.setChecked(True)  # 開発段階ではデフォルトON
         
@@ -923,6 +940,9 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             },
             "keepa": {
                 "api_key": self.keepa_api_key_edit.text(),
+            },
+            "amazon": {
+                "seller_id": self.amazon_seller_id_edit.text().strip(),
             },
             "pro": {
                 "enabled": self.pro_enabled_cb.isChecked(),
