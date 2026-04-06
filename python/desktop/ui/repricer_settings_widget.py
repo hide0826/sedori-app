@@ -121,6 +121,7 @@ class RepricerSettingsWidget(QWidget):
         self.profile_tab = QTabWidget()
         self.profile_rule_tables = {}
         self.profile_tp_spins = {}
+        self.exception_rules_table = None
         for profile_key, label_text in [("3", "3ルール"), ("6", "6ルール"), ("9", "9ルール")]:
             tab = QWidget()
             tab_layout = QVBoxLayout(tab)
@@ -148,6 +149,19 @@ class RepricerSettingsWidget(QWidget):
             self.setup_default_rules(table=table, connect_signals=True)
             tab_layout.addWidget(table)
             self.profile_tab.addTab(tab, label_text)
+
+        # 例外タブ（アプリ運用以前の在庫向け）
+        exception_tab = QWidget()
+        exception_layout = QVBoxLayout(exception_tab)
+        exception_note = QLabel("仕入DBに存在しない旧在庫向けの改定ルールです。")
+        exception_note.setStyleSheet("color: #aaaaaa;")
+        exception_layout.addWidget(exception_note)
+        # 例外タブは通常価格改定と同じ列構成（TP/akaji下限なし）
+        self.exception_rules_table = self._create_rules_table_widget(profile_key="exception", force_standard_columns=True)
+        self.setup_default_rules(table=self.exception_rules_table, connect_signals=True)
+        exception_layout.addWidget(self.exception_rules_table)
+        self.profile_tab.addTab(exception_tab, "例外")
+
         profile_layout.addWidget(self.profile_tab)
         self.layout().addWidget(profile_group)
 
@@ -192,21 +206,27 @@ class RepricerSettingsWidget(QWidget):
         rules_layout.addWidget(self.rules_table)
         self.layout().addWidget(rules_group)
 
-    def _create_rules_table_widget(self, profile_key=None):
+    def _create_rules_table_widget(self, profile_key=None, force_standard_columns=False):
         table = QTableWidget()
         table.setAlternatingRowColors(True)
         table.horizontalHeader().setStretchLastSection(True)
         table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         table.setEditTriggers(QTableWidget.NoEditTriggers)
-        columns = ['出品日数', 'アクション', 'priceTrace設定']
+        is_369_table = (self.mode == "369") and (not force_standard_columns)
+        if is_369_table:
+            columns = ['出品日数', 'アクション', 'priceTrace設定', 'TP', 'akaji下限(%)']
+        else:
+            columns = ['出品日数', 'アクション', 'priceTrace設定']
         table.setColumnCount(len(columns))
         table.setHorizontalHeaderLabels(columns)
+        table.setProperty("is_369_table", is_369_table)
         return table
 
     def setup_default_rules(self, table=None, connect_signals=False):
         """デフォルトルールの設定"""
         table = table or self.rules_table
+        is_369_table = bool(table.property("is_369_table"))
         # 出品日数の範囲設定
         day_ranges = [
             (1, 30), (31, 60), (61, 90), (91, 120), (121, 150),
@@ -230,6 +250,8 @@ class RepricerSettingsWidget(QWidget):
             ("price_down_ignore_4", "4%利益無視値下げ"),
             ("exclude", "対象外")
         ]
+        if is_369_table:
+            actions.insert(2, ("tp_down", "TP値下げ"))
         
         # priceTrace設定の選択肢（日本語）
         price_trace_options = [
@@ -240,6 +262,9 @@ class RepricerSettingsWidget(QWidget):
             (4, "最安値"),
             (5, "カート価格")
         ]
+
+        tp_options = [("tp0", "TP0"), ("tp1", "TP1"), ("tp2", "TP2"), ("tp3", "TP3")]
+        akaji_percent_options = [(v, f"{v}%") for v in range(1, 11)]
         
         for i, (start_day, end_day) in enumerate(day_ranges):
             # 出品日数
@@ -268,6 +293,21 @@ class RepricerSettingsWidget(QWidget):
             # スクロール無効化（誤設定防止）
             price_trace_combo.setEditable(False)
             table.setCellWidget(i, 2, price_trace_combo)
+
+            if is_369_table:
+                # TP設定
+                tp_combo = QComboBox()
+                for tp_key, tp_label in tp_options:
+                    tp_combo.addItem(tp_label, tp_key)
+                tp_combo.setEditable(False)
+                table.setCellWidget(i, 3, tp_combo)
+
+                # akaji下限(%)設定
+                akaji_percent_combo = QComboBox()
+                for percent_value, percent_text in akaji_percent_options:
+                    akaji_percent_combo.addItem(percent_text, percent_value)
+                akaji_percent_combo.setEditable(False)
+                table.setCellWidget(i, 4, akaji_percent_combo)
         
         # 列幅の調整
         table.resizeColumnsToContents()
@@ -276,6 +316,9 @@ class RepricerSettingsWidget(QWidget):
         table.setColumnWidth(0, 120)  # 出品日数
         table.setColumnWidth(1, 200)  # アクション
         table.setColumnWidth(2, 150)  # priceTrace設定
+        if is_369_table:
+            table.setColumnWidth(3, 100)  # TP
+            table.setColumnWidth(4, 120)  # akaji下限(%)
         
         # 初期状態でpriceTrace設定を非表示
         self.update_price_trace_visibility(table)
@@ -387,6 +430,7 @@ class RepricerSettingsWidget(QWidget):
             "excluded_skus": [sku.strip() for sku in self.excluded_skus_edit.text().split(",") if sku.strip()],
             "reprice_rules": self.config_data.get("reprice_rules", []) if isinstance(self.config_data, dict) else [],
             "rule_profiles": rule_profiles,
+            "exception_reprice_rules": self._collect_rules_from_table(self.exception_rules_table) if self.exception_rules_table else [],
             "default_profile": self.default_profile_combo.currentData(),
             "interval_days": self.interval_days_spin.value(),
             "alerts": {
@@ -398,6 +442,7 @@ class RepricerSettingsWidget(QWidget):
 
     def _collect_rules_from_table(self, table):
         rules = []
+        is_369_table = bool(table.property("is_369_table"))
         for i in range(table.rowCount()):
             days_item = table.item(i, 0)
             if not days_item:
@@ -409,16 +454,23 @@ class RepricerSettingsWidget(QWidget):
                 end_day = int(days_text.split("-")[1].replace("日", ""))
             action_combo = table.cellWidget(i, 1)
             price_trace_combo = table.cellWidget(i, 2)
+            tp_combo = table.cellWidget(i, 3) if is_369_table else None
+            akaji_percent_combo = table.cellWidget(i, 4) if is_369_table else None
             if action_combo and price_trace_combo:
                 action = action_combo.currentData()
                 price_trace = price_trace_combo.currentData()
+                tp_target = tp_combo.currentData() if tp_combo else "tp0"
+                akaji_drop_percent = int(akaji_percent_combo.currentData()) if akaji_percent_combo else 1
                 if isinstance(action, str) and action.startswith("price_down_ignore_"):
                     action = "price_down_ignore"
                 rules.append({
                     "days_from": end_day,
                     "action": action,
-                    "value": price_trace
+                    "value": price_trace,
                 })
+                if is_369_table:
+                    rules[-1]["tp_target"] = tp_target
+                    rules[-1]["akaji_drop_percent"] = akaji_drop_percent
         return rules
     
     def on_config_loaded(self, config):
@@ -443,7 +495,9 @@ class RepricerSettingsWidget(QWidget):
                 if days_from:
                     rules_dict[str(days_from)] = {
                         "action": rule.get("action", "maintain"),
-                        "priceTrace": rule.get("value", 0)
+                        "priceTrace": rule.get("value", 0),
+                        "tp_target": rule.get("tp_target", "tp0"),
+                        "akaji_drop_percent": rule.get("akaji_drop_percent", 1),
                     }
             self.update_rules_table(rules_dict)
             
@@ -469,6 +523,8 @@ class RepricerSettingsWidget(QWidget):
                 rules_dict_default[str(days_from)] = {
                     "action": rule.get("action", "maintain"),
                     "priceTrace": rule.get("value", 0),
+                        "tp_target": rule.get("tp_target", "tp0"),
+                        "akaji_drop_percent": rule.get("akaji_drop_percent", 1),
                 }
         profiles = config.get("rule_profiles", {}) or {}
         for profile_key, table in self.profile_rule_tables.items():
@@ -493,8 +549,25 @@ class RepricerSettingsWidget(QWidget):
                     rules_dict[str(days_from)] = {
                         "action": rule.get("action", "maintain"),
                         "priceTrace": rule.get("value", 0),
+                        "tp_target": rule.get("tp_target", "tp0"),
+                        "akaji_drop_percent": rule.get("akaji_drop_percent", 1),
                     }
             self.update_rules_table(rules_dict, table=table)
+
+        if self.exception_rules_table is not None:
+            exception_rules = config.get("exception_reprice_rules", [])
+            if not exception_rules:
+                self.update_rules_table(rules_dict_default, table=self.exception_rules_table)
+            else:
+                exception_rules_dict = {}
+                for rule in exception_rules:
+                    days_from = rule.get("days_from")
+                    if days_from:
+                        exception_rules_dict[str(days_from)] = {
+                            "action": rule.get("action", "maintain"),
+                            "priceTrace": rule.get("value", 0),
+                        }
+                self.update_rules_table(exception_rules_dict, table=self.exception_rules_table)
 
         interval_days = int(config.get("interval_days", 7) or 7)
         self.interval_days_spin.setValue(max(1, interval_days))
@@ -515,6 +588,7 @@ class RepricerSettingsWidget(QWidget):
     def update_rules_table(self, rules_dict, table=None):
         """ルールテーブルの更新"""
         table = table or self.rules_table
+        is_369_table = bool(table.property("is_369_table"))
         for i in range(table.rowCount()):
             days_item = table.item(i, 0)
             if days_item:
@@ -549,6 +623,23 @@ class RepricerSettingsWidget(QWidget):
                         index = price_trace_combo.findData(price_trace)
                         if index >= 0:
                             price_trace_combo.setCurrentIndex(index)
+
+                    if is_369_table:
+                        # TP設定
+                        tp_combo = table.cellWidget(i, 3)
+                        if tp_combo:
+                            tp_target = str(rule.get("tp_target", "tp0")).lower()
+                            index = tp_combo.findData(tp_target)
+                            if index >= 0:
+                                tp_combo.setCurrentIndex(index)
+
+                        # akaji下限(%)設定
+                        akaji_percent_combo = table.cellWidget(i, 4)
+                        if akaji_percent_combo:
+                            akaji_drop_percent = int(rule.get("akaji_drop_percent", 1) or 1)
+                            index = akaji_percent_combo.findData(akaji_drop_percent)
+                            if index >= 0:
+                                akaji_percent_combo.setCurrentIndex(index)
     
     def reset_to_default(self):
         """デフォルト設定にリセット"""
@@ -569,6 +660,9 @@ class RepricerSettingsWidget(QWidget):
                 for table in self.profile_rule_tables.values():
                     self.setup_default_rules(table=table, connect_signals=False)
                     self.update_price_trace_visibility(table)
+                if self.exception_rules_table is not None:
+                    self.setup_default_rules(table=self.exception_rules_table, connect_signals=False)
+                    self.update_price_trace_visibility(self.exception_rules_table)
                 default_tp = {
                     "3": {"tp0": 95, "tp1": 75, "tp2": 60, "tp3": 0},
                     "6": {"tp0": 90, "tp1": 70, "tp2": 55, "tp3": 0},

@@ -11,6 +11,7 @@ from core.csv_utils import normalize_dataframe_for_cp932
 ACTION_NAMES_JP = {
     "maintain": "維持",
     "priceTrace": "Trace変更",
+    "tp_down": "TP値下げ",
     "price_down_1": "1%値下げ",
     "price_down_2": "2%値下げ",
     "profit_ignore_down": "1%値下げ(ガード無視)",
@@ -323,6 +324,38 @@ def _get_tp_floor(price: float, akaji: float, tp_rate: float) -> float:
     return round(max(0.0, base) * (max(0.0, tp_rate) / 100.0))
 
 
+def _get_profile_rule_for_days(days_since_listed: int, profile_rules: List[Dict[str, Any]]) -> Tuple[int, Dict[str, Any]]:
+    """profile_rules(リスト)から経過日数に対応するルールを返す。"""
+    if not isinstance(profile_rules, list) or not profile_rules:
+        return -1, {"days_from": 999, "action": "maintain", "value": 0, "tp_target": "tp0", "akaji_drop_percent": 1}
+    sorted_rules = sorted(profile_rules, key=lambda r: int(r.get("days_from", 999)))
+    for idx, rule in enumerate(sorted_rules):
+        try:
+            days_to = int(rule.get("days_from", 999))
+        except Exception:
+            days_to = 999
+        if days_since_listed <= days_to:
+            return idx, rule
+    return len(sorted_rules) - 1, sorted_rules[-1]
+
+
+def _get_tp_down_period_end(current_idx: int, current_rule: Dict[str, Any], profile_rules: List[Dict[str, Any]]) -> int:
+    """同一アクション(tp_down)かつ同一TP指定が連続する終端日を返す。"""
+    if current_idx < 0 or not profile_rules:
+        return int(current_rule.get("days_from", 999) or 999)
+    sorted_rules = sorted(profile_rules, key=lambda r: int(r.get("days_from", 999)))
+    target_tp = str(current_rule.get("tp_target", "tp0")).lower()
+    end_day = int(current_rule.get("days_from", 999) or 999)
+    for i in range(current_idx + 1, len(sorted_rules)):
+        rule = sorted_rules[i]
+        action = str(rule.get("action", "maintain"))
+        tp_target = str(rule.get("tp_target", "tp0")).lower()
+        if action != "tp_down" or tp_target != target_tp:
+            break
+        end_day = int(rule.get("days_from", end_day) or end_day)
+    return end_day
+
+
 def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[str, Any]) -> RepriceOutputs:
     log_data = []
     updated_inventory_data = []
@@ -376,43 +409,91 @@ def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[s
             continue
 
         profile, is_fallback = detect_369_profile_from_sku(str(sku), default_profile)
-        tp_key, period_end = _get_tp_band(days_since_listed)
+        profile_data = profiles.get(profile) or {}
+        profile_rules = profile_data.get("reprice_rules", []) or []
+        rule_idx, active_rule = _get_profile_rule_for_days(days_since_listed, profile_rules)
+        raw_action = str(active_rule.get("action", "maintain"))
+        rule_trace_value = active_rule.get("value", 0)
+        tp_key_default, period_end_default = _get_tp_band(days_since_listed)
+        tp_key = str(active_rule.get("tp_target", tp_key_default)).lower()
+        if tp_key not in ("tp0", "tp1", "tp2", "tp3"):
+            tp_key = tp_key_default
+        akaji_drop_percent = int(active_rule.get("akaji_drop_percent", 1) or 1)
+        akaji_drop_percent = min(10, max(1, akaji_drop_percent))
         tp_rates = ((profiles.get(profile) or {}).get("tp_rates") or {})
         tp_rate = float(tp_rates.get(tp_key, 0) or 0)
         tp_floor = _get_tp_floor(price, akaji, tp_rate)
+        period_end = _get_tp_down_period_end(rule_idx, active_rule, profile_rules) if raw_action == "tp_down" else period_end_default
 
-        reason_tokens = [f"{days_since_listed}日経過: 3-6-9改定({profile}ルール/{tp_key.upper()})"]
+        action_jp = ACTION_NAMES_JP.get(raw_action, raw_action)
+        reason_tokens = [f"{days_since_listed}日経過: 3-6-9改定({profile}ルール/{tp_key.upper()}/{action_jp})"]
         if is_fallback:
             reason_tokens.append(f"PROFILE_FALLBACK: SKUタグ判定不可のため{profile}ルール適用")
 
         keepa_min = _to_float_or_none(row.get("keepa_min_same_condition"))
-        if keepa_min is None:
-            new_price = max(tp_floor, round(price))
-            reason_tokens.append("KEEPA_MISSING: keepa_min_same_condition 未入力のため維持寄り")
-        elif keepa_min < tp_floor:
-            new_price = tp_floor
-            if alert_enabled:
-                reason_tokens.append(
-                    f"{alert_prefix}: keepa_min({round(keepa_min)}) < {tp_key.upper()}_floor({tp_floor}) のためTP下限で固定"
-                )
-        else:
-            start_price = min(price, keepa_min)
+        new_price_trace = price_trace
+        if raw_action == "maintain":
+            new_price = round(price)
+        elif raw_action == "priceTrace":
+            new_price = round(price)
+            new_price_trace = rule_trace_value
+        elif raw_action == "tp_down":
+            if keepa_min is None:
+                start_price = price
+                reason_tokens.append("KEEPA_MISSING: keepa_min_same_condition 未入力")
+            elif keepa_min < tp_floor:
+                start_price = tp_floor
+                if alert_enabled:
+                    reason_tokens.append(
+                        f"{alert_prefix}: keepa_min({round(keepa_min)}) < {tp_key.upper()}_floor({tp_floor}) のためTP下限で固定"
+                    )
+            else:
+                start_price = min(price, keepa_min)
             remaining_days = max(0, period_end - days_since_listed)
             steps = max(1, math.ceil(remaining_days / interval_days))
             delta = (start_price - tp_floor) / steps if steps > 0 else 0
             new_price = max(tp_floor, round(start_price - delta))
+        elif raw_action in ("price_down_1", "price_down_2", "price_down_3", "price_down_4"):
+            down_percent = int(raw_action.replace("price_down_", ""))
+            new_price = round(price * (1.0 - down_percent / 100.0))
+        elif raw_action == "exclude":
+            log_data.append({
+                "sku": sku, "asin": asin, "title": title, "days": days_since_listed, "action": "除外",
+                "reason": f"{days_since_listed}日経過: 除外（ルール設定）", "price": price,
+                "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace,
+                "priceTraceChange": 0, "priceTraceChangeDisplay": "無し",
+                "rule_action": raw_action, "tp_target": tp_key, "akaji": akaji,
+                "akaji_drop_percent": akaji_drop_percent, "keepa_min_same_condition": keepa_min,
+            })
+            excluded_inventory_data.append(row.to_dict())
+            continue
+        else:
+            new_price = round(price)
 
-        action_jp = "3-6-9改定"
+        # akajiは「設定価格のx%下」とTP下限の厳しい方（高い方）を1つだけ採用
+        akaji_guard_from_price = round(new_price * (1.0 - akaji_drop_percent / 100.0))
+        final_akaji = max(tp_floor, akaji_guard_from_price)
+        if new_price <= final_akaji:
+            new_price = final_akaji
+            reason_tokens.append("TP下限に到達（維持）")
+
         reason = " / ".join(reason_tokens)
         row_dict = row.to_dict()
         row_dict["price"] = new_price
-        row_dict["priceTrace"] = price_trace
+        row_dict["priceTrace"] = new_price_trace
+        row_dict["akaji"] = final_akaji
         updated_inventory_data.append(row_dict)
         log_data.append({
             "sku": sku, "asin": asin, "title": title, "days": days_since_listed, "action": action_jp,
             "reason": reason, "price": price, "new_price": new_price,
-            "priceTrace": price_trace, "new_priceTrace": price_trace,
-            "priceTraceChange": 0, "priceTraceChangeDisplay": "無し"
+            "priceTrace": price_trace, "new_priceTrace": new_price_trace,
+            "priceTraceChange": (new_price_trace if raw_action == "priceTrace" else 0),
+            "priceTraceChangeDisplay": (format_trace_value(new_price_trace) if raw_action == "priceTrace" else "無し"),
+            "rule_action": raw_action,
+            "tp_target": tp_key,
+            "akaji": final_akaji,
+            "akaji_drop_percent": akaji_drop_percent,
+            "keepa_min_same_condition": keepa_min,
         })
 
     log_df = pd.DataFrame(log_data)

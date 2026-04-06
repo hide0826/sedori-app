@@ -111,6 +111,7 @@ class RepriceRule(BaseModel):
     action: Literal[
         "maintain",
         "priceTrace",
+        "tp_down",
         "price_down_1",
         "price_down_2",
         "price_down_3",
@@ -119,12 +120,15 @@ class RepriceRule(BaseModel):
         "exclude"
     ]
     value: Optional[float] = None
+    tp_target: Optional[str] = "tp0"
+    akaji_drop_percent: Optional[int] = 1
 
 class RepriceConfig(BaseModel):
     profit_guard_percentage: float = 1.1
     excluded_skus: list[str] = []
     q4_rule_enabled: bool = False
     reprice_rules: list[RepriceRule] = []
+    exception_reprice_rules: list[RepriceRule] = []
     rule_profiles: Dict[str, Any] = {}
     default_profile: Optional[str] = "6"
     interval_days: Optional[int] = 7
@@ -152,6 +156,7 @@ def get_config(mode: Optional[str] = Query(default="standard")):
                 "excluded_skus": config_data.get("excluded_skus", []),
                 "q4_rule_enabled": config_data.get("q4_rule_enabled", False),
                 "reprice_rules": config_data.get("reprice_rules", []),
+                "exception_reprice_rules": config_data.get("exception_reprice_rules", []),
                 "rule_profiles": config_data.get("rule_profiles", {}),
                 "default_profile": config_data.get("default_profile", "6"),
                 "interval_days": config_data.get("interval_days", 7),
@@ -196,6 +201,7 @@ def update_config(config: RepriceConfig = Body(...), mode: Optional[str] = Query
         payload = config.dict()
         if normalized_mode == "369":
             existing_data["rule_profiles"] = payload.get("rule_profiles", existing_data.get("rule_profiles", {}))
+            existing_data["exception_reprice_rules"] = payload.get("exception_reprice_rules", existing_data.get("exception_reprice_rules", []))
             existing_data["default_profile"] = payload.get("default_profile", existing_data.get("default_profile", "6"))
             existing_data["interval_days"] = payload.get("interval_days", existing_data.get("interval_days", 7))
             existing_data["alerts"] = payload.get("alerts", existing_data.get("alerts", {"enabled": True, "reason_prefix": "ALERT"}))

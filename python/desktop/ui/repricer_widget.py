@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QLineEdit, QFileDialog,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QProgressBar, QTextEdit, QGroupBox, QSplitter,
+    QProgressBar, QTextEdit, QGroupBox, QSplitter, QApplication,
     QMessageBox, QFrame, QMenu
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSettings, QUrl
@@ -21,6 +21,10 @@ from pathlib import Path
 from datetime import datetime
 import re
 from utils.error_handler import ErrorHandler, validate_csv_file, safe_execute
+try:
+    from desktop.services.keepa_service import KeepaService
+except ImportError:
+    from services.keepa_service import KeepaService  # type: ignore
 
 
 class NumericTableWidgetItem(QTableWidgetItem):
@@ -96,6 +100,7 @@ class RepricerWidget(QWidget):
         self.preview_days = None
         # 日数フィルタの現在値（90/180/270/340 または None）
         self.active_days_filter = None
+        self.keepa_cache = {}
         
         # UIの初期化
         self.setup_ui()
@@ -456,6 +461,13 @@ class RepricerWidget(QWidget):
         self.save_btn.setEnabled(False)
         self.save_btn.setMaximumHeight(35)  # 高さを制限
         button_layout.addWidget(self.save_btn)
+
+        # Keepa取得ボタン（対象行のみ）
+        self.keepa_fetch_btn = QPushButton("Keepa取得")
+        self.keepa_fetch_btn.clicked.connect(self.fetch_keepa_for_target_rows)
+        self.keepa_fetch_btn.setEnabled(False)
+        self.keepa_fetch_btn.setMaximumHeight(35)
+        button_layout.addWidget(self.keepa_fetch_btn)
         
         button_layout.addStretch()
         
@@ -741,8 +753,10 @@ class RepricerWidget(QWidget):
         
     def on_preview_completed(self, result):
         """プレビュー完了時の処理"""
+        self.repricing_result = result
         self.progress_bar.setVisible(False)
         self.preview_btn.setEnabled(True)
+        self.keepa_fetch_btn.setEnabled(True)
         
         # 結果テーブルの更新
         self.update_result_table(result)
@@ -796,6 +810,7 @@ class RepricerWidget(QWidget):
         self.progress_bar.setVisible(False)
         self.execute_btn.setEnabled(True)
         self.save_btn.setEnabled(True)
+        self.keepa_fetch_btn.setEnabled(True)
         
         # 結果テーブルの更新
         self.update_result_table(result)
@@ -825,7 +840,7 @@ class RepricerWidget(QWidget):
         
         # テーブルの設定（必要な列のみ）
         self.result_table.setRowCount(len(items))
-        columns = ['SKU', 'ASIN', 'Title', '日数', 'アクション', '理由', '現在価格', '改定価格', 'Trace変更']
+        columns = ['SKU', 'ASIN', 'Title', '日数', 'アクション', '理由', '現在価格', '改定価格', 'Trace変更', 'Keepa価格(参考)']
         self.result_table.setColumnCount(len(columns))
         self.result_table.setHorizontalHeaderLabels(columns)
         
@@ -864,6 +879,8 @@ class RepricerWidget(QWidget):
             
             # 文字列に変換（Noneの場合は空文字列）
             trace_change_text = str(trace_change_text) if trace_change_text is not None else ""
+            keepa_ref = item.get("keepa_ref_price", "")
+            keepa_ref_text = "" if keepa_ref in (None, "") else str(keepa_ref)
             
             # Excel数式記法のクリーンアップ
             self.result_table.setItem(i, 0, QTableWidgetItem(self.clean_excel_formula(str(sku))))
@@ -895,13 +912,14 @@ class RepricerWidget(QWidget):
             self.result_table.setItem(i, 7, new_price_item)
             
             self.result_table.setItem(i, 8, QTableWidgetItem(trace_change_text))
+            self.result_table.setItem(i, 9, QTableWidgetItem(keepa_ref_text))
             
             # 日付不明の行を識別（daysが-1、または理由に「日付不明」が含まれる）
             is_date_unknown = (days == -1) or ("日付不明" in reason)
             
             # 日付不明の場合は灰色で表示
             if is_date_unknown:
-                for j in range(9):
+                for j in range(10):
                     item = self.result_table.item(i, j)
                     if item:
                         item.setBackground(QColor(150, 150, 150))  # グレー背景
@@ -914,13 +932,13 @@ class RepricerWidget(QWidget):
                     
                     if new_price_float > price_float:
                         # 価格上昇：緑色
-                        for j in range(9):
+                        for j in range(10):
                             item = self.result_table.item(i, j)
                             if item:
                                 item.setBackground(QColor(200, 255, 200))
                     elif new_price_float < price_float:
                         # 価格下降：赤色
-                        for j in range(9):
+                        for j in range(10):
                             item = self.result_table.item(i, j)
                             if item:
                                 item.setBackground(QColor(255, 200, 200))
@@ -933,6 +951,111 @@ class RepricerWidget(QWidget):
         
         # 列幅の自動調整
         self.result_table.resizeColumnsToContents()
+
+    def _is_keepa_target_item(self, item: dict) -> bool:
+        """Keepa取得対象行を判定する。"""
+        raw_action = str(item.get("rule_action", "")).lower()
+        try:
+            current_price = float(item.get("new_price", item.get("price", 0)) or 0)
+        except (TypeError, ValueError):
+            current_price = 0.0
+        try:
+            akaji = float(item.get("akaji", 0) or 0)
+        except (TypeError, ValueError):
+            akaji = 0.0
+        is_akaji_sticky = akaji > 0 and abs(current_price - akaji) <= 1.0
+        return (raw_action == "tp_down") or (raw_action == "pricetrace" and is_akaji_sticky)
+
+    def _pick_keepa_reference_price(self, info) -> str:
+        """Keepa情報から参考価格文字列を作る（中古最安ベース）。"""
+        candidates = [
+            info.used_like_new,
+            info.used_very_good,
+            info.used_good,
+            info.used_acceptable,
+        ]
+        prices = [float(v) for v in candidates if v is not None and float(v) > 0]
+        if prices:
+            return str(round(min(prices)))
+        if info.new_price is not None and float(info.new_price) > 0:
+            return str(round(float(info.new_price)))
+        return ""
+
+    def fetch_keepa_for_target_rows(self):
+        """対象行だけKeepa価格(参考)を取得して結果テーブルに反映する。"""
+        if not self.repricing_result or "items" not in self.repricing_result:
+            QMessageBox.information(self, "Keepa取得", "先に価格改定プレビューまたは実行を行ってください。")
+            return
+
+        items = self.repricing_result.get("items", [])
+        target_items = [it for it in items if self._is_keepa_target_item(it) and str(it.get("asin", "")).strip()]
+        if not target_items:
+            QMessageBox.information(self, "Keepa取得", "Keepa取得対象のSKUがありません。")
+            return
+
+        unique_asins = []
+        seen = set()
+        for it in target_items:
+            asin = str(it.get("asin", "")).strip()
+            if asin and asin not in seen:
+                seen.add(asin)
+                unique_asins.append(asin)
+
+        reply = QMessageBox.question(
+            self,
+            "Keepa取得確認",
+            f"対象SKU: {len(target_items)}件（ASIN重複除外: {len(unique_asins)}件）\nKeepa価格(参考)を取得しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.keepa_fetch_btn.setEnabled(False)
+
+        success = 0
+        failed = 0
+        service = None
+        try:
+            service = KeepaService()
+            total = len(unique_asins)
+            asin_to_price = {}
+            for idx, asin in enumerate(unique_asins, 1):
+                if asin in self.keepa_cache:
+                    asin_to_price[asin] = self.keepa_cache.get(asin, "")
+                else:
+                    try:
+                        info = service.fetch_product_by_asin(asin)
+                        keepa_price = self._pick_keepa_reference_price(info)
+                        self.keepa_cache[asin] = keepa_price
+                        asin_to_price[asin] = keepa_price
+                    except Exception:
+                        self.keepa_cache[asin] = ""
+                        asin_to_price[asin] = ""
+                        failed += 1
+                self.progress_bar.setValue(round(idx * 100 / max(1, total)))
+                QApplication.processEvents()
+
+            for item in target_items:
+                asin = str(item.get("asin", "")).strip()
+                keepa_price = asin_to_price.get(asin, "")
+                if keepa_price:
+                    item["keepa_ref_price"] = keepa_price
+                    success += 1
+
+            self.update_result_table(self.repricing_result)
+            QMessageBox.information(
+                self,
+                "Keepa取得完了",
+                f"Keepa価格(参考)を更新しました。\n成功: {success}件 / 失敗: {failed}件",
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Keepa取得エラー", f"Keepa取得に失敗しました:\n{e}")
+        finally:
+            self.progress_bar.setVisible(False)
+            self.keepa_fetch_btn.setEnabled(True)
     
     def _get_unique_file_path(self, directory: str, filename: str) -> str:
         """重複しないファイルパスを生成"""

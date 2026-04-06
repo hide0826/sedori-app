@@ -1659,3 +1659,44 @@
 
 **最終更新**: 2026-03-29
 **更新者**: Agentモード（実装）
+
+### 2026-04-06（3-6-9改定ルール拡張・Keepa取得ボタン・通常/例外タブの列整理）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. **3-6-9改定ルールの行設定を拡張**
+     - `repricer_settings_widget.py`:
+       - 3/6/9タブのルール表に `TP` 列と `akaji下限(%)` 列（1〜10%）を追加。
+       - アクションに `TP値下げ`（内部キー: `tp_down`）を追加。
+       - ルール保存/読込に `tp_target` と `akaji_drop_percent` を追加。
+  2. **3-6-9価格改定ロジックに反映**
+     - `repricer_weekly.py`:
+       - 3-6-9モードで `tp_down` / `priceTrace` / `maintain` 等を日数帯ルールに沿って処理。
+       - `tp_down` は同一TP指定が連続する帯をまとめて終端日までみなし、`interval_days` 基準で段階的に下げる。
+       - `akaji` は「設定価格のx%下」と「TP下限」の厳しい方（高い方）を採用する形に更新。
+       - ログ項目に `rule_action` / `tp_target` / `akaji_drop_percent` などを追加。
+  3. **改定実行タブに Keepa取得ボタンを追加**
+     - `repricer_widget.py`:
+       - 実行ボタンエリアに `Keepa取得` ボタンを追加。
+       - 対象行（`TP値下げ`、または `priceTrace` かつ `akaji` 張り付き）だけ Keepa を取得する処理を実装。
+       - 結果テーブルに `Keepa価格(参考)` 列を追加し、取得結果を表示。
+       - ASIN重複除外・簡易キャッシュを追加。
+  4. **通常価格改定タブと例外タブの列を整理**
+     - `repricer_settings_widget.py`:
+       - 通常価格改定タブは既存どおり `出品日数 / アクション / priceTrace設定` のみ表示に戻し、TP/akaji列を非表示化。
+       - 3-6-9内の「例外」タブも通常と同じ列構成に変更（既存改定ルール運用を継続可能に）。
+  5. **API設定モデルの追随**
+     - `routers/repricer.py`:
+       - `RepriceRule` に `tp_down` / `tp_target` / `akaji_drop_percent` を追加。
+       - 369設定で `exception_reprice_rules` を返却・保存対象に追加。
+- **変更ファイル**:
+  - `python/desktop/ui/repricer_settings_widget.py`
+  - `python/services/repricer_weekly.py`
+  - `python/desktop/ui/repricer_widget.py`
+  - `python/routers/repricer.py`
+  - `docs/cursor_development_progress.md`
+- **次回**:
+  - `TP値下げ` 運用での閾値・理由文言（Keepa確認導線）を実機運用に合わせて微調整。
+  - 必要に応じて Keepa 取得対象条件を設定化（対象上限件数・対象アクション切替）。
+
+**最終更新**: 2026-04-06
+**更新者**: Agentモード（実装）
