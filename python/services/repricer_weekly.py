@@ -327,7 +327,7 @@ def _get_tp_floor(price: float, akaji: float, tp_rate: float) -> float:
 def _get_profile_rule_for_days(days_since_listed: int, profile_rules: List[Dict[str, Any]]) -> Tuple[int, Dict[str, Any]]:
     """profile_rules(リスト)から経過日数に対応するルールを返す。"""
     if not isinstance(profile_rules, list) or not profile_rules:
-        return -1, {"days_from": 999, "action": "maintain", "value": 0, "tp_target": "tp0", "akaji_drop_percent": 1}
+        return -1, {"days_from": 999, "action": "maintain", "value": 0, "tp_target": "tp0", "akaji_drop_percent": 1, "takane_rise_percent": 0}
     sorted_rules = sorted(profile_rules, key=lambda r: int(r.get("days_from", 999)))
     for idx, rule in enumerate(sorted_rules):
         try:
@@ -420,6 +420,8 @@ def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[s
             tp_key = tp_key_default
         akaji_drop_percent = int(active_rule.get("akaji_drop_percent", 1) or 1)
         akaji_drop_percent = min(10, max(1, akaji_drop_percent))
+        takane_rise_percent = int(active_rule.get("takane_rise_percent", 0) or 0)
+        takane_rise_percent = min(10, max(0, takane_rise_percent))
         tp_rates = ((profiles.get(profile) or {}).get("tp_rates") or {})
         tp_rate = float(tp_rates.get(tp_key, 0) or 0)
         tp_floor = _get_tp_floor(price, akaji, tp_rate)
@@ -476,12 +478,14 @@ def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[s
         if new_price <= final_akaji:
             new_price = final_akaji
             reason_tokens.append("TP下限に到達（維持）")
+        final_takane = max(new_price, round(new_price * (1.0 + takane_rise_percent / 100.0)))
 
         reason = " / ".join(reason_tokens)
         row_dict = row.to_dict()
         row_dict["price"] = new_price
         row_dict["priceTrace"] = new_price_trace
         row_dict["akaji"] = final_akaji
+        row_dict["takane"] = final_takane
         updated_inventory_data.append(row_dict)
         log_data.append({
             "sku": sku, "asin": asin, "title": title, "days": days_since_listed, "action": action_jp,
@@ -493,6 +497,8 @@ def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[s
             "tp_target": tp_key,
             "akaji": final_akaji,
             "akaji_drop_percent": akaji_drop_percent,
+            "takane": final_takane,
+            "takane_rise_percent": takane_rise_percent,
             "keepa_min_same_condition": keepa_min,
         })
 

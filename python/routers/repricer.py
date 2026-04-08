@@ -122,6 +122,7 @@ class RepriceRule(BaseModel):
     value: Optional[float] = None
     tp_target: Optional[str] = "tp0"
     akaji_drop_percent: Optional[int] = 1
+    takane_rise_percent: Optional[int] = 0
 
 class RepriceConfig(BaseModel):
     profit_guard_percentage: float = 1.1

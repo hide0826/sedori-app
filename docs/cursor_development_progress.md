@@ -1700,3 +1700,41 @@
 
 **最終更新**: 2026-04-06
 **更新者**: Agentモード（実装）
+
+### 2026-04-06（3-6-9改定UI改善: takane%追加・一括プリセット・ホイール誤操作防止）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. **3-6-9ルールに takane上限(%) を追加**
+     - `repricer_settings_widget.py`:
+       - 3/6/9ルール表に `takane上限(%)` 列を追加（0〜10%）。
+       - 保存/読込に `takane_rise_percent` を追加。
+     - `repricer_weekly.py`:
+       - 3-6-9改定で `takane_rise_percent` を使い、`takane` を改定価格ベースで算出して出力に反映。
+     - `routers/repricer.py`:
+       - ルールモデルに `takane_rise_percent` を追加。
+  2. **TP保持率設定エリアに一括プリセット機能**
+     - `repricer_settings_widget.py`:
+       - 各プロファイルタブ（3/6/9）に
+         - `akaji一括(%)`
+         - `takane一括(%)`
+         - `akaji/takane を全行に適用` ボタン
+         を追加。
+       - クリックでそのタブ内の全行へ一括反映できるようにした。
+  3. **TP保持率設定エリアのレイアウト改善**
+     - `repricer_settings_widget.py`:
+       - 縦積み構成を横並びに変更し、日数ごとのルール表の表示領域を広げて作業性を改善。
+  4. **マウスホイール誤操作防止**
+     - `repricer_settings_widget.py`:
+       - `NoWheelComboBox` / `NoWheelDoubleSpinBox` を追加。
+       - 3-6-9設定内のコンボ/スピンを差し替え、ホイールで値が変わらないようにした（クリック操作は維持）。
+- **変更ファイル**:
+  - `python/desktop/ui/repricer_settings_widget.py`
+  - `python/services/repricer_weekly.py`
+  - `python/routers/repricer.py`
+  - `docs/cursor_development_progress.md`
+- **次回**:
+  - 実運用データで `akaji/takane` の%初期値（帯ごとの推奨）を調整。
+  - 必要に応じて 3/6/9 全タブをまとめて一括反映するプリセット導線を追加。
+
+**最終更新**: 2026-04-06
+**更新者**: Agentモード（実装）

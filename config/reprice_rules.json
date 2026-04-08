@@ -81,67 +81,106 @@
         {
           "days_from": 30,
           "action": "priceTrace",
-          "value": 1
+          "value": 1,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 60,
           "action": "priceTrace",
-          "value": 1
+          "value": 1,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 90,
           "action": "priceTrace",
-          "value": 1
+          "value": 1,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 120,
-          "action": "price_down_1",
-          "value": 4
+          "action": "tp_down",
+          "value": 4,
+          "tp_target": "tp1",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 150,
-          "action": "price_down_1",
-          "value": 3
+          "action": "tp_down",
+          "value": 3,
+          "tp_target": "tp1",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 180,
-          "action": "price_down_1",
-          "value": 4
+          "action": "tp_down",
+          "value": 4,
+          "tp_target": "tp1",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 210,
-          "action": "price_down_2",
-          "value": 5
+          "action": "tp_down",
+          "value": 5,
+          "tp_target": "tp2",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 240,
-          "action": "price_down_2",
-          "value": 3
+          "action": "tp_down",
+          "value": 3,
+          "tp_target": "tp2",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 270,
-          "action": "price_down_2",
-          "value": 0
+          "action": "tp_down",
+          "value": 0,
+          "tp_target": "tp2",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 300,
-          "action": "price_down_ignore",
-          "value": 1
+          "action": "tp_down",
+          "value": 1,
+          "tp_target": "tp3",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 330,
-          "action": "price_down_ignore",
-          "value": 3
+          "action": "tp_down",
+          "value": 3,
+          "tp_target": "tp3",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 360,
-          "action": "price_down_ignore",
-          "value": 4
+          "action": "tp_down",
+          "value": 4,
+          "tp_target": "tp3",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 999,
-          "action": "price_down_2",
-          "value": 4
+          "action": "maintain",
+          "value": 4,
+          "tp_target": "tp3",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         }
       ]
     },
@@ -156,67 +195,106 @@
         {
           "days_from": 30,
           "action": "priceTrace",
-          "value": 1
+          "value": 1,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 60,
           "action": "priceTrace",
-          "value": 1
+          "value": 1,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 90,
           "action": "priceTrace",
-          "value": 1
+          "value": 1,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 120,
           "action": "price_down_1",
-          "value": 4
+          "value": 4,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 150,
           "action": "price_down_1",
-          "value": 3
+          "value": 3,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 180,
           "action": "price_down_1",
-          "value": 4
+          "value": 4,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 210,
           "action": "price_down_2",
-          "value": 5
+          "value": 5,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 240,
           "action": "price_down_2",
-          "value": 3
+          "value": 3,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 270,
           "action": "price_down_2",
-          "value": 0
+          "value": 0,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 300,
           "action": "price_down_ignore",
-          "value": 1
+          "value": 1,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 330,
           "action": "price_down_ignore",
-          "value": 3
+          "value": 3,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 360,
           "action": "price_down_ignore",
-          "value": 4
+          "value": 4,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         },
         {
           "days_from": 999,
           "action": "price_down_2",
-          "value": 4
+          "value": 4,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 2,
+          "takane_rise_percent": 1
         }
       ]
     },
@@ -231,67 +309,106 @@
         {
           "days_from": 30,
           "action": "maintain",
-          "value": 1
+          "value": 1,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 1,
+          "takane_rise_percent": 0
         },
         {
           "days_from": 60,
           "action": "maintain",
-          "value": 1
+          "value": 1,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 1,
+          "takane_rise_percent": 0
         },
         {
           "days_from": 90,
           "action": "maintain",
-          "value": 1
+          "value": 1,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 1,
+          "takane_rise_percent": 0
         },
         {
           "days_from": 120,
           "action": "maintain",
-          "value": 4
+          "value": 4,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 1,
+          "takane_rise_percent": 0
         },
         {
           "days_from": 150,
           "action": "maintain",
-          "value": 3
+          "value": 3,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 1,
+          "takane_rise_percent": 0
         },
         {
           "days_from": 180,
           "action": "maintain",
-          "value": 4
+          "value": 4,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 1,
+          "takane_rise_percent": 0
         },
         {
           "days_from": 210,
           "action": "maintain",
-          "value": 5
+          "value": 5,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 1,
+          "takane_rise_percent": 0
         },
         {
           "days_from": 240,
           "action": "maintain",
-          "value": 3
+          "value": 3,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 1,
+          "takane_rise_percent": 0
         },
         {
           "days_from": 270,
           "action": "maintain",
-          "value": 0
+          "value": 0,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 1,
+          "takane_rise_percent": 0
         },
         {
           "days_from": 300,
           "action": "maintain",
-          "value": 1
+          "value": 1,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 1,
+          "takane_rise_percent": 0
         },
         {
           "days_from": 330,
           "action": "maintain",
-          "value": 3
+          "value": 3,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 1,
+          "takane_rise_percent": 0
         },
         {
           "days_from": 360,
           "action": "maintain",
-          "value": 4
+          "value": 4,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 1,
+          "takane_rise_percent": 0
         },
         {
           "days_from": 999,
           "action": "maintain",
-          "value": 4
+          "value": 4,
+          "tp_target": "tp0",
+          "akaji_drop_percent": 1,
+          "takane_rise_percent": 0
         }
       ]
     }
@@ -302,5 +419,111 @@
     "enabled": true,
     "reason_prefix": "ALERT"
   },
-  "updated_at": "2026-03-29 07:31:28.223995"
+  "updated_at": "2026-04-08 12:42:00.943198",
+  "exception_reprice_rules": [
+    {
+      "days_from": 30,
+      "action": "priceTrace",
+      "value": 1.0,
+      "tp_target": "tp0",
+      "akaji_drop_percent": 1,
+      "takane_rise_percent": 0
+    },
+    {
+      "days_from": 60,
+      "action": "priceTrace",
+      "value": 1.0,
+      "tp_target": "tp0",
+      "akaji_drop_percent": 1,
+      "takane_rise_percent": 0
+    },
+    {
+      "days_from": 90,
+      "action": "priceTrace",
+      "value": 1.0,
+      "tp_target": "tp0",
+      "akaji_drop_percent": 1,
+      "takane_rise_percent": 0
+    },
+    {
+      "days_from": 120,
+      "action": "price_down_1",
+      "value": 4.0,
+      "tp_target": "tp0",
+      "akaji_drop_percent": 1,
+      "takane_rise_percent": 0
+    },
+    {
+      "days_from": 150,
+      "action": "price_down_1",
+      "value": 3.0,
+      "tp_target": "tp0",
+      "akaji_drop_percent": 1,
+      "takane_rise_percent": 0
+    },
+    {
+      "days_from": 180,
+      "action": "price_down_1",
+      "value": 4.0,
+      "tp_target": "tp0",
+      "akaji_drop_percent": 1,
+      "takane_rise_percent": 0
+    },
+    {
+      "days_from": 210,
+      "action": "price_down_2",
+      "value": 5.0,
+      "tp_target": "tp0",
+      "akaji_drop_percent": 1,
+      "takane_rise_percent": 0
+    },
+    {
+      "days_from": 240,
+      "action": "price_down_2",
+      "value": 3.0,
+      "tp_target": "tp0",
+      "akaji_drop_percent": 1,
+      "takane_rise_percent": 0
+    },
+    {
+      "days_from": 270,
+      "action": "price_down_2",
+      "value": 0.0,
+      "tp_target": "tp0",
+      "akaji_drop_percent": 1,
+      "takane_rise_percent": 0
+    },
+    {
+      "days_from": 300,
+      "action": "price_down_ignore",
+      "value": 1.0,
+      "tp_target": "tp0",
+      "akaji_drop_percent": 1,
+      "takane_rise_percent": 0
+    },
+    {
+      "days_from": 330,
+      "action": "price_down_ignore",
+      "value": 3.0,
+      "tp_target": "tp0",
+      "akaji_drop_percent": 1,
+      "takane_rise_percent": 0
+    },
+    {
+      "days_from": 360,
+      "action": "price_down_ignore",
+      "value": 4.0,
+      "tp_target": "tp0",
+      "akaji_drop_percent": 1,
+      "takane_rise_percent": 0
+    },
+    {
+      "days_from": 999,
+      "action": "price_down_2",
+      "value": 4.0,
+      "tp_target": "tp0",
+      "akaji_drop_percent": 1,
+      "takane_rise_percent": 0
+    }
+  ]
 }

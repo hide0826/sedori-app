@@ -23,6 +23,20 @@ import json
 from typing import Dict, List, Any, Optional
 
 
+class NoWheelComboBox(QComboBox):
+    """誤操作防止: マウスホイールで値変更しないコンボボックス"""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    """誤操作防止: マウスホイールで値変更しないスピンボックス"""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class RepricerSettingsWorker(QThread):
     """ルール設定処理のワーカースレッド"""
     config_loaded = Signal(dict)
@@ -121,12 +135,14 @@ class RepricerSettingsWidget(QWidget):
         self.profile_tab = QTabWidget()
         self.profile_rule_tables = {}
         self.profile_tp_spins = {}
+        self.profile_akaji_preset_combos = {}
+        self.profile_takane_preset_combos = {}
         self.exception_rules_table = None
         for profile_key, label_text in [("3", "3ルール"), ("6", "6ルール"), ("9", "9ルール")]:
             tab = QWidget()
             tab_layout = QVBoxLayout(tab)
             tp_group = QGroupBox("TP保持率設定")
-            tp_layout = QGridLayout(tp_group)
+            tp_layout = QHBoxLayout(tp_group)
             self.profile_tp_spins[profile_key] = {}
             tp_labels = [
                 ("tp0", "TP0の利益保持率(%)"),
@@ -134,15 +150,37 @@ class RepricerSettingsWidget(QWidget):
                 ("tp2", "TP2の利益保持率(%)"),
                 ("tp3", "TP3の利益保持率(%)"),
             ]
-            for row, (tp_key, tp_label) in enumerate(tp_labels):
-                tp_layout.addWidget(QLabel(tp_label), row, 0)
-                spin = QDoubleSpinBox()
+            for tp_key, tp_label in tp_labels:
+                tp_layout.addWidget(QLabel(tp_label))
+                spin = NoWheelDoubleSpinBox()
                 spin.setRange(0.0, 300.0)
                 spin.setSingleStep(1.0)
                 spin.setSuffix("%")
+                spin.setMaximumWidth(92)
                 self.profile_tp_spins[profile_key][tp_key] = spin
-                tp_layout.addWidget(spin, row, 1)
-            tp_layout.setColumnStretch(2, 1)
+                tp_layout.addWidget(spin)
+            # akaji/takane 一括プリセット
+            tp_layout.addSpacing(16)
+            tp_layout.addWidget(QLabel("akaji一括(%):"))
+            akaji_preset_combo = NoWheelComboBox()
+            for v in range(1, 11):
+                akaji_preset_combo.addItem(f"{v}%", v)
+            akaji_preset_combo.setMaximumWidth(88)
+            self.profile_akaji_preset_combos[profile_key] = akaji_preset_combo
+            tp_layout.addWidget(akaji_preset_combo)
+
+            tp_layout.addWidget(QLabel("takane一括(%):"))
+            takane_preset_combo = NoWheelComboBox()
+            for v in range(0, 11):
+                takane_preset_combo.addItem(f"{v}%", v)
+            takane_preset_combo.setMaximumWidth(88)
+            self.profile_takane_preset_combos[profile_key] = takane_preset_combo
+            tp_layout.addWidget(takane_preset_combo)
+
+            apply_preset_btn = QPushButton("akaji/takane を全行に適用")
+            apply_preset_btn.clicked.connect(lambda _checked=False, key=profile_key: self.apply_percent_preset_to_profile_rules(key))
+            tp_layout.addWidget(apply_preset_btn)
+            tp_layout.addStretch()
             tab_layout.addWidget(tp_group)
             table = self._create_rules_table_widget(profile_key=profile_key)
             self.profile_rule_tables[profile_key] = table
@@ -191,6 +229,35 @@ class RepricerSettingsWidget(QWidget):
 
         common_layout.setColumnStretch(2, 1)
         self.layout().addWidget(common_group)
+
+    def apply_percent_preset_to_profile_rules(self, profile_key: str):
+        """選択プロファイルの全行に akaji/takane プリセット(%)を一括適用する。"""
+        table = self.profile_rule_tables.get(profile_key)
+        if table is None:
+            return
+        akaji_combo = self.profile_akaji_preset_combos.get(profile_key)
+        takane_combo = self.profile_takane_preset_combos.get(profile_key)
+        akaji_percent = int(akaji_combo.currentData()) if akaji_combo else 1
+        takane_percent = int(takane_combo.currentData()) if takane_combo else 0
+        updated_rows = 0
+        for i in range(table.rowCount()):
+            akaji_cell = table.cellWidget(i, 4)
+            if akaji_cell:
+                idx = akaji_cell.findData(akaji_percent)
+                if idx >= 0:
+                    akaji_cell.setCurrentIndex(idx)
+            takane_cell = table.cellWidget(i, 5)
+            if takane_cell:
+                idx = takane_cell.findData(takane_percent)
+                if idx >= 0:
+                    takane_cell.setCurrentIndex(idx)
+            updated_rows += 1
+        QMessageBox.information(
+            self,
+            "一括適用完了",
+            f"{profile_key}ルールの {updated_rows} 行に\n"
+            f"akaji下限: {akaji_percent}% / takane上限: {takane_percent}% を適用しました。"
+        )
         
     def setup_rules_table(self):
         """ルール設定テーブルの設定"""
@@ -215,7 +282,7 @@ class RepricerSettingsWidget(QWidget):
         table.setEditTriggers(QTableWidget.NoEditTriggers)
         is_369_table = (self.mode == "369") and (not force_standard_columns)
         if is_369_table:
-            columns = ['出品日数', 'アクション', 'priceTrace設定', 'TP', 'akaji下限(%)']
+            columns = ['出品日数', 'アクション', 'priceTrace設定', 'TP', 'akaji下限(%)', 'takane上限(%)']
         else:
             columns = ['出品日数', 'アクション', 'priceTrace設定']
         table.setColumnCount(len(columns))
@@ -265,6 +332,7 @@ class RepricerSettingsWidget(QWidget):
 
         tp_options = [("tp0", "TP0"), ("tp1", "TP1"), ("tp2", "TP2"), ("tp3", "TP3")]
         akaji_percent_options = [(v, f"{v}%") for v in range(1, 11)]
+        takane_percent_options = [(v, f"{v}%") for v in range(0, 11)]
         
         for i, (start_day, end_day) in enumerate(day_ranges):
             # 出品日数
@@ -277,7 +345,7 @@ class RepricerSettingsWidget(QWidget):
             table.setItem(i, 0, days_item)
             
             # アクション選択
-            action_combo = QComboBox()
+            action_combo = NoWheelComboBox()
             for action_key, action_text in actions:
                 action_combo.addItem(action_text, action_key)
             # スクロール無効化（誤設定防止）
@@ -287,7 +355,7 @@ class RepricerSettingsWidget(QWidget):
             table.setCellWidget(i, 1, action_combo)
             
             # priceTrace設定
-            price_trace_combo = QComboBox()
+            price_trace_combo = NoWheelComboBox()
             for value, text in price_trace_options:
                 price_trace_combo.addItem(text, value)
             # スクロール無効化（誤設定防止）
@@ -296,18 +364,25 @@ class RepricerSettingsWidget(QWidget):
 
             if is_369_table:
                 # TP設定
-                tp_combo = QComboBox()
+                tp_combo = NoWheelComboBox()
                 for tp_key, tp_label in tp_options:
                     tp_combo.addItem(tp_label, tp_key)
                 tp_combo.setEditable(False)
                 table.setCellWidget(i, 3, tp_combo)
 
                 # akaji下限(%)設定
-                akaji_percent_combo = QComboBox()
+                akaji_percent_combo = NoWheelComboBox()
                 for percent_value, percent_text in akaji_percent_options:
                     akaji_percent_combo.addItem(percent_text, percent_value)
                 akaji_percent_combo.setEditable(False)
                 table.setCellWidget(i, 4, akaji_percent_combo)
+
+                # takane上限(%)設定
+                takane_percent_combo = NoWheelComboBox()
+                for percent_value, percent_text in takane_percent_options:
+                    takane_percent_combo.addItem(percent_text, percent_value)
+                takane_percent_combo.setEditable(False)
+                table.setCellWidget(i, 5, takane_percent_combo)
         
         # 列幅の調整
         table.resizeColumnsToContents()
@@ -319,6 +394,7 @@ class RepricerSettingsWidget(QWidget):
         if is_369_table:
             table.setColumnWidth(3, 100)  # TP
             table.setColumnWidth(4, 120)  # akaji下限(%)
+            table.setColumnWidth(5, 120)  # takane上限(%)
         
         # 初期状態でpriceTrace設定を非表示
         self.update_price_trace_visibility(table)
@@ -456,11 +532,13 @@ class RepricerSettingsWidget(QWidget):
             price_trace_combo = table.cellWidget(i, 2)
             tp_combo = table.cellWidget(i, 3) if is_369_table else None
             akaji_percent_combo = table.cellWidget(i, 4) if is_369_table else None
+            takane_percent_combo = table.cellWidget(i, 5) if is_369_table else None
             if action_combo and price_trace_combo:
                 action = action_combo.currentData()
                 price_trace = price_trace_combo.currentData()
                 tp_target = tp_combo.currentData() if tp_combo else "tp0"
                 akaji_drop_percent = int(akaji_percent_combo.currentData()) if akaji_percent_combo else 1
+                takane_rise_percent = int(takane_percent_combo.currentData()) if takane_percent_combo else 0
                 if isinstance(action, str) and action.startswith("price_down_ignore_"):
                     action = "price_down_ignore"
                 rules.append({
@@ -471,6 +549,7 @@ class RepricerSettingsWidget(QWidget):
                 if is_369_table:
                     rules[-1]["tp_target"] = tp_target
                     rules[-1]["akaji_drop_percent"] = akaji_drop_percent
+                    rules[-1]["takane_rise_percent"] = takane_rise_percent
         return rules
     
     def on_config_loaded(self, config):
@@ -498,6 +577,7 @@ class RepricerSettingsWidget(QWidget):
                         "priceTrace": rule.get("value", 0),
                         "tp_target": rule.get("tp_target", "tp0"),
                         "akaji_drop_percent": rule.get("akaji_drop_percent", 1),
+                        "takane_rise_percent": rule.get("takane_rise_percent", 0),
                     }
             self.update_rules_table(rules_dict)
             
@@ -523,8 +603,9 @@ class RepricerSettingsWidget(QWidget):
                 rules_dict_default[str(days_from)] = {
                     "action": rule.get("action", "maintain"),
                     "priceTrace": rule.get("value", 0),
-                        "tp_target": rule.get("tp_target", "tp0"),
-                        "akaji_drop_percent": rule.get("akaji_drop_percent", 1),
+                    "tp_target": rule.get("tp_target", "tp0"),
+                    "akaji_drop_percent": rule.get("akaji_drop_percent", 1),
+                    "takane_rise_percent": rule.get("takane_rise_percent", 0),
                 }
         profiles = config.get("rule_profiles", {}) or {}
         for profile_key, table in self.profile_rule_tables.items():
@@ -551,6 +632,7 @@ class RepricerSettingsWidget(QWidget):
                         "priceTrace": rule.get("value", 0),
                         "tp_target": rule.get("tp_target", "tp0"),
                         "akaji_drop_percent": rule.get("akaji_drop_percent", 1),
+                        "takane_rise_percent": rule.get("takane_rise_percent", 0),
                     }
             self.update_rules_table(rules_dict, table=table)
 
@@ -640,6 +722,14 @@ class RepricerSettingsWidget(QWidget):
                             index = akaji_percent_combo.findData(akaji_drop_percent)
                             if index >= 0:
                                 akaji_percent_combo.setCurrentIndex(index)
+
+                        # takane上限(%)設定
+                        takane_percent_combo = table.cellWidget(i, 5)
+                        if takane_percent_combo:
+                            takane_rise_percent = int(rule.get("takane_rise_percent", 0) or 0)
+                            index = takane_percent_combo.findData(takane_rise_percent)
+                            if index >= 0:
+                                takane_percent_combo.setCurrentIndex(index)
     
     def reset_to_default(self):
         """デフォルト設定にリセット"""
