@@ -1660,6 +1660,46 @@
 **最終更新**: 2026-03-29
 **更新者**: Agentモード（実装）
 
+### 2026-03-31（仕入DB行編集の行ズレ修正・証憑管理からの価格更新停止・金額丸め・画像URL反映改善）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. 仕入DBで選択した行と「仕入行の編集」ダイアログの内容がズレる問題を修正
+  2. 証憑管理（レシート）から仕入価格・見込み利益・損益分岐点を更新しないポリシーを追加（将来のSP-API対応まで完全停止）
+  3. 仕入DBの金額表示（仕入れ価格・見込み利益・損益分岐点）を四捨五入で整数表示に統一
+  4. 画像管理タブから保存した画像URLが仕入DBタブに反映されない/消える問題を修正
+- **実装完了**:
+  - **仕入DB行編集の行ズレ対策（`product_widget.py`）**
+    - `populate_purchase_table()`で `_row_id` の採番後に `_purchase_row_map` を構築するよう修正（採番前マップの欠落を解消）
+    - `_row_id` を `int` に正規化し、削除処理・編集処理で型不一致による参照失敗を防止
+    - `_open_purchase_row_edit()` で `row_id` 取得後に **SKU/ASIN一致確認**を追加し、誤レコードを開かないように改善
+  - **仕入行編集ダイアログ（`purchase_row_edit_dialog.py`）**
+    - 商品情報の表示から「コンディション説明」行を削除
+    - 「コンディション」はコンディション列のみを表示し、説明文を混在させない構成に整理
+  - **証憑管理の価格更新停止（`receipt_widget.py` + 新規 `receipt_purchase_price_policy.py`）**
+    - `RECEIPT_MUTATES_PURCHASE_DB_PRICE = False` を新設し、価格配賦・利益再計算・ProductDBの`purchase_price`更新をポリシーで一括制御
+    - レシート保存時の仕入DB価格更新ブロックをポリシー条件付きに変更
+    - 一括マッチング時の「10円以下差額の自動修正（価格変更）」もポリシー条件付きに変更
+  - **金額丸め（`product_widget.py`）**
+    - 仕入DBテーブル表示時に `仕入れ価格` / `見込み利益` / `損益分岐点` を四捨五入して整数表示
+    - 損益分岐点の再計算結果・既存値表示の双方で整数化を適用
+  - **画像URL保存の安定化（`purchase_db.py` / `product_widget.py` / `image_manager_widget.py`）**
+    - `PurchaseDatabase` に `image_url_6` カラム追加（マイグレーション）と `upsert` 対応
+    - 仕入DBタブ生成時、`purchase_history_db` の `image_url_1..6` を `画像URL1..6` に補完
+    - 画像管理タブの「仕入DBに保存」後に `ProductWidget` の各キャッシュ（`purchase_all_records` 等）へ即時反映し、後続保存での逆上書きを防止
+- **変更ファイル**:
+  - `python/desktop/ui/product_widget.py`
+  - `python/desktop/ui/purchase_row_edit_dialog.py`
+  - `python/desktop/ui/receipt_widget.py`
+  - `python/desktop/ui/image_manager_widget.py`
+  - `python/desktop/database/purchase_db.py`
+  - `python/desktop/services/receipt_purchase_price_policy.py`（新規）
+  - `docs/cursor_development_progress.md`
+- **次回**:
+  - SP-API連携後、`RECEIPT_MUTATES_PURCHASE_DB_PRICE` を有効化する前提で、手数料・送料の実データを使う再計算式に段階的に置換する
+
+**最終更新**: 2026-03-31
+**更新者**: Agentモード（実装）
+
 ### 2026-04-06（3-6-9改定ルール拡張・Keepa取得ボタン・通常/例外タブの列整理）
 - **チャット**: Agentモード（実装）
 - **内容**:
@@ -1736,5 +1776,51 @@
   - 実運用データで `akaji/takane` の%初期値（帯ごとの推奨）を調整。
   - 必要に応じて 3/6/9 全タブをまとめて一括反映するプリセット導線を追加。
 
-**最終更新**: 2026-04-06
+### 2026-04-12（3-6-9価格改定: 仕入DBのTP0〜3優先・SKUタグ不明時の例外/6分岐・結果UI強化・仕入編集のモードレス化）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. **3-6-9のTP下限を「仕入DBのTP0〜TP3」優先に変更**
+     - `repricer_weekly.py`:
+       - `python/desktop/data/hirio.db`（`purchases.tp0..tp3`）からSKU単位でTPを読み込み、設定されている帯（`tp0`〜`tp3`）は **金額をそのままTP下限**として採用。
+       - 未設定時のみ、従来どおり `akaji` とTP率からTP下限を算出するフォールバックへ。
+       - `tp_down` の「同一TPが連続する帯の終端日」計算を、プロファイルルール／例外ルールのどちらを使っているかに追従。
+  2. **SKUタグから3/6/9が判定できない場合のルール適用を整理**
+     - 仕入DBにSKUがあり、TPのいずれかが入っている場合は **6ルール**へ寄せる。
+     - それ以外は **`exception_reprice_rules`（例外タブ）** を優先。未設定なら従来のプロファイルへ。
+     - 例外適用時は **TP表記を理由に出さない**（通常3-6-9との見分けを明確化）。
+  3. **`TP0` は段階的値下げの対象外（価格維持）**
+     - `tp0` 帯では `tp_down` を **維持扱い**にして、誤って段階下げしない。
+  4. **TP下限到達状態の可視化と `akaji` 計算の整合**
+     - 出力に `tp_floor` / `is_tp_floor_or_below` / `tp_reach_status` を追加し、**期間内到達**と**期間外到達**を分けて状態表示できるようにした。
+     - `price == akaji` のケースは **「akaji到達」**として `tp_reach_status` に反映（TP下限列の見え方調整の土台）。
+     - TP下限と同額に `akaji` を引き上げすぎないよう計算側を調整。
+  5. **価格改定（通常/369）CSVエリアに「クリア」ボタン**
+     - `repricer_widget.py`: 選択CSV・プレビュー/結果/進捗表示をまとめて初期化。
+  6. **価格改定結果テーブルの操作性向上**
+     - `repricer_widget.py`:
+       - 結果に **`akaji` / `takane`** 列を追加。
+       - **`TP下限` 列**を追加し、`tp_reach_status` を表示（選択色で行背景が潰れないよう、選択時背景上書きを抑止）。
+       - 日数列のソートを数値として扱えるようヘッダ設定。
+       - 結果エリアにも **90/180/270/340/クリア** の日数フィルタを追加。
+       - 結果行の **ダブルクリック**で `ProductWidget` 経由（またはDB直参照）に **仕入行の編集（Keepa）** を開けるよう連携。
+  7. **仕入行の編集をモードレス化＋常に前面**
+     - `main_window.py`: `RepricerWidget` に `ProductWidget` を注入（`set_product_widget`）。
+     - `product_widget.py`: ダイアログを `exec` ではなく `show` で開き、参照を保持してGCで消えないようにする。
+     - `purchase_row_edit_dialog.py`: `WindowStaysOnTopHint` を付与し、他ウィンドウの裏に隠れにくくする。
+  8. **運用ルールJSONの追随（コミット対象）**
+     - `config/reprice_rules.json`: 実運用に合わせた帯アクションの調整（例: 一部帯を `priceTrace` 中心へ寄せる等）。
+- **変更ファイル**:
+  - `python/services/repricer_weekly.py`
+  - `python/desktop/ui/repricer_widget.py`
+  - `python/desktop/ui/main_window.py`
+  - `python/desktop/ui/product_widget.py`
+  - `python/desktop/ui/purchase_row_edit_dialog.py`
+  - `config/reprice_rules.json`
+  - `docs/cursor_development_progress.md`
+  - `D:\HIRIO\docs\cursor_development_progress.md`（リポジトリ外の進捗メモと同期）
+- **次回**:
+  - `tp_reach_status` の色分けルールを、運用フィードバックに合わせて微調整（特に「期間外到達」扱い）。
+  - 価格改定結果→仕入編集の導線で、SKU一致だがASIN不一致のケースの扱い（警告表示など）を詰める。
+
+**最終更新**: 2026-04-12
 **更新者**: Agentモード（実装）

@@ -279,6 +279,10 @@ class MainWindow(QMainWindow):
                 inventory_widget=self.inventory_widget,
                 api_client=self.api_client,
             )
+            if hasattr(self, "repricer_widget") and self.repricer_widget is not None:
+                self.repricer_widget.set_product_widget(self.product_widget)
+            if hasattr(self, "repricer_widget_369") and self.repricer_widget_369 is not None:
+                self.repricer_widget_369.set_product_widget(self.product_widget)
             self.inventory_widget.set_product_widget(self.product_widget)
             # 仕入管理（開発）からDB保存したときも仕入DBタブに即反映するため参照を渡す
             if hasattr(self, "inventory_widget_dev") and self.inventory_widget_dev is not None:

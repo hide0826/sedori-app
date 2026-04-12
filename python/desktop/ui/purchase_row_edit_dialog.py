@@ -180,6 +180,8 @@ class PurchaseRowEditDialog(QDialog):
         super().__init__(None)
         self.record = record
         self._product_widget = product_widget if product_widget is not None else parent
+        # メイン画面を操作しても編集ダイアログが背面に回らないようにする
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         self.setWindowTitle("仕入行の編集（Keepa）")
         self.setMinimumSize(380, 280)
         self.setMaximumSize(420, 420)

@@ -88,6 +88,7 @@ class RepricerWidget(QWidget):
         super().__init__()
         self.api_client = api_client
         self.mode = mode if mode in ("standard", "369") else "standard"
+        self.product_widget = None
         self.csv_path = None
         self.repricing_result = None
         self.error_handler = ErrorHandler(self)
@@ -100,7 +101,9 @@ class RepricerWidget(QWidget):
         self.preview_days = None
         # 日数フィルタの現在値（90/180/270/340 または None）
         self.active_days_filter = None
+        self.active_result_days_filter = None
         self.keepa_cache = {}
+        self._purchase_edit_dialogs = []
         
         # UIの初期化
         self.setup_ui()
@@ -119,6 +122,10 @@ class RepricerWidget(QWidget):
         
         # 下部：実行ボタンエリア
         self.setup_action_buttons()
+
+    def set_product_widget(self, product_widget):
+        """商品DBウィジェット参照を受け取り、仕入行編集ダイアログ連携に使う"""
+        self.product_widget = product_widget
         
     def setup_file_selection(self):
         """ファイル選択エリアの設定"""
@@ -139,6 +146,13 @@ class RepricerWidget(QWidget):
         self.select_file_btn.clicked.connect(self.select_csv_file)
         self.select_file_btn.setMaximumHeight(30)  # 高さを制限
         file_layout.addWidget(self.select_file_btn)
+
+        # ファイル選択クリアボタン
+        self.clear_file_btn = QPushButton("クリア")
+        self.clear_file_btn.clicked.connect(self.clear_csv_selection)
+        self.clear_file_btn.setMaximumHeight(30)  # 高さを制限
+        self.clear_file_btn.setEnabled(False)
+        file_layout.addWidget(self.clear_file_btn)
         
         # CSV内容プレビューボタン
         self.csv_preview_btn = QPushButton("CSV内容表示")
@@ -244,12 +258,45 @@ class RepricerWidget(QWidget):
         header_layout.addWidget(self.result_toggle_btn)
         header_layout.addStretch()
         result_layout.addLayout(header_layout)
+
+        # 日数フィルタボタン行（価格改定結果用）
+        result_filter_layout = QHBoxLayout()
+        self.result_filter_90_btn = QPushButton("90")
+        self.result_filter_180_btn = QPushButton("180")
+        self.result_filter_270_btn = QPushButton("270")
+        self.result_filter_340_btn = QPushButton("340")
+        self.result_filter_clear_btn = QPushButton("クリア")
+        self.result_filter_90_btn.clicked.connect(lambda _=False, d=90: self.apply_result_days_filter(d))
+        self.result_filter_180_btn.clicked.connect(lambda _=False, d=180: self.apply_result_days_filter(d))
+        self.result_filter_270_btn.clicked.connect(lambda _=False, d=270: self.apply_result_days_filter(d))
+        self.result_filter_340_btn.clicked.connect(lambda _=False, d=340: self.apply_result_days_filter(d))
+        self.result_filter_clear_btn.clicked.connect(self.clear_result_days_filter)
+        for btn in [
+            self.result_filter_90_btn,
+            self.result_filter_180_btn,
+            self.result_filter_270_btn,
+            self.result_filter_340_btn,
+            self.result_filter_clear_btn,
+        ]:
+            result_filter_layout.addWidget(btn)
+        result_filter_layout.addStretch()
+        result_layout.addLayout(result_filter_layout)
+        self._update_result_days_filter_styles()
         
         # 結果テーブル
         self.result_table = QTableWidget()
         self.result_table.setAlternatingRowColors(True)
         self.result_table.horizontalHeader().setStretchLastSection(True)
+        self.result_table.horizontalHeader().setSectionsClickable(True)
+        self.result_table.horizontalHeader().setSortIndicatorShown(True)
         self.result_table.setMinimumHeight(200)  # 適度な高さを設定
+        # 選択時にQSSのselected色で行背景が上書きされるのを防ぐ
+        # （TP下限の黄色ハイライトを常に視認できるようにする）
+        self.result_table.setStyleSheet(
+            "QTableWidget::item:selected {"
+            "background-color: transparent;"
+            "}"
+        )
         
         # 大量データ対応の最適化
         self.result_table.setSortingEnabled(True)  # ソート機能を有効化
@@ -261,6 +308,8 @@ class RepricerWidget(QWidget):
         
         # 選択変更時の自動スクロール機能
         self.result_table.itemSelectionChanged.connect(self.on_result_selection_changed)
+        # 行ダブルクリックで仕入行編集（Keepa）ダイアログを開く
+        self.result_table.cellDoubleClicked.connect(self.on_result_table_double_clicked)
         
         result_layout.addWidget(self.result_table)
         
@@ -495,6 +544,7 @@ class RepricerWidget(QWidget):
                     self.csv_preview_btn.setEnabled(True)
                     self.preview_btn.setEnabled(True)
                     self.execute_btn.setEnabled(True)
+                    self.clear_file_btn.setEnabled(True)
                     
                     # 選択したファイルのディレクトリを保存（次回同じフォルダから開く）
                     selected_dir = str(Path(file_path).parent)
@@ -518,6 +568,36 @@ class RepricerWidget(QWidget):
                 "ファイル選択エラー", 
                 user_message
             )
+
+    def clear_csv_selection(self):
+        """選択中のCSVファイルをクリアしてUI状態を初期化"""
+        self.csv_path = None
+        self.repricing_result = None
+        self.preview_df = None
+        self.preview_days = None
+        self.active_days_filter = None
+        self.file_path_edit.clear()
+
+        # ボタン状態を初期化
+        self.csv_preview_btn.setEnabled(False)
+        self.preview_btn.setEnabled(False)
+        self.execute_btn.setEnabled(False)
+        self.save_btn.setEnabled(False)
+        self.keepa_fetch_btn.setEnabled(False)
+        self.clear_file_btn.setEnabled(False)
+
+        # テーブル・進捗表示を初期化
+        self.preview_table.clear()
+        self.preview_table.setRowCount(0)
+        self.preview_table.setColumnCount(0)
+        self.result_table.clear()
+        self.result_table.setRowCount(0)
+        self.result_table.setColumnCount(0)
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setValue(0)
+
+        # フィルタボタンの見た目を通常に戻す
+        self._update_days_filter_styles()
             
     def preview_csv(self):
         """CSVファイルのプレビュー（価格改定プレビュー）"""
@@ -611,37 +691,124 @@ class RepricerWidget(QWidget):
     def on_result_selection_changed(self):
         """価格改定結果テーブルの選択変更時の処理"""
         try:
-            # 選択された行を取得
-            selected_items = self.result_table.selectedItems()
-            if not selected_items:
-                return
-            
-            # 最初の選択されたアイテムの行番号を取得
-            current_row = selected_items[0].row()
-            
-            # Title列を探す（価格改定結果では「Title」列）
-            title_column = -1
-            for j in range(self.result_table.columnCount()):
-                header_item = self.result_table.horizontalHeaderItem(j)
-                if header_item and header_item.text() == 'Title':
-                    title_column = j
-                    break
-            
-            # Title列が見つかった場合、その列をハイライト
-            if title_column >= 0:
-                # Title列のセルをハイライト
-                for j in range(self.result_table.columnCount()):
-                    item = self.result_table.item(current_row, j)
-                    if item:
-                        if j == title_column:
-                            # Title列は黄色でハイライト
-                            item.setBackground(QColor(255, 255, 200))
-                        else:
-                            # 他の列は通常の背景色
-                            item.setBackground(QColor(255, 255, 255))
-                            
+            # NOTE:
+            # 過去は選択行の背景色をここで上書きしていたが、
+            # 価格改定結果の行色（TP下限の黄色・上昇/下降色）を潰してしまうため
+            # 背景変更は行わない。
+            pass
         except Exception as e:
             print(f"結果選択変更処理エラー: {e}")
+
+    def on_result_table_double_clicked(self, row: int, col: int):
+        """価格改定結果行のダブルクリックで仕入行編集ダイアログを開く"""
+        try:
+            sku_item = self.result_table.item(row, 0)  # SKU列
+            asin_item = self.result_table.item(row, 1)  # ASIN列
+            title_item = self.result_table.item(row, 2)  # Title列
+            current_price_item = self.result_table.item(row, 7)  # 現在価格列
+            new_price_item = self.result_table.item(row, 8)  # 改定価格列
+            sku = sku_item.text().strip() if sku_item else ""
+            asin = asin_item.text().strip() if asin_item else ""
+            title = title_item.text().strip() if title_item else ""
+            current_price = current_price_item.text().strip() if current_price_item else ""
+            new_price = new_price_item.text().strip() if new_price_item else ""
+            if not sku:
+                return
+
+            record = None
+            pw = self.product_widget
+            if pw is not None:
+                records = getattr(pw, "purchase_all_records", None) or getattr(pw, "purchase_records", None) or []
+                for rec in records:
+                    rec_sku = str(rec.get("SKU") or rec.get("sku") or "").strip()
+                    rec_asin = str(rec.get("ASIN") or rec.get("asin") or "").strip()
+                    if rec_sku == sku and (not asin or not rec_asin or rec_asin == asin):
+                        record = rec
+                        break
+                if record is None:
+                    for rec in records:
+                        rec_sku = str(rec.get("SKU") or rec.get("sku") or "").strip()
+                        if rec_sku == sku:
+                            record = rec
+                            break
+
+            # ProductWidgetのキャッシュに無い場合は仕入DBから最低限取得して開く
+            if record is None and pw is not None and hasattr(pw, "purchase_history_db"):
+                db_rec = pw.purchase_history_db.get_by_sku(sku)
+                if db_rec:
+                    record = {
+                        "SKU": sku,
+                        "ASIN": asin or str(db_rec.get("asin") or ""),
+                        "商品名": title or str(db_rec.get("product_name") or db_rec.get("title") or ""),
+                        "コンディション": str(db_rec.get("condition_note") or db_rec.get("condition") or ""),
+                        "販売予定価格": db_rec.get("expected_price") or db_rec.get("planned_price") or current_price or new_price or 0,
+                        "見込み利益": db_rec.get("expected_profit") or db_rec.get("profit") or 0,
+                        "TP0": db_rec.get("tp0", ""),
+                        "TP1": db_rec.get("tp1", ""),
+                        "TP2": db_rec.get("tp2", ""),
+                        "TP3": db_rec.get("tp3", ""),
+                        "tp0": db_rec.get("tp0", ""),
+                        "tp1": db_rec.get("tp1", ""),
+                        "tp2": db_rec.get("tp2", ""),
+                        "tp3": db_rec.get("tp3", ""),
+                    }
+
+            # ProductDBも参照して、商品名/ASINなど不足情報を補完
+            if pw is not None and hasattr(pw, "db"):
+                try:
+                    product_rec = pw.db.get_by_sku(sku)
+                except Exception:
+                    product_rec = None
+                if product_rec:
+                    if record is None:
+                        record = {}
+                    record.setdefault("SKU", sku)
+                    if not record.get("ASIN"):
+                        record["ASIN"] = asin or str(product_rec.get("asin") or "")
+                    if not record.get("商品名"):
+                        record["商品名"] = title or str(product_rec.get("product_name") or "")
+                    if not record.get("販売予定価格"):
+                        record["販売予定価格"] = current_price or new_price or 0
+                    if "見込み利益" not in record or record.get("見込み利益") in (None, ""):
+                        record["見込み利益"] = 0
+
+            # 最終フォールバック: 結果テーブルの値で最低限の表示項目を埋める
+            if record is not None:
+                record.setdefault("SKU", sku)
+                record.setdefault("ASIN", asin)
+                if not record.get("商品名"):
+                    record["商品名"] = title
+                if not record.get("コンディション"):
+                    record["コンディション"] = ""
+                if not record.get("販売予定価格"):
+                    record["販売予定価格"] = current_price or new_price or 0
+                if "見込み利益" not in record or record.get("見込み利益") in (None, ""):
+                    record["見込み利益"] = 0
+                # ダイアログ側の互換キー
+                if "expected_price" not in record:
+                    record["expected_price"] = record.get("販売予定価格", 0)
+                if "expected_profit" not in record:
+                    record["expected_profit"] = record.get("見込み利益", 0)
+
+            if record is None:
+                QMessageBox.information(self, "仕入行の編集", f"SKU {sku} の仕入データが見つかりません。")
+                return
+
+            try:
+                from ui.purchase_row_edit_dialog import PurchaseRowEditDialog
+            except ImportError:
+                from desktop.ui.purchase_row_edit_dialog import PurchaseRowEditDialog
+            dialog = PurchaseRowEditDialog(record, product_widget=pw)
+            dialog.setModal(False)
+            dialog.setWindowModality(Qt.NonModal)
+            dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+            self._purchase_edit_dialogs.append(dialog)
+            dialog.destroyed.connect(lambda _=None, d=dialog: self._purchase_edit_dialogs.remove(d) if d in self._purchase_edit_dialogs else None)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        except Exception as e:
+            QMessageBox.warning(self, "仕入行の編集", f"ダイアログ表示に失敗しました:\n{e}")
     
     def clean_excel_formula(self, value: str) -> str:
         """Excel数式記法のクリーンアップ"""
@@ -722,6 +889,47 @@ class RepricerWidget(QWidget):
         # クリアボタンは常にベーススタイル
         if hasattr(self, "filter_clear_btn"):
             self.filter_clear_btn.setStyleSheet(base_style)
+
+    def apply_result_days_filter(self, threshold: int):
+        """価格改定結果の日数フィルタを適用"""
+        if not self.repricing_result or "items" not in self.repricing_result:
+            return
+        self.active_result_days_filter = threshold
+        self._update_result_days_filter_styles()
+        self.update_result_table(self.repricing_result)
+
+    def clear_result_days_filter(self):
+        """価格改定結果の日数フィルタを解除"""
+        self.active_result_days_filter = None
+        self._update_result_days_filter_styles()
+        if self.repricing_result and "items" in self.repricing_result:
+            self.update_result_table(self.repricing_result)
+
+    def _update_result_days_filter_styles(self):
+        """価格改定結果用の日数フィルタボタンのスタイル更新"""
+        base_style = ""
+        active_style = (
+            "QPushButton {"
+            "  background-color: #0078d4;"
+            "  color: white;"
+            "  font-weight: bold;"
+            "}"
+        )
+        button_map = {
+            90: getattr(self, "result_filter_90_btn", None),
+            180: getattr(self, "result_filter_180_btn", None),
+            270: getattr(self, "result_filter_270_btn", None),
+            340: getattr(self, "result_filter_340_btn", None),
+        }
+        for days, btn in button_map.items():
+            if btn is None:
+                continue
+            if self.active_result_days_filter == days:
+                btn.setStyleSheet(active_style)
+            else:
+                btn.setStyleSheet(base_style)
+        if hasattr(self, "result_filter_clear_btn"):
+            self.result_filter_clear_btn.setStyleSheet(base_style)
     
     def _format_trace_change(self, price_trace_change):
         """Trace変更の日本語化
@@ -834,15 +1042,27 @@ class RepricerWidget(QWidget):
     def update_result_table(self, result):
         """結果テーブルの更新"""
         items = result['items']
+        if self.active_result_days_filter is not None:
+            threshold = int(self.active_result_days_filter)
+            filtered_items = []
+            for it in items:
+                try:
+                    d = int(it.get("days", -1))
+                except (TypeError, ValueError):
+                    d = -1
+                if d >= threshold:
+                    filtered_items.append(it)
+            items = filtered_items
         
         # ソート機能を一時的に無効化（データ投入中はソートしない）
         self.result_table.setSortingEnabled(False)
         
         # テーブルの設定（必要な列のみ）
         self.result_table.setRowCount(len(items))
-        columns = ['SKU', 'ASIN', 'Title', '日数', 'アクション', '理由', '現在価格', '改定価格', 'Trace変更', 'Keepa価格(参考)']
+        columns = ['SKU', 'ASIN', 'Title', '日数', 'TP下限', 'アクション', '理由', '現在価格', '改定価格', 'akaji', 'takane', 'Trace変更', 'Keepa価格(参考)']
         self.result_table.setColumnCount(len(columns))
         self.result_table.setHorizontalHeaderLabels(columns)
+        total_columns = len(columns)
         
         # データの設定
         for i, item in enumerate(items):
@@ -855,6 +1075,15 @@ class RepricerWidget(QWidget):
             reason = str(item.get('reason', ''))
             price = float(item.get('price', 0)) if item.get('price') is not None else 0
             new_price = float(item.get('new_price', 0)) if item.get('new_price') is not None else 0
+            akaji_value = item.get('akaji', '')
+            takane_value = item.get('takane', '')
+            tp_floor_raw = item.get('tp_floor', None)
+            try:
+                tp_floor = float(tp_floor_raw) if tp_floor_raw not in (None, "") else None
+            except (TypeError, ValueError):
+                tp_floor = None
+            is_tp_floor_or_below = bool(item.get('is_tp_floor_or_below', False))
+            tp_reach_status = str(item.get('tp_reach_status', '') or '')
             # priceTraceChangeDisplayを優先的に使用（表示用文字列）
             trace_change_text = item.get('priceTraceChangeDisplay', None)
             
@@ -899,27 +1128,63 @@ class RepricerWidget(QWidget):
             days_item.setText(self.clean_excel_formula(str(days)))
             self.result_table.setItem(i, 3, days_item)
             
-            self.result_table.setItem(i, 4, QTableWidgetItem(self.clean_excel_formula(str(action))))
-            self.result_table.setItem(i, 5, QTableWidgetItem(self.clean_excel_formula(str(reason))))
+            # TP下限到達マーカー（色に依存しない視認性向上）
+            tp_flag_text = ""
+            akaji_equal_price = False
+            if akaji_value not in (None, ""):
+                try:
+                    akaji_equal_price = abs(price - float(akaji_value)) <= 1e-9
+                except (TypeError, ValueError):
+                    akaji_equal_price = False
+            if tp_reach_status in ("期間到達", "期間外到達"):
+                tp_flag_text = tp_reach_status
+            elif is_tp_floor_or_below:
+                tp_flag_text = "到達"
+            elif akaji_equal_price:
+                # 在庫CSVのpriceとakajiが同額の場合は要チェックとして明示
+                tp_flag_text = "akaji到達"
+            elif "TP下限" in reason:
+                tp_flag_text = "近接"
+            tp_flag_item = QTableWidgetItem(tp_flag_text)
+            if tp_flag_text:
+                tp_flag_item.setToolTip("TP下限到達/下限以下の行です")
+                if tp_flag_text == "期間到達":
+                    tp_flag_item.setForeground(QColor(80, 220, 120))  # 緑
+                elif tp_flag_text == "期間外到達":
+                    tp_flag_item.setForeground(QColor(255, 80, 80))  # 赤
+                elif tp_flag_text == "akaji到達":
+                    tp_flag_item.setForeground(QColor(255, 230, 0))  # 黄色
+                else:
+                    tp_flag_item.setForeground(QColor(255, 80, 80))
+            self.result_table.setItem(i, 4, tp_flag_item)
+
+            self.result_table.setItem(i, 5, QTableWidgetItem(self.clean_excel_formula(str(action))))
+            self.result_table.setItem(i, 6, QTableWidgetItem(self.clean_excel_formula(str(reason))))
             
             # 価格列：数値としてソートするためにQt.UserRoleに数値を設定
             price_item = NumericTableWidgetItem(price)
             price_item.setText(self.clean_excel_formula(str(price)))
-            self.result_table.setItem(i, 6, price_item)
+            self.result_table.setItem(i, 7, price_item)
             
             new_price_item = NumericTableWidgetItem(new_price)
             new_price_item.setText(self.clean_excel_formula(str(new_price)))
-            self.result_table.setItem(i, 7, new_price_item)
+            self.result_table.setItem(i, 8, new_price_item)
+
+            # akaji / takane は3-6-9実行時の入力値確認用にそのまま表示
+            akaji_text = "" if akaji_value in (None, "") else self.clean_excel_formula(str(akaji_value))
+            takane_text = "" if takane_value in (None, "") else self.clean_excel_formula(str(takane_value))
+            self.result_table.setItem(i, 9, QTableWidgetItem(akaji_text))
+            self.result_table.setItem(i, 10, QTableWidgetItem(takane_text))
             
-            self.result_table.setItem(i, 8, QTableWidgetItem(trace_change_text))
-            self.result_table.setItem(i, 9, QTableWidgetItem(keepa_ref_text))
+            self.result_table.setItem(i, 11, QTableWidgetItem(trace_change_text))
+            self.result_table.setItem(i, 12, QTableWidgetItem(keepa_ref_text))
             
             # 日付不明の行を識別（daysが-1、または理由に「日付不明」が含まれる）
             is_date_unknown = (days == -1) or ("日付不明" in reason)
             
             # 日付不明の場合は灰色で表示
             if is_date_unknown:
-                for j in range(10):
+                for j in range(total_columns):
                     item = self.result_table.item(i, j)
                     if item:
                         item.setBackground(QColor(150, 150, 150))  # グレー背景
@@ -932,16 +1197,47 @@ class RepricerWidget(QWidget):
                     
                     if new_price_float > price_float:
                         # 価格上昇：緑色
-                        for j in range(10):
+                        for j in range(total_columns):
                             item = self.result_table.item(i, j)
                             if item:
                                 item.setBackground(QColor(200, 255, 200))
                     elif new_price_float < price_float:
                         # 価格下降：赤色
-                        for j in range(10):
+                        for j in range(total_columns):
                             item = self.result_table.item(i, j)
                             if item:
                                 item.setBackground(QColor(255, 200, 200))
+
+                    # TP下限ちょうど/以下は最優先で黄色表示
+                    # バックエンド判定フラグを最優先で使用し、必要時のみフォールバック判定
+                    akaji_float = None
+                    try:
+                        akaji_float = float(akaji_value) if akaji_value not in (None, "") else None
+                    except (TypeError, ValueError):
+                        akaji_float = None
+
+                    is_tp_floor_row = bool(
+                        is_tp_floor_or_below
+                        or (tp_floor is not None and tp_floor > 0 and (new_price_float <= tp_floor or price_float <= tp_floor))
+                        or ("TP下限" in reason)
+                        or (akaji_float is not None and akaji_float > 0 and (new_price_float <= akaji_float or price_float <= akaji_float))
+                    )
+                    if is_tp_floor_row:
+                        for j in range(total_columns):
+                            cell_item = self.result_table.item(i, j)
+                            if cell_item:
+                                # ダークテーマでも見える強めの黄色
+                                cell_item.setBackground(QColor(255, 230, 0))
+                        # TP下限マーカー列は常に赤で見せる（行色処理の後に再適用）
+                        tp_marker_item = self.result_table.item(i, 4)
+                        if tp_marker_item and tp_marker_item.text().strip():
+                            marker_text = tp_marker_item.text().strip()
+                            if marker_text == "期間到達":
+                                tp_marker_item.setForeground(QColor(80, 220, 120))
+                            elif marker_text == "akaji到達":
+                                tp_marker_item.setForeground(QColor(255, 230, 0))
+                            else:
+                                tp_marker_item.setForeground(QColor(255, 80, 80))
                 except (ValueError, TypeError):
                     # 型変換に失敗した場合は色分けをスキップ
                     pass

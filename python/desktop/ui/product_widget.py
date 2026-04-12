@@ -344,6 +344,7 @@ class ProductWidget(QWidget):
         self.purchase_columns: List[str] = list(self.inventory_columns)
         self.purchase_records: List[Dict[str, Any]] = []
         self.sales_records: List[Dict[str, Any]] = []
+        self._purchase_edit_dialogs: List[QDialog] = []
         # 仕入DB行の一意IDカウンタ（ソートしても行を特定できるようにする）
         self._purchase_row_id_counter: int = 1
         # 重いデータ読み込みが完了しているかどうか
@@ -3533,7 +3534,14 @@ class ProductWidget(QWidget):
         except ImportError:
             from desktop.ui.purchase_row_edit_dialog import PurchaseRowEditDialog
         dialog = PurchaseRowEditDialog(record, product_widget=self)
-        dialog.exec_()
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.NonModal)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        self._purchase_edit_dialogs.append(dialog)
+        dialog.destroyed.connect(lambda _=None, d=dialog: self._purchase_edit_dialogs.remove(d) if d in self._purchase_edit_dialogs else None)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _get_value_from_row(self, row: int, keys: List[str]) -> Optional[str]:
         for col in range(self.purchase_table.columnCount()):
