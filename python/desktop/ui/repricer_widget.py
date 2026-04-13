@@ -20,6 +20,7 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 import re
+from typing import Any, Dict, Optional
 from utils.error_handler import ErrorHandler, validate_csv_file, safe_execute
 try:
     from desktop.services.keepa_service import KeepaService
@@ -699,6 +700,36 @@ class RepricerWidget(QWidget):
         except Exception as e:
             print(f"結果選択変更処理エラー: {e}")
 
+    def _repricer_csv_snapshot_for_sku(self, sku: str, asin: str) -> Optional[Dict[str, Any]]:
+        """3-6-9モードのプレビュー/実行結果から、日数・在庫CSV由来の現在価格・profit を取得。"""
+        if str(self.mode) != "369" or not self.repricing_result:
+            return None
+        items = self.repricing_result.get("items") or []
+        for it in items:
+            if str(it.get("sku", "")).strip() != sku:
+                continue
+            it_asin = str(it.get("asin", "")).strip()
+            if asin and it_asin and it_asin != asin:
+                continue
+            try:
+                p = float(it.get("price", 0) or 0)
+            except (TypeError, ValueError):
+                p = 0.0
+            raw_profit = it.get("csv_profit", it.get("profit", 0))
+            try:
+                prof = float(raw_profit or 0)
+            except (TypeError, ValueError):
+                prof = 0.0
+            days_val: Optional[int] = None
+            raw_days = it.get("days")
+            if raw_days is not None and str(raw_days).strip() != "":
+                try:
+                    days_val = int(float(raw_days))
+                except (TypeError, ValueError):
+                    days_val = None
+            return {"price": p, "profit": prof, "days": days_val}
+        return None
+
     def on_result_table_double_clicked(self, row: int, col: int):
         """価格改定結果行のダブルクリックで仕入行編集ダイアログを開く"""
         try:
@@ -715,8 +746,17 @@ class RepricerWidget(QWidget):
             if not sku:
                 return
 
-            record = None
+            # ProductWidget はタブ初表示まで仕入スナップショットを読まない。
+            # データベース管理を開かないと purchase_all_records が空のままになり、
+            # 仕入行の編集で価格・利益が空振りするため、ここで先に読み込む。
             pw = self.product_widget
+            if pw is not None and hasattr(pw, "ensure_initial_data_loaded"):
+                try:
+                    pw.ensure_initial_data_loaded()
+                except Exception:
+                    pass
+
+            record = None
             if pw is not None:
                 records = getattr(pw, "purchase_all_records", None) or getattr(pw, "purchase_records", None) or []
                 for rec in records:
@@ -741,6 +781,8 @@ class RepricerWidget(QWidget):
                         "ASIN": asin or str(db_rec.get("asin") or ""),
                         "商品名": title or str(db_rec.get("product_name") or db_rec.get("title") or ""),
                         "コンディション": str(db_rec.get("condition_note") or db_rec.get("condition") or ""),
+                        "仕入れ価格": db_rec.get("purchase_price") or db_rec.get("仕入れ価格") or db_rec.get("仕入価格") or 0,
+                        "purchase_price": db_rec.get("purchase_price") or db_rec.get("仕入れ価格") or db_rec.get("仕入価格") or 0,
                         "販売予定価格": db_rec.get("expected_price") or db_rec.get("planned_price") or current_price or new_price or 0,
                         "見込み利益": db_rec.get("expected_profit") or db_rec.get("profit") or 0,
                         "TP0": db_rec.get("tp0", ""),
@@ -794,11 +836,13 @@ class RepricerWidget(QWidget):
                 QMessageBox.information(self, "仕入行の編集", f"SKU {sku} の仕入データが見つかりません。")
                 return
 
+            csv_snap = self._repricer_csv_snapshot_for_sku(sku, asin)
+
             try:
                 from ui.purchase_row_edit_dialog import PurchaseRowEditDialog
             except ImportError:
                 from desktop.ui.purchase_row_edit_dialog import PurchaseRowEditDialog
-            dialog = PurchaseRowEditDialog(record, product_widget=pw)
+            dialog = PurchaseRowEditDialog(record, product_widget=pw, csv_inventory_snapshot=csv_snap)
             dialog.setModal(False)
             dialog.setWindowModality(Qt.NonModal)
             dialog.setAttribute(Qt.WA_DeleteOnClose, True)

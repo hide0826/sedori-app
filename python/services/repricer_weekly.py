@@ -339,6 +339,19 @@ def _to_float_or_none_strict(value: Any) -> float:
         return None
 
 
+def _csv_profit_from_inventory_row(row: Any) -> float:
+    """在庫CSVの profit 列（見込み利益）を数値化。欠損・不正は0。"""
+    try:
+        if row is None:
+            return 0.0
+        v = row.get("profit") if hasattr(row, "get") else None
+        if v is None:
+            return 0.0
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _resolve_purchase_db_path() -> Path:
     """仕入DB(hirio.db)の想定パスを返す。"""
     # python/services/repricer_weekly.py から python/desktop/data/hirio.db を参照
@@ -465,6 +478,7 @@ def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[s
                 "reason": "除外SKU（設定で除外指定）", "price": price,
                 "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace,
                 "priceTraceChange": 0, "priceTraceChangeDisplay": "無し",
+                "csv_profit": _csv_profit_from_inventory_row(row),
                 "tp_floor": None,
                 "is_tp_floor_or_below": False,
                 "tp_reach_status": "",
@@ -479,6 +493,7 @@ def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[s
                 "reason": "日付不明（維持）", "price": price,
                 "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace,
                 "priceTraceChange": 0, "priceTraceChangeDisplay": "無し",
+                "csv_profit": _csv_profit_from_inventory_row(row),
                 "tp_floor": None,
                 "is_tp_floor_or_below": False,
                 "tp_reach_status": "",
@@ -491,6 +506,7 @@ def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[s
                 "reason": f"{days_since_listed}日経過: 365日超過（要手動対応）", "price": price,
                 "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace,
                 "priceTraceChange": 0, "priceTraceChangeDisplay": "無し",
+                "csv_profit": _csv_profit_from_inventory_row(row),
                 "tp_floor": None,
                 "is_tp_floor_or_below": False,
                 "tp_reach_status": "",
@@ -618,6 +634,7 @@ def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[s
                 "reason": f"{days_since_listed}日経過: 除外（ルール設定）", "price": price,
                 "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace,
                 "priceTraceChange": 0, "priceTraceChangeDisplay": "無し",
+                "csv_profit": _csv_profit_from_inventory_row(row),
                 "rule_action": raw_action, "tp_target": tp_key, "akaji": akaji,
                 "akaji_drop_percent": akaji_drop_percent, "keepa_min_same_condition": keepa_min,
                 "tp_floor": tp_floor,
@@ -667,6 +684,7 @@ def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[s
             "priceTrace": price_trace, "new_priceTrace": new_price_trace,
             "priceTraceChange": (new_price_trace if raw_action == "priceTrace" else 0),
             "priceTraceChangeDisplay": (format_trace_value(new_price_trace) if raw_action == "priceTrace" else "無し"),
+            "csv_profit": _csv_profit_from_inventory_row(row),
             "rule_action": raw_action,
             "tp_target": tp_key,
             "akaji": final_akaji,

@@ -1824,3 +1824,34 @@
 
 **最終更新**: 2026-04-12
 **更新者**: Agentモード（実装）
+
+### 2026-04-13（3-6-9価格改定: 仕入行編集の商品情報をCSV/仕入DB連携で拡張）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. **3-6-9結果から仕入行編集へCSVスナップショットを連携**
+     - `repricer_weekly.py`:
+       - 3-6-9の結果 `items` に `csv_profit`（在庫CSVの `profit`）を追加。
+     - `repricer_widget.py`:
+       - ダブルクリック時に `sku/asin` で結果行を引き当て、`price`/`csv_profit`/`days` を編集ダイアログへ渡す処理を追加。
+  2. **仕入行編集ダイアログの商品情報エリアを拡張**
+     - `purchase_row_edit_dialog.py`:
+       - 3-6-9連携時に `日数（価格改定結果）`、`現在価格（CSV・price）`、`現在見込み利益（CSV・利益率）` を表示。
+       - 既存の見込み値は `販売予定価格（仕入時）` として明示し、表示の意図が分かるように整理。
+       - さらに `仕入れ価格（仕入DB）` を追加し、販売予定価格（仕入時）の上に表示するよう調整。
+  3. **「データベース管理を一度開かないと値が揃わない」問題を解消**
+     - `repricer_widget.py`:
+       - 編集ダイアログを開く前に `ProductWidget.ensure_initial_data_loaded()` を呼び、`purchase_all_records` 未初期化による情報欠落を防止。
+  4. **仕入DBフォールバック時のキー補完を強化**
+     - `repricer_widget.py`:
+       - `purchase_history_db.get_by_sku()` で取得した値から `仕入れ価格` / `purchase_price` も `record` に含め、ダイアログ表示を安定化。
+- **変更ファイル**:
+  - `python/services/repricer_weekly.py`
+  - `python/desktop/ui/repricer_widget.py`
+  - `python/desktop/ui/purchase_row_edit_dialog.py`
+  - `docs/cursor_development_progress.md`
+- **次回**:
+  - 3-6-9結果に `priceTrace` 等の補助指標も同様に渡すか検討し、編集時の判断材料をさらに強化。
+  - 仕入行編集の商品情報行の並び順・表示文言を運用画面で最終微調整。
+
+**最終更新**: 2026-04-13
+**更新者**: Agentモード（実装）

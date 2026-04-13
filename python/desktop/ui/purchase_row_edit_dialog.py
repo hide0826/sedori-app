@@ -175,16 +175,18 @@ class PurchaseRowEditDialog(QDialog):
         parent: Optional[QWidget] = None,
         *,
         product_widget: Optional[QWidget] = None,
+        csv_inventory_snapshot: Optional[Dict[str, Any]] = None,
     ):
         # parent=None で作成し、メイン画面を前面に出さない（編集時もブラウザが隠れないようにする）
         super().__init__(None)
         self.record = record
         self._product_widget = product_widget if product_widget is not None else parent
+        self._csv_inventory_snapshot = csv_inventory_snapshot or {}
         # メイン画面を操作しても編集ダイアログが背面に回らないようにする
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         self.setWindowTitle("仕入行の編集（Keepa）")
-        self.setMinimumSize(380, 280)
-        self.setMaximumSize(420, 420)
+        self.setMinimumSize(380, 320)
+        self.setMaximumSize(420, 500)
         self._positioned_at_topleft = False
         self._tp_field_sync_guard = False
         self._setup_ui()
@@ -215,18 +217,74 @@ class PurchaseRowEditDialog(QDialog):
         self._condition_label.setWordWrap(True)
         self._condition_label.setMaximumWidth(340)
         info_layout.addRow("コンディション:", self._condition_label)
+
         sale_price = _parse_number(self.record.get("販売予定価格") or self.record.get("expected_price"))
         self._sale_price_value = sale_price
         purchase_price = _parse_number(self.record.get("仕入れ価格") or self.record.get("purchase_price") or self.record.get("仕入価格"))
         self._purchase_price_value = purchase_price
-        info_layout.addRow("販売予定価格:", QLabel(_format_price(sale_price)))
+        purchase_price_lbl = QLabel(_format_price(purchase_price))
+        purchase_price_lbl.setToolTip(
+            "仕入DB（purchases.purchase_price）に保存されている仕入れ価格です。"
+        )
+        info_layout.addRow("仕入れ価格（仕入DB）:", purchase_price_lbl)
         profit = _parse_number(self.record.get("見込み利益") or self.record.get("expected_profit"))
         self._current_profit_value = profit  # 今出てる見込み利益（値下げ時の概算の基準）
         base_rate = (profit / sale_price * 100.0) if sale_price > 0 and profit != 0 else 0.0
         profit_text = _format_price(profit)
         if base_rate:
             profit_text = f"{profit_text}（{base_rate:.1f}%）"
-        info_layout.addRow("見込み利益（利益率）:", QLabel(profit_text))
+        planned_lbl = QLabel(_format_price(sale_price))
+        planned_lbl.setToolTip(
+            "仕入スナップショット／仕入データに保存されている販売予定価格（仕入時点の見込み）です。"
+        )
+        info_layout.addRow("販売予定価格（仕入時）:", planned_lbl)
+        profit_db_lbl = QLabel(profit_text)
+        profit_db_lbl.setToolTip(
+            "仕入スナップショット／仕入データの見込み利益と、販売予定価格に対する利益率です。"
+        )
+        info_layout.addRow("見込み利益（利益率）:", profit_db_lbl)
+
+        snap = self._csv_inventory_snapshot
+        if snap:
+            days_raw = snap.get("days")
+            d_int: Optional[int] = None
+            if days_raw is not None and str(days_raw).strip() != "":
+                try:
+                    d_int = int(float(days_raw))
+                except (TypeError, ValueError):
+                    d_int = None
+            if d_int is None:
+                days_text = "-"
+            elif d_int == -1:
+                days_text = "日付不明（-1）"
+            else:
+                days_text = f"{d_int} 日"
+            days_lbl = QLabel(days_text)
+            days_lbl.setToolTip(
+                "価格改定結果テーブルの「日数」列と同じ値です（SKU の出品からの経過日数）。"
+            )
+            info_layout.addRow("日数（価格改定結果）:", days_lbl)
+
+            csv_price = _parse_number(snap.get("price"))
+            csv_profit = _parse_number(snap.get("profit"))
+            csv_price_lbl = QLabel(_format_price(csv_price))
+            csv_price_lbl.setToolTip(
+                "価格改定で読み込んだ在庫CSVの price 列（改定前の現在価格）です。仕入DBの販売予定価格とは別の値です。"
+            )
+            info_layout.addRow("現在価格（CSV・price）:", csv_price_lbl)
+            if csv_price > 0:
+                rate = csv_profit / csv_price * 100.0
+                prof_text = f"{int(round(csv_profit)):,}（{rate:.1f}%）"
+            else:
+                prof_text = (
+                    f"{int(round(csv_profit)):,}（-）" if csv_profit else "-"
+                )
+            csv_profit_lbl = QLabel(prof_text)
+            csv_profit_lbl.setToolTip(
+                "在庫CSVの profit 列と、現在価格に対する利益率（profit ÷ price）です。"
+            )
+            info_layout.addRow("現在見込み利益（CSV・利益率）:", csv_profit_lbl)
+
         info_group.setLayout(info_layout)
         layout.addWidget(info_group)
 
