@@ -288,10 +288,10 @@ class KeepaTestWidget(QWidget):
             "損益分岐点": ["損益分岐点", "break_even"],
             "想定利益率": ["想定利益率", "expected_margin"],
             "想定ROI": ["想定ROI", "expected_roi"],
-            "TP0": ["TP0", "tp0", "TA0", "ta0"],
+            "TP0": ["TP0", "tp0"],
             "TP1": ["TP1", "tp1", "TA1", "ta1"],
             "TP2": ["TP2", "tp2", "TA2", "ta2"],
-            "TP3": ["TP3", "tp3", "TA3", "ta3"],
+            "TP3": ["TP3", "tp3"],
             "下限TP0": ["下限TP0", "lower_tp0", "lowerTp0"],
             "下限TP1": ["下限TP1", "lower_tp1", "lowerTp1"],
             "下限TP2": ["下限TP2", "lower_tp2", "lowerTp2"],
@@ -309,9 +309,12 @@ class KeepaTestWidget(QWidget):
             # 既存DBの TP 値を「下限TP」の初期値として使えるようにする
             if value in (None, "") and col_name.startswith("下限TP"):
                 suffix = col_name.replace("下限TP", "")
+                fallback_keys = [f"TP{suffix}", f"tp{suffix}"]
+                if suffix in ("1", "2"):
+                    fallback_keys.extend([f"TA{suffix}", f"ta{suffix}"])
                 value = self._get_record_value(
                     record,
-                    [f"TP{suffix}", f"tp{suffix}", f"TA{suffix}", f"ta{suffix}"],
+                    fallback_keys,
                 )
             txt = "" if value in (None, "") else str(value)
             item = QTableWidgetItem(txt)

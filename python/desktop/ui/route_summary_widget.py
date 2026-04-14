@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 from ui.star_rating_widget import StarRatingWidget
 from PySide6.QtCore import Qt, QDateTime, QTime, Signal, QSettings
-from PySide6.QtGui import QColor, QShortcut, QKeySequence
+from PySide6.QtGui import QColor, QShortcut, QKeySequence, QDrag
 import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -57,6 +57,96 @@ try:
     from utils.template_generator import TemplateGenerator
 except ImportError:
     TemplateGenerator = None
+
+
+class SafeInternalMoveTable(QTableWidget):
+    """セルウィジェットを含む行を安全に並び替えるためのテーブル。"""
+
+    rows_reordered = Signal()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._drag_source_row: Optional[int] = None
+
+    def startDrag(self, supportedActions) -> None:
+        # dropEvent 時点の currentRow() は移動先に変わる場合があるため、
+        # ドラッグ開始時の行を保持しておく。
+        self._drag_source_row = self.currentRow()
+        if self._drag_source_row < 0:
+            return
+        indexes = self.selectedIndexes()
+        if not indexes:
+            return
+        mime = self.model().mimeData(indexes)
+        if mime is None:
+            return
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        # QAbstractItemView の標準 startDrag は MoveAction 後に削除処理を行う場合があるため、
+        # ここでは独自に drag を実行して二重削除を防ぐ。
+        drag.exec(Qt.MoveAction)
+
+    def _clone_row(self, row: int) -> Dict[str, Any]:
+        texts: List[str] = []
+        star_rating: float = 0.0
+        for col in range(self.columnCount()):
+            item = self.item(row, col)
+            texts.append(item.text() if item is not None else "")
+            if col == 9:
+                w = self.cellWidget(row, col)
+                if isinstance(w, StarRatingWidget):
+                    star_rating = float(w.rating())
+        return {"texts": texts, "star_rating": star_rating}
+
+    def _restore_row(self, row: int, payload: Dict[str, Any]) -> None:
+        texts = payload.get("texts", [])
+        for col, text in enumerate(texts):
+            self.setItem(row, col, QTableWidgetItem(str(text)))
+        # 星評価ウィジェットは行移動で崩れやすいため毎回再生成する
+        star_widget = StarRatingWidget(self, rating=float(payload.get("star_rating", 0.0)), star_size=14)
+        self.setCellWidget(row, 9, star_widget)
+
+    def dropEvent(self, event) -> None:
+        if event.source() is not self:
+            super().dropEvent(event)
+            return
+
+        src_row = self._drag_source_row if self._drag_source_row is not None else self.currentRow()
+        self._drag_source_row = None
+        if src_row < 0:
+            event.ignore()
+            return
+
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        dst_row = self.rowAt(pos.y())
+        if dst_row < 0:
+            dst_row = self.rowCount() - 1
+
+        # 同じ場所へのドロップは何もしない
+        if dst_row in (src_row, src_row + 1):
+            event.ignore()
+            return
+
+        payload = self._clone_row(src_row)
+
+        self.blockSignals(True)
+        try:
+            dst_row = max(0, min(dst_row, self.rowCount() - 1))
+            if dst_row > src_row:
+                # 下方向へ移動: 間の行を上へ詰める
+                for r in range(src_row, dst_row):
+                    self._restore_row(r, self._clone_row(r + 1))
+            else:
+                # 上方向へ移動: 間の行を下へずらす
+                for r in range(src_row, dst_row, -1):
+                    self._restore_row(r, self._clone_row(r - 1))
+            self._restore_row(dst_row, payload)
+        finally:
+            self.blockSignals(False)
+
+        self.selectRow(dst_row)
+        event.acceptProposedAction()
+        self.rows_reordered.emit()
 
 
 class RouteSummaryWidget(QWidget):
@@ -98,6 +188,7 @@ class RouteSummaryWidget(QWidget):
         self.undo_stack = []
         self.redo_stack = []
         self.max_undo_history = 50  # 最大履歴数
+        self._is_reordering_rows = False
         
         self.setup_ui()
     
@@ -184,7 +275,7 @@ class RouteSummaryWidget(QWidget):
         visits_layout = QVBoxLayout(visits_group)
         
         # テーブル
-        self.store_visits_table = QTableWidget()
+        self.store_visits_table = SafeInternalMoveTable()
         self.store_visits_table.setAlternatingRowColors(True)
         # 行ドラッグ＆ドロップに必要な行単位選択＋単一選択
         self.store_visits_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -239,8 +330,8 @@ class RouteSummaryWidget(QWidget):
         # デフォルトの行高を調整（星評価が綺麗に収まるように）
         self.store_visits_table.verticalHeader().setDefaultSectionSize(24)
         
-        # 訪問順序の変更を監視
-        self.store_visits_table.model().rowsMoved.connect(self.on_rows_moved)
+        # SafeInternalMoveTable の独自シグナルで並び替え後処理を行う
+        self.store_visits_table.rows_reordered.connect(self.on_rows_reordered_safe)
         
         # データ変更を監視してUndoスタックに保存
         self.store_visits_table.itemChanged.connect(self.on_table_item_changed)
@@ -427,7 +518,7 @@ class RouteSummaryWidget(QWidget):
         layout = QVBoxLayout(widget)
         
         # テーブル
-        self.store_visits_table = QTableWidget()
+        self.store_visits_table = SafeInternalMoveTable()
         self.store_visits_table.setAlternatingRowColors(True)
         self.store_visits_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.store_visits_table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
@@ -464,8 +555,8 @@ class RouteSummaryWidget(QWidget):
         # デフォルトの行高を調整（星評価が綺麗に収まるように）
         self.store_visits_table.verticalHeader().setDefaultSectionSize(24)
         
-        # 訪問順序の変更を監視
-        self.store_visits_table.model().rowsMoved.connect(self.on_rows_moved)
+        # SafeInternalMoveTable の独自シグナルで並び替え後処理を行う
+        self.store_visits_table.rows_reordered.connect(self.on_rows_reordered_safe)
         
         # データ変更を監視してUndoスタックに保存
         self.store_visits_table.itemChanged.connect(self.on_table_item_changed)
@@ -894,9 +985,29 @@ class RouteSummaryWidget(QWidget):
         # タイマーをリセット（500ms後に保存）
         self._change_timer.stop()
         self._change_timer.start(500)
+
+    def _rebind_star_rating_signals(self) -> None:
+        """星評価ウィジェットのシグナルを現在の行構成に合わせて再接続する。"""
+        for row in range(self.store_visits_table.rowCount()):
+            star_widget = self.store_visits_table.cellWidget(row, 9)
+            if not isinstance(star_widget, StarRatingWidget):
+                continue
+            try:
+                star_widget.rating_changed.disconnect()
+            except Exception:
+                pass
+            star_widget.rating_changed.connect(lambda rating, r=row: self.on_star_rating_changed(r, rating))
+
+    def on_rows_reordered_safe(self):
+        """SafeInternalMoveTable での行並び替え後処理。"""
+        self.on_rows_moved(None, 0, 0, None, 0)
     
     def on_rows_moved(self, parent, start, end, destination, row):
         """行移動時の処理（訪問順序を再設定）"""
+        if getattr(self, "_is_reordering_rows", False):
+            return
+        self._is_reordering_rows = True
+
         # 変更イベントを一時的に無効化
         self.store_visits_table.blockSignals(True)
         
@@ -906,6 +1017,7 @@ class RouteSummaryWidget(QWidget):
                 order_item = self.store_visits_table.item(i, 0)
                 if order_item:
                     order_item.setText(str(i + 1))
+            self._rebind_star_rating_signals()
             
             # 状態を保存
             self.save_table_state()
@@ -916,6 +1028,7 @@ class RouteSummaryWidget(QWidget):
         finally:
             # 変更イベントを再有効化
             self.store_visits_table.blockSignals(False)
+            self._is_reordering_rows = False
     
     def save_store_order(self):
         """現在の訪問順序をデータベースに保存（自動保存用）"""

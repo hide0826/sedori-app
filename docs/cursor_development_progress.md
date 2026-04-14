@@ -1825,6 +1825,41 @@
 **最終更新**: 2026-04-12
 **更新者**: Agentモード（実装）
 
+### 2026-04-13（商品DB TP列整理・ルート登録D&D安定化）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. 商品DB（仕入DB）で `TA0` / `TA3` を削除し、`TP0` / `TP3` へ統一
+  2. 仕入DBの TP列表示を運用方針に合わせて整理（通常は非表示、TPボタン時のみ表示）
+  3. ルート登録タブの店舗訪問詳細で、ドラッグ&ドロップ並び替え時に行崩れ・行消失・クラッシュする問題を修正
+- **実装完了**:
+  - **TA0/TA3 削除とTP統一**
+    - `purchase_db.py`: 起動時マイグレーションで `ta0` / `ta3` を `tp0` / `tp3` に移行し、旧カラムを削除する処理を追加
+    - `product_widget.py` / `purchase_row_edit_dialog.py` / `keepa_test_widget.py`: `TA0` / `TA3` 参照を除去し、旧列が表示復活しないよう除外ロジックを追加
+  - **TP列表示の運用整理**
+    - `product_widget.py`: `TP0〜TP3` を列末尾へ再配置
+    - 通常表示（ALL）では `TP0〜TP3` を非表示にし、`TP` モード時のみ表示するよう変更
+  - **ルート登録タブ D&D 安定化**
+    - `route_summary_widget.py`:
+      - `SafeInternalMoveTable` を追加し、セルウィジェット（星評価）を含む行の安全な並び替え処理を実装
+      - 標準 `startDrag` 依存をやめて独自 `QDrag` 実行に変更（重複削除回避）
+      - `rowsMoved` 依存を外し、独自シグナル `rows_reordered` に統一
+      - 並び替え処理に再入防止フラグを追加
+      - 行削除/挿入ではなく「行データ入替」方式へ変更し、連続ドラッグ時のクラッシュを回避
+- **変更ファイル**:
+  - `python/desktop/database/purchase_db.py`
+  - `python/desktop/ui/product_widget.py`
+  - `python/desktop/ui/purchase_row_edit_dialog.py`
+  - `python/desktop/ui/keepa_test_widget.py`
+  - `python/desktop/ui/route_summary_widget.py`
+  - `docs/cursor_development_progress.md`
+- **動作確認**:
+  - 商品DB仕入DBで `TA0` / `TA3` 列が表示されないことを確認
+  - `TP` ボタン押下時のみ `TP0〜TP3` が表示されることを確認
+  - ルート登録タブで複数回の行ドラッグ&ドロップ後も、行消失・ホワイトアウト・クラッシュが解消したことを確認
+
+**最終更新**: 2026-04-13
+**更新者**: Agentモード（実装）
+
 ### 2026-04-13（3-6-9価格改定: 仕入行編集の商品情報をCSV/仕入DB連携で拡張）
 - **チャット**: Agentモード（実装）
 - **内容**:

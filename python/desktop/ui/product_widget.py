@@ -408,13 +408,11 @@ class ProductWidget(QWidget):
                 "発送方法", "仕入先", "コンディション説明"
             ]
 
-        # 商品名の右に TP0 / TP1 / TP2 / TP3 を挿入（重複は避ける）
-        if "商品名" in base:
-            insert_pos = base.index("商品名") + 1
-            for col in ["TP0", "TP1", "TP2", "TP3"]:
-                if col not in base:
-                    base.insert(insert_pos, col)
-                    insert_pos += 1
+        # TP0〜TP3 は末尾に配置（3-6-9価格改定専用のため通常業務列から分離）
+        for col in ["TP0", "TP1", "TP2", "TP3"]:
+            while col in base:
+                base.remove(col)
+        base.extend(["TP0", "TP1", "TP2", "TP3"])
 
         # コンディション説明の後に挿入するカラム（順序重要）
         insert_after_condition_note = [
@@ -631,7 +629,7 @@ class ProductWidget(QWidget):
 
         self.clear_tp_dev_button = QPushButton("TPクリア(開発)")
         self.clear_tp_dev_button.setToolTip(
-            "【開発用】仕入DBの全行から TP0〜TP3（および旧 TA0〜TA3）を空にします。\n"
+            "【開発用】仕入DBの全行から TP0〜TP3 を空にします。\n"
             "スナップショットと hiroi.db の該当 SKU にも反映します。取り消しはできません。"
         )
         self.clear_tp_dev_button.clicked.connect(self.clear_all_purchase_tp_for_dev)
@@ -990,10 +988,10 @@ class ProductWidget(QWidget):
             return
 
         tp_keys = (
-            "TP0", "tp0", "TA0", "ta0",
+            "TP0", "tp0",
             "TP1", "tp1", "TA1", "ta1",
             "TP2", "tp2", "TA2", "ta2",
-            "TP3", "tp3", "TA3", "ta3",
+            "TP3", "tp3",
         )
         total = len(self.purchase_all_records)
         prog = self._tp_batch_progress_open(
@@ -1795,8 +1793,11 @@ class ProductWidget(QWidget):
             return
         
         # 表示する列の範囲を定義
+        tp_columns = {"TP0", "TP1", "TP2", "TP3"}
+        tp_indices = {i for i, col_name in enumerate(self.purchase_columns) if col_name in tp_columns}
+
         if self.purchase_view_mode == "all":
-            # 全列表示
+            # 通常表示（TP0〜TP3は非表示）
             visible_ranges = [(quantity_col_idx + 1, len(self.purchase_columns))]
         elif self.purchase_view_mode == "status":
             # ステータス・ステータス理由のみ
@@ -1871,6 +1872,9 @@ class ProductWidget(QWidget):
                         if start <= col_idx < end:
                             is_visible = True
                             break
+                # TP列は「TP」モード時のみ表示
+                if col_idx in tp_indices:
+                    is_visible = (self.purchase_view_mode == "tp")
                 self.purchase_table.setColumnHidden(col_idx, not is_visible)
     
     def update_purchase_count_label(self):
@@ -2080,10 +2084,10 @@ class ProductWidget(QWidget):
                         if status_reason:
                             row["ステータス理由"] = status_reason
                             row["status_reason"] = status_reason
-                        tp0 = purchase_info.get("tp0") or purchase_info.get("ta0") or ""
+                        tp0 = purchase_info.get("tp0") or ""
                         tp1 = purchase_info.get("tp1") or purchase_info.get("ta1") or ""
                         tp2 = purchase_info.get("tp2") or purchase_info.get("ta2") or ""
-                        tp3 = purchase_info.get("tp3") or purchase_info.get("ta3") or ""
+                        tp3 = purchase_info.get("tp3") or ""
                         if tp0:
                             row["TP0"] = tp0
                             row["tp0"] = tp0
@@ -2133,8 +2137,8 @@ class ProductWidget(QWidget):
             "品目", "品名", "氏名(個人)", "本人確認書類", "確認番号", "確認日", "確認者", "台帳登録済",
             "person_name", "person_address", "id_type", "id_number", "id_checked_on", "id_checked_by", "id_proof_ref",
             "kobutsu_kind", "hinmoku", "hinmei",
-            # TA1/TA2 系の古い列は今後は表示しない
-            "TA1", "TA2", "ta1", "ta2",
+            # TA0/TA1/TA2/TA3 系の古い列は今後は表示しない
+            "TA0", "TA1", "TA2", "TA3", "ta0", "ta1", "ta2", "ta3",
         })
         
         # レコードから追加の列を取得（既にcolumnsに含まれているもの・古物台帳用除外リストは除外）
@@ -2143,7 +2147,7 @@ class ProductWidget(QWidget):
                 if key in _purchase_table_exclude_columns:
                     continue
                 upper_key = key.upper()
-                if upper_key in ("TA1", "TA2"):
+                if upper_key in ("TA0", "TA1", "TA2", "TA3"):
                     # 念のため大文字マッチでも除外
                     continue
                 if upper_key not in seen:
@@ -2582,10 +2586,10 @@ class ProductWidget(QWidget):
                             try:
                                 # ステータス理由も取得して保存
                                 status_reason = rec.get("ステータス理由") or rec.get("status_reason") or ""
-                                tp0 = rec.get("TP0") or rec.get("tp0") or rec.get("TA0") or rec.get("ta0") or ""
+                                tp0 = rec.get("TP0") or rec.get("tp0") or ""
                                 tp1 = rec.get("TP1") or rec.get("tp1") or rec.get("TA1") or rec.get("ta1") or ""
                                 tp2 = rec.get("TP2") or rec.get("tp2") or rec.get("TA2") or rec.get("ta2") or ""
-                                tp3 = rec.get("TP3") or rec.get("tp3") or rec.get("TA3") or rec.get("ta3") or ""
+                                tp3 = rec.get("TP3") or rec.get("tp3") or ""
                                 purchase_data = {
                                     "sku": sku,
                                     "status": new_status,
@@ -2797,10 +2801,10 @@ class ProductWidget(QWidget):
                     tp2 = ""
                     tp3 = ""
                     if 0 <= row < len(records):
-                        tp0 = records[row].get("TP0") or records[row].get("tp0") or records[row].get("TA0") or records[row].get("ta0") or ""
+                        tp0 = records[row].get("TP0") or records[row].get("tp0") or ""
                         tp1 = records[row].get("TP1") or records[row].get("tp1") or records[row].get("TA1") or records[row].get("ta1") or ""
                         tp2 = records[row].get("TP2") or records[row].get("tp2") or records[row].get("TA2") or records[row].get("ta2") or ""
-                        tp3 = records[row].get("TP3") or records[row].get("tp3") or records[row].get("TA3") or records[row].get("ta3") or ""
+                        tp3 = records[row].get("TP3") or records[row].get("tp3") or ""
                     # テーブル上のTP0/TP1/TP2の現在値を取得
                     if "TP0" in columns:
                         idx = columns.index("TP0")
@@ -3585,10 +3589,6 @@ class ProductWidget(QWidget):
             return
 
         # 旧キー(TA*)が残っている場合は TP* へ寄せておく（上書きしない）＋ TA* 側はクリアする
-        if (row.get("TA0") or row.get("ta0")) and not (row.get("TP0") or row.get("tp0")):
-            v = row.get("TA0") or row.get("ta0")
-            row["TP0"] = str(v)
-            row["tp0"] = str(v)
         if (row.get("TA1") or row.get("ta1")) and not (row.get("TP1") or row.get("tp1")):
             v = row.get("TA1") or row.get("ta1")
             row["TP1"] = str(v)
@@ -3597,10 +3597,6 @@ class ProductWidget(QWidget):
             v = row.get("TA2") or row.get("ta2")
             row["TP2"] = str(v)
             row["tp2"] = str(v)
-        if (row.get("TA3") or row.get("ta3")) and not (row.get("TP3") or row.get("tp3")):
-            v = row.get("TA3") or row.get("ta3")
-            row["TP3"] = str(v)
-            row["tp3"] = str(v)
         # TA* キーは今後使用しないので削除しておく
         for k in ("TA0", "ta0", "TA1", "ta1", "TA2", "ta2", "TA3", "ta3"):
             if k in row:

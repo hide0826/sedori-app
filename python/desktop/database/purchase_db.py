@@ -96,7 +96,7 @@ class PurchaseDatabase:
             # 商品ステータス管理
             ("status", "TEXT DEFAULT 'ready'"),  # 'ready': 出品可能, 'damaged': 破損, 'unlistable': 登録不可, 'storage': 保管中, 'pending': 次回出品予定
             ("status_reason", "TEXT"),  # ステータス設定の理由・詳細
-            # TA1/TA2/TA3 は廃止し、今後は TP0/TP1/TP2/TP3 のみを使用する
+            # TA0/TA3 は廃止し、今後は TP0/TP1/TP2/TP3 のみを使用する
             ("tp0", "TEXT"),
             ("tp1", "TEXT"),
             ("tp2", "TEXT"),
@@ -114,14 +114,25 @@ class PurchaseDatabase:
                 except Exception as e:
                     print(f"Error adding column {col_name}: {e}")
         
-        # 旧カラム ta1/ta2/ta3 に値があり、新カラム tp1/tp2/tp3 が空なら移行（互換用ワンショット）
+        # 旧カラム ta0/ta3 に値があり、新カラム tp0/tp3 が空なら移行（互換用ワンショット）
         try:
-            if "tp1" in existing_cols or "tp2" in existing_cols:
+            if "tp0" in existing_cols or "tp3" in existing_cols:
                 # 既存_cols は ALTER 前のスナップショットなので、列の有無はSQL側で吸収しておく
                 pass
-            cur.execute("UPDATE purchases SET tp1 = ta1 WHERE (tp1 IS NULL OR tp1 = '') AND ta1 IS NOT NULL AND ta1 <> ''")
-            cur.execute("UPDATE purchases SET tp2 = ta2 WHERE (tp2 IS NULL OR tp2 = '') AND ta2 IS NOT NULL AND ta2 <> ''")
+            cur.execute("UPDATE purchases SET tp0 = ta0 WHERE (tp0 IS NULL OR tp0 = '') AND ta0 IS NOT NULL AND ta0 <> ''")
             cur.execute("UPDATE purchases SET tp3 = ta3 WHERE (tp3 IS NULL OR tp3 = '') AND ta3 IS NOT NULL AND ta3 <> ''")
+        except Exception:
+            pass
+
+        # 旧カラム ta0 / ta3 を削除（存在する場合のみ）
+        # NOTE: SQLiteのバージョン差異で DROP COLUMN が使えない場合があるため例外は握りつぶす。
+        try:
+            cur.execute("PRAGMA table_info(purchases)")
+            existing_cols_after_migration = {row["name"] for row in cur.fetchall()}
+            if "ta0" in existing_cols_after_migration:
+                cur.execute("ALTER TABLE purchases DROP COLUMN ta0")
+            if "ta3" in existing_cols_after_migration:
+                cur.execute("ALTER TABLE purchases DROP COLUMN ta3")
         except Exception:
             pass
         self.conn.commit()

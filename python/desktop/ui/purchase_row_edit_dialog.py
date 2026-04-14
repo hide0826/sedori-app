@@ -352,10 +352,10 @@ class PurchaseRowEditDialog(QDialog):
             setattr(self, f"_ta{tier}_rate_spin", rate_spin)
             setattr(self, f"_ta{tier}_profit_label", profit_lbl)
 
-        _add_tp_block(0, ("TP0", "tp0", "TA0", "ta0"), "例: 6400")
+        _add_tp_block(0, ("TP0", "tp0"), "例: 6400")
         _add_tp_block(1, ("TP1", "tp1", "TA1", "ta1"), "例: 6200")
         _add_tp_block(2, ("TP2", "tp2", "TA2", "ta2"), "例: 5800")
-        _add_tp_block(3, ("TP3", "tp3", "TA3", "ta3"), "例: 5600")
+        _add_tp_block(3, ("TP3", "tp3"), "例: 5600")
 
         ta_group.setLayout(ta_layout)
         layout.addWidget(ta_group)
