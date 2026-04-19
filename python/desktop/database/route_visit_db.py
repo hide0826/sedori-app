@@ -13,6 +13,12 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
+# IN・OUT の両方が空の行は未訪問（履歴表示・店舗スコア集計から除外）
+_SQL_ACTUAL_VISIT = (
+    "TRIM(COALESCE(store_in_time, '')) != '' "
+    "AND TRIM(COALESCE(store_out_time, '')) != ''"
+)
+
 
 class RouteVisitDatabase:
     """ルート訪問履歴データベース操作クラス"""
@@ -128,11 +134,11 @@ class RouteVisitDatabase:
             raise
 
     def list_route_visits(self, route_date: Optional[str] = None, route_code: Optional[str] = None) -> List[Dict[str, Any]]:
-        """保存済みのルート訪問履歴を取得"""
+        """保存済みのルート訪問履歴を取得（IN・OUT 両方に入力がある行のみ＝実訪問のみ）"""
         conn = self._get_connection()
         cur = conn.cursor()
 
-        query = "SELECT * FROM route_visit_logs WHERE 1=1"
+        query = f"SELECT * FROM route_visit_logs WHERE 1=1 AND ({_SQL_ACTUAL_VISIT})"
         params: List[Any] = []
         if route_date:
             query += " AND route_date = ?"
@@ -149,12 +155,12 @@ class RouteVisitDatabase:
     def get_store_visit_aggregates(self) -> List[Dict[str, Any]]:
         """店舗コードごとに想定粗利・仕入点数・評価を集計（route_visit_logs のみ）。
         店舗名は同一店舗のうち1件を代表で取得（MAX）。
-        訪問時間（到着・出発のいずれか）が入っていない行は「未訪問」として集計から除外する。"""
+        IN時刻・OUT時刻のどちらか一方でも空の行は未訪問として集計から除外する。"""
         conn = self._get_connection()
         cur = conn.cursor()
         # 出発時刻・帰宅時刻・往路高速代・復路高速代は店舗ではないため集計から除外
-        # 到着時刻・出発時刻のいずれも空の行は訪問していないので集計から除外
-        cur.execute("""
+        # IN・OUT 両方に入力がある行のみ実訪問として集計
+        cur.execute(f"""
             SELECT store_code,
                    COALESCE(SUM(store_gross_profit), 0) AS total_gross_profit,
                    COALESCE(SUM(store_item_count), 0) AS total_item_count,
@@ -164,7 +170,7 @@ class RouteVisitDatabase:
             FROM route_visit_logs
             WHERE store_code IS NOT NULL AND store_code != ''
               AND store_code NOT IN ('出発時刻', '帰宅時刻', '往路高速代', '復路高速代')
-              AND (TRIM(COALESCE(store_in_time, '')) != '' OR TRIM(COALESCE(store_out_time, '')) != '')
+              AND ({_SQL_ACTUAL_VISIT})
             GROUP BY store_code
         """)
         rows = cur.fetchall()
@@ -174,21 +180,28 @@ class RouteVisitDatabase:
         """
         店舗コードごとに「直近訪問時のルート名」を返す。
         店舗マスタにルートが未登録でも、訪問ログからルート名を補完するために使用する。
-        訪問時間が入っている行のみ対象（未訪問は除外）。
+        IN・OUT 両方に入力がある行のみ対象（未訪問は除外）。
         """
         conn = self._get_connection()
         cur = conn.cursor()
-        time_cond = " (TRIM(COALESCE(r1.store_in_time, '')) != '' OR TRIM(COALESCE(r1.store_out_time, '')) != '') "
+        time_cond_r1 = (
+            "TRIM(COALESCE(r1.store_in_time, '')) != '' "
+            "AND TRIM(COALESCE(r1.store_out_time, '')) != ''"
+        )
+        time_cond_r2 = (
+            "TRIM(COALESCE(r2.store_in_time, '')) != '' "
+            "AND TRIM(COALESCE(r2.store_out_time, '')) != ''"
+        )
         cur.execute(f"""
             SELECT r1.store_code, MAX(r1.route_name) AS route_name
             FROM route_visit_logs r1
             WHERE r1.store_code IS NOT NULL AND r1.store_code != ''
               AND r1.store_code NOT IN ('出発時刻', '帰宅時刻', '往路高速代', '復路高速代')
-              AND {time_cond}
+              AND ({time_cond_r1})
               AND r1.route_date = (
                 SELECT MAX(r2.route_date) FROM route_visit_logs r2
                 WHERE r2.store_code = r1.store_code
-                  AND (TRIM(COALESCE(r2.store_in_time, '')) != '' OR TRIM(COALESCE(r2.store_out_time, '')) != '')
+                  AND ({time_cond_r2})
               )
             GROUP BY r1.store_code
         """)

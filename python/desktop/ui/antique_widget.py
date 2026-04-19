@@ -11,16 +11,17 @@
 """
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
     QPushButton, QLabel, QLineEdit, QComboBox,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QGroupBox, QMessageBox, QDateEdit, QSpinBox, QCheckBox,
-    QFileDialog, QProgressBar, QTextEdit, QTabWidget,
+    QFileDialog, QProgressBar, QTextEdit, QPlainTextEdit, QTabWidget,
     QApplication,
 )
 from PySide6.QtCore import Qt, QDate, QThread, Signal, QSettings, QUrl
 from PySide6.QtGui import QFont, QColor, QDesktopServices
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
+from collections import defaultdict
 import re
 import pandas as pd
 from pathlib import Path
@@ -126,9 +127,11 @@ class AntiqueWidget(QWidget):
         # サブタブ
         self.tabs = QTabWidget()
         self.tab_input = QWidget()
+        self.tab_business_info = QWidget()
         self.tab_view = QWidget()
         self.tab_dict = QWidget()
         self.tabs.addTab(self.tab_input, "入力・生成")
+        self.tabs.addTab(self.tab_business_info, "事業者情報")
         self.tabs.addTab(self.tab_view, "閲覧・出力")
         self.tabs.addTab(self.tab_dict, "ユーザー辞書")
 
@@ -137,6 +140,7 @@ class AntiqueWidget(QWidget):
 
         # それぞれのタブを構築（列スキーマ定義後に呼ぶ）
         self._setup_tab_input()
+        self._setup_tab_business_info()
         self._setup_tab_view()
         self._setup_tab_dict()
 
@@ -160,6 +164,7 @@ class AntiqueWidget(QWidget):
             if self.antique_data:
                 self.export_csv_btn.setEnabled(True)
                 self.export_excel_btn.setEnabled(True)
+                self.export_pdf_btn.setEnabled(True)
                 self.clear_btn.setEnabled(True)
         else:
             self.stats_label.setText("読み込みに失敗しました。『更新』で再試行できます。")
@@ -1220,6 +1225,108 @@ class AntiqueWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"一括登録でエラーが発生しました:\n{e}")
 
+    # ===== 事業者情報タブ（古物商許可証の記載項目） =====
+    def _setup_tab_business_info(self) -> None:
+        """古物商許可証に基づく事業者情報の入力・保存（Excel/PDF表紙用に後から参照）"""
+        lay = QVBoxLayout(self.tab_business_info)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(10)
+
+        intro = QLabel(
+            "古物商許可証に記載の内容を入力してください。"
+            "\n保存した内容は、今後のExcel／PDF出力の表紙などに利用できるようにします。"
+        )
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+
+        grp = QGroupBox("事業者情報")
+        form = QFormLayout(grp)
+        form.setSpacing(10)
+        form.setContentsMargins(12, 16, 12, 12)
+
+        self.ed_operator_permit = QLineEdit()
+        self.ed_operator_permit.setPlaceholderText("例: 第〇〇〇〇〇〇号")
+        form.addRow("古物商許可番号:", self.ed_operator_permit)
+
+        self.ed_operator_legal_name = QLineEdit()
+        self.ed_operator_legal_name.setPlaceholderText("屋号・法人名・氏名など")
+        form.addRow("氏名又は名称:", self.ed_operator_legal_name)
+
+        self.ed_operator_address = QPlainTextEdit()
+        self.ed_operator_address.setPlaceholderText("本店・主たる営業所の住所など")
+        self.ed_operator_address.setMinimumHeight(72)
+        self.ed_operator_address.setTabChangesFocus(True)
+        form.addRow("住所または居所:", self.ed_operator_address)
+
+        self.ed_operator_repr_name = QLineEdit()
+        self.ed_operator_repr_name.setPlaceholderText("代表者の氏名")
+        form.addRow("代表者の氏名:", self.ed_operator_repr_name)
+
+        self.ed_operator_repr_address = QPlainTextEdit()
+        self.ed_operator_repr_address.setPlaceholderText("代表者の住所")
+        self.ed_operator_repr_address.setMinimumHeight(72)
+        self.ed_operator_repr_address.setTabChangesFocus(True)
+        form.addRow("代表者の住所:", self.ed_operator_repr_address)
+
+        lay.addWidget(grp)
+
+        btn_row = QHBoxLayout()
+        self.btn_save_operator_info = QPushButton("設定を保存")
+        self.btn_save_operator_info.setToolTip("入力内容をこのPCの設定に保存します")
+        self.btn_save_operator_info.clicked.connect(self._save_operator_info_settings)
+        btn_row.addWidget(self.btn_save_operator_info)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+        lay.addStretch()
+
+        self._load_operator_info_settings()
+
+    def _operator_info_settings_keys(self) -> Dict[str, str]:
+        """QSettings 用キー（プレフィックス ledger/operator_）"""
+        return {
+            "permit": "ledger/operator_permit_number",
+            "legal_name": "ledger/operator_legal_name",
+            "address": "ledger/operator_address",
+            "repr_name": "ledger/operator_representative_name",
+            "repr_address": "ledger/operator_representative_address",
+        }
+
+    def _load_operator_info_settings(self) -> None:
+        try:
+            s = self._settings()
+            keys = self._operator_info_settings_keys()
+            self.ed_operator_permit.setText(s.value(keys["permit"], "") or "")
+            self.ed_operator_legal_name.setText(s.value(keys["legal_name"], "") or "")
+            self.ed_operator_address.setPlainText(s.value(keys["address"], "") or "")
+            self.ed_operator_repr_name.setText(s.value(keys["repr_name"], "") or "")
+            self.ed_operator_repr_address.setPlainText(s.value(keys["repr_address"], "") or "")
+        except Exception as e:
+            print(f"事業者情報の読み込みに失敗: {e}")
+
+    def _save_operator_info_settings(self) -> None:
+        try:
+            s = self._settings()
+            keys = self._operator_info_settings_keys()
+            s.setValue(keys["permit"], self.ed_operator_permit.text().strip())
+            s.setValue(keys["legal_name"], self.ed_operator_legal_name.text().strip())
+            s.setValue(keys["address"], self.ed_operator_address.toPlainText().strip())
+            s.setValue(keys["repr_name"], self.ed_operator_repr_name.text().strip())
+            s.setValue(keys["repr_address"], self.ed_operator_repr_address.toPlainText().strip())
+            s.sync()
+            QMessageBox.information(self, "保存", "事業者情報を保存しました。")
+        except Exception as e:
+            QMessageBox.critical(self, "保存エラー", f"保存に失敗しました:\n{e}")
+
+    def get_operator_info(self) -> Dict[str, str]:
+        """表紙・出力用に事業者情報を辞書で返す（未保存の画面内容を反映）"""
+        return {
+            "permit_number": self.ed_operator_permit.text().strip(),
+            "legal_name": self.ed_operator_legal_name.text().strip(),
+            "address": self.ed_operator_address.toPlainText().strip(),
+            "representative_name": self.ed_operator_repr_name.text().strip(),
+            "representative_address": self.ed_operator_repr_address.toPlainText().strip(),
+        }
+
     # ===== 閲覧・出力タブ（既存UIを移設） =====
     def _setup_tab_view(self):
         layout = QVBoxLayout(self.tab_view)
@@ -1413,6 +1520,12 @@ class AntiqueWidget(QWidget):
         self.export_excel_btn.clicked.connect(self.export_excel)
         self.export_excel_btn.setEnabled(False)
         action_layout.addWidget(self.export_excel_btn)
+
+        self.export_pdf_btn = QPushButton("PDF出力")
+        self.export_pdf_btn.setToolTip("表紙・月別明細をPDFで保存します（日本語フォントが必要です）")
+        self.export_pdf_btn.clicked.connect(self.export_pdf)
+        self.export_pdf_btn.setEnabled(False)
+        action_layout.addWidget(self.export_pdf_btn)
         
         # データクリアボタン
         self.clear_btn = QPushButton("データクリア")
@@ -1477,6 +1590,7 @@ class AntiqueWidget(QWidget):
             # ボタンの有効化
             self.export_csv_btn.setEnabled(True)
             self.export_excel_btn.setEnabled(True)
+            self.export_pdf_btn.setEnabled(True)
             self.clear_btn.setEnabled(True)
             # 統計情報更新
             self.update_stats()
@@ -1580,44 +1694,6 @@ class AntiqueWidget(QWidget):
                         item.setText(full)
         except Exception:
             pass
-        
-    def apply_filters(self):
-        """フィルタの適用"""
-        if self.antique_data is None:
-            return
-            
-        # 検索条件
-        search_text = self.search_edit.text().lower()
-        
-        # 価格範囲フィルタ
-        min_price = self.min_price_spin.value()
-        max_price = self.max_price_spin.value()
-        
-        # フィルタの適用
-        filtered_data = []
-        for item in self.antique_data:
-            # 検索フィルタ
-            if search_text:
-                search_match = (
-                    search_text in str(item.get("商品名", "")).lower() or
-                    search_text in str(item.get("SKU", "")).lower() or
-                    search_text in str(item.get("ASIN", "")).lower()
-                )
-                if not search_match:
-                    continue
-            
-            # 価格範囲フィルタ
-            try:
-                price = float(item.get("価格", 0))
-                if price < min_price or price > max_price:
-                    continue
-            except:
-                pass
-            
-            filtered_data.append(item)
-        
-        # フィルタ結果でテーブルを更新
-        self.update_table_with_filtered_data(filtered_data)
         
     def update_table_with_filtered_data(self, filtered_data):
         """フィルタ結果でテーブルを更新"""
@@ -1774,18 +1850,35 @@ class AntiqueWidget(QWidget):
         return rows
 
     def get_filtered_rows(self):
-        rows = self.antique_data or []
-        # 相手区分フィルタ
+        rows = list(self.antique_data or [])
+        # 相手区分（「すべて」以外は counterparty_type が一致する行のみ）
         cpt = getattr(self, 'cmb_counterparty_filter', None)
-        if cpt and cpt.currentText() != 'すべて':
-            rows = [r for r in rows if str(r.get('counterparty_type','')) == cpt.currentText()]
-        # キーワード（既存の検索ボックス使用）
+        if cpt:
+            want = (cpt.currentText() or "").strip()
+            if want and want != "すべて":
+                rows = [
+                    r for r in rows
+                    if (str(r.get("counterparty_type") or "").strip() == want)
+                ]
+        # 金額範囲（ledger の amount）
+        if hasattr(self, "min_price_spin") and hasattr(self, "max_price_spin"):
+            mn = self.min_price_spin.value()
+            mx = self.max_price_spin.value()
+            out_amt: List[Dict[str, Any]] = []
+            for r in rows:
+                try:
+                    amt = float(r.get("amount") or 0)
+                except (TypeError, ValueError):
+                    amt = 0.0
+                if mn <= amt <= mx:
+                    out_amt.append(r)
+            rows = out_amt
+        # キーワード（全列を対象）
         keyword = self.search_edit.text().strip().lower() if hasattr(self, 'search_edit') else ''
         if keyword:
-            def hit(r):
-                # ALL_COLUMNS は (key, label) のタプル
+            def hit(r: Dict[str, Any]) -> bool:
                 for k, _ in self.ALL_COLUMNS:
-                    v = str(r.get(k, '')).lower()
+                    v = str(r.get(k, "")).lower()
                     if keyword in v:
                         return True
                 return False
@@ -1871,6 +1964,7 @@ class AntiqueWidget(QWidget):
         # ボタンの無効化
         self.export_csv_btn.setEnabled(False)
         self.export_excel_btn.setEnabled(False)
+        self.export_pdf_btn.setEnabled(False)
         self.clear_btn.setEnabled(False)
         
         # 表示のクリア
@@ -1899,7 +1993,7 @@ class AntiqueWidget(QWidget):
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "古物台帳CSVファイルを保存",
-            f"antique_register_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            f"古物台帳_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             "CSVファイル (*.csv)"
         )
         
@@ -1993,49 +2087,304 @@ class AntiqueWidget(QWidget):
             self.chk_group_store.setChecked(False)
             self.chk_group_flea.setChecked(False)
             self.chk_group_person.setChecked(False)
-                
+        # テーブル行を相手区分で絞り込み（該当なしなら 0 件表示）
+        self.apply_filters()
+
+    def _entry_date_year_month(self, row: Dict[str, Any]) -> Optional[str]:
+        """取引日から YYYY-MM を取得。解釈できなければ None。"""
+        raw = row.get("entry_date")
+        if raw is None:
+            return None
+        s = str(raw).strip()
+        if not s:
+            return None
+        norm = self._normalize_date(s)
+        if len(norm) >= 10 and norm[4] == "-" and norm[7] == "-":
+            try:
+                y = int(norm[:4])
+                m = int(norm[5:7])
+                if 1 <= m <= 12:
+                    return f"{y:04d}-{m:02d}"
+            except ValueError:
+                pass
+        return None
+
+    @staticmethod
+    def _sanitize_excel_sheet_name(name: str) -> str:
+        """Excel シート名（31文字・禁止文字を避ける）"""
+        invalid = frozenset('\\/*?[]:')
+        cleaned = "".join(c for c in name if c not in invalid).strip()
+        if not cleaned:
+            cleaned = "Sheet"
+        return cleaned[:31]
+
+    def _export_columns_for_counterparty_rows(
+        self, rows: List[Dict[str, Any]]
+    ) -> Tuple[List[str], List[str]]:
+        """
+        出力行の相手区分に応じた列セット（アプリの列グループ定義に準拠）。
+        - 店舗のみ: 共通 + 店舗（個人・フリマ専用列は含めない）
+        - フリマのみ: 共通 + フリマ
+        - 個人のみ: 共通 + 個人
+        - 複合: 共通 + 含まれる区分に対応するグループの和集合
+        相手区分が空・または「店舗/フリマ/個人」以外が混ざる場合は全列。
+        """
+        canonical = frozenset({"店舗", "フリマ", "個人"})
+        found: set[str] = set()
+        for r in rows:
+            t = str(r.get("counterparty_type") or "").strip()
+            if t:
+                found.add(t)
+        if not found:
+            return list(self.column_keys), list(self.column_headers)
+        if not found.issubset(canonical):
+            return list(self.column_keys), list(self.column_headers)
+
+        pairs: List[Tuple[str, str]] = []
+        pairs.extend(self.COMMON_COLUMNS)
+        if "店舗" in found:
+            pairs.extend(self.STORE_COLUMNS)
+        if "フリマ" in found:
+            pairs.extend(self.FLEA_COLUMNS)
+        if "個人" in found:
+            pairs.extend(self.PERSON_COLUMNS)
+        keys = [k for k, _ in pairs]
+        headers = [h for _, h in pairs]
+        return keys, headers
+
+    @staticmethod
+    def _columns_without_receipt_url_for_pdf(
+        keys: List[str], headers: List[str]
+    ) -> Tuple[List[str], List[str]]:
+        """PDFではレシート画像URL列を除き、他列の幅を確保する。"""
+        pairs = [(k, h) for k, h in zip(keys, headers) if k != "receipt_no"]
+        if not pairs:
+            return keys, headers
+        return [p[0] for p in pairs], [p[1] for p in pairs]
+
+    def _build_ledger_dataframe(
+        self,
+        rows: List[Dict[str, Any]],
+        column_keys: Optional[List[str]] = None,
+        column_headers: Optional[List[str]] = None,
+    ) -> pd.DataFrame:
+        """台帳行リストから出力用 DataFrame。列は省略時は全列（従来どおり）。"""
+        keys = column_keys if column_keys is not None else self.column_keys
+        headers = column_headers if column_headers is not None else self.column_headers
+        if len(keys) != len(headers):
+            raise ValueError("column_keys と column_headers の長さが一致しません")
+        data_for_df: List[Dict[str, str]] = []
+        for r in rows:
+            row_dict: Dict[str, str] = {}
+            for key, header in zip(keys, headers):
+                value = r.get(key)
+                row_dict[header] = "" if value is None else str(value)
+            data_for_df.append(row_dict)
+        if not data_for_df:
+            return pd.DataFrame(columns=headers)
+        df = pd.DataFrame(data_for_df)
+        return df[headers]
+
+    def _ledger_export_period_label(self) -> str:
+        """閲覧・出力の日付範囲を表紙用テキストに。"""
+        try:
+            if hasattr(self, "start_date_edit") and hasattr(self, "end_date_edit"):
+                a = self.start_date_edit.date().toString("yyyy-MM-dd")
+                b = self.end_date_edit.date().toString("yyyy-MM-dd")
+                return f"{a} ～ {b}"
+        except Exception:
+            pass
+        return ""
+
+    def _export_output_category_label(self, rows: List[Dict[str, Any]]) -> str:
+        """出力明細に含まれる相手区分を表記（店舗／フリマ／個人およびその複合）。"""
+        if not rows:
+            return "—"
+        priority = ("店舗", "フリマ", "個人")
+        seen: Dict[str, None] = {}
+        for r in rows:
+            t = str(r.get("counterparty_type") or "").strip()
+            if t:
+                seen.setdefault(t, None)
+        if not seen:
+            return "—"
+        parts: List[str] = []
+        for p in priority:
+            if p in seen:
+                parts.append(p)
+        for t in sorted(x for x in seen if x not in priority):
+            parts.append(t)
+        return "/".join(parts)
+
+    def _cover_sheet_key_values(self, row_count: int, rows: List[Dict[str, Any]]) -> List[Tuple[str, str]]:
+        """表紙用（項目, 内容）の行リスト。Excel/PDF 共通。"""
+        op = self.get_operator_info()
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        period = self._ledger_export_period_label()
+        out_cat = self._export_output_category_label(rows)
+        return [
+            ("帳簿名", "古物台帳"),
+            ("出力区分", out_cat),
+            ("出力日時", now_str),
+            ("表示期間（日付範囲選択）", period),
+            ("明細行数", str(row_count)),
+            ("", ""),
+            ("古物商許可番号", op.get("permit_number") or ""),
+            ("氏名又は名称", op.get("legal_name") or ""),
+            ("住所または居所", op.get("address") or ""),
+            ("代表者の氏名", op.get("representative_name") or ""),
+            ("代表者の住所", op.get("representative_address") or ""),
+        ]
+
+    def _build_excel_cover_dataframe(self, row_count: int, rows: List[Dict[str, Any]]) -> pd.DataFrame:
+        """表紙シート用（項目・内容の2列）。"""
+        return pd.DataFrame(self._cover_sheet_key_values(row_count, rows), columns=["項目", "内容"])
+
+    def _group_rows_by_entry_month(
+        self, rows: List[Dict[str, Any]]
+    ) -> Tuple[List[str], Dict[str, List[Dict[str, Any]]]]:
+        """取引月でグループ化。戻り値: (ソート済み月キー, キー→行リスト)。"""
+        by_month: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for r in rows:
+            ym = self._entry_date_year_month(r)
+            key = ym if ym else "__nodate__"
+            by_month[key].append(r)
+        sorted_keys = sorted((k for k in by_month if k != "__nodate__"), key=lambda x: x)
+        if "__nodate__" in by_month:
+            sorted_keys.append("__nodate__")
+        return sorted_keys, by_month
+
     def export_excel(self):
-        """Excel出力"""
+        """Excel出力（1枚目: 表紙、以降: 取引月ごとのシート）"""
         if self.antique_data is None:
             QMessageBox.warning(self, "エラー", "出力するデータがありません")
             return
-            
+
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "古物台帳Excelファイルを保存",
-            f"antique_register_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-            "Excelファイル (*.xlsx)"
+            f"古物台帳_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            "Excelファイル (*.xlsx)",
         )
-        
-        if file_path:
-            try:
-                # フィルタ結果を出力（0件ならDBから再読込して再取得）
-                rows = self.get_filtered_rows()
-                if not rows:
+
+        if not file_path:
+            return
+
+        try:
+            rows = self.get_filtered_rows()
+            if not rows:
+                try:
+                    self.reload_ledger_rows()
+                    rows = self.get_filtered_rows()
+                except Exception:
+                    pass
+
+            from pathlib import Path
+            from desktop.utils.file_naming import resolve_unique_path
+
+            target = resolve_unique_path(Path(file_path))
+
+            cover_df = self._build_excel_cover_dataframe(len(rows), rows)
+
+            sorted_keys, by_month = self._group_rows_by_entry_month(rows)
+
+            cover_sheet = self._sanitize_excel_sheet_name("表紙")
+            used_lower = {cover_sheet.lower()}
+
+            with pd.ExcelWriter(str(target), engine="openpyxl") as writer:
+                cover_df.to_excel(writer, index=False, sheet_name=cover_sheet)
+
+                for mk in sorted_keys:
+                    part_rows = by_month[mk]
+                    df_part = self._build_ledger_dataframe(part_rows)
+                    if mk == "__nodate__":
+                        label = "日付未設定"
+                    else:
+                        try:
+                            y, mo = mk.split("-", 1)
+                            label = f"{y}年{mo}月"
+                        except ValueError:
+                            label = mk
+                    base_name = self._sanitize_excel_sheet_name(label)
+                    sheet_name = base_name
+                    n = 2
+                    while sheet_name.lower() in used_lower:
+                        suffix = f"_{n}"
+                        sheet_name = self._sanitize_excel_sheet_name(
+                            base_name[: max(1, 31 - len(suffix))] + suffix
+                        )
+                        n += 1
+                    used_lower.add(sheet_name.lower())
+                    df_part.to_excel(writer, index=False, sheet_name=sheet_name)
+
+            detail_msg = f"表紙 + {len(sorted_keys)} ヶ月分のシート" if sorted_keys else "表紙のみ（明細0件）"
+            QMessageBox.information(
+                self,
+                "出力完了",
+                f"Excelファイルを保存しました。\n（{detail_msg}）\n\n{target}",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"保存に失敗しました:\n{str(e)}")
+
+    def export_pdf(self):
+        """PDF出力（表紙ページ + 取引月ごとのページ）。Excelと同じフィルタ・月分割。レシート画像URL列は出さない。"""
+        if self.antique_data is None:
+            QMessageBox.warning(self, "エラー", "出力するデータがありません")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "古物台帳PDFファイルを保存",
+            f"古物台帳_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            "PDFファイル (*.pdf)",
+        )
+        if not file_path:
+            return
+
+        try:
+            rows = self.get_filtered_rows()
+            if not rows:
+                try:
+                    self.reload_ledger_rows()
+                    rows = self.get_filtered_rows()
+                except Exception:
+                    pass
+
+            from pathlib import Path
+            from desktop.utils.file_naming import resolve_unique_path
+            from desktop.utils.ledger_pdf_export import write_ledger_pdf
+
+            target = resolve_unique_path(Path(file_path))
+            cover_pairs = self._cover_sheet_key_values(len(rows), rows)
+            sorted_keys, by_month = self._group_rows_by_entry_month(rows)
+
+            pdf_keys, pdf_headers = self._export_columns_for_counterparty_rows(rows)
+            pdf_keys, pdf_headers = self._columns_without_receipt_url_for_pdf(pdf_keys, pdf_headers)
+
+            sections: List[Tuple[str, List[Dict[str, Any]]]] = []
+            for mk in sorted_keys:
+                part_rows = by_month[mk]
+                df_part = self._build_ledger_dataframe(part_rows, pdf_keys, pdf_headers)
+                records = df_part.to_dict("records")
+                if mk == "__nodate__":
+                    title = "日付未設定"
+                else:
                     try:
-                        self.reload_ledger_rows()
-                        rows = self.get_filtered_rows()
-                    except Exception:
-                        pass
-                from pathlib import Path
-                from desktop.utils.file_naming import resolve_unique_path
-                target = resolve_unique_path(Path(file_path))
-                
-                # 日本語ヘッダーと正しい順序でデータフレームを作成
-                data_for_df = []
-                for r in rows:
-                    row_dict = {}
-                    for key, header in zip(self.column_keys, self.column_headers):
-                        value = r.get(key)
-                        # Noneは空文字に変換
-                        row_dict[header] = "" if value is None else str(value)
-                    data_for_df.append(row_dict)
-                
-                df = pd.DataFrame(data_for_df)
-                # 列の順序を日本語ヘッダーの順序に合わせる
-                df = df[self.column_headers]
-                df.to_excel(str(target), index=False, engine='openpyxl')
-                
-                QMessageBox.information(self, "出力完了", f"Excelファイルを保存しました:\n{str(target)}")
-            except Exception as e:
-                QMessageBox.critical(self, "エラー", f"保存に失敗しました:\n{str(e)}")
+                        y, mo = mk.split("-", 1)
+                        title = f"{y}年{mo}月"
+                    except ValueError:
+                        title = str(mk)
+                sections.append((title, records))
+
+            write_ledger_pdf(target, cover_pairs, sections, pdf_headers)
+
+            detail_msg = f"表紙 + {len(sorted_keys)} セクション" if sorted_keys else "表紙のみ（明細0件）"
+            QMessageBox.information(
+                self,
+                "出力完了",
+                f"PDFファイルを保存しました。\n（{detail_msg}）\n\n{target}",
+            )
+        except RuntimeError as e:
+            QMessageBox.critical(self, "PDF出力", str(e))
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"PDFの保存に失敗しました:\n{str(e)}")

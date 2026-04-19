@@ -4,6 +4,7 @@ pandas
 python-multipart
 chardet
 openpyxl
+reportlab
 matplotlib
 Pillow
 pytesseract

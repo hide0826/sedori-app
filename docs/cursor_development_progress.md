@@ -1,3 +1,17 @@
+## 2026-04-19 古物台帳 PDF／ルート訪問集計の整理
+
+- **追加**: `python/desktop/utils/ledger_pdf_export.py`
+  - ReportLab で古物台帳 PDF（表紙＋月別明細）。日本語 TrueType（游ゴシック Medium 等を優先、可変フォント VF は後回しで線が細く見えにくくする）。
+  - ページ番号は `doc.build(..., canvasmaker=...)` でカスタム Canvas を渡す（`build` に渡さないとデフォルト Canvas になり番号が出ない問題を解消）。右下「◯ページ / 全◯ページ」。
+  - 明細は `Paragraph` で折り返し、列幅は `_LEDGER_COL_WEIGHT` で調整。**識別情報**列を広げ 13 桁 JAN が 1 行に収まるよう再配分（備考・相手区分をやや縮小）。テキスト色は黒に統一、セルフォントをやや大きくし印刷視認性を改善。罫線を少し濃く。
+- **変更**: `python/desktop/ui/antique_widget.py`
+  - 古物台帳：相手区分フィルタ、事業者情報（表紙用）、Excel 表紙・月別シート、PDF 出力で上記モジュールを利用。レシート画像 URL 列は PDF から除外など。
+- **変更**: `python/desktop/database/route_visit_db.py`
+  - ルート訪問の集計・履歴で、IN/OUT が両方空の行は未訪問扱いとし、スコア・履歴から除外するよう統一。
+- **変更**: `requirements.txt`
+  - `reportlab` を追加（古物台帳 PDF 用）。
+- **Git**: feat: 古物台帳 PDF（ページ番号・視認性・識別情報列幅）とルート訪問集計の修正
+
 ## 2026-03-29 仕入DB・3-6-9改定連携と仕入行編集（Keepa）ダイアログ改善
 
 - **追加**: `python/desktop/services/purchase_tp_autofill_369.py`
