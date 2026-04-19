@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QMessageBox, QAbstractItemView,
     QTabWidget, QLabel, QLineEdit, QFileDialog
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSettings
 import sys
 import os
 import json
@@ -28,6 +28,14 @@ CONDITIONS = [
     {'key': 'good', 'name': '中古(良い)'},
     {'key': 'acceptable', 'name': '中古(可)'},
 ]
+
+MISSING_FIXED_ROWS = [
+    {"key": "取説欠品", "name": "取説欠品"},
+    {"key": "内箱欠品", "name": "内箱欠品"},
+    {"key": "取説・内箱欠品", "name": "取説・内箱欠品"},
+]
+CUSTOM_TEMPLATE_KEYS = ("custom1", "custom2", "custom3")
+CUSTOM_DEFAULT_LABELS = {"custom1": "カスタム1", "custom2": "カスタム2", "custom3": "カスタム3"}
 
 
 class ConditionTextEdit(QWidget):
@@ -120,9 +128,71 @@ class ConditionTemplateWidget(QWidget):
         # タブ2: 欠品キーワード辞書
         self.missing_keywords_tab = QWidget()
         self._setup_missing_keywords_tab()
-        self.tabs.addTab(self.missing_keywords_tab, "欠品キーワード辞書")
+        self.tabs.addTab(self.missing_keywords_tab, "詳細説明")
         
         layout.addWidget(self.tabs)
+
+    @staticmethod
+    def _qsettings() -> QSettings:
+        """在庫・仕入まわりと同系の保存先（ユーザーごとに列幅を保持）"""
+        return QSettings("HIRIO", "SedoriDesktopApp")
+
+    def _setup_interactive_two_columns(
+        self,
+        table: QTableWidget,
+        table_id: str,
+        *,
+        default_col0: int,
+        default_col1: int,
+    ) -> None:
+        """コンディション／コメントの2列をドラッグで調整可能にし、幅を自動保存する。"""
+        header = table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.Interactive)
+
+        self._restore_table_column_widths(
+            table, table_id, default_col0=default_col0, default_col1=default_col1
+        )
+
+        def _on_section_resized(_logical: int, _old: int, _new: int) -> None:
+            self._persist_table_column_widths(table, table_id)
+
+        header.sectionResized.connect(_on_section_resized)
+
+    def _table_width_settings_key(self, table_id: str) -> str:
+        return f"condition_template_widget/columns/{table_id}"
+
+    def _restore_table_column_widths(
+        self,
+        table: QTableWidget,
+        table_id: str,
+        *,
+        default_col0: int,
+        default_col1: int,
+    ) -> None:
+        s = self._qsettings()
+        key = self._table_width_settings_key(table_id)
+        w0 = int(s.value(f"{key}/col0", default_col0))
+        w1 = int(s.value(f"{key}/col1", default_col1))
+        if w0 < 60:
+            w0 = default_col0
+        if w1 < 100:
+            w1 = default_col1
+        header = table.horizontalHeader()
+        header.blockSignals(True)
+        try:
+            table.setColumnWidth(0, w0)
+            table.setColumnWidth(1, w1)
+        finally:
+            header.blockSignals(False)
+
+    def _persist_table_column_widths(self, table: QTableWidget, table_id: str) -> None:
+        s = self._qsettings()
+        key = self._table_width_settings_key(table_id)
+        s.setValue(f"{key}/col0", table.columnWidth(0))
+        s.setValue(f"{key}/col1", table.columnWidth(1))
+        s.sync()
     
     def _setup_condition_tab(self):
         """コンディション説明タブの設定"""
@@ -149,10 +219,8 @@ class ConditionTemplateWidget(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         
-        # ヘッダー設定
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        # ヘッダー: ユーザーが列幅を調整可能（幅は保存して復元）
+        self._setup_interactive_two_columns(self.table, "condition_main", default_col0=200, default_col1=520)
         
         # 各行にコンディションとテキストエリアを配置
         for i, condition in enumerate(CONDITIONS):
@@ -215,61 +283,88 @@ class ConditionTemplateWidget(QWidget):
         layout.addLayout(button_layout)
     
     def _setup_missing_keywords_tab(self):
-        """欠品キーワード辞書タブの設定"""
+        """詳細説明タブ（欠品3種＋カスタム1〜3。カスタムは名称・コメントとも自由入力）"""
         layout = QVBoxLayout(self.missing_keywords_tab)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
-        
+
         # 説明ラベル
         info_label = QLabel(
-            "よくある欠品情報のキーワードと変換後の文章を設定できます。\n"
-            "辞書にないキーワードは「【欠品情報】」見出しのみが挿入されます。"
+            "よく使う欠品・詳細説明を登録できます。\n"
+            "上段は名称固定、下段のカスタム1〜3は「コンディション」列の名称を自由に変えられます。"
         )
         info_label.setStyleSheet("color: #666; padding: 5px;")
         layout.addWidget(info_label)
-        
-        # テーブル作成
+
+        # テーブル作成（コンディション説明タブと同形式）
         self.keywords_table = QTableWidget()
         self.keywords_table.setColumnCount(2)
-        self.keywords_table.setHorizontalHeaderLabels(["キーワード", "変換後の文章"])
-        
-        # テーブル設定
+        self.keywords_table.setHorizontalHeaderLabels(["コンディション", "コメント"])
+
+        total_rows = len(MISSING_FIXED_ROWS) + len(CUSTOM_TEMPLATE_KEYS)
+        self.keywords_table.setRowCount(total_rows)
         self.keywords_table.setAlternatingRowColors(True)
         self.keywords_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.keywords_table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked)
-        
-        # ヘッダー設定
-        header = self.keywords_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        
+        self.keywords_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+
+        # ヘッダー: ユーザーが列幅を調整可能（幅は保存して復元）
+        self._setup_interactive_two_columns(
+            self.keywords_table, "detail_missing", default_col0=220, default_col1=500
+        )
+
+        self.missing_text_edits = {}  # キー -> ConditionTextEdit
+        self.missing_label_edits = {}  # custom1〜3 -> QLineEdit
+
+        row_i = 0
+        for row_def in MISSING_FIXED_ROWS:
+            name_item = QTableWidgetItem(row_def["name"])
+            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+            name_item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+            self.keywords_table.setItem(row_i, 0, name_item)
+
+            text_edit = ConditionTextEdit()
+            self.missing_text_edits[row_def["key"]] = text_edit
+            self.keywords_table.setCellWidget(row_i, 1, text_edit)
+            self.keywords_table.setRowHeight(row_i, 100)
+            row_i += 1
+
+        for ck in CUSTOM_TEMPLATE_KEYS:
+            label_edit = QLineEdit()
+            label_edit.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            label_edit.setPlaceholderText(CUSTOM_DEFAULT_LABELS[ck])
+            self.missing_label_edits[ck] = label_edit
+            self.keywords_table.setCellWidget(row_i, 0, label_edit)
+
+            text_edit = ConditionTextEdit()
+            self.missing_text_edits[ck] = text_edit
+            self.keywords_table.setCellWidget(row_i, 1, text_edit)
+            self.keywords_table.setRowHeight(row_i, 100)
+            row_i += 1
+
         layout.addWidget(self.keywords_table)
-        
+
         # ボタンエリア
         button_layout = QHBoxLayout()
-        
-        # 追加ボタン
-        add_btn = QPushButton("追加")
-        add_btn.clicked.connect(self.add_keyword_row)
-        button_layout.addWidget(add_btn)
-        
-        # 削除ボタン
-        delete_btn = QPushButton("削除")
-        delete_btn.clicked.connect(self.delete_keyword_row)
-        button_layout.addWidget(delete_btn)
-        
         button_layout.addStretch()
-        
-        # インポートボタン
-        import_btn = QPushButton("インポート")
-        import_btn.clicked.connect(self.import_keywords)
-        button_layout.addWidget(import_btn)
-        
-        # エクスポートボタン
-        export_btn = QPushButton("エクスポート")
-        export_btn.clicked.connect(self.export_keywords)
-        button_layout.addWidget(export_btn)
-        
+
+        # リセットボタン
+        reset_keywords_btn = QPushButton("リセット")
+        reset_keywords_btn.clicked.connect(self.reset_keywords_data)
+        reset_keywords_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ff9800;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #f57c00;
+            }
+        """)
+        button_layout.addWidget(reset_keywords_btn)
+
         # 保存ボタン
         save_keywords_btn = QPushButton("保存")
         save_keywords_btn.clicked.connect(self.save_keywords_data)
@@ -372,30 +467,31 @@ class ConditionTemplateWidget(QWidget):
             )
     
     def load_keywords_data(self):
-        """欠品キーワード辞書を読み込んで表示"""
+        """詳細説明（欠品3＋カスタム3）を読み込んで表示"""
         try:
             keywords_data = self.condition_db.load_missing_keywords()
             keywords = keywords_data.get('keywords', {})
-            
-            # テーブルに行を追加
-            self.keywords_table.setRowCount(len(keywords))
-            
-            row = 0
-            for keyword, converted_text in keywords.items():
-                # キーワード
-                keyword_item = QTableWidgetItem(keyword)
-                self.keywords_table.setItem(row, 0, keyword_item)
-                
-                # 変換後の文章
-                converted_item = QTableWidgetItem(converted_text)
-                self.keywords_table.setItem(row, 1, converted_item)
-                
-                row += 1
+            custom_labels = keywords_data.get('custom_labels') or {}
+
+            for row_def in MISSING_FIXED_ROWS:
+                key = row_def["key"]
+                text_edit = self.missing_text_edits.get(key)
+                if text_edit:
+                    text_edit.setText(str(keywords.get(key, "") or ""))
+
+            for ck in CUSTOM_TEMPLATE_KEYS:
+                le = self.missing_label_edits.get(ck)
+                if le:
+                    lab = custom_labels.get(ck) or CUSTOM_DEFAULT_LABELS[ck]
+                    le.setText(str(lab))
+                te = self.missing_text_edits.get(ck)
+                if te:
+                    te.setText(str(keywords.get(ck, "") or ""))
         except Exception as e:
             QMessageBox.warning(
                 self,
                 "読み込みエラー",
-                f"欠品キーワード辞書の読み込みに失敗しました:\n{str(e)}"
+                f"詳細説明の読み込みに失敗しました:\n{str(e)}"
             )
     
     def add_keyword_row(self):
@@ -435,47 +531,80 @@ class ConditionTemplateWidget(QWidget):
             self.keywords_table.removeRow(current_row)
     
     def save_keywords_data(self):
-        """欠品キーワード辞書を保存"""
+        """詳細説明を保存（欠品3＋カスタム3、カスタム表示名は custom_labels）"""
         try:
-            keywords = {}
-            
-            # テーブルからデータを取得
-            for row in range(self.keywords_table.rowCount()):
-                keyword_item = self.keywords_table.item(row, 0)
-                converted_item = self.keywords_table.item(row, 1)
-                
-                if keyword_item and converted_item:
-                    keyword = keyword_item.text().strip()
-                    converted_text = converted_item.text().strip()
-                    
-                    if keyword:  # キーワードが空でない場合のみ追加
-                        keywords[keyword] = converted_text
-            
-            # 既存のデータを読み込んでdetection_keywordsを保持
             existing_data = self.condition_db.load_missing_keywords()
+            keywords = dict(existing_data.get('keywords', {}))
             detection_keywords = existing_data.get('detection_keywords', ['欠品', 'なし', '無し', '欠'])
-            
-            # 保存
+
+            for row_def in MISSING_FIXED_ROWS:
+                key = row_def["key"]
+                text_edit = self.missing_text_edits.get(key)
+                text_val = text_edit.text().strip() if text_edit else ""
+                if text_val:
+                    keywords[key] = text_val
+                else:
+                    keywords.pop(key, None)
+
+            custom_labels: dict = {}
+            for ck in CUSTOM_TEMPLATE_KEYS:
+                text_edit = self.missing_text_edits.get(ck)
+                text_val = text_edit.text().strip() if text_edit else ""
+                if text_val:
+                    keywords[ck] = text_val
+                else:
+                    keywords.pop(ck, None)
+                le = self.missing_label_edits.get(ck)
+                lab = le.text().strip() if le else ""
+                if not lab:
+                    lab = CUSTOM_DEFAULT_LABELS[ck]
+                custom_labels[ck] = lab
+
             keywords_data = {
                 'keywords': keywords,
+                'custom_labels': custom_labels,
                 'detection_keywords': detection_keywords
             }
-            
+
             self.condition_db.save_missing_keywords(keywords_data)
-            
+
             QMessageBox.information(
                 self,
                 "保存完了",
-                "欠品キーワード辞書を保存しました。"
+                "詳細説明を保存しました。"
             )
         except Exception as e:
             QMessageBox.critical(
                 self,
                 "保存エラー",
-                f"欠品キーワード辞書の保存に失敗しました:\n{str(e)}"
+                f"詳細説明の保存に失敗しました:\n{str(e)}"
             )
             import traceback
             traceback.print_exc()
+
+    def reset_keywords_data(self):
+        """詳細説明を空欄・カスタム名をデフォルトにリセット"""
+        reply = QMessageBox.question(
+            self,
+            "リセット確認",
+            "欠品3種・カスタム3種のコメントを空欄にし、カスタムの名称を「カスタム1〜3」に戻しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        for row_def in MISSING_FIXED_ROWS:
+            text_edit = self.missing_text_edits.get(row_def["key"])
+            if text_edit:
+                text_edit.setText("")
+        for ck in CUSTOM_TEMPLATE_KEYS:
+            text_edit = self.missing_text_edits.get(ck)
+            if text_edit:
+                text_edit.setText("")
+            le = self.missing_label_edits.get(ck)
+            if le:
+                le.setText(CUSTOM_DEFAULT_LABELS[ck])
     
     def import_keywords(self):
         """欠品キーワード辞書をインポート"""

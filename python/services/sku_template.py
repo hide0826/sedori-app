@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import re
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
+
+# SKU の「今日」は日本のカレンダー日を基準にする（サーバーが UTC でも前日にならないようにする）
+# 日本は夏時間がないため UTC+9 固定でよい（Windows でも zoneinfo 用 tzdata 不要）
+_JST = timezone(timedelta(hours=9))
 
 
 COND_NUM_MAP = {
@@ -48,12 +52,12 @@ class SKUTemplateRenderer:
                     continue
 
     def _today(self) -> str:
-        base = self._override_date or datetime.now()
+        base = self._override_date or datetime.now(_JST)
         return base.strftime("%Y%m%d")
 
     def _format_date(self, fmt_py: str) -> str:
         """UIで指定されたSKU日付があればそれを、なければ現在日付を指定フォーマットで返す。"""
-        base = self._override_date or datetime.now()
+        base = self._override_date or datetime.now(_JST)
         return base.strftime(fmt_py)
 
     def _get_cond_num(self, condition: str) -> Optional[int]:

@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QSpinBox, QDateEdit, QFileDialog,
     QDialog, QDialogButtonBox, QSizePolicy, QInputDialog,
     QPlainTextEdit, QScrollArea, QFormLayout, QTimeEdit,
-    QToolButton,
+    QToolButton, QApplication,
 )
 from PySide6.QtCore import Qt, QDate, QTime, QDateTime, Signal, QSettings
 from PySide6.QtGui import QFont, QColor, QPalette, QStandardItemModel, QStandardItem
@@ -26,6 +26,7 @@ import sys
 import os
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+from html import escape
 
 # プロジェクトルートをパスに追加（相対インポート用）
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -40,6 +41,54 @@ from database.warranty_db import WarrantyDatabase
 from ui.star_rating_widget import StarRatingWidget
 from utils.route_utils import mark_route_flags_from_folder
 from utils.settings_helper import is_pro_enabled
+
+# ファイル操作エリア直下の手順ラベル用（①〜⑧）。ハイライトは 1..8 / なしは None
+_WORKFLOW_PIPELINE_SEGMENTS = [
+    "①CSV取込",
+    "②ルートテンプレート読込",
+    "③照合処理実行",
+    "④SKU生成",
+    "⑤コンディション説明編集",
+    "⑥DB保存",
+    "⑦古物台帳生成",
+    "⑧出品CSV生成",
+]
+_WORKFLOW_PIPELINE_SEP = "\u2010"
+_ACTION_TO_PIPELINE_STEP = {
+    "CSV取込": 1,
+    "ルートテンプレ読込": 2,
+    "照合処理実行": 3,
+    "SKU生成": 4,
+    "DB保存": 6,
+    "古物台帳生成": 7,
+    "出品CSV生成": 8,
+}
+
+
+def _format_status_prefix_html(text: str, emphasize: bool) -> str:
+    """ワークフロー行の左側（手順リストより前）。"""
+    if not emphasize:
+        return f'<span style="color:#cccccc;">{escape(text)}</span>'
+    t = text.strip()
+    if t == "ワークフロー: 実行中":
+        return (
+            '<span style="color:#cccccc;">ワークフロー: </span>'
+            '<span style="color:#ffd54f;font-weight:600;">実行中</span>'
+        )
+    return f'<span style="color:#ffd54f;font-weight:600;">{escape(text)}</span>'
+
+
+def _format_workflow_pipeline_html(active_step: Optional[int]) -> str:
+    parts: List[str] = []
+    for i, seg in enumerate(_WORKFLOW_PIPELINE_SEGMENTS, start=1):
+        esc = escape(seg)
+        if active_step == i:
+            parts.append(
+                f'<span style="color:#ffd54f;font-weight:600;">{esc}</span>'
+            )
+        else:
+            parts.append(f'<span style="color:#9e9e9e;">{esc}</span>')
+    return _WORKFLOW_PIPELINE_SEP.join(parts)
 
 
 def _normalize_condition_note_newlines(s: str) -> str:
@@ -71,7 +120,27 @@ class InventoryRowEditDialog(QDialog):
         self.setMinimumWidth(520)
         self.setMinimumHeight(400)
         self._build_ui()
+        self._apply_custom_missing_checkbox_labels()
         self._load_row_data()
+        self._sync_missing_custom_checkboxes_enabled()
+    
+    def _sync_missing_custom_checkboxes_enabled(self) -> None:
+        """取説欠品・内箱欠品のどちらかがONのときはカスタムを選べない（テンプレ重複の不具合防止）。"""
+        fixed_on = self.missing_manual_checkbox.isChecked() or self.missing_inner_box_checkbox.isChecked()
+        custom_cbs = (
+            self.missing_custom1_checkbox,
+            self.missing_custom2_checkbox,
+            self.missing_custom3_checkbox,
+        )
+        for cb in custom_cbs:
+            if fixed_on:
+                cb.setChecked(False)
+            cb.setEnabled(not fixed_on)
+            cb.setToolTip(
+                "取説欠品・内箱欠品のチェックを外すと、こちらを選べます。"
+                if fixed_on
+                else ""
+            )
     
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -80,9 +149,55 @@ class InventoryRowEditDialog(QDialog):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll_content = QWidget()
         form = QFormLayout(scroll_content)
+        self.missing_manual_checkbox = QCheckBox("取説欠品")
+        self.missing_inner_box_checkbox = QCheckBox("内箱欠品")
+        self.missing_custom1_checkbox = QCheckBox("カスタム1")
+        self.missing_custom2_checkbox = QCheckBox("カスタム2")
+        self.missing_custom3_checkbox = QCheckBox("カスタム3")
+        _missing_cb_style = """
+                QCheckBox {
+                    background-color: #3c3c3c;
+                    color: #ffffff;
+                    font-weight: bold;
+                    border: 1px solid #555555;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                }
+                QCheckBox::indicator {
+                    width: 16px;
+                    height: 16px;
+                }
+            """
+        for cb in (
+            self.missing_manual_checkbox,
+            self.missing_inner_box_checkbox,
+            self.missing_custom1_checkbox,
+            self.missing_custom2_checkbox,
+            self.missing_custom3_checkbox,
+        ):
+            cb.setStyleSheet(_missing_cb_style)
+        self.missing_manual_checkbox.toggled.connect(self._sync_missing_custom_checkboxes_enabled)
+        self.missing_inner_box_checkbox.toggled.connect(self._sync_missing_custom_checkboxes_enabled)
         
         for col in self.column_headers:
             if col == "コンディション説明":
+                # コンディション説明の上に欠品・詳細（カスタム）チェックを配置
+                missing_opts = QWidget()
+                missing_opts_layout = QVBoxLayout(missing_opts)
+                missing_opts_layout.setContentsMargins(0, 0, 0, 0)
+                row1 = QHBoxLayout()
+                row1.addWidget(self.missing_manual_checkbox)
+                row1.addWidget(self.missing_inner_box_checkbox)
+                row1.addStretch()
+                missing_opts_layout.addLayout(row1)
+                row2 = QHBoxLayout()
+                row2.addWidget(self.missing_custom1_checkbox)
+                row2.addWidget(self.missing_custom2_checkbox)
+                row2.addWidget(self.missing_custom3_checkbox)
+                row2.addStretch()
+                missing_opts_layout.addLayout(row2)
+                form.addRow("欠品・詳細（選択）:", missing_opts)
+
                 w = QPlainTextEdit()
                 w.setPlaceholderText("複数行入力可。改行は\\nで保存されます。")
                 w.setMinimumHeight(120)
@@ -112,6 +227,18 @@ class InventoryRowEditDialog(QDialog):
         bb.rejected.connect(self.reject)
         layout.addWidget(bb)
     
+    def _apply_custom_missing_checkbox_labels(self) -> None:
+        """詳細説明タブで保存したカスタム名称をチェックボックス表示に反映"""
+        try:
+            md = self.condition_template_db.load_missing_keywords()
+            lab = md.get("custom_labels") or {}
+            defaults = {"custom1": "カスタム1", "custom2": "カスタム2", "custom3": "カスタム3"}
+            self.missing_custom1_checkbox.setText(lab.get("custom1") or defaults["custom1"])
+            self.missing_custom2_checkbox.setText(lab.get("custom2") or defaults["custom2"])
+            self.missing_custom3_checkbox.setText(lab.get("custom3") or defaults["custom3"])
+        except Exception:
+            pass
+
     def _load_row_data(self):
         for col in self.column_headers:
             w = self._widgets.get(col)
@@ -145,6 +272,49 @@ class InventoryRowEditDialog(QDialog):
             return
         # テンプレートは改行を "\\n" で保存しているので、表示用に実際の改行に変換（1行表示で行区切りに\nが入った状態で編集欄に表示）
         text = _normalize_condition_note_newlines(text)
+
+        # 欠品・詳細（カスタム）チェックに応じて「詳細説明」タブの文面を挿入
+        try:
+            manual_checked = bool(self.missing_manual_checkbox.isChecked())
+            inner_box_checked = bool(self.missing_inner_box_checkbox.isChecked())
+            missing_key = ""
+            if manual_checked and inner_box_checked:
+                missing_key = "取説・内箱欠品"
+            elif manual_checked:
+                missing_key = "取説欠品"
+            elif inner_box_checked:
+                missing_key = "内箱欠品"
+
+            missing_data = self.condition_template_db.load_missing_keywords()
+            kw = missing_data.get("keywords", {}) or {}
+
+            if missing_key:
+                missing_text = str(kw.get(missing_key, "") or "").strip()
+                if missing_text:
+                    if "{欠品}" in text:
+                        text = text.replace("{欠品}", missing_text)
+                    elif "【付属品】" in text:
+                        text = text.replace("【付属品】", f"【付属品】{missing_text}")
+                    else:
+                        text = f"{text}\n【付属品】{missing_text}".strip()
+
+            extra_parts: List[str] = []
+            for ck, cb in (
+                ("custom1", self.missing_custom1_checkbox),
+                ("custom2", self.missing_custom2_checkbox),
+                ("custom3", self.missing_custom3_checkbox),
+            ):
+                if cb.isChecked():
+                    part = str(kw.get(ck, "") or "").strip()
+                    if part:
+                        extra_parts.append(part)
+            if extra_parts:
+                extra_block = "\n".join(extra_parts)
+                text = f"{text.rstrip()}\n{extra_block}".strip() if text.strip() else extra_block
+        except Exception:
+            # 詳細説明が取得できない場合は通常テンプレートのみを使用
+            pass
+
         note_w.setPlainText(text)
     
     def get_result(self) -> Dict[str, Any]:
@@ -431,14 +601,7 @@ class InventoryWidget(QWidget):
         """ファイル操作エリアの設定（改良版）"""
         file_group = QGroupBox("ファイル操作・アクション")
         file_layout = QHBoxLayout(file_group)
-        
-        # ファイル操作セクション
-        file_ops_layout = QHBoxLayout()
-        
-        # CSV取込ボタン
-        self.import_btn = QPushButton("CSV取込")
-        self.import_btn.clicked.connect(self.import_csv)
-        self.import_btn.setStyleSheet("""
+        green_button_style = """
             QPushButton {
                 background-color: #28a745;
                 color: white;
@@ -450,151 +613,124 @@ class InventoryWidget(QWidget):
             QPushButton:hover {
                 background-color: #218838;
             }
-        """)
+        """
+        
+        # ファイル操作セクション
+        file_ops_layout = QHBoxLayout()
+        
+        # CSV取込ボタン
+        self.import_btn = QPushButton("CSV取込")
+        self.import_btn.clicked.connect(lambda: self._run_action_with_status("CSV取込", self.import_csv))
+        self.import_btn.setStyleSheet(green_button_style)
         file_ops_layout.addWidget(self.import_btn)
         
         # エクスポートボタン
         self.export_btn = QPushButton("CSV出力")
-        self.export_btn.clicked.connect(self.export_csv)
+        self.export_btn.clicked.connect(lambda: self._run_action_with_status("CSV出力", self.export_csv))
         self.export_btn.setEnabled(False)
-        file_ops_layout.addWidget(self.export_btn)
+        # 外部ユーザー向け運用では混乱を避けるため既定で非表示。
+        # 必要になったら `self.export_btn.setVisible(True)` で復帰可能。
+        self.export_btn.setVisible(False)
         
         # オールクリアボタン
         self.clear_btn = QPushButton("オールクリア")
-        self.clear_btn.clicked.connect(self.clear_data)
+        self.clear_btn.clicked.connect(lambda: self._run_action_with_status("オールクリア", self.clear_data))
         self.clear_btn.setEnabled(False)
-        file_ops_layout.addWidget(self.clear_btn)
         
         # 統合保存ボタン
         self.combined_save_btn = QPushButton("統合保存")
-        self.combined_save_btn.clicked.connect(self.save_combined_snapshot)
-        file_ops_layout.addWidget(self.combined_save_btn)
+        self.combined_save_btn.clicked.connect(lambda: self._run_action_with_status("統合保存", self.save_combined_snapshot))
         
         # 統合読込ボタン
         self.combined_load_btn = QPushButton("統合読込")
-        self.combined_load_btn.clicked.connect(self.open_combined_snapshot_history)
-        file_ops_layout.addWidget(self.combined_load_btn)
+        self.combined_load_btn.clicked.connect(lambda: self._run_action_with_status("統合読込", self.open_combined_snapshot_history))
         
         # DB保存ボタン
         self.db_save_btn = QPushButton("DB保存")
-        self.db_save_btn.clicked.connect(self.save_to_databases)
-        self.db_save_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4caf50;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-        """)
-        file_ops_layout.addWidget(self.db_save_btn)
-        
-        file_layout.addLayout(file_ops_layout)
+        self.db_save_btn.clicked.connect(lambda: self._run_action_with_status("DB保存", self.save_to_databases))
+        self.db_save_btn.setStyleSheet(green_button_style)
         
         # アクションボタンセクション
         action_ops_layout = QHBoxLayout()
         
         # SKU生成ボタン
         self.generate_sku_btn = QPushButton("SKU生成")
-        self.generate_sku_btn.clicked.connect(self.generate_sku)
+        self.generate_sku_btn.clicked.connect(lambda: self._run_action_with_status("SKU生成", self.generate_sku))
         self.generate_sku_btn.setEnabled(False)
-        self.generate_sku_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #007bff;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #0056b3;
-            }
-        """)
-        action_ops_layout.addWidget(self.generate_sku_btn)
+        self.generate_sku_btn.setStyleSheet(green_button_style)
 
         # SKUクリアボタン（SKU列だけ「未実装」に戻す）
         self.clear_sku_btn = QPushButton("SKUクリア")
         self.clear_sku_btn.setToolTip("仕入データは残したまま、SKU列だけをすべて『未実装』に戻します。")
-        self.clear_sku_btn.clicked.connect(self.clear_sku)
+        self.clear_sku_btn.clicked.connect(lambda: self._run_action_with_status("SKUクリア", self.clear_sku))
         self.clear_sku_btn.setEnabled(False)
         action_ops_layout.addWidget(self.clear_sku_btn)
         
         # 出品CSV生成ボタン
         self.export_listing_btn = QPushButton("出品CSV生成")
-        self.export_listing_btn.clicked.connect(self.export_listing_csv)
+        self.export_listing_btn.clicked.connect(lambda: self._run_action_with_status("出品CSV生成", self.export_listing_csv))
         self.export_listing_btn.setEnabled(False)
-        action_ops_layout.addWidget(self.export_listing_btn)
         
         # 古物台帳生成ボタン
         self.antique_register_btn = QPushButton("古物台帳生成")
-        self.antique_register_btn.clicked.connect(self.generate_antique_register)
+        self.antique_register_btn.clicked.connect(lambda: self._run_action_with_status("古物台帳生成", self.generate_antique_register))
         self.antique_register_btn.setEnabled(False)
-        action_ops_layout.addWidget(self.antique_register_btn)
 
         # ルートテンプレート読み込みボタン
         self.route_template_btn = QPushButton("ルートテンプレ読込")
-        self.route_template_btn.clicked.connect(self.apply_route_template)
+        self.route_template_btn.clicked.connect(lambda: self._run_action_with_status("ルートテンプレ読込", self.apply_route_template))
         self.route_template_btn.setEnabled(self.route_summary_widget is not None)
-        action_ops_layout.addWidget(self.route_template_btn)
         
         # 照合処理実行ボタン
         self.matching_btn = QPushButton("照合処理実行")
-        self.matching_btn.clicked.connect(self.run_matching)
+        self.matching_btn.clicked.connect(lambda: self._run_action_with_status("照合処理実行", self.run_matching))
         self.matching_btn.setEnabled(self.route_summary_widget is not None)
-        self.matching_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #007bff;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #0056b3;
-            }
-        """)
-        action_ops_layout.addWidget(self.matching_btn)
+        self.matching_btn.setStyleSheet(green_button_style)
+
+        # 主要アクションは同系色で統一
+        self.route_template_btn.setStyleSheet(green_button_style)
+        self.antique_register_btn.setStyleSheet(green_button_style)
+        self.export_listing_btn.setStyleSheet(green_button_style)
+        self.clear_sku_btn.setStyleSheet(green_button_style)
+
+        # 先頭に並べる運用ボタン（指定順）
+        # CSV取込 → ルートテンプレ読込 → 照合処理実行 → SKU生成 → DB保存 → 古物台帳生成 → 出品CSV生成
+        file_ops_layout.addWidget(self.route_template_btn)
+        file_ops_layout.addWidget(self.matching_btn)
+        file_ops_layout.addWidget(self.generate_sku_btn)
+        file_ops_layout.addWidget(self.db_save_btn)
+        file_ops_layout.addWidget(self.antique_register_btn)
+        file_ops_layout.addWidget(self.export_listing_btn)
+
+        # そのほかのボタンは後ろに維持
+        file_ops_layout.addWidget(self.export_btn)
+        file_ops_layout.addWidget(self.clear_btn)
+        file_ops_layout.addWidget(self.combined_save_btn)
+        file_ops_layout.addWidget(self.combined_load_btn)
+
+        file_layout.addLayout(file_ops_layout)
         
         # スポット仕入（1店舗・スキマ時間用）
         self.spot_purchase_btn = QPushButton("スポット")
         self.spot_purchase_btn.setToolTip("スキマ時間の1店舗スポット仕入をルート情報として登録し、ルートサマリー一覧に残します")
-        self.spot_purchase_btn.clicked.connect(self.open_spot_purchase_dialog)
+        self.spot_purchase_btn.clicked.connect(lambda: self._run_action_with_status("スポット", self.open_spot_purchase_dialog))
+        self.spot_purchase_btn.setStyleSheet(green_button_style)
         action_ops_layout.addWidget(self.spot_purchase_btn)
         
         file_layout.addLayout(action_ops_layout)
 
-        # デフォルトフォルダ設定エリア
-        default_folder_layout = QHBoxLayout()
-        default_folder_label = QLabel("デフォルトフォルダ:")
-        default_folder_label.setStyleSheet("color: #cccccc;")
-        default_folder_layout.addWidget(default_folder_label)
+        # 右側操作ボタン（デフォルト設定 / SKU設定）
+        file_layout.addStretch()
 
-        from PySide6.QtWidgets import QSizePolicy as _QSizePolicyForDefaultFolder
-        self.default_base_folder_edit = QLineEdit()
-        self.default_base_folder_edit.setReadOnly(True)
-        self.default_base_folder_edit.setPlaceholderText("未設定")
-        self.default_base_folder_edit.setMinimumWidth(220)
-        self.default_base_folder_edit.setSizePolicy(_QSizePolicyForDefaultFolder.Expanding, _QSizePolicyForDefaultFolder.Fixed)
-        default_folder_layout.addWidget(self.default_base_folder_edit)
-
-        self.default_base_folder_btn = QPushButton("参照…")
+        self.default_base_folder_btn = QPushButton("デフォルト設定")
+        self.default_base_folder_btn.setToolTip("仕入管理タブで使うデフォルトフォルダを設定します。")
         self.default_base_folder_btn.clicked.connect(self.browse_default_base_folder)
-        default_folder_layout.addWidget(self.default_base_folder_btn)
-
-        file_layout.addLayout(default_folder_layout)
+        file_layout.addWidget(self.default_base_folder_btn)
 
         # SKU設定トグルボタン
         self.toggle_settings_btn = QPushButton("SKU設定")
         self.toggle_settings_btn.clicked.connect(self.toggle_settings_panel)
         file_layout.addWidget(self.toggle_settings_btn)
-        
-        file_layout.addStretch()
         
         # データ件数表示
         self.data_count_label = QLabel("データ件数: 0")
@@ -604,11 +740,17 @@ class InventoryWidget(QWidget):
         # グループボックスをメインレイアウトに追加
         self.layout().addWidget(file_group)
 
-        # ワークフロー状態表示（ファイル操作・アクションエリアの下の行に配置）
-        self.workflow_status_label = QLabel("ワークフロー: 未実行")
-        self.workflow_status_label.setStyleSheet("color: #cccccc;")
+        # ワークフロー状態 + 手順①〜⑧を1行のリッチテキストで表示
+        self._workflow_status_text = "ワークフロー: 未実行"
+        self._workflow_emphasize = False
+        self._workflow_active_step: Optional[int] = None
+        self.workflow_status_label = QLabel()
+        self.workflow_status_label.setTextFormat(Qt.TextFormat.RichText)
+        self.workflow_status_label.setWordWrap(True)
+        self.workflow_status_label.setStyleSheet("padding: 2px 0px;")
+        self._sync_workflow_status_label()
         status_layout = QHBoxLayout()
-        status_layout.addWidget(self.workflow_status_label)
+        status_layout.addWidget(self.workflow_status_label, 1)
         status_layout.addStretch()
         self.layout().addLayout(status_layout)
 
@@ -2059,8 +2201,7 @@ class InventoryWidget(QWidget):
                 # SKU自動マッチング処理（商品DBから仕入れ日・ASINで検索）
                 self._auto_match_sku_from_product_db()
                 
-                # コンディション説明を自動入力（コメント欄に欠品情報がある場合）
-                self.inventory_data = self._auto_fill_condition_notes(self.inventory_data)
+                # コメント→コンディション説明の自動入力は運用方針により無効化
                 self.filtered_data = self.inventory_data.copy()
                 
                 self.update_table()
@@ -2297,17 +2438,54 @@ class InventoryWidget(QWidget):
             return fallback
         return str(Path.home())
 
-    def _update_workflow_status(self, text: str, emphasize: bool = False):
-        """ワークフロー状態ラベルを更新"""
+    def _sync_workflow_status_label(self) -> None:
+        """ワークフロー: 〜 と ①〜⑧ 手順を1行の HTML で表示する。"""
         if not hasattr(self, "workflow_status_label") or self.workflow_status_label is None:
             return
-        self.workflow_status_label.setText(text)
-        if emphasize:
-            # 強調表示（黄色っぽい色）
-            self.workflow_status_label.setStyleSheet("color: #ffd54f; font-weight: bold;")
-        else:
-            # 通常表示
-            self.workflow_status_label.setStyleSheet("color: #cccccc; font-weight: normal;")
+        text = getattr(self, "_workflow_status_text", "ワークフロー: 未実行")
+        emph = getattr(self, "_workflow_emphasize", False)
+        step = getattr(self, "_workflow_active_step", None)
+        prefix = _format_status_prefix_html(text, emph)
+        pipe = _format_workflow_pipeline_html(step)
+        sep = '<span style="color:#cccccc;">　</span>'
+        self.workflow_status_label.setText(prefix + sep + pipe)
+
+    def _set_workflow_pipeline_highlight(self, step: Optional[int]) -> None:
+        """手順（①〜⑧）のどれを強調するか。None で強調なし。"""
+        self._workflow_active_step = step
+        self._sync_workflow_status_label()
+
+    def _update_workflow_status(self, text: str, emphasize: bool = False):
+        """ワークフロー状態ラベルを更新（手順リストと1行に結合）"""
+        self._workflow_status_text = text
+        self._workflow_emphasize = emphasize
+        if "コンディション説明編集中" in text:
+            self._workflow_active_step = 5
+        elif text.strip() == "ワークフロー: 未実行":
+            self._workflow_active_step = None
+        elif "工程8まで完了" in text and "工程6まで完了" not in text:
+            self._workflow_active_step = None
+        self._sync_workflow_status_label()
+
+    def _run_action_with_status(self, action_name: str, action_func):
+        """押したボタン名をワークフロー表示に反映してから処理を実行"""
+        step = _ACTION_TO_PIPELINE_STEP.get(action_name)
+        try:
+            if step is not None:
+                self._workflow_active_step = step
+            # 手順①〜⑧に無い操作では、直前までの工程ハイライトを維持する
+            self._update_workflow_status("ワークフロー: 実行中", emphasize=True)
+            # 重い処理前に表示を即時反映
+            QApplication.processEvents()
+        except Exception:
+            pass
+        try:
+            return action_func()
+        finally:
+            # 完了後も「いまどこまで進んだか」が分かるよう、次のボタンが押されるまでハイライトを維持
+            if step is not None:
+                self._workflow_active_step = step
+            self._update_workflow_status("ワークフロー: 待機", emphasize=False)
 
     def _apply_start_button_style(self, state: str):
         """
@@ -2387,6 +2565,9 @@ class InventoryWidget(QWidget):
                 "Amazon出品用のCSVファイルを生成します。"
             ):
                 return
+            self._workflow_active_step = 8
+            self._update_workflow_status("ワークフロー: 実行中", emphasize=True)
+            QApplication.processEvents()
             self.export_listing_csv()
             
             # 古物台帳生成
@@ -2395,6 +2576,8 @@ class InventoryWidget(QWidget):
                 "現在の仕入データとルート情報を古物台帳タブに転送します。"
             ):
                 return
+            self._set_workflow_pipeline_highlight(7)
+            QApplication.processEvents()
             self.generate_antique_register()
 
             # 再開完了
@@ -2446,6 +2629,9 @@ class InventoryWidget(QWidget):
             f"選択フォルダ内の仕入リストCSVを読み込みます。\n対象ファイル: {csv_path.name}"
         ):
             return
+        self._workflow_active_step = 1
+        self._update_workflow_status("ワークフロー: 実行中", emphasize=True)
+        QApplication.processEvents()
         self._import_csv_from_path(str(csv_path))
         
         # 3. route_template_ で始まる xlsx/xls を探して読み込み
@@ -2481,6 +2667,8 @@ class InventoryWidget(QWidget):
         ):
             return
         
+        self._set_workflow_pipeline_highlight(2)
+        QApplication.processEvents()
         # ルートテンプレ読込と同等の処理（ダイアログを出さずに直接読み込み）
         try:
             loaded_path = self.route_summary_widget.load_template(str(route_path))
@@ -2507,6 +2695,8 @@ class InventoryWidget(QWidget):
             "仕入データとルート情報の照合処理を実行します。"
         ):
             return
+        self._set_workflow_pipeline_highlight(3)
+        QApplication.processEvents()
         self.run_matching()
         
         # 照合処理で inventory_data が更新されている前提で後続処理を実行
@@ -2524,6 +2714,8 @@ class InventoryWidget(QWidget):
             "仕入データにSKUを自動生成します。"
         ):
             return
+        self._set_workflow_pipeline_highlight(4)
+        QApplication.processEvents()
         self.generate_sku()
         
         # 6. 統合保存
@@ -2532,6 +2724,8 @@ class InventoryWidget(QWidget):
             "現在の仕入データとルート情報を統合スナップショットとして保存します。"
         ):
             return
+        self._set_workflow_pipeline_highlight(None)
+        QApplication.processEvents()
         self.save_combined_snapshot()
         
         # 7. DB保存
@@ -2540,6 +2734,8 @@ class InventoryWidget(QWidget):
             "統合された仕入データをデータベースに保存します。"
         ):
             return
+        self._set_workflow_pipeline_highlight(6)
+        QApplication.processEvents()
         self.save_to_databases()
 
         # 工程6完了後、工程7に進む前にコンディション説明編集の確認（1工程ずつ確認モード時のみ）
@@ -2573,6 +2769,8 @@ class InventoryWidget(QWidget):
             "Amazon出品用のCSVファイルを生成します。"
         ):
             return
+        self._set_workflow_pipeline_highlight(8)
+        QApplication.processEvents()
         self.export_listing_csv()
         
         # 9. 古物台帳生成
@@ -2581,6 +2779,8 @@ class InventoryWidget(QWidget):
             "現在の仕入データとルート情報を古物台帳タブに転送します。"
         ):
             return
+        self._set_workflow_pipeline_highlight(7)
+        QApplication.processEvents()
         self.generate_antique_register()
 
         # 全工程完了
@@ -2816,9 +3016,6 @@ class InventoryWidget(QWidget):
         
         # 利益率とROIを計算
         new_df = self._calculate_margin_and_roi(new_df)
-        
-        # コンディション説明を自動入力（コメント欄に欠品情報がある場合）
-        new_df = self._auto_fill_condition_notes(new_df)
         
         return new_df
     
@@ -3663,6 +3860,8 @@ class InventoryWidget(QWidget):
             self.route_clear_btn.setEnabled(False)
         if hasattr(self, 'route_delete_row_btn'):
             self.route_delete_row_btn.setEnabled(False)
+
+        self._update_workflow_status("ワークフロー: 未実行", emphasize=False)
     
     def clear_inventory_data(self):
         """仕入データ一覧のみをクリア"""

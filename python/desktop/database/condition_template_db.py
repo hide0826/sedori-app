@@ -276,6 +276,11 @@ class ConditionTemplateDatabase:
                     "内箱欠品": "内箱なし",
                     "外箱欠品": "外箱なし"
                 },
+                "custom_labels": {
+                    "custom1": "カスタム1",
+                    "custom2": "カスタム2",
+                    "custom3": "カスタム3",
+                },
                 "detection_keywords": ["欠品", "なし", "無し", "欠"]
             }
             self.save_missing_keywords(default_data)

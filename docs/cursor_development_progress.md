@@ -1890,3 +1890,31 @@
 
 **最終更新**: 2026-04-13
 **更新者**: Agentモード（実装）
+
+### 2026-04-19（仕入管理: SKU日付JST・ワークフロー表示・詳細説明タブ・行編集の連携）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. **SKU生成の日付が前日になる問題**
+     - `sku_template.py`: `datetime.now()` をサーバーTZ依存にしないよう、**日本の暦日**基準で `timezone(timedelta(hours=9))` を使用（UTC環境でも前日にならない）。
+  2. **仕入管理のワークフロー表示**
+     - `inventory_widget.py`: ファイル操作エリア直下を **1行** に統合（`ワークフロー: 待機` / `実行中` ＋ ①〜⑧ 手順）。実行中の工程をハイライト。**ボタン操作完了後も** 直近工程のハイライトを維持（次操作まで）。自動ワークフロー開始時は `実行中` を表示。
+  3. **コンディション説明まわり**
+     - `condition_template_widget.py`: タブ **「欠品説明」→「詳細説明」** に変更。**カスタム1〜3** を追加（コンディション名は自由入力・コメントは複数行）。`missing_keywords.json` に `custom1`〜`custom3` 本文と `custom_labels` を保存。
+     - `condition_template_db.py`: 新規 JSON デフォルトに `custom_labels` を追加。
+     - `missing_keywords.json`: 上記キーと `custom_labels` を追記（既存欠品テキストは維持）。
+     - 詳細説明・コンディション説明テーブルとも **列幅をドラッグ調整**可能にし、`QSettings("HIRIO","SedoriDesktopApp")` に **列幅を自動保存**。
+     - カスタム行のコンディション列 `QLineEdit` を **中央寄せ**。
+  4. **行の編集（仕入データ）**
+     - `inventory_widget.py` `InventoryRowEditDialog`: **カスタム1〜3** チェックを追加。詳細説明タブの **カスタム表示名** をチェックボックス文言に反映。「コンディション説明呼び出し」で欠品テンプレに加え **カスタム文面を追記**。
+     - **取説欠品・内箱欠品のいずれかがONのときはカスタムを無効化**しチェックを外す（テンプレ重複の不具合防止）。
+- **変更ファイル**:
+  - `python/services/sku_template.py`
+  - `python/desktop/ui/inventory_widget.py`
+  - `python/desktop/ui/condition_template_widget.py`
+  - `python/desktop/database/condition_template_db.py`
+  - `python/desktop/data/missing_keywords.json`
+  - `docs/cursor_development_progress.md`
+- **次回（任意）**: 詳細説明のインポート/エクスポートが固定行前提のため、カスタム行追加後の整合を必要なら追随。
+
+**最終更新**: 2026-04-19
+**更新者**: Agentモード（実装）
