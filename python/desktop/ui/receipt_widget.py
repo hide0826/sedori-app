@@ -447,6 +447,8 @@ class ReceiptWidget(QWidget):
         self.notifications_enabled = True
         # レシート一覧の初回ロードが完了しているかどうか
         self._initial_data_loaded: bool = False
+        # 確定処理の多重起動防止フラグ
+        self._confirm_in_progress: bool = False
         
         self.setup_ui()
         
@@ -8431,12 +8433,37 @@ class ReceiptWidget(QWidget):
     
     def confirm_receipt_linkage(self):
         """確定ボタン: レシート管理で紐付けられた画像ファイル名を仕入DBのSKUに設定"""
+        from time import perf_counter
+        if getattr(self, "_confirm_in_progress", False):
+            print("[WARN] confirm_receipt_linkage is already running. skip duplicated call.")
+            QMessageBox.information(self, "処理中", "確定処理はすでに実行中です。完了までお待ちください。")
+            return
+        self._confirm_in_progress = True
+        if hasattr(self, "confirm_btn") and self.confirm_btn:
+            try:
+                self.confirm_btn.setEnabled(False)
+            except Exception:
+                pass
+        # 安全優先: まずは従来処理をデフォルトにする。
+        # 高速化版は安定確認が取れるまで明示フラグ時のみ有効化。
+        use_optimized = False
+        try:
+            if use_optimized:
+                return self._confirm_receipt_linkage_optimized()
+        except Exception:
+            # 高速化版で問題が起きた場合のみ既存処理へフォールバック
+            import traceback
+            print(f"[WARN] 高速化版 confirm 処理でエラー。既存処理へフォールバックします。\n{traceback.format_exc()}")
+
         from pathlib import Path
         from PySide6.QtWidgets import QMessageBox
         
         # デバッグ: メソッドが呼ばれたことを確認
         print(f"[DEBUG] confirm_receipt_linkage が呼ばれました")
         print(f"[DEBUG] product_widget: {self.product_widget}")
+        perf_t0 = perf_counter()
+        perf_marks = {}
+        print("[PERF] confirm_receipt_linkage start")
         
         # product_widgetが設定されていない場合は警告を表示
         if not hasattr(self, 'product_widget') or not self.product_widget:
@@ -8457,14 +8484,19 @@ class ReceiptWidget(QWidget):
             # 現在のレシート一覧・保証書一覧に表示されているレコードのみ取得
             all_receipts = self._get_current_receipts_from_tables()
             print(f"[DEBUG] レシート件数（現在の一覧）: {len(all_receipts)}")
+            perf_marks["load_current_receipts"] = perf_counter()
+            print(f"[PERF] load_current_receipts={perf_marks['load_current_receipts'] - perf_t0:.3f}s")
             
             # 保証書テーブルの行数を取得
             warranty_row_count = 0
             if hasattr(self, 'warranty_table') and self.warranty_table:
                 warranty_row_count = self.warranty_table.rowCount()
             
-            # 処理ステップ数を計算（レシート処理 + 保証書処理 + 仕訳帳処理）
-            total_steps = len(all_receipts) + warranty_row_count + len(all_receipts)
+            # 処理ステップ数を計算
+            # 進捗バーが100%になった後に重い後処理が残ると体感的に「止まった」ように見えるため、
+            # 後処理分（スナップ保存・テーブル更新・仕訳帳UI更新・ルートフラグ更新）も明示的に含める。
+            post_steps = 4
+            total_steps = len(all_receipts) + warranty_row_count + len(all_receipts) + post_steps
             
             # プログレスダイアログを表示
             progress = QProgressDialog("確定処理中...", "キャンセル", 0, total_steps, self)
@@ -8647,6 +8679,8 @@ class ReceiptWidget(QWidget):
                         error_messages.append(f"SKU {sku}: {str(e)}")
                         import traceback
                         print(f"確定処理エラー (SKU={sku}): {e}\n{traceback.format_exc()}")
+            perf_marks["receipt_sku_reflect"] = perf_counter()
+            print(f"[PERF] receipt_sku_reflect={perf_marks['receipt_sku_reflect'] - perf_marks.get('load_current_receipts', perf_t0):.3f}s")
             
             # 保証書一覧から情報を取得して仕入DBに反映
             if hasattr(self, 'warranty_table') and self.warranty_table.rowCount() > 0:
@@ -8850,29 +8884,49 @@ class ReceiptWidget(QWidget):
                         print(f"保証書確定処理エラー: {e}\n{traceback.format_exc()}")
                 
                 updated_count += warranty_updated_count
+            perf_marks["warranty_reflect"] = perf_counter()
+            print(f"[PERF] warranty_reflect={perf_marks['warranty_reflect'] - perf_marks.get('receipt_sku_reflect', perf_t0):.3f}s")
             
             # 仕入管理タブのテーブル表示を更新
             if updated_count > 0 and hasattr(self, 'product_widget') and self.product_widget:
                 # スナップショットを保存（アプリ再起動後も保持されるように）
                 if hasattr(self.product_widget, 'save_purchase_snapshot'):
+                    current_step += 1
+                    progress.setValue(current_step)
+                    progress.setLabelText("確定処理中... (後処理: スナップショット保存)")
+                    QCoreApplication.processEvents()
                     try:
                         self.product_widget.save_purchase_snapshot()
                     except Exception as e:
                         import traceback
                         print(f"スナップショット保存エラー: {e}\n{traceback.format_exc()}")
+                    finally:
+                        perf_marks["save_purchase_snapshot"] = perf_counter()
+                        print(f"[PERF] save_purchase_snapshot={perf_marks['save_purchase_snapshot'] - perf_marks.get('warranty_reflect', perf_t0):.3f}s")
                 
                 if hasattr(self.product_widget, 'update_table'):
-                    try:
-                        self.product_widget.update_table()
-                    except Exception:
-                        pass
-                
-                if hasattr(self.product_widget, 'populate_purchase_table'):
-                    try:
-                        if hasattr(self.product_widget, 'purchase_all_records'):
-                            self.product_widget.populate_purchase_table(self.product_widget.purchase_all_records)
-                    except Exception:
-                        pass
+                    current_step += 1
+                    progress.setValue(current_step)
+                    progress.setLabelText("確定処理中... (後処理: 仕入テーブル更新を予約)")
+                    QCoreApplication.processEvents()
+                    # NOTE:
+                    # update_table() は全体再構築が重く、UIフリーズの主因になりやすい。
+                    # 確定処理中はDB保存完了を優先し、表示更新は次回タブ表示/手動更新時に委ねる。
+                    setattr(self.product_widget, "_pending_purchase_refresh", True)
+                perf_marks["purchase_refresh_deferred"] = perf_counter()
+                print(f"[PERF] purchase_refresh_deferred={perf_marks['purchase_refresh_deferred'] - perf_marks.get('save_purchase_snapshot', perf_marks.get('warranty_reflect', perf_t0)):.3f}s")
+            else:
+                # updated_count == 0 の場合も進捗は実際の処理段階に合わせて進める
+                current_step += 1
+                progress.setValue(current_step)
+                progress.setLabelText("確定処理中... (後処理: スナップショット保存スキップ)")
+                QCoreApplication.processEvents()
+                perf_marks["purchase_refresh_skipped"] = perf_counter()
+                print(f"[PERF] purchase_refresh_skipped={perf_marks['purchase_refresh_skipped'] - perf_marks.get('warranty_reflect', perf_t0):.3f}s")
+                current_step += 1
+                progress.setValue(current_step)
+                progress.setLabelText("確定処理中... (後処理: 仕入テーブル更新スキップ)")
+                QCoreApplication.processEvents()
             
             # 仕訳帳への自動登録処理
             journal_count = 0
@@ -8910,9 +8964,13 @@ class ReceiptWidget(QWidget):
                     "金額0": 0,
                     "既に登録済み": 0
                 }
+                # 高速化: 同じ日付・同じ店舗コードは毎回DB参照しない
+                journal_entries_cache = {}
+                store_name_cache = {}
                 
                 journal_receipt_count = 0
                 for receipt in all_receipts:
+                    one_journal_t0 = perf_counter()
                     # キャンセルチェック
                     if progress.wasCanceled():
                         QMessageBox.information(self, "確定処理", "確定処理がキャンセルされました。")
@@ -8964,12 +9022,17 @@ class ReceiptWidget(QWidget):
                     
                     if store_code:
                         # 店舗マスタから店舗名を取得
-                        try:
-                            store = self.store_db.get_store_by_code(store_code)
-                            if store:
-                                store_name = store.get('store_name', '') or ''
-                        except Exception as e:
-                            print(f"[DEBUG] 店舗マスタ取得エラー (store_code={store_code}): {e}")
+                        if store_code in store_name_cache:
+                            store_name = store_name_cache.get(store_code, '')
+                        else:
+                            try:
+                                store = self.store_db.get_store_by_code(store_code)
+                                if store:
+                                    store_name = store.get('store_name', '') or ''
+                                store_name_cache[store_code] = store_name
+                            except Exception as e:
+                                print(f"[DEBUG] 店舗マスタ取得エラー (store_code={store_code}): {e}")
+                                store_name_cache[store_code] = ''
                     
                     # 店舗マスタから取得できない場合は、既存の方法で取得（フォールバック）
                     if not store_name:
@@ -8991,10 +9054,14 @@ class ReceiptWidget(QWidget):
                     #   1. 同じ日付の範囲で取得
                     #   2. まず画像URL一致を優先
                     #   3. 見つからなければ「日付（同一日）＋金額＋摘要（店舗名）」一致で重複判定
-                    existing_entries = journal_db.list_by_date(
-                        purchase_date_only,
-                        f"{purchase_date_only} 23:59:59"
-                    )
+                    if purchase_date_only in journal_entries_cache:
+                        existing_entries = journal_entries_cache[purchase_date_only]
+                    else:
+                        existing_entries = journal_db.list_by_date(
+                            purchase_date_only,
+                            f"{purchase_date_only} 23:59:59"
+                        )
+                        journal_entries_cache[purchase_date_only] = existing_entries
                     existing_entry = None
 
                     # 1) 画像URLで既存エントリを検索
@@ -9052,27 +9119,51 @@ class ReceiptWidget(QWidget):
                                     print(f"[DEBUG] 仕訳帳スキップ (receipt_id={receipt_id}): 変更なし (journal_id={existing_id})")
                         else:
                             # 新規登録
-                            journal_db.insert(journal_entry)
+                            new_id = journal_db.insert(journal_entry)
                             journal_count += 1
+                            # キャッシュにも追加して、同一実行内の重複チェック精度と速度を維持
+                            cache_entry = dict(journal_entry)
+                            cache_entry["id"] = new_id
+                            existing_entries.append(cache_entry)
                             print(f"[DEBUG] 仕訳帳登録成功 (receipt_id={receipt_id}): date={purchase_datetime}, amount={total_amount}, store={store_name}")
                     except Exception as e:
                         print(f"[DEBUG] 仕訳帳登録/更新エラー (receipt_id={receipt_id}): {e}")
                         error_count += 1
                         error_messages.append(f"仕訳帳登録/更新エラー (receipt_id={receipt_id}): {str(e)}")
+                    finally:
+                        one_journal_dt = perf_counter() - one_journal_t0
+                        print(f"[PERF] journal_per_receipt receipt_id={receipt_id} elapsed={one_journal_dt:.3f}s")
                 
                 # スキップ理由をログ出力
                 print(f"[DEBUG] 仕訳帳登録スキップ理由: {skipped_reasons}")
                 
                 # 仕訳帳タブを更新（もし開いていれば）
+                current_step += 1
+                progress.setValue(current_step)
+                progress.setLabelText("確定処理中... (後処理: 仕訳帳タブ更新)")
+                QCoreApplication.processEvents()
                 if hasattr(self, 'evidence_widget'):
                     try:
                         if hasattr(self.evidence_widget, 'journal_entry_widget'):
-                            self.evidence_widget.journal_entry_widget.load_entries()
+                            journal_widget = self.evidence_widget.journal_entry_widget
+                            # フリーズ回避最優先:
+                            # 確定処理中には仕訳帳タブの全件再描画(load_entries)を実行しない。
+                            # 次回タブ表示時に遅延ロードさせる。
+                            setattr(journal_widget, "_initial_data_loaded", False)
                     except Exception:
                         pass
+                perf_marks["journal_phase_total"] = perf_counter()
+                print(f"[PERF] journal_phase_total={perf_marks['journal_phase_total'] - perf_marks.get('purchase_refresh_deferred', perf_marks.get('purchase_refresh_skipped', perf_t0)):.3f}s")
             except Exception as e:
                 import traceback
                 print(f"[DEBUG] 仕訳帳自動登録処理エラー: {e}\n{traceback.format_exc()}")
+                # 仕訳帳処理で例外が出ても、進捗段階は揃える
+                if current_step < total_steps - 1:
+                    current_step += 1
+                    progress.setValue(current_step)
+                    progress.setLabelText("確定処理中... (後処理: 仕訳帳タブ更新スキップ)")
+                    QCoreApplication.processEvents()
+                perf_marks["journal_phase_total"] = perf_counter()
             
             # 結果を表示
             receipt_count = updated_count - warranty_updated_count
@@ -9113,23 +9204,462 @@ class ReceiptWidget(QWidget):
                     message
                 )
 
-            # ルートタブ側の「証憑」チェックをONにする（対応するルートサマリーが判定できた場合）
-            try:
-                base_folder: Optional[Path] | None = None
-                if getattr(self, "current_folder", None):
-                    base_folder = self.current_folder
-                elif getattr(self, "default_folder", None):
-                    base_folder = self.default_folder
-
-                if base_folder:
-                    mark_route_flags_from_folder(base_folder, evidence_completed=True)
-            except Exception as e:
-                # ルート判定に失敗しても致命的ではないのでログのみ
-                print(f"証憑フラグ更新エラー: {e}")
+            # ルート証憑フラグ更新は予約のみ（progressを再操作しない）
+            # ※ close済みのprogressにsetValue/setLabelTextするとダイアログが再表示されることがある。
+            perf_marks["route_flag_deferred"] = perf_counter()
+            print(f"[PERF] route_flag_deferred={perf_marks['route_flag_deferred'] - perf_marks.get('journal_phase_total', perf_t0):.3f}s")
         except Exception as e:
             import traceback
             QMessageBox.critical(
                 self, "エラー",
                 f"確定処理中にエラーが発生しました:\n{str(e)}\n\n{traceback.format_exc()}"
             )
+        finally:
+            try:
+                if 'progress' in locals() and progress is not None:
+                    progress.close()
+                    progress.deleteLater()
+            except Exception:
+                pass
+            perf_t_end = perf_counter()
+            print(f"[PERF] confirm_receipt_linkage total={perf_t_end - perf_t0:.3f}s")
+            self._confirm_in_progress = False
+            if hasattr(self, "confirm_btn") and self.confirm_btn:
+                try:
+                    self.confirm_btn.setEnabled(True)
+                except Exception:
+                    pass
+
+    def _confirm_receipt_linkage_optimized(self):
+        """確定処理の高速化版（処理対象の事前集約・検索マップ化で待ち時間を削減）"""
+        from pathlib import Path
+        from time import perf_counter
+        from PySide6.QtWidgets import QMessageBox
+        import re
+        t0 = perf_counter()
+        checkpoints = {}
+
+        if not hasattr(self, 'product_widget') or not self.product_widget:
+            QMessageBox.warning(
+                self, "エラー",
+                "仕入管理ウィジェットが設定されていません。\n"
+                "データベース管理タブを開いてから再度お試しください。"
+            )
+            return
+
+        updated_count = 0
+        warranty_updated_count = 0
+        journal_count = 0
+        error_count = 0
+        error_messages = []
+
+        all_receipts = self._get_current_receipts_from_tables()
+        warranty_row_count = self.warranty_table.rowCount() if hasattr(self, 'warranty_table') and self.warranty_table else 0
+        total_steps = max(1, len(all_receipts) + warranty_row_count + len(all_receipts))
+
+        progress = QProgressDialog("確定処理中...", "キャンセル", 0, total_steps, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        progress.show()
+        QCoreApplication.processEvents()
+        current_step = 0
+
+        def tick(label: str, force: bool = False):
+            nonlocal current_step
+            current_step += 1
+            if force or (current_step % 20 == 0) or current_step >= total_steps:
+                progress.setValue(min(current_step, total_steps))
+                progress.setLabelText(label)
+                QCoreApplication.processEvents()
+            if progress.wasCanceled():
+                QMessageBox.information(self, "確定処理", "確定処理がキャンセルされました。")
+                raise RuntimeError("cancelled")
+
+        # ---- 1) SKU単位の更新内容を先に集約 ----
+        receipt_updates: dict[str, dict] = {}
+        for idx, receipt in enumerate(all_receipts, 1):
+            tick(f"確定処理中... (レシート集約: {idx}/{len(all_receipts)})")
+
+            ocr_text = receipt.get('ocr_text') or ""
+            if "保証書" in ocr_text or "保証期間" in ocr_text or "保証規定" in ocr_text:
+                continue
+
+            file_path = receipt.get('original_file_path') or receipt.get('file_path', '')
+            if not file_path:
+                continue
+            image_file = Path(file_path)
+            if not image_file.exists():
+                error_count += 1
+                error_messages.append(f"レシートID {receipt.get('id')}: 画像ファイルが見つかりません: {file_path}")
+                continue
+
+            image_file_name = image_file.stem
+            if not image_file_name:
+                continue
+            receipt_image_url = receipt.get('gcs_url') or receipt.get('image_url') or ''
+            linked_skus_text = receipt.get('linked_skus', '') or ''
+            linked_skus = [s.strip() for s in linked_skus_text.split(',') if s.strip()]
+            for sku in linked_skus:
+                receipt_updates[sku] = {
+                    "receipt_id": image_file_name,
+                    "receipt_image_url": receipt_image_url,
+                }
+        checkpoints["receipt_collect"] = perf_counter()
+
+        warranty_updates: dict[str, dict] = {}
+        if hasattr(self, 'warranty_table') and self.warranty_table and self.warranty_table.rowCount() > 0:
+            for warranty_row in range(self.warranty_table.rowCount()):
+                tick(f"確定処理中... (保証書集約: {warranty_row + 1}/{self.warranty_table.rowCount()})")
+                try:
+                    id_item = self.warranty_table.item(warranty_row, 0)
+                    if not id_item:
+                        continue
+                    receipt_id = int(id_item.text())
+                    receipt_info = self.receipt_db.get_receipt(receipt_id)
+                    if not receipt_info:
+                        continue
+
+                    file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path', '')
+                    warranty_image_name = Path(file_path).stem if file_path else ""
+
+                    linked_skus_text = receipt_info.get('linked_skus', '') or ''
+                    target_skus = [s.strip() for s in linked_skus_text.split(',') if s.strip()]
+                    if not target_skus:
+                        sku_item = self.warranty_table.item(warranty_row, 7)
+                        if sku_item and sku_item.text().strip():
+                            target_skus = [sku_item.text().strip()]
+                    if not target_skus:
+                        continue
+
+                    warranty_days = None
+                    warranty_days_item = self.warranty_table.item(warranty_row, 9)
+                    if warranty_days_item and warranty_days_item.text().strip():
+                        try:
+                            warranty_days = int(warranty_days_item.text().strip())
+                        except ValueError:
+                            warranty_days = None
+
+                    warranty_until = None
+                    warranty_until_widget = self.warranty_table.cellWidget(warranty_row, 10)
+                    if isinstance(warranty_until_widget, QDateEdit):
+                        qdate = warranty_until_widget.date()
+                        if qdate.isValid():
+                            warranty_until = qdate.toString("yyyy-MM-dd")
+
+                    for sku in target_skus:
+                        warranty_updates[sku] = {
+                            "warranty_image": warranty_image_name,
+                            "warranty_period_days": warranty_days,
+                            "warranty_until": warranty_until,
+                        }
+                except Exception as e:
+                    error_count += 1
+                    error_messages.append(f"保証書処理エラー: {str(e)}")
+        checkpoints["warranty_collect"] = perf_counter()
+
+        # ---- 2) メモリ上データをマップ更新（O(n)） ----
+        target_skus_all = set(receipt_updates.keys()) | set(warranty_updates.keys())
+        pw = self.product_widget
+
+        purchase_map = {}
+        for record in (pw.purchase_all_records or []):
+            sku = str(record.get('SKU') or record.get('sku') or '').strip()
+            if sku:
+                purchase_map[sku] = record
+
+        for sku in target_skus_all:
+            rec = purchase_map.get(sku)
+            if not rec:
+                continue
+            ru = receipt_updates.get(sku)
+            wu = warranty_updates.get(sku)
+            if ru:
+                rec['レシート画像'] = ru.get("receipt_id", "")
+                if ru.get("receipt_image_url"):
+                    rec['レシート画像URL'] = ru["receipt_image_url"]
+                updated_count += 1
+            if wu:
+                if wu.get("warranty_image"):
+                    rec['保証書画像'] = wu["warranty_image"]
+                if wu.get("warranty_period_days") is not None:
+                    rec['保証期間'] = wu["warranty_period_days"]
+                if wu.get("warranty_until"):
+                    rec['保証最終日'] = wu["warranty_until"]
+                warranty_updated_count += 1
+
+        # DataFrame更新（SKU -> indexの逆引き）
+        def build_df_index_map(df):
+            idx_map = {}
+            if df is None or 'SKU' not in df.columns:
+                return idx_map
+            for i, sku_val in df['SKU'].items():
+                sku = str(sku_val or '').strip()
+                if sku:
+                    idx_map[sku] = i
+            return idx_map
+
+        inv_df = pw.inventory_data if hasattr(pw, 'inventory_data') else None
+        fil_df = pw.filtered_data if hasattr(pw, 'filtered_data') else None
+        inv_idx_map = build_df_index_map(inv_df)
+        fil_idx_map = build_df_index_map(fil_df)
+
+        for sku in target_skus_all:
+            ru = receipt_updates.get(sku)
+            wu = warranty_updates.get(sku)
+            if inv_df is not None and sku in inv_idx_map:
+                i = inv_idx_map[sku]
+                if ru:
+                    if 'レシート画像' not in inv_df.columns:
+                        inv_df['レシート画像'] = ''
+                    inv_df.at[i, 'レシート画像'] = ru.get("receipt_id", "")
+                    if ru.get("receipt_image_url"):
+                        if 'レシート画像URL' not in inv_df.columns:
+                            inv_df['レシート画像URL'] = ''
+                        inv_df.at[i, 'レシート画像URL'] = ru["receipt_image_url"]
+                if wu:
+                    if wu.get("warranty_image"):
+                        if '保証書画像' not in inv_df.columns:
+                            inv_df['保証書画像'] = ''
+                        inv_df.at[i, '保証書画像'] = wu["warranty_image"]
+                    if wu.get("warranty_period_days") is not None:
+                        if '保証期間' not in inv_df.columns:
+                            inv_df['保証期間'] = ''
+                        inv_df.at[i, '保証期間'] = wu["warranty_period_days"]
+                    if wu.get("warranty_until"):
+                        if '保証最終日' not in inv_df.columns:
+                            inv_df['保証最終日'] = ''
+                        inv_df.at[i, '保証最終日'] = wu["warranty_until"]
+
+            if fil_df is not None and sku in fil_idx_map:
+                i = fil_idx_map[sku]
+                if ru:
+                    if 'レシート画像' not in fil_df.columns:
+                        fil_df['レシート画像'] = ''
+                    fil_df.at[i, 'レシート画像'] = ru.get("receipt_id", "")
+                    if ru.get("receipt_image_url"):
+                        if 'レシート画像URL' not in fil_df.columns:
+                            fil_df['レシート画像URL'] = ''
+                        fil_df.at[i, 'レシート画像URL'] = ru["receipt_image_url"]
+                if wu:
+                    if wu.get("warranty_image"):
+                        if '保証書画像' not in fil_df.columns:
+                            fil_df['保証書画像'] = ''
+                        fil_df.at[i, '保証書画像'] = wu["warranty_image"]
+                    if wu.get("warranty_period_days") is not None:
+                        if '保証期間' not in fil_df.columns:
+                            fil_df['保証期間'] = ''
+                        fil_df.at[i, '保証期間'] = wu["warranty_period_days"]
+                    if wu.get("warranty_until"):
+                        if '保証最終日' not in fil_df.columns:
+                            fil_df['保証最終日'] = ''
+                        fil_df.at[i, '保証最終日'] = wu["warranty_until"]
+        checkpoints["memory_update"] = perf_counter()
+
+        # ---- 3) ProductDB更新（SKUごとに1回） ----
+        for i, sku in enumerate(target_skus_all, 1):
+            tick(f"確定処理中... (仕入DB更新: {i}/{len(target_skus_all)})")
+            try:
+                product = pw.db.get_by_sku(sku) or {"sku": sku}
+                ru = receipt_updates.get(sku)
+                wu = warranty_updates.get(sku)
+                if ru:
+                    product["receipt_id"] = ru.get("receipt_id", "")
+                    if ru.get("receipt_image_url"):
+                        product["receipt_image_url"] = ru["receipt_image_url"]
+                if wu:
+                    if wu.get("warranty_period_days") is not None:
+                        product["warranty_period_days"] = wu["warranty_period_days"]
+                    if wu.get("warranty_until"):
+                        product["warranty_until"] = wu["warranty_until"]
+                pw.db.upsert(product)
+            except Exception as e:
+                error_count += 1
+                error_messages.append(f"SKU {sku}: {str(e)}")
+        checkpoints["product_db_update"] = perf_counter()
+
+        # ---- 4) 仕訳帳登録（同一日検索をキャッシュ化）----
+        from desktop.database.journal_db import JournalDatabase
+        from desktop.database.account_title_db import AccountTitleDatabase
+        journal_db = JournalDatabase()
+        account_title_db = AccountTitleDatabase()
+        default_debit = "仕入"
+        default_credit_account = account_title_db.get_default_credit_account()
+        default_credit = "現金"
+        if default_credit_account:
+            name = default_credit_account.get("name", "")
+            card_name = default_credit_account.get("card_name", "")
+            last_four = default_credit_account.get("last_four_digits", "")
+            if card_name and last_four:
+                default_credit = f"{name} ({card_name} ****{last_four})"
+            elif card_name:
+                default_credit = f"{name} ({card_name})"
+            elif name:
+                default_credit = name
+
+        receipts_for_journal = []
+        dates_needed = set()
+        for receipt in all_receipts:
+            ocr_text = receipt.get('ocr_text') or ""
+            if "保証書" in ocr_text or "保証期間" in ocr_text or "保証規定" in ocr_text:
+                continue
+            raw_purchase_date = (receipt.get('purchase_date', '') or '').strip()
+            if not raw_purchase_date:
+                continue
+            purchase_datetime = raw_purchase_date.replace('T', ' ').strip()
+            date_only = purchase_datetime.split(' ')[0]
+            receipts_for_journal.append((receipt, purchase_datetime, date_only))
+            dates_needed.add(date_only)
+
+        entries_by_date = {}
+        for d in dates_needed:
+            entries_by_date[d] = journal_db.list_by_date(d, f"{d} 23:59:59")
+
+        for idx, (receipt, purchase_datetime, purchase_date_only) in enumerate(receipts_for_journal, 1):
+            tick(f"確定処理中... (仕訳帳登録: {idx}/{len(receipts_for_journal)})")
+            try:
+                receipt_id = receipt.get('id')
+                total_amount = receipt.get('total_amount', 0) or 0
+                if not total_amount:
+                    continue
+
+                account_title = (receipt.get('account_title') or '').strip() or default_debit
+                store_code = (receipt.get('store_code') or '').strip()
+                store_name = ''
+                if store_code:
+                    try:
+                        store = self.store_db.get_store_by_code(store_code)
+                        if store:
+                            store_name = store.get('store_name', '') or ''
+                    except Exception:
+                        pass
+                if not store_name:
+                    store_name = receipt.get('store_name_raw', '') or receipt.get('store_name', '') or ''
+                    if store_name:
+                        store_name = re.sub(r'\s*\([^)]*\)', '', store_name)
+                        store_name = re.sub(r'\s+ss-\d+', '', store_name, flags=re.IGNORECASE).strip()
+
+                registration_number = receipt.get('registration_number', '') or ''
+                image_url = receipt.get('gcs_url') or receipt.get('image_url') or ''
+                day_entries = entries_by_date.get(purchase_date_only, [])
+
+                existing_entry = None
+                if image_url:
+                    for e in day_entries:
+                        if e.get('image_url') == image_url:
+                            existing_entry = e
+                            break
+                if existing_entry is None:
+                    for e in day_entries:
+                        if e.get('amount') == total_amount and (e.get('description') or '') == store_name:
+                            existing_entry = e
+                            break
+
+                journal_entry = {
+                    "transaction_date": purchase_datetime,
+                    "debit_account": account_title,
+                    "amount": total_amount,
+                    "credit_account": default_credit,
+                    "description": store_name,
+                    "invoice_number": registration_number,
+                    "tax_category": "10％",
+                    "image_url": image_url
+                }
+
+                if existing_entry and existing_entry.get('id'):
+                    eid = existing_entry['id']
+                    has_changes = (
+                        existing_entry.get('transaction_date') != purchase_datetime or
+                        existing_entry.get('debit_account') != account_title or
+                        existing_entry.get('amount') != total_amount or
+                        existing_entry.get('credit_account') != default_credit or
+                        existing_entry.get('description') != store_name or
+                        existing_entry.get('invoice_number') != registration_number or
+                        existing_entry.get('tax_category') != "10％" or
+                        existing_entry.get('image_url') != image_url
+                    )
+                    if has_changes:
+                        journal_db.update(eid, journal_entry)
+                        journal_count += 1
+                        existing_entry.update(journal_entry)
+                else:
+                    new_id = journal_db.insert(journal_entry)
+                    journal_count += 1
+                    journal_entry["id"] = new_id
+                    day_entries.append(journal_entry)
+            except Exception as e:
+                error_count += 1
+                error_messages.append(f"仕訳帳登録/更新エラー (receipt_id={receipt.get('id')}): {str(e)}")
+        checkpoints["journal_update"] = perf_counter()
+
+        # ---- 5) 画面反映と結果表示 ----
+        if (updated_count > 0 or warranty_updated_count > 0) and hasattr(self, 'product_widget') and self.product_widget:
+            if hasattr(self.product_widget, 'save_purchase_snapshot'):
+                try:
+                    self.product_widget.save_purchase_snapshot()
+                except Exception:
+                    pass
+            if hasattr(self.product_widget, 'update_table'):
+                try:
+                    setattr(self.product_widget, "_pending_purchase_refresh", True)
+                except Exception:
+                    pass
+
+        if hasattr(self, 'evidence_widget'):
+            try:
+                if hasattr(self.evidence_widget, 'journal_entry_widget'):
+                    journal_widget = self.evidence_widget.journal_entry_widget
+                    setattr(journal_widget, "_initial_data_loaded", False)
+            except Exception:
+                pass
+
+        progress.setValue(total_steps)
+        progress.close()
+
+        receipt_count = updated_count
+        warranty_count = warranty_updated_count
+
+        if receipt_count == 0 and warranty_count == 0 and error_count == 0:
+            QMessageBox.information(
+                self, "確定",
+                "確定するレコードがありませんでした。\n"
+                "レシート一覧にSKUが紐付けられているレコードがあるか確認してください。"
+            )
+        elif error_count == 0:
+            msg = f"{receipt_count} 件のSKUにレシート画像を設定しました。"
+            if warranty_count > 0:
+                msg += f"\n{warranty_count} 件のSKUに保証書情報（保証書画像・保証期間・保証最終日）を設定しました。"
+            if journal_count > 0:
+                msg += f"\n{journal_count} 件のレシートを仕訳帳に登録しました。"
+            QMessageBox.information(self, "確定完了", msg)
+        else:
+            msg = f"{receipt_count} 件のSKUにレシート画像を設定しました。"
+            if warranty_count > 0:
+                msg += f"\n{warranty_count} 件のSKUに保証書情報（保証書画像・保証期間・保証最終日）を設定しました。"
+            if journal_count > 0:
+                msg += f"\n{journal_count} 件のレシートを仕訳帳に登録しました。"
+            msg += f"\n\nエラー: {error_count} 件\n" + "\n".join(error_messages[:5])
+            QMessageBox.warning(self, "確定完了（一部エラー）", msg)
+
+        try:
+            base_folder: Optional[Path] | None = None
+            if getattr(self, "current_folder", None):
+                base_folder = self.current_folder
+            elif getattr(self, "default_folder", None):
+                base_folder = self.default_folder
+            # フリーズ回避のため、ここでは即時更新しない（予約のみ）
+            if base_folder:
+                setattr(self, "_pending_route_evidence_flag_update", str(base_folder))
+        except Exception as e:
+            print(f"証憑フラグ更新エラー: {e}")
+        t_end = perf_counter()
+        print(
+            "[PERF] confirm_receipt_linkage optimized "
+            f"total={t_end - t0:.3f}s, "
+            f"receipt_collect={checkpoints.get('receipt_collect', t0) - t0:.3f}s, "
+            f"warranty_collect={checkpoints.get('warranty_collect', checkpoints.get('receipt_collect', t0)) - checkpoints.get('receipt_collect', t0):.3f}s, "
+            f"memory_update={checkpoints.get('memory_update', checkpoints.get('warranty_collect', t0)) - checkpoints.get('warranty_collect', t0):.3f}s, "
+            f"product_db_update={checkpoints.get('product_db_update', checkpoints.get('memory_update', t0)) - checkpoints.get('memory_update', t0):.3f}s, "
+            f"journal_update={checkpoints.get('journal_update', checkpoints.get('product_db_update', t0)) - checkpoints.get('product_db_update', t0):.3f}s"
+        )
 

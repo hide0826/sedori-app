@@ -156,6 +156,8 @@ class JournalEntryWidget(QWidget):
         self.journal_db = JournalDatabase()
         # 初回データ読み込みフラグ（遅延ロード用）
         self._initial_data_loaded: bool = False
+        # 読み込み中フラグ（itemChangedの再入を防止）
+        self._is_loading_entries: bool = False
         self.setup_ui()
         # テーブルの列幅を復元（ヘッダー構造だけ先に反映）
         restore_table_header_state(self.table, "JournalEntryWidget/TableHeaderState")
@@ -254,69 +256,77 @@ class JournalEntryWidget(QWidget):
     
     def load_entries(self):
         """仕訳帳エントリを読み込んでテーブルに表示"""
-        entries = self.journal_db.list_all()
-        self.table.setRowCount(len(entries))
-        
-        for row, entry in enumerate(entries):
-            # 取引日付
-            transaction_date = entry.get("transaction_date", "")
-            date_item = QTableWidgetItem(transaction_date)
-            date_item.setData(Qt.UserRole, entry.get("id"))  # IDを保存
-            self.table.setItem(row, 0, date_item)
+        self._is_loading_entries = True
+        self.table.blockSignals(True)
+        try:
+            entries = self.journal_db.list_all()
+            self.table.setRowCount(len(entries))
             
-            # 借方勘定科目（編集可能、プルダウン）
-            debit_account = entry.get("debit_account", "")
-            debit_item = QTableWidgetItem(debit_account)
-            debit_item.setFlags(debit_item.flags() | Qt.ItemIsEditable)
-            self.table.setItem(row, 1, debit_item)
-            
-            # 金額（編集可能）
-            amount = entry.get("amount", 0)
-            amount_str = f"{amount:,}" if amount else "0"
-            amount_item = QTableWidgetItem(amount_str)
-            amount_item.setFlags(amount_item.flags() | Qt.ItemIsEditable)
-            self.table.setItem(row, 2, amount_item)
-            
-            # 貸方勘定科目（編集可能、プルダウン）
-            credit_account = entry.get("credit_account", "")
-            credit_item = QTableWidgetItem(credit_account)
-            credit_item.setFlags(credit_item.flags() | Qt.ItemIsEditable)
-            self.table.setItem(row, 3, credit_item)
-            
-            # 摘要（編集可能）
-            description = entry.get("description", "")
-            desc_item = QTableWidgetItem(description)
-            desc_item.setFlags(desc_item.flags() | Qt.ItemIsEditable)
-            self.table.setItem(row, 4, desc_item)
-            
-            # インボイス番号（編集可能）
-            invoice_number = entry.get("invoice_number", "")
-            invoice_item = QTableWidgetItem(invoice_number)
-            invoice_item.setFlags(invoice_item.flags() | Qt.ItemIsEditable)
-            self.table.setItem(row, 5, invoice_item)
-            
-            # 税区分（編集可能、プルダウン）
-            tax_category = entry.get("tax_category", "")
-            tax_item = QTableWidgetItem(tax_category)
-            tax_item.setFlags(tax_item.flags() | Qt.ItemIsEditable)
-            self.table.setItem(row, 6, tax_item)
-            
-            # 画像URL
-            image_url = entry.get("image_url", "")
-            image_url_item = QTableWidgetItem(image_url)
-            if image_url:
-                image_url_item.setToolTip(f"画像URL: {image_url}\n（ダブルクリックでブラウザ表示）")
-                # URLのスタイル設定
-                image_url_item.setForeground(Qt.white)
-                font = image_url_item.font()
-                font.setUnderline(True)
-                image_url_item.setFont(font)
-            # 画像URLは編集不可
-            image_url_item.setFlags(image_url_item.flags() & ~Qt.ItemIsEditable)
-            self.table.setItem(row, 7, image_url_item)
+            for row, entry in enumerate(entries):
+                # 取引日付
+                transaction_date = entry.get("transaction_date", "")
+                date_item = QTableWidgetItem(transaction_date)
+                date_item.setData(Qt.UserRole, entry.get("id"))  # IDを保存
+                self.table.setItem(row, 0, date_item)
+                
+                # 借方勘定科目（編集可能、プルダウン）
+                debit_account = entry.get("debit_account", "")
+                debit_item = QTableWidgetItem(debit_account)
+                debit_item.setFlags(debit_item.flags() | Qt.ItemIsEditable)
+                self.table.setItem(row, 1, debit_item)
+                
+                # 金額（編集可能）
+                amount = entry.get("amount", 0)
+                amount_str = f"{amount:,}" if amount else "0"
+                amount_item = QTableWidgetItem(amount_str)
+                amount_item.setFlags(amount_item.flags() | Qt.ItemIsEditable)
+                self.table.setItem(row, 2, amount_item)
+                
+                # 貸方勘定科目（編集可能、プルダウン）
+                credit_account = entry.get("credit_account", "")
+                credit_item = QTableWidgetItem(credit_account)
+                credit_item.setFlags(credit_item.flags() | Qt.ItemIsEditable)
+                self.table.setItem(row, 3, credit_item)
+                
+                # 摘要（編集可能）
+                description = entry.get("description", "")
+                desc_item = QTableWidgetItem(description)
+                desc_item.setFlags(desc_item.flags() | Qt.ItemIsEditable)
+                self.table.setItem(row, 4, desc_item)
+                
+                # インボイス番号（編集可能）
+                invoice_number = entry.get("invoice_number", "")
+                invoice_item = QTableWidgetItem(invoice_number)
+                invoice_item.setFlags(invoice_item.flags() | Qt.ItemIsEditable)
+                self.table.setItem(row, 5, invoice_item)
+                
+                # 税区分（編集可能、プルダウン）
+                tax_category = entry.get("tax_category", "")
+                tax_item = QTableWidgetItem(tax_category)
+                tax_item.setFlags(tax_item.flags() | Qt.ItemIsEditable)
+                self.table.setItem(row, 6, tax_item)
+                
+                # 画像URL
+                image_url = entry.get("image_url", "")
+                image_url_item = QTableWidgetItem(image_url)
+                if image_url:
+                    image_url_item.setToolTip(f"画像URL: {image_url}\n（ダブルクリックでブラウザ表示）")
+                    # URLのスタイル設定
+                    image_url_item.setForeground(Qt.white)
+                    font = image_url_item.font()
+                    font.setUnderline(True)
+                    image_url_item.setFont(font)
+                # 画像URLは編集不可
+                image_url_item.setFlags(image_url_item.flags() & ~Qt.ItemIsEditable)
+                self.table.setItem(row, 7, image_url_item)
+        finally:
+            self.table.blockSignals(False)
+            self._is_loading_entries = False
     
     def on_item_changed(self, item: QTableWidgetItem):
         """テーブルの項目が変更されたときにデータベースを更新"""
+        if self._is_loading_entries:
+            return
         row = item.row()
         col = item.column()
         

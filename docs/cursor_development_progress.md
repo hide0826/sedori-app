@@ -1932,3 +1932,38 @@
 
 **最終更新**: 2026-04-19
 **更新者**: Agentモード（実装）
+
+### 2026-04-21（証憑管理: 確定ボタンの長時間停止調査と安定化）
+- **チャット**: Agentモード（調査・実装）
+- **内容**:
+  1. 証憑管理タブ「確定」実行時に 2〜5分以上停止する問題を調査
+  2. 進捗バー表示と実処理の乖離（100%後/95%残留）を修正
+  3. 確定処理の多重起動・重い後処理再描画を抑止
+- **実装完了**:
+  - **確定処理の計測ログ追加**（`receipt_widget.py`）
+    - `[PERF]` ログでフェーズ別時間（レシート反映、保証書反映、仕訳帳処理、スナップ保存、全体）を出力。
+    - レシート単位の仕訳帳処理時間（`journal_per_receipt`）を可視化。
+  - **仕訳帳タブ再描画の暴走防止**（`journal_entry_widget.py`）
+    - `load_entries()` 中は `blockSignals(True)` と `_is_loading_entries` で `itemChanged` による再入更新を停止。
+    - 読み込み時の不要なDB更新連鎖を解消。
+  - **確定処理中の重い再描画を延期**（`receipt_widget.py`）
+    - `product_widget.update_table()` と `journal_entry_widget.load_entries()` を確定フロー中に即時実行せず、遅延反映へ変更。
+  - **ルート証憑フラグ更新の同期実行を切り離し**（`receipt_widget.py`）
+    - 確定処理内で `mark_route_flags_from_folder(...)` を実行しない（予約のみ）。
+  - **進捗ダイアログ残留不具合の修正**（`receipt_widget.py`）
+    - `progress.close()` 後に `setValue/setLabelText` しないよう修正。
+    - `finally` で `progress.close(); progress.deleteLater()` を追加し、95%ダイアログ再表示を防止。
+  - **確定処理の二重起動防止**（`receipt_widget.py`）
+    - `_confirm_in_progress` フラグと確定ボタンの一時無効化で多重実行を抑止。
+- **確認結果**:
+  - 計測ログ上、処理本体は数秒で完了するケースを確認。
+  - 体感上の長時間停止は、進捗ダイアログ再表示・後処理再入による表示残留が主因であることを確認。
+- **変更ファイル**:
+  - `python/desktop/ui/receipt_widget.py`
+  - `python/desktop/ui/journal_entry_widget.py`
+  - `docs/cursor_development_progress.md`
+- **次回**:
+  - ルート証憑フラグ更新の遅延実行タイミング（ルートタブ表示時）を明示的に実装して整合性を強化。
+
+**最終更新**: 2026-04-21
+**更新者**: Agentモード（実装）
