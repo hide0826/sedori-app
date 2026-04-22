@@ -116,22 +116,22 @@ QGroupBox::title {
 
 /* ボタン */
 QPushButton {
-    background-color: #4a4a4a;
+    background-color: #28a745;
     color: #ffffff;
-    border: 1px solid #666666;
+    border: 1px solid #218838;
     border-radius: 4px;
     padding: 6px 12px;
     font-weight: bold;
 }
 
 QPushButton:hover {
-    background-color: #5a5a5a;
-    border-color: #777777;
+    background-color: #218838;
+    border-color: #1e7e34;
 }
 
 QPushButton:pressed {
-    background-color: #3a3a3a;
-    border-color: #555555;
+    background-color: #1e7e34;
+    border-color: #1c7430;
 }
 
 QPushButton:disabled {

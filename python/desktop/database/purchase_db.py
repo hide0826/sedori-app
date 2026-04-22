@@ -104,6 +104,7 @@ class PurchaseDatabase:
             ("status_set_at", "DATETIME"),  # ステータスを設定した日時
             # 出品日（在庫DBとの連携用・視認用）
             ("listed_date", "TEXT"),
+            ("repricing_enabled", "INTEGER DEFAULT 1"),
         ]
 
         for col_name, col_def in new_columns:
@@ -178,6 +179,7 @@ class PurchaseDatabase:
             "tp3",
             "status_set_at",
             "listed_date",
+            "repricing_enabled",
         ]
         # purchase辞書に含まれるキーのみを対象とする
         

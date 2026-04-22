@@ -238,9 +238,9 @@ class MainWindow(QMainWindow):
             inventory_tabs.addTab(self.inventory_widget, "仕入データ")
             inventory_tabs.addTab(self.condition_template_widget, "コンディション説明")
             self.tab_widget.addTab(inventory_tabs, "仕入管理")
-            # 仕入管理（開発）: 同一機能だが data_dev / 別QSettings で独立インスタンス（本番DBを壊さない）
+            # 3-6-9仕入管理: 同一機能だが data_dev / 別QSettings で独立インスタンス（本番DBを壊さない）
             self.inventory_widget_dev = InventoryWidget(self.api_client, dev_mode=True)
-            self.tab_widget.addTab(self.inventory_widget_dev, "仕入管理（開発）")
+            self.tab_widget.addTab(self.inventory_widget_dev, "3-6-9仕入管理")
             return False
 
         if phase == 1:
@@ -284,7 +284,7 @@ class MainWindow(QMainWindow):
             if hasattr(self, "repricer_widget_369") and self.repricer_widget_369 is not None:
                 self.repricer_widget_369.set_product_widget(self.product_widget)
             self.inventory_widget.set_product_widget(self.product_widget)
-            # 仕入管理（開発）からDB保存したときも仕入DBタブに即反映するため参照を渡す
+            # 3-6-9仕入管理からDB保存したときも仕入DBタブに即反映するため参照を渡す
             if hasattr(self, "inventory_widget_dev") and self.inventory_widget_dev is not None:
                 self.inventory_widget_dev.set_product_widget(self.product_widget)
             self.route_visit_widget = RouteVisitLogWidget()

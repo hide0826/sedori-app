@@ -17,6 +17,7 @@ from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -243,6 +244,13 @@ class PurchaseRowEditDialog(QDialog):
             "仕入スナップショット／仕入データの見込み利益と、販売予定価格に対する利益率です。"
         )
         info_layout.addRow("見込み利益（利益率）:", profit_db_lbl)
+        self._repricing_enabled_cb = QCheckBox("価格改定の対象にする（ON）")
+        repricing_val = self.record.get("価格改定")
+        if repricing_val in (None, ""):
+            repricing_val = self.record.get("repricing_enabled")
+        is_enabled = str(repricing_val).strip().lower() not in ("0", "off", "false", "無効", "no")
+        self._repricing_enabled_cb.setChecked(is_enabled)
+        info_layout.addRow("価格改定:", self._repricing_enabled_cb)
 
         snap = self._csv_inventory_snapshot
         if snap:
@@ -585,6 +593,9 @@ class PurchaseRowEditDialog(QDialog):
         self.record["tp2"] = tp2
         self.record["TP3"] = tp3
         self.record["tp3"] = tp3
+        repricing_enabled = bool(self._repricing_enabled_cb.isChecked())
+        self.record["価格改定"] = "ON" if repricing_enabled else "OFF"
+        self.record["repricing_enabled"] = 1 if repricing_enabled else 0
         # 親が ProductWidget なら hirio.db とスナップショットにも保存
         if self._product_widget and hasattr(self._product_widget, "purchase_history_db"):
             sku = self._record_str("SKU") or self._record_str("sku")
@@ -600,6 +611,7 @@ class PurchaseRowEditDialog(QDialog):
                         "tp1": tp1,
                         "tp2": tp2,
                         "tp3": tp3,
+                        "repricing_enabled": 1 if repricing_enabled else 0,
                     })
                 except Exception as e:
                     QMessageBox.warning(self, "反映", f"DB 保存でエラー: {e}")

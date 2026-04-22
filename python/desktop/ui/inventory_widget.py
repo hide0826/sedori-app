@@ -105,6 +105,16 @@ def _to_stored_newlines(s: str) -> str:
     return str(s).replace("\r\n", "\n").replace("\n", "\\n").replace("\r", "\\n")
 
 
+def _is_repricing_enabled_value(value: Any) -> bool:
+    """価格改定のON/OFF値をboolに正規化。未設定はON扱い。"""
+    if value is None:
+        return True
+    s = str(value).strip().lower()
+    if s == "":
+        return True
+    return s not in {"0", "off", "false", "無効", "いいえ", "no"}
+
+
 class InventoryRowEditDialog(QDialog):
     """仕入データ1行を編集するダイアログ（コンディション説明は複数行・呼び出しボタン付き）"""
     
@@ -154,6 +164,7 @@ class InventoryRowEditDialog(QDialog):
         self.missing_custom1_checkbox = QCheckBox("カスタム1")
         self.missing_custom2_checkbox = QCheckBox("カスタム2")
         self.missing_custom3_checkbox = QCheckBox("カスタム3")
+        self.repricing_enabled_checkbox = QCheckBox("価格改定を有効（ON）")
         _missing_cb_style = """
                 QCheckBox {
                     background-color: #3c3c3c;
@@ -208,6 +219,9 @@ class InventoryRowEditDialog(QDialog):
                 w.setMinimumHeight(60)
                 self._widgets[col] = w
                 form.addRow(QLabel(col + ":"), w)
+            elif col == "価格改定":
+                self._widgets[col] = self.repricing_enabled_checkbox
+                form.addRow(QLabel(col + ":"), self.repricing_enabled_checkbox)
             else:
                 w = QLineEdit()
                 self._widgets[col] = w
@@ -253,6 +267,8 @@ class InventoryRowEditDialog(QDialog):
                 val = _normalize_condition_note_newlines(val)
             if isinstance(w, QPlainTextEdit):
                 w.setPlainText(val)
+            elif isinstance(w, QCheckBox):
+                w.setChecked(_is_repricing_enabled_value(val))
             else:
                 w.setText(val)
     
@@ -325,6 +341,8 @@ class InventoryRowEditDialog(QDialog):
                 continue
             if isinstance(w, QPlainTextEdit):
                 val = w.toPlainText().strip()
+            elif isinstance(w, QCheckBox):
+                val = "ON" if w.isChecked() else "OFF"
             else:
                 val = w.text().strip()
             if col == "コンディション説明":
@@ -525,7 +543,7 @@ class InventoryWidget(QWidget):
         self.antique_widget = None  # 古物台帳ウィジェットへの参照
         self.product_widget = None  # 商品DBウィジェットへの参照
         
-        # 仕入管理（開発）タブも実仕入で使うため、統合保存・DB保存は本番と同じDBを使用する
+        # 3-6-9仕入管理タブも実仕入で使うため、統合保存・DB保存は本番と同じDBを使用する
         # （dev_mode は 3-6-9 列の表示やPRO統計などUI差のみ。保存先は本番と同一）
         self.store_db = StoreDatabase()
         self.inventory_db = InventoryDatabase()
@@ -1040,7 +1058,7 @@ class InventoryWidget(QWidget):
         self.column_headers = [
             "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
             "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
-            "発送方法", "仕入先", "コンディション説明"
+            "発送方法", "仕入先", "価格改定", "コンディション説明"
         ]
         # 開発用タブでは、店舗コードの右に「3-6-9」カラムを追加
         if self.dev_mode:
@@ -1794,7 +1812,7 @@ class InventoryWidget(QWidget):
             BASE_COLUMNS_FOR_PURCHASE_DB = [
                 "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
                 "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
-                "発送方法", "仕入先", "コンディション説明"
+                "発送方法", "仕入先", "価格改定", "コンディション説明"
             ]
             if self.filtered_data is not None and len(self.filtered_data) > 0:
                 cols = [c for c in BASE_COLUMNS_FOR_PURCHASE_DB if c in self.filtered_data.columns]
@@ -3090,6 +3108,8 @@ class InventoryWidget(QWidget):
                     else:
                         value = ""
                     value = str(value) if pd.notna(value) else ""
+                    if column == "価格改定":
+                        value = "OFF" if _is_repricing_enabled_value(value) is False else "ON"
                     
                     # SKU列の特別処理（空の場合は「未実装」と表示・フル値をUserRoleで保持）
                     if column == "SKU":
@@ -3378,6 +3398,8 @@ class InventoryWidget(QWidget):
                     value = str(full)
             if column == "コンディション説明":
                 value = _normalize_condition_note_newlines(value)
+            if column == "価格改定" and not str(value).strip():
+                value = "ON"
             row_data[column] = value
         return row_data
     

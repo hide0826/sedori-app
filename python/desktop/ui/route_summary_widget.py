@@ -2730,7 +2730,7 @@ class RouteSummaryWidget(QWidget):
             return int(round(val))
 
         inventory_df = None
-        # 仕入管理（開発）タブにデータがあれば優先的に使用し、無ければ本番タブのデータを使う
+        # 3-6-9仕入管理タブにデータがあれば優先的に使用し、無ければ本番タブのデータを使う
         candidate_widgets = []
         if getattr(self, "inventory_widget_dev", None) is not None:
             candidate_widgets.append(self.inventory_widget_dev)

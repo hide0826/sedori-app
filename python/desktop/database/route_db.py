@@ -69,7 +69,7 @@ class RouteDatabase:
                 total_item_count INTEGER,
                 purchase_success_rate REAL,
                 avg_purchase_price REAL,
-                -- 仕入健全度・実効利益関連（PRO版、仕入管理（開発）タブ由来）
+                -- 仕入健全度・実効利益関連（PRO版、3-6-9仕入管理タブ由来）
                 health_score_count TEXT,      -- 仕入健全度(件数3-6-9) 表示用文字列
                 health_score_amount TEXT,     -- 仕入健全度(金額3-6-9) 表示用文字列
                 effective_profit REAL,        -- 実効見込み利益

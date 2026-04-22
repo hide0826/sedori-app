@@ -814,18 +814,6 @@ class ReceiptWidget(QWidget):
         self.folder_btn.clicked.connect(self.select_folder_for_batch)
         action_layout.addWidget(self.folder_btn)
         
-        # デフォルトフォルダ設定ボタン
-        self.default_folder_btn = QPushButton("デフォルトフォルダ設定")
-        self.default_folder_btn.setToolTip("処理の起点となるデフォルトフォルダを設定します")
-        self.default_folder_btn.clicked.connect(self.set_default_folder)
-        action_layout.addWidget(self.default_folder_btn)
-        
-        self.folder_label = QLabel("未選択")
-        self.folder_label.setStyleSheet("color: #bbb;")
-        self.folder_label.setWordWrap(False)  # 折り返しを無効化
-        self.folder_label.setMaximumWidth(200)  # 最大幅を拡張
-        action_layout.addWidget(self.folder_label)
-        
         self.process_btn = QPushButton("OCR処理")
         self.process_btn.clicked.connect(self.process_selected_file)
         action_layout.addWidget(self.process_btn)
@@ -849,7 +837,7 @@ class ReceiptWidget(QWidget):
         self.confirm_btn = QPushButton("確定")
         self.confirm_btn.setStyleSheet("""
             QPushButton {
-                background-color: #007bff;
+                background-color: #28a745;
                 color: white;
                 border: none;
                 padding: 8px 16px;
@@ -857,7 +845,7 @@ class ReceiptWidget(QWidget):
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #0056b3;
+                background-color: #218838;
             }
         """)
         self.confirm_btn.clicked.connect(self.confirm_receipt_linkage)
@@ -886,6 +874,12 @@ class ReceiptWidget(QWidget):
         self.gcs_upload_btn = QPushButton("GCSアップロード")
         self.gcs_upload_btn.clicked.connect(self.show_gcs_upload_dialog)
         action_layout.addWidget(self.gcs_upload_btn)
+
+        # デフォルトフォルダ設定ボタン（右端寄せ）
+        self.default_folder_btn = QPushButton("デフォルトフォルダ設定")
+        self.default_folder_btn.setToolTip("処理の起点となるデフォルトフォルダを設定します")
+        self.default_folder_btn.clicked.connect(self.set_default_folder)
+        action_layout.addWidget(self.default_folder_btn)
         
         action_layout.addStretch()
         
@@ -1160,6 +1154,8 @@ class ReceiptWidget(QWidget):
     
     def update_folder_label(self):
         """フォルダラベルを更新"""
+        if not hasattr(self, "folder_label"):
+            return
         if self.current_folder and self.current_folder.exists():
             # 画像ファイル数をカウント
             image_paths = []
@@ -1235,7 +1231,8 @@ class ReceiptWidget(QWidget):
         """OCRキューから次の1枚を取り出して処理"""
         if not self.ocr_queue:
             self.batch_running = False
-            self.folder_label.setText(f"{str(self.current_folder)} - 一括OCR完了")
+            if hasattr(self, "folder_label"):
+                self.folder_label.setText(f"{str(self.current_folder)} - 一括OCR完了")
             QMessageBox.information(self, "一括OCR完了", "選択されたフォルダ内のすべての画像の処理が完了しました。")
             return
         next_path = self.ocr_queue.pop(0)
@@ -1244,7 +1241,8 @@ class ReceiptWidget(QWidget):
         # 現在処理中の画像を含めて計算（処理済み + 1）
         current_processed = self.batch_processed_count + 1
         progress_percent = int((current_processed / self.batch_total_count) * 100) if self.batch_total_count > 0 else 0
-        self.folder_label.setText(f"{str(self.current_folder)} - 処理中: {Path(next_path).name} （進捗: {progress_percent}% - {current_processed}/{self.batch_total_count}件、残り {remaining} 件）")
+        if hasattr(self, "folder_label"):
+            self.folder_label.setText(f"{str(self.current_folder)} - 処理中: {Path(next_path).name} （進捗: {progress_percent}% - {current_processed}/{self.batch_total_count}件、残り {remaining} 件）")
         self.process_image(next_path)
     
     def process_image(self, image_path: str):
@@ -7325,7 +7323,7 @@ class ReceiptWidget(QWidget):
             save_btn = QPushButton("変更を保存")
             save_btn.setStyleSheet("""
                 QPushButton {
-                    background-color: #007bff;
+                    background-color: #28a745;
                     color: white;
                     border: none;
                     padding: 8px 16px;
@@ -7333,7 +7331,7 @@ class ReceiptWidget(QWidget):
                     font-weight: bold;
                 }
                 QPushButton:hover {
-                    background-color: #0056b3;
+                    background-color: #218838;
                 }
             """)
             

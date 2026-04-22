@@ -173,7 +173,7 @@ class WarrantyWidget(QWidget):
         self.confirm_btn.setEnabled(False)
         self.confirm_btn.setStyleSheet("""
             QPushButton {
-                background-color: #007bff;
+                background-color: #28a745;
                 color: white;
                 border: none;
                 padding: 8px 16px;
@@ -181,7 +181,7 @@ class WarrantyWidget(QWidget):
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #0056b3;
+                background-color: #218838;
             }
         """)
         btn_layout.addWidget(self.confirm_btn)

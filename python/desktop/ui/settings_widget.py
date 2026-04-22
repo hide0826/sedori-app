@@ -182,11 +182,11 @@ class SettingsWidget(QWidget):
         advanced_widget = QWidget()
         layout = QVBoxLayout(advanced_widget)
         
-        # PRO版
-        pro_group = QGroupBox("PRO版")
+        # 3-6-9版
+        pro_group = QGroupBox("3-6-9版")
         pro_layout = QGridLayout(pro_group)
-        self.pro_enabled_cb = QCheckBox("PRO版を有効にする")
-        self.pro_enabled_cb.setToolTip("有効にすると、PRO版機能が利用できます。今後の機能追加はPRO版を前提に進めます。")
+        self.pro_enabled_cb = QCheckBox("3-6-9版を有効にする")
+        self.pro_enabled_cb.setToolTip("有効にすると、3-6-9版機能が利用できます。今後の機能追加は3-6-9版を前提に進めます。")
         # チェック変更時に即QSettingsへ書き込み（他タブの3-6-9などがすぐ反映される）
         self.pro_enabled_cb.toggled.connect(self._on_pro_toggled)
         pro_layout.addWidget(self.pro_enabled_cb, 0, 0, 1, 2)
@@ -604,7 +604,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.save_btn.clicked.connect(self.save_settings)
         self.save_btn.setStyleSheet("""
             QPushButton {
-                background-color: #0078d4;
+                background-color: #28a745;
                 color: white;
                 border: none;
                 padding: 8px 16px;
@@ -612,7 +612,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #106ebe;
+                background-color: #218838;
             }
         """)
         button_layout.addWidget(self.save_btn)
@@ -631,7 +631,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         parent_layout.addLayout(button_layout)
 
     def _on_pro_toggled(self, checked: bool):
-        """PRO版チェック変更時に即QSettingsへ保存（保存ボタンなしで他タブに反映）"""
+        """3-6-9版チェック変更時に即QSettingsへ保存（保存ボタンなしで他タブに反映）"""
         self.settings.setValue("pro/enabled", checked)
 
     def browse_directory(self, line_edit):
@@ -798,7 +798,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.keepa_api_key_edit.setText(self.settings.value("keepa/api_key", ""))
         # Amazon 自店セラーID
         self.amazon_seller_id_edit.setText(self.settings.value("amazon/seller_id", ""))
-        # PRO版（開発段階ではデフォルトON）
+        # 3-6-9版（開発段階ではデフォルトON）
         self.pro_enabled_cb.setChecked(self.settings.value("pro/enabled", True, type=bool))
         gemini_model = self.settings.value("ocr/gemini_model", "gemini-flash-latest")
         if gemini_model not in [self.gemini_model_combo.itemText(i) for i in range(self.gemini_model_combo.count())]:
@@ -845,7 +845,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             self.settings.setValue("keepa/api_key", self.keepa_api_key_edit.text())
             # Amazon 自店セラーID
             self.settings.setValue("amazon/seller_id", self.amazon_seller_id_edit.text().strip())
-            # PRO版
+            # 3-6-9版
             self.settings.setValue("pro/enabled", self.pro_enabled_cb.isChecked())
             
             # 設定変更シグナルを発火

@@ -255,7 +255,7 @@ class DataAcquisitionWidget(QWidget):
 
         # 実行ボタン
         run_btn = QPushButton("販売DBに取り込む")
-        run_btn.setStyleSheet("background-color: #007bff; color: white; font-weight: bold;")
+        run_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
         run_btn.clicked.connect(self._run_transaction_import)
         tab_layout.addWidget(run_btn)
 

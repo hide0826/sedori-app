@@ -1967,3 +1967,56 @@
 
 **最終更新**: 2026-04-21
 **更新者**: Agentモード（実装）
+
+### 2026-04-21（UI文言統一・ボタン緑化・価格改定ON/OFFフラグ実装）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. タブ名・設定文言の「PRO版/開発」表記を 3-6-9 運用向けに整理
+  2. 主要ボタンの配色を仕入管理タブ基準の緑系へ統一
+  3. 仕入単位の「価格改定ON/OFF」フラグを追加し、価格改定処理で OFF を除外
+- **実装完了**:
+  - **UI文言の統一**
+    - `main_window.py`: タブ名を `仕入管理（開発）` → `3-6-9仕入管理` に変更。
+    - `settings_widget.py`: 詳細設定タブの `PRO版` 表示文言を `3-6-9版` へ変更（表示名のみ変更、既存設定キー互換は維持）。
+    - 関連コメントの旧表記（仕入管理（開発））を 3-6-9 へ追随。
+  - **主要ボタンの緑統一**
+    - `styles.qss` の `QPushButton` デフォルト配色を緑系へ変更（hover/pressed 含む）。
+    - 個別に青指定していた主要ボタン（確定/保存/実行など）を緑へ追随：
+      - `receipt_widget.py`, `warranty_widget.py`, `repricer_widget.py`, `repricer_settings_widget.py`, `settings_widget.py`, `antique_widget.py`, `store_master_widget.py`, `data_acquisition_widget.py`
+  - **価格改定ON/OFFフラグ（仕入単位）**
+    - `purchase_db.py`:
+      - `purchases` に `repricing_enabled INTEGER DEFAULT 1` をマイグレーション追加。
+      - `upsert` 対象フィールドに `repricing_enabled` を追加。
+    - `inventory_widget.py`:
+      - 仕入管理/3-6-9仕入管理の列に `価格改定` を追加（デフォルト ON）。
+      - 行編集ダイアログに `価格改定` チェックを追加（3-6-9 と 欠品・詳細 の間、デフォルト ON）。
+      - DB保存対象列にも `価格改定` を追加。
+    - `product_widget.py`:
+      - 商品DB > 仕入DB に `価格改定` 列を追加し、右端固定で表示（ON/OFF）。
+      - 仕入DB読み込み時に `purchases.repricing_enabled` を反映。
+    - `purchase_row_edit_dialog.py`:
+      - 商品情報エリア「見込み利益（利益率）」の下に `価格改定` チェックを追加。
+      - 反映時に `repricing_enabled` を仕入DBへ保存。
+    - `repricer_weekly.py`:
+      - 標準/3-6-9 の両改定処理で、`価格改定=OFF`（CSV列または仕入DBフラグ）を改定除外として処理。
+      - 除外理由 `価格改定OFF（仕入DB設定）` をログ出力。
+- **変更ファイル**:
+  - `python/desktop/ui/main_window.py`
+  - `python/desktop/ui/settings_widget.py`
+  - `python/desktop/ui/styles.qss`
+  - `python/desktop/ui/receipt_widget.py`
+  - `python/desktop/ui/warranty_widget.py`
+  - `python/desktop/ui/repricer_widget.py`
+  - `python/desktop/ui/repricer_settings_widget.py`
+  - `python/desktop/ui/antique_widget.py`
+  - `python/desktop/ui/store_master_widget.py`
+  - `python/desktop/ui/data_acquisition_widget.py`
+  - `python/desktop/database/purchase_db.py`
+  - `python/desktop/ui/inventory_widget.py`
+  - `python/desktop/ui/product_widget.py`
+  - `python/desktop/ui/purchase_row_edit_dialog.py`
+  - `python/services/repricer_weekly.py`
+  - `docs/cursor_development_progress.md`
+- **次回**:
+  - 仕入DBの `価格改定` 列をセルクリックで直接ON/OFF切替できるUI（チェックボックス表示）を必要に応じて追加。
+  - 価格改定除外ログに `repricing_enabled` の判定元（CSV列/DB）を出し分ける運用改善を検討。

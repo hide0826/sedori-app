@@ -1052,14 +1052,14 @@ class StoreListWidget(QWidget):
         self.call_route_btn.clicked.connect(self.on_call_route_clicked)
         self.call_route_btn.setStyleSheet("""
             QPushButton {
-                background-color: #007bff;
+                background-color: #28a745;
                 color: white;
                 padding: 8px 16px;
                 border-radius: 4px;
                 min-width: 120px;
             }
             QPushButton:hover {
-                background-color: #0056b3;
+                background-color: #218838;
             }
         """)
         route_layout.addWidget(self.call_route_btn)

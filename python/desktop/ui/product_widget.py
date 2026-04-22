@@ -431,6 +431,8 @@ class ProductWidget(QWidget):
             "画像1", "画像2", "画像3", "画像4", "画像5", "画像6",
             # 画像URL列
             "画像URL1", "画像URL2", "画像URL3", "画像URL4", "画像URL5", "画像URL6",
+            # 価格改定ON/OFF（右端）
+            "価格改定",
         ]
         
         # コンディション説明の位置を探して、その後にカラムを挿入
@@ -689,7 +691,7 @@ class ProductWidget(QWidget):
         # （レシート画像や画像URLをダブルクリックしたときに画像/URLを開く）
         self.purchase_table.cellDoubleClicked.connect(self.on_purchase_table_cell_clicked)
         self.purchase_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        # SKU・商品名など長いテキストを省略表示（...）にしない（仕入管理（開発）保存時などでフル表示）
+        # SKU・商品名など長いテキストを省略表示（...）にしない（3-6-9仕入管理保存時などでフル表示）
         self.purchase_table.setTextElideMode(Qt.ElideNone)
         
         layout.addWidget(self.purchase_table)
@@ -2106,6 +2108,8 @@ class ProductWidget(QWidget):
                         if listed_date:
                             row["出品日"] = listed_date
                             row["listed_date"] = listed_date
+                        repricing_enabled = purchase_info.get("repricing_enabled", 1)
+                        row["価格改定"] = "OFF" if str(repricing_enabled).strip().lower() in ("0", "off", "false", "no") else "ON"
                 except Exception as e:
                     print(f"仕入DB情報取得エラー(SKU={sku}): {e}")
 
@@ -2153,6 +2157,8 @@ class ProductWidget(QWidget):
                 if upper_key not in seen:
                     seen.add(upper_key)
                     columns.append(key)
+        if "価格改定" in columns:
+            columns = [c for c in columns if c != "価格改定"] + ["価格改定"]
         self.purchase_columns = columns
         # _row_id は下のループ内で欠けている行に採番する。採番前にマップを作るとキーが欠落し、
         # 編集時に row_map ミス→SKU先頭一致で別商品が開く不具合になるため、ここでは空にしてループ内で登録する。
@@ -2335,6 +2341,11 @@ class ProductWidget(QWidget):
                     else:
                         item = QTableWidgetItem("")
                         item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                elif header == "価格改定":
+                    flag = str(value).strip().lower() if value is not None else ""
+                    text = "OFF" if flag in ("0", "off", "false", "無効", "no") else "ON"
+                    item = QTableWidgetItem(text)
+                    item.setTextAlignment(Qt.AlignCenter)
                 elif header == "想定利益率" or header == "想定ROI":
                     # 想定利益率・想定ROI列の処理：空欄の場合は再計算
                     value_str = str(value) if value else ""

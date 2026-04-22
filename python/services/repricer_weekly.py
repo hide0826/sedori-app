@@ -409,6 +409,61 @@ def _load_tp_map_from_purchase_db(sku_list: List[str]) -> Dict[str, Dict[str, fl
     return result
 
 
+def _is_repricing_off(value: Any) -> bool:
+    """価格改定ON/OFF表現を判定。True=OFF（改定除外）。"""
+    if value is None:
+        return False
+    s = str(value).strip().lower()
+    if s == "":
+        return False
+    return s in {"0", "off", "false", "無効", "いいえ", "no"}
+
+
+def _load_repricing_enabled_map_from_purchase_db(sku_list: List[str]) -> Dict[str, bool]:
+    """仕入DBからSKU単位の価格改定フラグ（True=ON）を読み込む。"""
+    result: Dict[str, bool] = {}
+    if not sku_list:
+        return result
+
+    db_path = _resolve_purchase_db_path()
+    if not db_path.exists():
+        return result
+
+    unique_skus = []
+    seen = set()
+    for sku in sku_list:
+        s = str(sku or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        unique_skus.append(s)
+    if not unique_skus:
+        return result
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        chunk_size = 900
+        for i in range(0, len(unique_skus), chunk_size):
+            chunk = unique_skus[i:i + chunk_size]
+            placeholders = ",".join(["?"] * len(chunk))
+            cur.execute(
+                f"SELECT sku, repricing_enabled FROM purchases WHERE sku IN ({placeholders})",
+                tuple(chunk),
+            )
+            for row in cur.fetchall():
+                sku = str(row["sku"] or "").strip()
+                if not sku:
+                    continue
+                result[sku] = not _is_repricing_off(row["repricing_enabled"])
+        conn.close()
+    except Exception as e:
+        print(f"[WARNING REPRICE FLAG] 仕入DBの価格改定フラグ読込に失敗: {e}")
+
+    return result
+
+
 def _get_profile_rule_for_days(days_since_listed: int, profile_rules: List[Dict[str, Any]]) -> Tuple[int, Dict[str, Any]]:
     """profile_rules(リスト)から経過日数に対応するルールを返す。"""
     if not isinstance(profile_rules, list) or not profile_rules:
@@ -461,6 +516,7 @@ def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[s
             _sku = _sku[2:-1]
         sku_candidates.append(str(_sku or "").strip())
     tp_map_by_sku = _load_tp_map_from_purchase_db(sku_candidates)
+    repricing_enabled_map_by_sku = _load_repricing_enabled_map_from_purchase_db(sku_candidates)
 
     for _, row in df.iterrows():
         sku = row.get("SKU", "")
@@ -471,6 +527,21 @@ def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[s
         price_trace = row.get("priceTrace", 0)
         asin = row.get("ASIN", "")
         title = row.get("title", "")
+        row_repricing_off = _is_repricing_off(row.get("価格改定"))
+        db_repricing_enabled = repricing_enabled_map_by_sku.get(str(sku).strip(), True)
+        if row_repricing_off or not db_repricing_enabled:
+            log_data.append({
+                "sku": sku, "asin": asin, "title": title, "days": -1, "action": "除外",
+                "reason": "価格改定OFF（仕入DB設定）", "price": price,
+                "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace,
+                "priceTraceChange": 0, "priceTraceChangeDisplay": "無し",
+                "csv_profit": _csv_profit_from_inventory_row(row),
+                "tp_floor": None,
+                "is_tp_floor_or_below": False,
+                "tp_reach_status": "",
+            })
+            excluded_inventory_data.append(row.to_dict())
+            continue
 
         if sku in excluded_skus:
             log_data.append({
@@ -717,6 +788,13 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime, mode: str = "standa
     updated_inventory_data = []
     excluded_inventory_data = []
     excluded_skus = set(config.get("excluded_skus", []))
+    sku_candidates = []
+    for _, _row in df.iterrows():
+        _sku = _row.get("SKU", "")
+        if isinstance(_sku, str) and _sku.startswith('="') and _sku.endswith('"'):
+            _sku = _sku[2:-1]
+        sku_candidates.append(str(_sku or "").strip())
+    repricing_enabled_map_by_sku = _load_repricing_enabled_map_from_purchase_db(sku_candidates)
 
     rules = config["reprice_rules"]
 
@@ -795,6 +873,18 @@ def apply_repricing_rules(df: pd.DataFrame, today: datetime, mode: str = "standa
         # ASINとTitleを取得
         asin = row.get("ASIN", "")
         title = row.get("title", "")
+        row_repricing_off = _is_repricing_off(row.get("価格改定"))
+        db_repricing_enabled = repricing_enabled_map_by_sku.get(str(sku).strip(), True)
+        if row_repricing_off or not db_repricing_enabled:
+            log_data.append({
+                "sku": sku, "asin": asin, "title": title, "days": -1, "action": "除外",
+                "reason": "価格改定OFF（仕入DB設定）", "price": price,
+                "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace,
+                "priceTraceChange": 0,
+                "priceTraceChangeDisplay": "無し"
+            })
+            excluded_inventory_data.append(row.to_dict())
+            continue
         
         # priceTraceChangeの計算と表示文字列の決定
         # priceTraceアクションの場合:

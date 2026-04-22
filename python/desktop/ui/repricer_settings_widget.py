@@ -413,7 +413,7 @@ class RepricerSettingsWidget(QWidget):
         self.save_btn.clicked.connect(self.save_config)
         self.save_btn.setStyleSheet("""
             QPushButton {
-                background-color: #0078d4;
+                background-color: #28a745;
                 color: white;
                 border: none;
                 padding: 8px 16px;
@@ -421,7 +421,7 @@ class RepricerSettingsWidget(QWidget):
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #106ebe;
+                background-color: #218838;
             }
         """)
         button_layout.addWidget(self.save_btn)

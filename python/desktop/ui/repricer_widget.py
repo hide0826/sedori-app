@@ -482,7 +482,7 @@ class RepricerWidget(QWidget):
         self.execute_btn.setMaximumHeight(35)  # 高さを制限
         self.execute_btn.setStyleSheet("""
             QPushButton {
-                background-color: #0078d4;
+                background-color: #28a745;
                 color: white;
                 border: none;
                 padding: 8px 16px;
@@ -490,7 +490,7 @@ class RepricerWidget(QWidget):
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #106ebe;
+                background-color: #218838;
             }
             QPushButton:disabled {
                 background-color: #cccccc;
@@ -911,7 +911,7 @@ class RepricerWidget(QWidget):
         # アクティブスタイル（選択中のボタン）
         active_style = (
             "QPushButton {"
-            "  background-color: #0078d4;"
+            "  background-color: #28a745;"
             "  color: white;"
             "  font-weight: bold;"
             "}"
@@ -954,7 +954,7 @@ class RepricerWidget(QWidget):
         base_style = ""
         active_style = (
             "QPushButton {"
-            "  background-color: #0078d4;"
+            "  background-color: #28a745;"
             "  color: white;"
             "  font-weight: bold;"
             "}"

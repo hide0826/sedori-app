@@ -1502,7 +1502,7 @@ class AntiqueWidget(QWidget):
         self.export_csv_btn.setEnabled(False)
         self.export_csv_btn.setStyleSheet("""
             QPushButton {
-                background-color: #007bff;
+                background-color: #28a745;
                 color: white;
                 border: none;
                 padding: 8px 16px;
@@ -1510,7 +1510,7 @@ class AntiqueWidget(QWidget):
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #0056b3;
+                background-color: #218838;
             }
         """)
         action_layout.addWidget(self.export_csv_btn)
