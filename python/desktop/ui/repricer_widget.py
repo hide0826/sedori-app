@@ -108,6 +108,92 @@ class RepricerWidget(QWidget):
         
         # UIの初期化
         self.setup_ui()
+
+    @staticmethod
+    def _normalize_sku_text(raw_value: Any) -> str:
+        """CSVセル値からSKU文字列を安全に正規化する。"""
+        if raw_value is None:
+            return ""
+        text = str(raw_value).strip()
+        if not text or text.lower() in ("nan", "none"):
+            return ""
+        # Excel由来の ="SKU" を通常文字列に戻す
+        if text.startswith('="') and text.endswith('"'):
+            text = text[2:-1].strip()
+        return text
+
+    def _extract_skus_for_status_sync(self, df: pd.DataFrame) -> list[str]:
+        """価格改定CSVからSKU一覧（重複除去）を抽出する。"""
+        if df is None or df.empty:
+            return []
+
+        def _norm_col(col_name: Any) -> str:
+            return str(col_name).strip().lower().replace(" ", "").replace("_", "").replace("-", "")
+
+        sku_col_candidates = {
+            "sku", "sellersku", "merchantsku", "出品者sku", "出品sku", "商品sku", "商品管理番号"
+        }
+        sku_col = None
+        for col in df.columns:
+            if _norm_col(col) in sku_col_candidates:
+                sku_col = col
+                break
+        if sku_col is None:
+            return []
+
+        seen = set()
+        unique_skus: list[str] = []
+        for raw_sku in df[sku_col].tolist():
+            sku = self._normalize_sku_text(raw_sku)
+            if not sku or sku in seen:
+                continue
+            seen.add(sku)
+            unique_skus.append(sku)
+        return unique_skus
+
+    def _sync_purchase_status_to_selling_from_csv(self, csv_path: str) -> tuple[int, int, int]:
+        """
+        CSV内SKUと仕入DBを照合し、statusが未設定/readyの行だけsellingへ更新する。
+
+        Returns:
+            (updated_count, matched_count, csv_sku_count)
+        """
+        try:
+            from utils.csv_io import csv_io
+            try:
+                from database.purchase_db import PurchaseDatabase
+            except Exception:
+                from desktop.database.purchase_db import PurchaseDatabase  # type: ignore
+
+            df = csv_io.read_csv(csv_path)
+            skus = self._extract_skus_for_status_sync(df)
+            if not skus:
+                return (0, 0, 0)
+
+            purchase_db = PurchaseDatabase()
+            updated_count = 0
+            matched_count = 0
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            for sku in skus:
+                purchase = purchase_db.get_by_sku(sku)
+                if not purchase:
+                    continue
+                matched_count += 1
+                current_status = str(purchase.get("status") or "").strip().lower()
+                if not current_status or current_status == "ready":
+                    purchase_db.upsert({
+                        "sku": sku,
+                        "status": "selling",
+                        "status_set_at": now_str,
+                    })
+                    updated_count += 1
+
+            return (updated_count, matched_count, len(skus))
+        except Exception as e:
+            # 価格改定フローを止めないため、同期失敗はログのみ
+            print(f"[RepricerWidget] ステータス同期エラー: {e}")
+            return (0, 0, 0)
         
     def setup_ui(self):
         """UIの設定"""
@@ -550,6 +636,29 @@ class RepricerWidget(QWidget):
                     # 選択したファイルのディレクトリを保存（次回同じフォルダから開く）
                     selected_dir = str(Path(file_path).parent)
                     self.settings.setValue("directories/csv", selected_dir)
+
+                    # 在庫CSVのSKUが仕入DBにある場合、ready/未設定のみ販売中へ同期
+                    updated, matched, csv_sku_count = self._sync_purchase_status_to_selling_from_csv(file_path)
+                    if csv_sku_count > 0:
+                        print(
+                            f"[RepricerWidget] ステータス同期: CSV SKU={csv_sku_count}, "
+                            f"DB一致={matched}, 販売中へ更新={updated}"
+                        )
+                        QMessageBox.information(
+                            self,
+                            "ステータス同期結果",
+                            "在庫リスト読み込み時のステータス同期が完了しました。\n\n"
+                            f"CSV内SKU数: {csv_sku_count} 件\n"
+                            f"仕入DB一致: {matched} 件\n"
+                            f"販売中へ更新: {updated} 件\n\n"
+                            "※ 更新対象はステータスが未設定/出品可能(ready)のSKUのみです。"
+                        )
+                    else:
+                        QMessageBox.information(
+                            self,
+                            "ステータス同期結果",
+                            "ステータス同期は実行しましたが、CSV内にSKU列または有効なSKUが見つかりませんでした。"
+                        )
                     
                     # ファイル選択完了後、自動的にCSVプレビューを表示
                     QTimer.singleShot(100, self.show_csv_preview)

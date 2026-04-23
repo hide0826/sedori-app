@@ -15,14 +15,14 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 import copy
 
-from PySide6.QtCore import Qt, QMimeData, QUrl
+from PySide6.QtCore import Qt, QMimeData, QUrl, QSettings
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QGroupBox, QFormLayout, QLineEdit, QDialog, QDialogButtonBox,
     QMessageBox, QLabel, QTabWidget, QHeaderView, QFileDialog, QMenu, QApplication,
     QAbstractItemView, QComboBox, QProgressDialog,
 )
-from PySide6.QtGui import QDrag, QPixmap, QDesktopServices, QCursor
+from PySide6.QtGui import QDrag, QPixmap, QDesktopServices, QCursor, QColor
 
 from desktop.utils.ui_utils import (
     save_table_header_state, restore_table_header_state,
@@ -329,6 +329,7 @@ class ProductWidget(QWidget):
     def __init__(self, parent=None, inventory_widget=None, api_client=None):
         super().__init__(parent)
         self.api_client = api_client
+        self.settings = QSettings("HIRIO", "DesktopApp")
         # DBハンドルの初期化（軽量処理）
         self.db = ProductDatabase()
         self.warranty_db = WarrantyDatabase()
@@ -703,6 +704,10 @@ class ProductWidget(QWidget):
         layout.setSpacing(10)
         
         controls_layout = QHBoxLayout()
+        self.import_sales_csv_button = QPushButton("CSV取込")
+        self.import_sales_csv_button.clicked.connect(self.import_sales_csv)
+        controls_layout.addWidget(self.import_sales_csv_button)
+
         self.reload_sales_button = QPushButton("再読み込み")
         self.reload_sales_button.clicked.connect(self.load_sales_data)
         controls_layout.addWidget(self.reload_sales_button)
@@ -711,9 +716,270 @@ class ProductWidget(QWidget):
         layout.addLayout(controls_layout)
         
         self.sales_table = QTableWidget()
-        self.sales_table.setColumnCount(7)
-        self.sales_table.setHorizontalHeaderLabels(["販売日", "SKU", "商品名", "販売価格", "個数", "手数料", "利益"])
+        self.sales_table.setColumnCount(8)
+        self.sales_table.setHorizontalHeaderLabels(["販売日", "SKU", "商品名", "販売価格", "個数", "手数料", "利益", "返金総額"])
+        # 右側の数値列で罫線が見えづらくならないよう明示設定
+        self.sales_table.setShowGrid(True)
+        self.sales_table.setGridStyle(Qt.SolidLine)
         layout.addWidget(self.sales_table)
+
+    @staticmethod
+    def _to_int_amount(value: Any, default: int = 0) -> int:
+        """CSVの金額文字列を安全に整数化する。"""
+        if value is None:
+            return default
+        text = str(value).strip()
+        if not text or text.lower() in ("nan", "none"):
+            return default
+        text = text.replace(",", "")
+        try:
+            return int(round(float(text)))
+        except Exception:
+            return default
+
+    @staticmethod
+    def _to_int_count(value: Any, default: int = 1) -> int:
+        """CSVの数量文字列を安全に整数化する。"""
+        n = ProductWidget._to_int_amount(value, default=default)
+        return n if n > 0 else default
+
+    @staticmethod
+    def _normalize_text(value: Any) -> str:
+        if value is None:
+            return ""
+        text = str(value).strip()
+        if text.lower() in ("nan", "none"):
+            return ""
+        return text
+
+    def _build_sale_dedupe_key(self, sale: Dict[str, Any]) -> tuple:
+        """重複取込判定用キー。"""
+        order_id = self._normalize_text(sale.get("order_id"))
+        sku = self._normalize_text(sale.get("sku"))
+        if order_id and sku:
+            return ("order_sku", order_id, sku)
+        return (
+            "fallback",
+            sku,
+            self._normalize_text(sale.get("sale_date")),
+            self._to_int_amount(sale.get("sale_price"), default=0),
+        )
+
+    def _sync_purchase_status_from_sales(self) -> Dict[str, int]:
+        """
+        仕入DBと販売DBの数量を突き合わせてステータスを更新する。
+
+        - 販売数量 >= 仕入数量: sold（販売済み）
+        - 0 < 販売数量 < 仕入数量: partially_sold（一部販売済み）
+        """
+        summary = {
+            "updated_sold": 0,
+            "updated_partial": 0,
+            "unchanged": 0,
+            "target_skus": 0,
+        }
+        try:
+            sales = self.sales_db.list_all()
+        except Exception:
+            return summary
+
+        sold_qty_by_sku: Dict[str, int] = {}
+        for sale in sales:
+            sku = self._normalize_text(sale.get("sku"))
+            if not sku:
+                continue
+            # Pending等は在庫減算に含めない（出荷済みのみを販売済みとして扱う）
+            tx = self._normalize_text(sale.get("transaction_method")).lower()
+            if tx and tx not in ("shipped", "shipped "):
+                continue
+            sold_qty_by_sku[sku] = sold_qty_by_sku.get(sku, 0) + self._to_int_count(sale.get("quantity"), default=1)
+
+        summary["target_skus"] = len(sold_qty_by_sku)
+        if not sold_qty_by_sku:
+            return summary
+
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for sku, sold_qty in sold_qty_by_sku.items():
+            purchase = self.purchase_history_db.get_by_sku(sku)
+            if not purchase:
+                continue
+
+            purchase_qty = self._to_int_count(purchase.get("quantity"), default=1)
+            current_status = self._normalize_text(purchase.get("status")).lower() or "ready"
+            next_status = None
+            reason = ""
+
+            if sold_qty >= purchase_qty:
+                next_status = "sold"
+                reason = f"販売CSV連動: 販売数 {sold_qty} / 仕入数 {purchase_qty}"
+            elif sold_qty > 0:
+                next_status = "partially_sold"
+                reason = f"販売CSV連動: 販売数 {sold_qty} / 仕入数 {purchase_qty}（在庫残あり）"
+
+            if not next_status or current_status == next_status:
+                summary["unchanged"] += 1
+                continue
+
+            self.purchase_history_db.upsert({
+                "sku": sku,
+                "status": next_status,
+                "status_reason": reason,
+                "status_set_at": now_str,
+            })
+            if next_status == "sold":
+                summary["updated_sold"] += 1
+            elif next_status == "partially_sold":
+                summary["updated_partial"] += 1
+
+        return summary
+
+    def import_sales_csv(self):
+        """売れたものCSVを販売DBへ取り込む。"""
+        default_dir = self.settings.value("directories/sales_csv", "")
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "販売CSVを選択",
+            default_dir,
+            "CSVファイル (*.csv);;すべてのファイル (*)"
+        )
+        if not file_path:
+            return
+
+        try:
+            from utils.csv_io import csv_io
+
+            df = csv_io.read_csv(file_path)
+            if df is None or df.empty:
+                QMessageBox.warning(self, "販売CSV取込", "CSVの読み込みに失敗したか、データが空です。")
+                return
+
+            required_cols = ["SKU", "注文日"]
+            missing = [c for c in required_cols if c not in df.columns]
+            if missing:
+                QMessageBox.warning(
+                    self,
+                    "販売CSV取込",
+                    f"必須列が不足しています: {', '.join(missing)}"
+                )
+                return
+
+            selected_dir = str(Path(file_path).parent)
+            self.settings.setValue("directories/sales_csv", selected_dir)
+
+            existing_sales = self.sales_db.list_all()
+            existing_by_key: Dict[tuple, Dict[str, Any]] = {}
+            existing_keys = set()
+            for s in existing_sales:
+                key = self._build_sale_dedupe_key(s)
+                existing_keys.add(key)
+                # 同一キーが複数ある場合は先勝（通常は重複なし想定）
+                if key not in existing_by_key:
+                    existing_by_key[key] = s
+            imported_keys = set()
+
+            inserted = 0
+            updated = 0
+            skipped_duplicate = 0
+            skipped_invalid = 0
+
+            for _, row in df.iterrows():
+                sku = self._normalize_text(row.get("SKU"))
+                sale_date = self._normalize_text(row.get("注文日"))
+                if not sku or not sale_date:
+                    skipped_invalid += 1
+                    continue
+
+                sale_price = self._to_int_amount(row.get("販売価格"), default=0)
+                if sale_price <= 0:
+                    sale_price = self._to_int_amount(row.get("出品価格"), default=0)
+
+                platform_fee = self._to_int_amount(row.get("Amazon手数料"), default=0)
+                shipping_fee = self._to_int_amount(row.get("配送料"), default=0)
+                quantity = self._to_int_count(row.get("売れた個数"), default=1)
+
+                other_fees = (
+                    self._to_int_amount(row.get("配送手数料"), default=0)
+                    + self._to_int_amount(row.get("送料手数料"), default=0)
+                    + self._to_int_amount(row.get("払い戻し手数料"), default=0)
+                    + self._to_int_amount(row.get("返金手数料"), default=0)
+                    + self._to_int_amount(row.get("ギフト包装チャージバック"), default=0)
+                    + self._to_int_amount(row.get("その他"), default=0)
+                )
+
+                net_profit_raw = row.get("粗利益")
+                net_profit = (
+                    self._to_int_amount(net_profit_raw, default=None)
+                    if net_profit_raw is not None and str(net_profit_raw).strip() != ""
+                    else None
+                )
+                refund_total = self._to_int_amount(row.get("返金総額"), default=0)
+
+                sale_payload = {
+                    "sku": sku,
+                    "sale_date": sale_date,
+                    "sales_method": self._normalize_text(row.get("配送経路")) or "FBA",
+                    "platform": "Amazon",
+                    "sale_price": sale_price,
+                    "quantity": quantity,
+                    "title": self._normalize_text(row.get("商品名")),
+                    "platform_fee": platform_fee,
+                    "shipping_fee": shipping_fee,
+                    "other_fees": other_fees,
+                    "refund_total": refund_total,
+                    "net_profit": net_profit,
+                    "order_id": self._normalize_text(row.get("AmazonOrderId")),
+                    "transaction_method": self._normalize_text(row.get("出荷状態")),
+                }
+
+                dedupe_key = self._build_sale_dedupe_key(sale_payload)
+                existing_sale = existing_by_key.get(dedupe_key)
+                if existing_sale is not None:
+                    existing_price = self._to_int_amount(existing_sale.get("sale_price"), default=0)
+                    incoming_price = self._to_int_amount(sale_payload.get("sale_price"), default=0)
+                    # 未確定(0円) → 確定(>0円) のときは更新する
+                    if existing_price <= 0 < incoming_price:
+                        target_id = existing_sale.get("id")
+                        if target_id:
+                            self.sales_db.update(int(target_id), sale_payload)
+                            updated += 1
+                            # 以降の重複判定にも最新値を反映
+                            existing_by_key[dedupe_key] = {**existing_sale, **sale_payload}
+                            continue
+                    skipped_duplicate += 1
+                    continue
+
+                if dedupe_key in imported_keys:
+                    skipped_duplicate += 1
+                    continue
+
+                self.sales_db.insert(sale_payload)
+                imported_keys.add(dedupe_key)
+                inserted += 1
+
+            status_sync = self._sync_purchase_status_from_sales()
+            self.load_sales_data()
+            try:
+                # 仕入DB表示が開いている場合は、ステータス表示を最新化
+                if hasattr(self, "purchase_all_records_master"):
+                    base_records = copy.deepcopy(getattr(self, "purchase_all_records_master", []) or [])
+                    if base_records:
+                        self.load_purchase_data(base_records)
+            except Exception:
+                pass
+
+            QMessageBox.information(
+                self,
+                "販売CSV取込完了",
+                f"取込件数: {inserted} 件\n"
+                f"更新件数(0円→確定): {updated} 件\n"
+                f"重複スキップ: {skipped_duplicate} 件\n"
+                f"不正データスキップ: {skipped_invalid} 件\n\n"
+                f"ステータス更新（販売済み）: {status_sync.get('updated_sold', 0)} 件\n"
+                f"ステータス更新（一部販売済み）: {status_sync.get('updated_partial', 0)} 件\n"
+                f"ステータス変更なし: {status_sync.get('unchanged', 0)} 件"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "販売CSV取込エラー", f"販売CSVの取込に失敗しました:\n{e}")
 
     def get_all_purchase_records(self) -> List[Dict[str, Any]]:
         """現在のすべての仕入レコードを返す"""
@@ -1535,6 +1801,20 @@ class ProductWidget(QWidget):
             item_profit = QTableWidgetItem(f"{net_profit:,}")
             item_profit.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.sales_table.setItem(row_idx, 6, item_profit)
+
+            # 返金総額
+            refund_total = sale.get("refund_total") or 0
+            item_refund = QTableWidgetItem(f"{refund_total:,}")
+            item_refund.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.sales_table.setItem(row_idx, 7, item_refund)
+
+            # 返金総額がある行は黄色背景で強調
+            if self._to_int_amount(refund_total, default=0) != 0:
+                refund_bg = QColor(255, 235, 120)
+                for col in range(self.sales_table.columnCount()):
+                    cell = self.sales_table.item(row_idx, col)
+                    if cell:
+                        cell.setBackground(refund_bg)
 
         self.sales_table.resizeColumnsToContents()
 
@@ -2558,8 +2838,7 @@ class ProductWidget(QWidget):
                     status_combo.addItem("保管中", "storage")
                     status_combo.addItem("次回出品予定", "pending")
                     status_combo.addItem("販売中", "selling")
-                    status_combo.addItem("販売済み", "sold")
-                    status_combo.addItem("販売開始済み", "selling")
+                    status_combo.addItem("一部販売済み", "partially_sold")
                     status_combo.addItem("販売済み", "sold")
                     
                     # 現在の値を設定
@@ -2962,6 +3241,7 @@ class ProductWidget(QWidget):
             "storage": QColor(20, 30, 80),  # 保管中：青系
             "pending": QColor(80, 70, 20),  # 次回出品予定：黄色系
             "selling": QColor(20, 80, 40),  # 販売中：緑系
+            "partially_sold": QColor(20, 70, 70),  # 一部販売済み：青緑系
             "sold": QColor(60, 60, 60),  # 販売済み：やや暗め
         }
         

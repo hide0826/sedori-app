@@ -2020,3 +2020,44 @@
 - **次回**:
   - 仕入DBの `価格改定` 列をセルクリックで直接ON/OFF切替できるUI（チェックボックス表示）を必要に応じて追加。
   - 価格改定除外ログに `repricing_enabled` の判定元（CSV列/DB）を出し分ける運用改善を検討。
+
+### 2026-04-22（販売DB CSV取込拡張・在庫ステータス連動・価格改定CSV連動）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. 商品DB > 仕入DB のステータス候補整理（重複解消と `一部販売済み` 追加）
+  2. 価格改定タブでCSV選択時に、SKU一致の仕入DBステータスを `販売中` へ同期
+  3. 商品DB > 販売DB に CSV取込機能を追加（orders CSV対応）
+  4. 販売CSV取込後に、仕入数量と販売数量を突合して `販売済み / 一部販売済み` を自動更新
+  5. 販売DBに `返金総額` カラムを追加し、返金あり行を黄色表示
+  6. 販売CSVの再取込時、同一注文（OrderId+SKU）で `販売価格 0 → 正常価格` の更新に対応
+- **実装完了**:
+  - **仕入DBステータスUI**
+    - `product_widget.py`: ステータス候補の重複（`販売開始済み` / `販売済み`）を解消。
+    - `一部販売済み`（内部値: `partially_sold`）を追加し、行背景色も定義。
+  - **価格改定CSV連動**
+    - `repricer_widget.py`: CSV選択時にSKU列を抽出し、仕入DBの `ready/未設定` を `selling` へ同期。
+    - 同期結果（CSV内SKU数・DB一致数・更新数）をダイアログ表示。
+  - **販売DB CSV取込**
+    - `product_widget.py`: 販売DBタブに `CSV取込` ボタンを追加。
+    - `orders_*.csv` の主要列（注文日・SKU・販売価格・手数料・粗利益・返金総額等）を `sales` へ取込。
+    - 重複判定は `AmazonOrderId + SKU`（fallbackあり）。
+  - **販売→在庫ステータス連動**
+    - `product_widget.py`: 販売DB集計（SKU別販売数量）と仕入数量を突合し、
+      - `販売数 >= 仕入数` → `sold`
+      - `0 < 販売数 < 仕入数` → `partially_sold`
+      へ自動更新（理由・設定日時も保存）。
+  - **返金総額カラム追加**
+    - `sales_db.py`: `sales.refund_total` を追加（新規CREATE + 既存DBマイグレーション）。
+    - `product_widget.py`: 販売DB表示列に `返金総額` を追加、`refund_total != 0` の行を黄色表示。
+    - 表示順を `手数料 → 利益 → 返金総額` に調整。
+  - **0円売価の後追い更新**
+    - `sales_db.py`: `update()` を追加（販売レコードの部分更新）。
+    - `product_widget.py`: 再取込時、同一注文の既存売価が0で新CSVが正数なら更新。
+- **変更ファイル**:
+  - `python/desktop/ui/product_widget.py`
+  - `python/desktop/ui/repricer_widget.py`
+  - `python/desktop/database/sales_db.py`
+  - `docs/cursor_development_progress.md`
+- **次回**:
+  - 販売DBに「返金ありのみ表示」フィルタを追加し、返金対応の確認作業を効率化する。
+  - 販売CSVの更新ルール（0円→正数以外）を必要に応じて設定化する。

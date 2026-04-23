@@ -58,6 +58,7 @@ class SalesDatabase:
               fba_fee INTEGER DEFAULT 0,
               storage_fee INTEGER DEFAULT 0,
               other_fees INTEGER DEFAULT 0,
+              refund_total INTEGER DEFAULT 0,
               net_profit INTEGER,
               order_id TEXT,
               buyer_name TEXT,
@@ -77,6 +78,8 @@ class SalesDatabase:
                 cur.execute("ALTER TABLE sales ADD COLUMN quantity INTEGER DEFAULT 1")
             if "title" not in cols:
                 cur.execute("ALTER TABLE sales ADD COLUMN title TEXT")
+            if "refund_total" not in cols:
+                cur.execute("ALTER TABLE sales ADD COLUMN refund_total INTEGER DEFAULT 0")
         except Exception:
             # 古いSQLiteなどで失敗してもアプリ全体は止めない
             pass
@@ -119,7 +122,7 @@ class SalesDatabase:
         fields = [
             "purchase_id", "inventory_status_id", "sku", "sale_date",
             "sales_method", "platform", "sale_price", "quantity", "title", "platform_fee",
-            "shipping_fee", "fba_fee", "storage_fee", "other_fees",
+            "shipping_fee", "fba_fee", "storage_fee", "other_fees", "refund_total",
             "net_profit", "order_id", "buyer_name", "transaction_method"
         ]
         values = [sale.get(k) for k in fields]
@@ -133,6 +136,40 @@ class SalesDatabase:
         sale_id = cur.lastrowid
         self.conn.commit()
         return sale_id
+
+    def update(self, sale_id: int, sale: Dict[str, Any]) -> bool:
+        """IDで販売情報を更新する（指定キーのみ部分更新）。"""
+        if not sale_id:
+            return False
+
+        # net_profitを計算（指定されていない場合）
+        if sale.get("net_profit") is None:
+            net_profit = (
+                sale.get("sale_price", 0) -
+                sale.get("platform_fee", 0) -
+                sale.get("shipping_fee", 0) -
+                sale.get("fba_fee", 0) -
+                sale.get("storage_fee", 0) -
+                sale.get("other_fees", 0)
+            )
+            sale["net_profit"] = net_profit
+
+        fields = [
+            "purchase_id", "inventory_status_id", "sku", "sale_date",
+            "sales_method", "platform", "sale_price", "quantity", "title", "platform_fee",
+            "shipping_fee", "fba_fee", "storage_fee", "other_fees", "refund_total",
+            "net_profit", "order_id", "buyer_name", "transaction_method"
+        ]
+        update_fields = [k for k in fields if k in sale]
+        if not update_fields:
+            return False
+
+        cur = self.conn.cursor()
+        set_clause = ",".join([f"{k}=?" for k in update_fields])
+        values = [sale.get(k) for k in update_fields] + [sale_id]
+        cur.execute(f"UPDATE sales SET {set_clause} WHERE id = ?", values)
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def get_by_id(self, sale_id: int) -> Optional[Dict[str, Any]]:
         """IDで販売情報を取得"""
