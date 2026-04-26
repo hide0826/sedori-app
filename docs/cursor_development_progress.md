@@ -2061,3 +2061,37 @@
 - **次回**:
   - 販売DBに「返金ありのみ表示」フィルタを追加し、返金対応の確認作業を効率化する。
   - 販売CSVの更新ルール（0円→正数以外）を必要に応じて設定化する。
+
+### 2026-04-26（店舗一覧ダブルクリック編集・SP-APIテストタブ追加）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. データベース管理 > 店舗マスタ > 店舗一覧で、行ダブルクリック時に編集ウィンドウを開く仕様を追加
+  2. SP-APIテストタブを新規追加し、LWA認証とSP-API接続確認をGUI上で実行できる環境を整備
+  3. ASIN入力でCatalog API（1件取得）を叩く追加テストを実装
+  4. CursorルールにSP-API認証方針（LWA優先）を追加
+- **実装完了**:
+  - **店舗一覧ダブルクリック編集（`store_master_widget.py`）**
+    - 店舗一覧テーブルのダブルクリックをセル編集ではなく「行編集ダイアログ起動」に変更。
+    - `cellDoubleClicked` で対象行を選択して `edit_store()` を呼び出すよう実装。
+    - セル編集トリガーを `SelectedClicked | EditKeyPressed` に変更し、登録番号・備考の手動編集は維持。
+  - **SP-APIテストタブ追加（`main_window.py` + `sp_api_test_widget.py` 新規）**
+    - メインタブに `SP-APIテスト` を追加（Keepaテストの次）。
+    - `.env` の `SP_API_CLIENT_ID / SP_API_CLIENT_SECRET / SP_API_REFRESH_TOKEN` を読んでテスト実行可能に。
+    - `.env確認`、`LWAトークン取得`、`SP-API接続テスト`（`/sellers/v1/marketplaceParticipations`）を実装。
+    - 応答JSONをログ表示し、JPマーケットプレイス（`A1VC38T7YXB528`）の参加有無を簡易判定。
+  - **Catalog API 1件テスト（`sp_api_test_widget.py`）**
+    - ASIN入力欄と `Catalog API 1件テスト` ボタンを追加。
+    - `GET /catalog/2022-04-01/items/{asin}`（JP marketplaceIds）を実行し、結果JSONをログ出力。
+  - **起動時エラー修正**
+    - `log_output` 生成前に `clear_log_btn` が参照していた初期化順序不具合を修正。
+  - **Cursorルール追加**
+    - `.cursor/rules/sp-api-auth-policy.mdc` を追加し、SP-API認証方針の共通前提を常時適用化。
+- **変更ファイル**:
+  - `python/desktop/ui/store_master_widget.py`
+  - `python/desktop/ui/main_window.py`
+  - `python/desktop/ui/sp_api_test_widget.py`（新規）
+  - `.cursor/rules/sp-api-auth-policy.mdc`（新規）
+  - `docs/cursor_development_progress.md`
+- **次回**:
+  - まずは現行方針どおり「SP-API非依存でアプリ本体を完成」させる。
+  - その後、SP-API利用版でデータ取得・反映フローを段階導入する。

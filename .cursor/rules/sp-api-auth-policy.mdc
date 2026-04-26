@@ -1,0 +1,18 @@
+---
+description: SP-API認証方針（AWS SigV4不要）
+alwaysApply: true
+---
+
+# Amazon SP-API 認証方針（固定）
+
+このプロジェクトでは Amazon SP-API の認証仕様を以下で固定する。
+
+- 2023-10-02以降の公式仕様を前提とする
+- SP-API呼び出しに AWS IAM登録 / SigV4署名は必須ではない
+- LWAアクセストークンを `x-amz-access-token` ヘッダーで送る
+- `x-amzn-access-token` は使わない（誤り）
+- 日本マーケットプレイスIDは `A1VC38T7YXB528` を既定値として扱う
+
+## 参照（公式）
+- https://developer-docs.amazon.com/sp-api/changelog/sp-api-will-no-longer-require-aws-iam-or-aws-signature-version-4
+- https://developer-docs.amazon.com/sp-api/docs/connecting-to-the-selling-partner-api

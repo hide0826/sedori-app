@@ -345,12 +345,15 @@ class MainWindow(QMainWindow):
             return False
 
         if phase == 7:
-            # Keepaテスト・画像テスト・設定（最後に設定タブ）
+            # Keepaテスト・SP-APIテスト・画像テスト・設定（最後に設定タブ）
             from ui.keepa_test_widget import KeepaTestWidget
+            from ui.sp_api_test_widget import SPAPITestWidget
             from ui.image_test_widget import ImageTestWidget
             from ui.settings_widget import SettingsWidget
             self.keepa_test_widget = KeepaTestWidget(product_widget=getattr(self, "product_widget", None))
             self.tab_widget.addTab(self.keepa_test_widget, "Keepaテスト")
+            self.sp_api_test_widget = SPAPITestWidget()
+            self.tab_widget.addTab(self.sp_api_test_widget, "SP-APIテスト")
             self.image_test_widget = ImageTestWidget()
             self.tab_widget.addTab(self.image_test_widget, "画像テスト")
             self.settings_widget = SettingsWidget(self.api_client)

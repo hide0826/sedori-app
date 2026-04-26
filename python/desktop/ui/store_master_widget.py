@@ -1580,8 +1580,9 @@ class StoreListWidget(QWidget):
         self.store_table = QTableWidget()
         self.store_table.setAlternatingRowColors(True)
         self.store_table.setSelectionBehavior(QTableWidget.SelectRows)
-        # ダブルクリックで編集可能に（備考欄のみ編集可能）
-        self.store_table.setEditTriggers(QTableWidget.DoubleClicked)
+        # ダブルクリックは店舗編集ダイアログに使うため、
+        # セル編集は「選択済みセルのクリック」または「F2」に限定
+        self.store_table.setEditTriggers(QTableWidget.SelectedClicked | QTableWidget.EditKeyPressed)
         # テキストの省略（...）を無効化
         self.store_table.setTextElideMode(Qt.ElideNone)
         # テキストを折り返して全文表示
@@ -1598,6 +1599,8 @@ class StoreListWidget(QWidget):
         
         # 備考欄の変更を監視
         self.store_table.cellChanged.connect(self.on_store_cell_changed)
+        # 店舗行ダブルクリックで編集ウィンドウを開く
+        self.store_table.cellDoubleClicked.connect(self.on_store_table_double_clicked)
         
         table_layout.addWidget(self.store_table)
         
@@ -1832,6 +1835,14 @@ class StoreListWidget(QWidget):
             
         except Exception as e:
             print(f"店舗マスタセル保存エラー: {e}")
+
+    def on_store_table_double_clicked(self, row: int, column: int):
+        """店舗一覧の行をダブルクリックしたときに編集ダイアログを開く"""
+        _ = column  # どの列でダブルクリックされても同じ処理
+        if row < 0:
+            return
+        self.store_table.selectRow(row)
+        self.edit_store()
     
     def on_search_changed(self, text):
         """検索テキスト変更時の処理"""
