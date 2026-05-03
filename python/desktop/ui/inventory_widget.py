@@ -115,6 +115,10 @@ def _is_repricing_enabled_value(value: Any) -> bool:
     return s not in {"0", "off", "false", "無効", "いいえ", "no"}
 
 
+SALES_CHANNEL_OPTIONS = ["Amazon", "メルカリ", "ヤフオク", "ラクマ", "その他"]
+SHIPPING_METHOD_OPTIONS = ["FBA", "自己発送"]
+
+
 class InventoryRowEditDialog(QDialog):
     """仕入データ1行を編集するダイアログ（コンディション説明は複数行・呼び出しボタン付き）"""
     
@@ -219,6 +223,16 @@ class InventoryRowEditDialog(QDialog):
                 w.setMinimumHeight(60)
                 self._widgets[col] = w
                 form.addRow(QLabel(col + ":"), w)
+            elif col == "発送方法":
+                w = QComboBox()
+                w.addItems(SHIPPING_METHOD_OPTIONS)
+                self._widgets[col] = w
+                form.addRow(QLabel(col + ":"), w)
+            elif col == "販売チャネル":
+                w = QComboBox()
+                w.addItems(SALES_CHANNEL_OPTIONS)
+                self._widgets[col] = w
+                form.addRow(QLabel(col + ":"), w)
             elif col == "価格改定":
                 self._widgets[col] = self.repricing_enabled_checkbox
                 form.addRow(QLabel(col + ":"), self.repricing_enabled_checkbox)
@@ -267,6 +281,16 @@ class InventoryRowEditDialog(QDialog):
                 val = _normalize_condition_note_newlines(val)
             if isinstance(w, QPlainTextEdit):
                 w.setPlainText(val)
+            elif isinstance(w, QComboBox):
+                if col == "発送方法" and not val:
+                    val = "FBA"
+                if not val:
+                    val = "Amazon"
+                idx = w.findText(val)
+                if idx < 0:
+                    w.addItem(val)
+                    idx = w.findText(val)
+                w.setCurrentIndex(max(0, idx))
             elif isinstance(w, QCheckBox):
                 w.setChecked(_is_repricing_enabled_value(val))
             else:
@@ -341,6 +365,8 @@ class InventoryRowEditDialog(QDialog):
                 continue
             if isinstance(w, QPlainTextEdit):
                 val = w.toPlainText().strip()
+            elif isinstance(w, QComboBox):
+                val = w.currentText().strip()
             elif isinstance(w, QCheckBox):
                 val = "ON" if w.isChecked() else "OFF"
             else:
@@ -348,6 +374,10 @@ class InventoryRowEditDialog(QDialog):
             if col == "コンディション説明":
                 # 保存時は改行を \n で扱う（1行表示で行区切りに\nが入る形）
                 val = _to_stored_newlines(val) if val else ""
+            elif col == "発送方法":
+                val = val or "FBA"
+            elif col == "販売チャネル":
+                val = val or "Amazon"
             result[col] = val
         return result
 
@@ -1058,7 +1088,7 @@ class InventoryWidget(QWidget):
         self.column_headers = [
             "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
             "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
-            "発送方法", "仕入先", "価格改定", "コンディション説明"
+            "発送方法", "販売チャネル", "仕入先", "価格改定", "コンディション説明"
         ]
         # 開発用タブでは、店舗コードの右に「3-6-9」カラムを追加
         if self.dev_mode:
@@ -1812,7 +1842,7 @@ class InventoryWidget(QWidget):
             BASE_COLUMNS_FOR_PURCHASE_DB = [
                 "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
                 "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
-                "発送方法", "仕入先", "価格改定", "コンディション説明"
+                "発送方法", "販売チャネル", "仕入先", "価格改定", "コンディション説明"
             ]
             if self.filtered_data is not None and len(self.filtered_data) > 0:
                 cols = [c for c in BASE_COLUMNS_FOR_PURCHASE_DB if c in self.filtered_data.columns]
@@ -2028,6 +2058,8 @@ class InventoryWidget(QWidget):
         augmented: List[Dict[str, Any]] = []
         for record in records:
             row = dict(record)
+            if not str(row.get("販売チャネル") or "").strip():
+                row["販売チャネル"] = "Amazon"
             sku = row.get("SKU") or row.get("sku")
             
             # コメントから保証期間を算出
@@ -2964,6 +2996,13 @@ class InventoryWidget(QWidget):
             "shippingMethod": "発送方法",
             "shipping_method": "発送方法",
             "発送": "発送方法",
+            # 販売チャネル
+            "販売チャネル": "販売チャネル",
+            "販売先": "販売チャネル",
+            "チャネル": "販売チャネル",
+            "salesChannel": "販売チャネル",
+            "sales_channel": "販売チャネル",
+            "platform": "販売チャネル",
             # 仕入先
             "仕入先": "仕入先",
             "仕入元": "仕入先",
@@ -3008,6 +3047,14 @@ class InventoryWidget(QWidget):
         # コンディション説明欄を空にする
         if "コンディション説明" in new_df.columns:
             new_df["コンディション説明"] = ""
+        # 販売チャネルが空欄なら既定値を補完
+        if "販売チャネル" in new_df.columns:
+            new_df["販売チャネル"] = new_df["販売チャネル"].fillna("").astype(str).str.strip()
+            new_df.loc[new_df["販売チャネル"] == "", "販売チャネル"] = "Amazon"
+        # 発送方法が空欄なら既定値を補完
+        if "発送方法" in new_df.columns:
+            new_df["発送方法"] = new_df["発送方法"].fillna("").astype(str).str.strip()
+            new_df.loc[new_df["発送方法"] == "", "発送方法"] = "FBA"
         
         # SKUが空の場合は「未実装」にする
         if "SKU" in new_df.columns:
@@ -3110,6 +3157,10 @@ class InventoryWidget(QWidget):
                     value = str(value) if pd.notna(value) else ""
                     if column == "価格改定":
                         value = "OFF" if _is_repricing_enabled_value(value) is False else "ON"
+                    elif column == "発送方法" and not str(value).strip():
+                        value = "FBA"
+                    elif column == "販売チャネル" and not str(value).strip():
+                        value = "Amazon"
                     
                     # SKU列の特別処理（空の場合は「未実装」と表示・フル値をUserRoleで保持）
                     if column == "SKU":
@@ -3400,6 +3451,10 @@ class InventoryWidget(QWidget):
                 value = _normalize_condition_note_newlines(value)
             if column == "価格改定" and not str(value).strip():
                 value = "ON"
+            if column == "発送方法" and not str(value).strip():
+                value = "FBA"
+            if column == "販売チャネル" and not str(value).strip():
+                value = "Amazon"
             row_data[column] = value
         return row_data
     

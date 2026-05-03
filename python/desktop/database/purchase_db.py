@@ -56,6 +56,7 @@ class PurchaseDatabase:
               receipt_id INTEGER,
               comment TEXT,
               other_cost INTEGER DEFAULT 0,
+              sales_channel TEXT DEFAULT 'Amazon',
               created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
               updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
               FOREIGN KEY (product_id) REFERENCES products(id)
@@ -105,6 +106,7 @@ class PurchaseDatabase:
             # 出品日（在庫DBとの連携用・視認用）
             ("listed_date", "TEXT"),
             ("repricing_enabled", "INTEGER DEFAULT 1"),
+            ("sales_channel", "TEXT DEFAULT 'Amazon'"),
         ]
 
         for col_name, col_def in new_columns:
@@ -168,6 +170,7 @@ class PurchaseDatabase:
             "receipt_id",
             "comment",
             "other_cost",
+            "sales_channel",
             "expected_margin",
             "expected_roi",
             "status",

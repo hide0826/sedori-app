@@ -1,3 +1,22 @@
+## 2026-05-03 販売チャネル列・発送方法プルダウン・ホイール誤操作防止
+
+- **目的**: フリマ等の販売先を仕入データで区別できるようにし、発送方法を FBA／自己発送で明示選択できるようにする。あわせてプルダウン・数値スピンのホイール誤変更をアプリ全体で防止する。
+- **変更**: `python/desktop/ui/inventory_widget.py`
+  - 仕入管理／3-6-9仕入管理の列に **販売チャネル** を追加（`発送方法` の次）。候補は Amazon／メルカリ／ヤフオク／ラクマ／その他。空欄は `Amazon` を補完。
+  - **発送方法** を行編集ダイアログで **FBA／自己発送** のプルダウンに。空欄は `FBA` を補完。
+  - CSV 列マッピングに `販売チャネル` 系（`sales_channel` / `platform` 等）を追加。DB 保存対象列（`BASE_COLUMNS_FOR_PURCHASE_DB`）に **販売チャネル** を追加。
+- **変更**: `python/desktop/database/purchase_db.py`
+  - `purchases` に **`sales_channel`**（TEXT、既定 `Amazon`）を追加。マイグレーションと `upsert` 対応。
+- **変更**: `python/desktop/ui/product_widget.py`
+  - 仕入DB表示の基本列に **販売チャネル** を追加。`purchases.sales_channel` から行データへ補完。未設定は `Amazon`。
+- **変更**: `python/desktop/ui/purchase_row_edit_dialog.py`
+  - 仕入行の編集ダイアログに **販売チャネル**・**発送方法** のプルダウンを追加。反映時に `sales_channel` を DB へ保存。
+- **追加**: `python/desktop/ui/utils/combobox_wheel_guard.py`
+  - `QApplication` にイベントフィルタを取り付け、**QComboBox** と **QAbstractSpinBox**（QSpinBox / QDoubleSpinBox 等）上の **ホイールで値が変わらない** ようにする。
+- **変更**: `python/desktop/main.py`
+  - 起動時に `install_combobox_wheel_guard` を呼び出し。
+- **Git**: feat(desktop): 販売チャネル・発送方法プルダウンとホイール誤操作防止
+
 ## 2026-04-19 古物台帳 PDF／ルート訪問集計の整理
 
 - **追加**: `python/desktop/utils/ledger_pdf_export.py`

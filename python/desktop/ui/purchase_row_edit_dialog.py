@@ -18,6 +18,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -34,6 +35,8 @@ from PySide6.QtWidgets import (
 
 # ダークUI向け：TP0〜TP3 でラベル・入力・概算の色を分ける
 _TP_DIALOG_TIER_COLORS = ("#6ecff6", "#7ae495", "#f0c674", "#e8a0bf")
+_SALES_CHANNEL_OPTIONS = ["Amazon", "メルカリ", "ヤフオク", "ラクマ", "その他"]
+_SHIPPING_METHOD_OPTIONS = ["FBA", "自己発送"]
 
 
 def _style_tp_tier_text(color: str, *widgets: QWidget) -> None:
@@ -251,6 +254,34 @@ class PurchaseRowEditDialog(QDialog):
         is_enabled = str(repricing_val).strip().lower() not in ("0", "off", "false", "無効", "no")
         self._repricing_enabled_cb.setChecked(is_enabled)
         info_layout.addRow("価格改定:", self._repricing_enabled_cb)
+        self._shipping_method_combo = QComboBox()
+        self._shipping_method_combo.addItems(_SHIPPING_METHOD_OPTIONS)
+        shipping_method = str(
+            self.record.get("発送方法")
+            or self.record.get("shippingMethod")
+            or self.record.get("shipping_method")
+            or "FBA"
+        ).strip()
+        ship_idx = self._shipping_method_combo.findText(shipping_method)
+        if ship_idx < 0 and shipping_method:
+            self._shipping_method_combo.addItem(shipping_method)
+            ship_idx = self._shipping_method_combo.findText(shipping_method)
+        self._shipping_method_combo.setCurrentIndex(max(0, ship_idx))
+        info_layout.addRow("発送方法:", self._shipping_method_combo)
+        self._sales_channel_combo = QComboBox()
+        self._sales_channel_combo.addItems(_SALES_CHANNEL_OPTIONS)
+        sales_channel = str(
+            self.record.get("販売チャネル")
+            or self.record.get("sales_channel")
+            or self.record.get("platform")
+            or "Amazon"
+        ).strip()
+        idx = self._sales_channel_combo.findText(sales_channel)
+        if idx < 0 and sales_channel:
+            self._sales_channel_combo.addItem(sales_channel)
+            idx = self._sales_channel_combo.findText(sales_channel)
+        self._sales_channel_combo.setCurrentIndex(max(0, idx))
+        info_layout.addRow("販売チャネル:", self._sales_channel_combo)
 
         snap = self._csv_inventory_snapshot
         if snap:
@@ -594,6 +625,13 @@ class PurchaseRowEditDialog(QDialog):
         self.record["TP3"] = tp3
         self.record["tp3"] = tp3
         repricing_enabled = bool(self._repricing_enabled_cb.isChecked())
+        shipping_method = self._shipping_method_combo.currentText().strip() or "FBA"
+        self.record["発送方法"] = shipping_method
+        self.record["shippingMethod"] = shipping_method
+        self.record["shipping_method"] = shipping_method
+        sales_channel = self._sales_channel_combo.currentText().strip() or "Amazon"
+        self.record["販売チャネル"] = sales_channel
+        self.record["sales_channel"] = sales_channel
         self.record["価格改定"] = "ON" if repricing_enabled else "OFF"
         self.record["repricing_enabled"] = 1 if repricing_enabled else 0
         # 親が ProductWidget なら hirio.db とスナップショットにも保存
@@ -611,6 +649,7 @@ class PurchaseRowEditDialog(QDialog):
                         "tp1": tp1,
                         "tp2": tp2,
                         "tp3": tp3,
+                        "sales_channel": sales_channel,
                         "repricing_enabled": 1 if repricing_enabled else 0,
                     })
                 except Exception as e:

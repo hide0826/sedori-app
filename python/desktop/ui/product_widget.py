@@ -406,7 +406,7 @@ class ProductWidget(QWidget):
             base = [
                 "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
                 "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "コメント",
-                "発送方法", "仕入先", "コンディション説明"
+                "発送方法", "販売チャネル", "仕入先", "コンディション説明"
             ]
 
         # TP0〜TP3 は末尾に配置（3-6-9価格改定専用のため通常業務列から分離）
@@ -2348,6 +2348,8 @@ class ProductWidget(QWidget):
                 try:
                     purchase_info = self.purchase_history_db.get_by_sku(sku)
                     if purchase_info:
+                        sales_channel = str(purchase_info.get("sales_channel") or "").strip() or "Amazon"
+                        row["販売チャネル"] = str(row.get("販売チャネル") or "").strip() or sales_channel
                         # 画像URLは PurchaseDatabase 側を正として補完する。
                         # products テーブル未作成SKUでも、仕入DBタブで URL が消えないようにする。
                         for i in range(1, 7):
@@ -2392,6 +2394,9 @@ class ProductWidget(QWidget):
                         row["価格改定"] = "OFF" if str(repricing_enabled).strip().lower() in ("0", "off", "false", "no") else "ON"
                 except Exception as e:
                     print(f"仕入DB情報取得エラー(SKU={sku}): {e}")
+            # 既存データ互換: 未設定時は Amazon を既定値にする
+            if not str(row.get("販売チャネル") or "").strip():
+                row["販売チャネル"] = "Amazon"
 
             augmented.append(row)
         return augmented
