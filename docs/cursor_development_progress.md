@@ -2114,3 +2114,32 @@
 - **次回**:
   - まずは現行方針どおり「SP-API非依存でアプリ本体を完成」させる。
   - その後、SP-API利用版でデータ取得・反映フローを段階導入する。
+
+### 2026-05-03（画像管理: リネーム時軽量化・仕入DB先行読込・確定UI/速度改善）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. **リネーム時の画像軽量化（Pillow）**
+     - `image_service.py`: `lightweight_jpeg_rename` を追加（EXIF 向き補正後に RGB 化、長辺最大 1600px、JPEG 品質 85、EXIF は出力しない）。
+     - 一時ファイルへ保存 → 読み取り検証 → `os.replace` で確定。元パスと異なる場合は元ファイル削除。削減率をログ出力。
+     - `image_manager_widget.py`: フォルダ選択エリアに「リネーム時に軽量化」チェックボックス。ON 時は全画像リネーム / SKU 指定リネームで上記を使用。設定は `config/inventory_settings.json` の `image_manager_lightweight_rename` に保存（既存の画像管理設定と併存）。
+  2. **商品名が付かない問題（DBタブを開くまで仕入データが空）**
+     - `ProductWidget` は `showEvent` でしか `ensure_initial_data_loaded` が走らないため、`purchase_all_records` が空のままだった。
+     - `image_manager_widget.py`: `_ensure_product_widget_data_loaded()` を追加し、ツリー更新・SKU 候補検索・商品名取得・確定/紐付け/リネーム前などで先行実行。初回読み込み完了時は `_jan_title_cache` をクリア。
+  3. **全画像リネーム後に「確定処理」が押せない問題**
+     - ツリー再構築で選択が外れ、`confirm_btn` が更新されないだけだった。
+     - `update_tree_widget` 末尾で `can_confirm` に応じて `確定処理` を有効化。子画像行選択時は親 JAN グループが有効なら有効化。
+  4. **確定処理が極端に遅い問題（JAN グループごとに全表再描画＋スナップショット保存）**
+     - `product_widget.py`: `update_image_paths_for_jan` に `defer_table_refresh_and_snapshot` を追加。
+     - 画像管理の確定処理ループでは defer を有効にし、完了後にテーブル再描画・件数ラベル・スナップショット保存を **1 回だけ**実行。
+     - モジュールレベル `logger` を定義（従来の `logger.warning` が未定義だった箇所の整理）。
+- **変更ファイル**:
+  - `python/desktop/services/image_service.py`
+  - `python/desktop/ui/image_manager_widget.py`
+  - `python/desktop/ui/product_widget.py`
+  - `docs/cursor_development_progress.md`
+- **次回**:
+  - 確定処理後の全表 `populate` がまだ重い場合は、差分更新や仮想化の検討。
+  - 軽量化対象を PNG 等に広げる場合は透過・拡張子の仕様を決める。
+
+**最終更新**: 2026-05-03
+**更新者**: Agentモード（実装）

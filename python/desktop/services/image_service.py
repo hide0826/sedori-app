@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 from typing import List, Dict, Any, Optional, NamedTuple, Callable
 from datetime import datetime
-from PIL import Image, ExifTags, ImageEnhance
+from PIL import Image, ExifTags, ImageEnhance, ImageOps
 import logging
 
 # バーコード読み取りライブラリ（オプション）
@@ -447,6 +447,95 @@ class ImageService:
         records.sort(key=lambda r: r.capture_dt if r.capture_dt else datetime.min)
         
         return records
+    
+    def lightweight_jpeg_rename(
+        self,
+        source_path: str,
+        dest_path: str,
+        max_long_edge: int = 1600,
+        jpeg_quality: int = 85,
+    ) -> None:
+        """
+        リネーム先パスへ JPEG を書き出す（軽量化・EXIF なし）。
+        一時ファイルに保存し検証後、os.replace で dest に反映する。
+        source と dest が異なるパスなら、成功後に source を削除する。
+        """
+        source_path = os.path.normpath(source_path)
+        dest_path = os.path.normpath(dest_path)
+        if not os.path.isfile(source_path):
+            raise FileNotFoundError(f"source not found: {source_path}")
+
+        size_before = os.path.getsize(source_path)
+        dest_dir = os.path.dirname(os.path.abspath(dest_path))
+        if not dest_dir:
+            dest_dir = os.path.abspath(os.path.curdir)
+
+        tmp_path: Optional[str] = None
+        try:
+            with Image.open(source_path) as src:
+                img = ImageOps.exif_transpose(src)
+                img = img.convert("RGB")
+                w, h = img.size
+                long_edge = max(w, h)
+                if long_edge > max_long_edge:
+                    scale = max_long_edge / float(long_edge)
+                    new_w = max(1, int(round(w * scale)))
+                    new_h = max(1, int(round(h * scale)))
+                    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+                fd, tmp_path = tempfile.mkstemp(
+                    suffix=".tmp",
+                    prefix="hir_lightweight_",
+                    dir=dest_dir,
+                )
+                os.close(fd)
+                img.save(tmp_path, "JPEG", quality=jpeg_quality, optimize=True)
+
+            size_after = os.path.getsize(tmp_path)
+            if size_after == 0:
+                raise ValueError("lightweight JPEG output is empty")
+
+            with Image.open(tmp_path) as chk:
+                chk.load()
+
+            os.replace(tmp_path, dest_path)
+            tmp_path = None
+
+            mb_b = size_before / (1024.0 * 1024.0)
+            mb_a = size_after / (1024.0 * 1024.0)
+            if size_before > 0:
+                reduced_pct = (1.0 - (size_after / float(size_before))) * 100.0
+                logger.info(
+                    "Lightweight JPEG rename: %.3f MB -> %.3f MB (%.1f%% reduction) %s -> %s",
+                    mb_b,
+                    mb_a,
+                    reduced_pct,
+                    source_path,
+                    dest_path,
+                )
+            else:
+                logger.info(
+                    "Lightweight JPEG rename: %.3f MB -> %.3f MB %s -> %s",
+                    mb_b,
+                    mb_a,
+                    source_path,
+                    dest_path,
+                )
+
+            if os.path.normcase(os.path.abspath(source_path)) != os.path.normcase(
+                os.path.abspath(dest_path)
+            ):
+                try:
+                    os.remove(source_path)
+                except OSError as exc:
+                    logger.warning("Could not remove source after lightweight rename: %s (%s)", source_path, exc)
+        except Exception:
+            if tmp_path and os.path.isfile(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            raise
     
     def group_by_jan(self, records: List[ImageRecord]) -> List[JanGroup]:
         """

@@ -34,6 +34,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 
 import json
 import logging
+
+logger = logging.getLogger(__name__)
+
 from database.product_db import ProductDatabase
 from database.warranty_db import WarrantyDatabase
 from database.product_purchase_db import ProductPurchaseDatabase
@@ -1508,6 +1511,7 @@ class ProductWidget(QWidget):
         skip_existing: bool = True,
         target_sku: Optional[str] = None,
         clear_existing: bool = False,
+        defer_table_refresh_and_snapshot: bool = False,
     ) -> Tuple[bool, int, Optional[Dict[str, Any]]]:
         """
         指定JANに対応する仕入レコードへ画像パスを割り当てる
@@ -1518,6 +1522,8 @@ class ProductWidget(QWidget):
             all_records: 現在の全仕入レコード（purchase_all_records 相当）
             skip_existing: 既に画像列が埋まっている場合はスキップするかどうか
             clear_existing: 既存の画像をクリアしてから新しい画像を登録するかどうか
+            defer_table_refresh_and_snapshot: True のとき、テーブル再描画とスナップショット保存を省略する。
+                画像管理の「確定処理」など複数JANを連続更新するとき、各回で全行再描画・DB保存すると極端に遅くなるため。
 
         Returns:
             (success, added_count, record_snapshot)
@@ -1612,16 +1618,17 @@ class ProductWidget(QWidget):
                     self.purchase_all_records[idx] = target_record
                     break
 
-        # テーブルを再描画
-        self.purchase_records = list(self.purchase_all_records)
-        self.populate_purchase_table(self.purchase_records)
-        self.update_purchase_count_label()
-        
-        # スナップショットを保存（リネーム後のパスを永続化）
-        try:
-            self.save_purchase_snapshot()
-        except Exception as e:
-            logger.warning(f"スナップショット保存エラー（画像パス更新は反映済み）: {e}")
+        if not defer_table_refresh_and_snapshot:
+            # テーブルを再描画
+            self.purchase_records = list(self.purchase_all_records)
+            self.populate_purchase_table(self.purchase_records)
+            self.update_purchase_count_label()
+
+            # スナップショットを保存（リネーム後のパスを永続化）
+            try:
+                self.save_purchase_snapshot()
+            except Exception as e:
+                logger.warning(f"スナップショット保存エラー（画像パス更新は反映済み）: {e}")
 
         # スナップショット用にコピーを返す
         record_snapshot = dict(target_record)

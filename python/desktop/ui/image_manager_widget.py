@@ -506,6 +506,22 @@ class ImageManagerWidget(QWidget):
     def set_product_widget(self, product_widget):
         """ProductWidgetへの参照を設定"""
         self.product_widget = product_widget
+
+    def _ensure_product_widget_data_loaded(self) -> None:
+        """
+        データベース管理タブを開かなくても仕入DB（purchase_all_records）を参照できるようにする。
+        ProductWidget は showEvent で初回読み込みするため、画像管理だけ先に使うと商品名が空になる。
+        """
+        if not self.product_widget:
+            return
+        try:
+            pw = self.product_widget
+            was_loaded = getattr(pw, "_initial_data_loaded", False)
+            pw.ensure_initial_data_loaded()
+            if getattr(pw, "_initial_data_loaded", False) and not was_loaded:
+                self._jan_title_cache.clear()
+        except Exception as e:
+            logger.warning("仕入DBの先行読み込みに失敗しました: %s", e)
     
     def setup_ui(self):
         """UIのセットアップ"""
@@ -524,9 +540,11 @@ class ImageManagerWidget(QWidget):
         # 上部：フォルダ選択エリア（最小サイズ）
         folder_group = QGroupBox("フォルダ選択")
         folder_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)  # 高さを最小限に
-        folder_layout = QHBoxLayout(folder_group)
+        folder_outer = QVBoxLayout(folder_group)
+        folder_outer.setSpacing(4)
+        folder_outer.setContentsMargins(5, 5, 5, 5)
+        folder_layout = QHBoxLayout()
         folder_layout.setSpacing(5)
-        folder_layout.setContentsMargins(5, 5, 5, 5)  # マージンを小さく
         
         folder_label = QLabel("フォルダ:")
         self.folder_path_label = QLabel("（未選択）")
@@ -577,6 +595,15 @@ class ImageManagerWidget(QWidget):
         folder_layout.addWidget(self.scan_unknown_btn)
         folder_layout.addWidget(self.manual_link_btn)
         folder_layout.addWidget(self.clear_images_btn)
+
+        folder_outer.addLayout(folder_layout)
+        self.lightweight_rename_checkbox = QCheckBox("リネーム時に軽量化（長辺1600px・JPEG品質85・EXIF削除）")
+        self.lightweight_rename_checkbox.setToolTip(
+            "有効にすると、SKUリネーム時に画像を再エンコードします。"
+            "一時ファイルへ保存してから置き換えるため、失敗時も元ファイルを保護しやすくなります。"
+        )
+        self.lightweight_rename_checkbox.stateChanged.connect(self._on_lightweight_rename_preference_changed)
+        folder_outer.addWidget(self.lightweight_rename_checkbox)
         
         layout.addWidget(folder_group)
         
@@ -750,6 +777,10 @@ class ImageManagerWidget(QWidget):
                             self.folder_path_label.setText(last_dir)
                             self.scan_btn.setEnabled(True)
                             self.scan_unknown_btn.setEnabled(True)
+
+                    lw = config.get('image_manager_lightweight_rename')
+                    if lw is not None:
+                        self.lightweight_rename_checkbox.setChecked(bool(lw))
         except Exception as e:
             print(f"Failed to load last directory: {e}")
     
@@ -769,6 +800,8 @@ class ImageManagerWidget(QWidget):
             # 起点となるデフォルトフォルダも保存
             if self.default_root_dir:
                 config['image_manager_default_root_dir'] = self.default_root_dir
+
+            config['image_manager_lightweight_rename'] = self.lightweight_rename_checkbox.isChecked()
             
             # 設定ファイルを保存
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -776,6 +809,10 @@ class ImageManagerWidget(QWidget):
                 json.dump(config, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"Failed to save last directory: {e}")
+
+    def _on_lightweight_rename_preference_changed(self, _state: int = 0) -> None:
+        """リネーム時軽量化の ON/OFF を設定ファイルへ保存する"""
+        self.save_last_directory()
     
     def select_directory(self):
         """フォルダ選択ダイアログを表示"""
@@ -990,6 +1027,7 @@ class ImageManagerWidget(QWidget):
     
     def update_tree_widget(self):
         """ツリービジェットを更新"""
+        self._ensure_product_widget_data_loaded()
         self._updating_tree_checks = True
         try:
             self.tree_widget.clear()
@@ -1031,6 +1069,10 @@ class ImageManagerWidget(QWidget):
             self._updating_tree_checks = False
         has_valid_groups = any(g.jan != "unknown" for g in self.jan_groups)
         self.rename_btn.setEnabled(has_valid_groups)
+        # 確定処理は全グループ対象のため、JAN付きグループが1つでもあれば有効にする
+        # （ツリー再構築で選択が外れると on_tree_selection_changed だけでは ON にならない）
+        can_confirm = any(g.jan != "unknown" and g.images for g in self.jan_groups)
+        self.confirm_btn.setEnabled(can_confirm)
     
     def clear_jan_groups(self):
         """JANグループエリアに展開されている画像をクリア"""
@@ -1084,6 +1126,9 @@ class ImageManagerWidget(QWidget):
         group = item.data(0, Qt.UserRole)
         
         is_valid_group = isinstance(group, JanGroup) and group.jan != "unknown"
+        if not is_valid_group and item.parent():
+            parent_group = item.parent().data(0, Qt.UserRole)
+            is_valid_group = isinstance(parent_group, JanGroup) and parent_group.jan != "unknown"
         self.confirm_btn.setEnabled(is_valid_group)
 
         if isinstance(group, JanGroup):
@@ -1485,6 +1530,8 @@ class ImageManagerWidget(QWidget):
         """仕入DBからJANコードでSKU候補を検索"""
         if not self.product_widget or not jan:
             return []
+
+        self._ensure_product_widget_data_loaded()
         
         try:
             # purchase_all_recordsからJANコードで検索
@@ -1505,6 +1552,8 @@ class ImageManagerWidget(QWidget):
         """JANコードに紐づく候補商品タイトルを取得"""
         if not jan or jan == "unknown":
             return ""
+
+        self._ensure_product_widget_data_loaded()
         
         if jan in self._jan_title_cache:
             return self._jan_title_cache[jan]
@@ -1767,7 +1816,12 @@ class ImageManagerWidget(QWidget):
             return
 
         # 2. リネーム処理の実行
-        progress = QProgressDialog("リネーム処理中...", "キャンセル", 0, len(rename_operations), self)
+        progress_label = (
+            "リネーム・軽量化中..."
+            if self.lightweight_rename_checkbox.isChecked()
+            else "リネーム処理中..."
+        )
+        progress = QProgressDialog(progress_label, "キャンセル", 0, len(rename_operations), self)
         progress.setWindowModality(Qt.WindowModal)
         progress.show()
 
@@ -1781,7 +1835,10 @@ class ImageManagerWidget(QWidget):
             
             old_path_str = record.path
             try:
-                os.rename(old_path_str, new_path_str)
+                if self.lightweight_rename_checkbox.isChecked():
+                    self.image_service.lightweight_jpeg_rename(old_path_str, new_path_str)
+                else:
+                    os.rename(old_path_str, new_path_str)
                 
                 # DBレコードを更新
                 db_record = self.image_db.get_by_file_path(old_path_str)
@@ -1940,6 +1997,8 @@ class ImageManagerWidget(QWidget):
             QMessageBox.warning(self, "エラー", "データベース管理タブが見つかりません。")
             return
 
+        self._ensure_product_widget_data_loaded()
+
         # 有効なJANグループを抽出（JAN不明グループは除外）
         valid_groups = [g for g in self.jan_groups if g.jan != "unknown" and g.images]
 
@@ -1996,7 +2055,13 @@ class ImageManagerWidget(QWidget):
                     
                     # 更新処理を実行（既存画像をクリアしてから新しい画像で上書き）
                     success, added_count, record_snapshot = self.product_widget.update_image_paths_for_jan(
-                        jan, image_paths, all_records, skip_existing=False, target_sku=target_sku, clear_existing=True
+                        jan,
+                        image_paths,
+                        all_records,
+                        skip_existing=False,
+                        target_sku=target_sku,
+                        clear_existing=True,
+                        defer_table_refresh_and_snapshot=True,
                     )
 
                     if success:
@@ -2018,6 +2083,16 @@ class ImageManagerWidget(QWidget):
                     failed_groups.append(jan)
 
             progress.close()
+
+            # 各JANごとにテーブル全再描画・スナップショット保存していたため極端に遅かった。一括で1回だけ行う。
+            try:
+                pw = self.product_widget
+                pw.purchase_records = list(pw.purchase_all_records)
+                pw.populate_purchase_table(pw.purchase_records)
+                pw.update_purchase_count_label()
+                pw.save_purchase_snapshot()
+            except Exception as e:
+                logger.warning(f"確定処理後の仕入DB表示更新に失敗しました: {e}")
 
             # 結果メッセージを表示
             message_parts = []
@@ -4235,6 +4310,8 @@ class ImageManagerWidget(QWidget):
             QMessageBox.information(self, "情報", "画像が含まれていないJANグループです。")
             return
 
+        self._ensure_product_widget_data_loaded()
+
         # まずJANコードから仕入DBのSKU候補を検索
         sku = ""
         candidates = []
@@ -4345,7 +4422,12 @@ class ImageManagerWidget(QWidget):
             return
 
         # 実際のリネーム処理
-        progress = QProgressDialog("リネーム処理中...", "キャンセル", 0, len(rename_operations), self)
+        progress_label = (
+            "リネーム・軽量化中..."
+            if self.lightweight_rename_checkbox.isChecked()
+            else "リネーム処理中..."
+        )
+        progress = QProgressDialog(progress_label, "キャンセル", 0, len(rename_operations), self)
         progress.setWindowModality(Qt.WindowModal)
         progress.show()
 
@@ -4359,7 +4441,10 @@ class ImageManagerWidget(QWidget):
 
             old_path_str = record.path
             try:
-                os.rename(old_path_str, new_path_str)
+                if self.lightweight_rename_checkbox.isChecked():
+                    self.image_service.lightweight_jpeg_rename(old_path_str, new_path_str)
+                else:
+                    os.rename(old_path_str, new_path_str)
 
                 # DBレコードを更新
                 db_record = self.image_db.get_by_file_path(old_path_str)
@@ -4439,6 +4524,8 @@ class ImageManagerWidget(QWidget):
         if not self.product_widget:
             QMessageBox.warning(self, "エラー", "仕入DBタブ（商品データベース）への参照がありません。")
             return
+
+        self._ensure_product_widget_data_loaded()
 
         if not group or not group.images:
             QMessageBox.information(self, "情報", "画像が含まれていないJANグループです。")
@@ -4559,6 +4646,8 @@ class ImageManagerWidget(QWidget):
         if not self.product_widget:
             QMessageBox.warning(self, "エラー", "仕入DBタブ（商品データベース）への参照がありません。")
             return
+
+        self._ensure_product_widget_data_loaded()
 
         if not getattr(self, "jan_groups", None):
             QMessageBox.information(self, "情報", "JANグループがありません。先にスキャンを実行してください。")
