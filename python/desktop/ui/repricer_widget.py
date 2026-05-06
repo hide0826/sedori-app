@@ -185,6 +185,7 @@ class RepricerWidget(QWidget):
                     purchase_db.upsert({
                         "sku": sku,
                         "status": "selling",
+                        "status_reason": "在庫CSV連動:",
                         "status_set_at": now_str,
                     })
                     updated_count += 1

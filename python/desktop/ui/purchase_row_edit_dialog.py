@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import re
 import sys
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -37,6 +38,46 @@ from PySide6.QtWidgets import (
 _TP_DIALOG_TIER_COLORS = ("#6ecff6", "#7ae495", "#f0c674", "#e8a0bf")
 _SALES_CHANNEL_OPTIONS = ["Amazon", "メルカリ", "ヤフオク", "ラクマ", "その他"]
 _SHIPPING_METHOD_OPTIONS = ["FBA", "自己発送"]
+
+# SKU 先頭日付の編集を禁止するステータス（内部コードおよび表示ラベル）
+_SKU_DATE_BLOCKED_STATUS_CODES = frozenset({"selling", "sold", "partially_sold"})
+_SKU_DATE_BLOCKED_LABELS = frozenset({"販売中", "販売済み", "一部販売済み"})
+
+
+def _normalized_purchase_status_code(record: Dict[str, Any]) -> str:
+    raw = record.get("ステータス") if record.get("ステータス") is not None else record.get("status")
+    if raw is None or str(raw).strip() == "":
+        return "ready"
+    s = str(raw).strip()
+    if s in _SKU_DATE_BLOCKED_LABELS:
+        return {
+            "販売中": "selling",
+            "販売済み": "sold",
+            "一部販売済み": "partially_sold",
+        }[s]
+    return s.lower()
+
+
+def _sku_date_edit_locked(record: Dict[str, Any]) -> bool:
+    return _normalized_purchase_status_code(record) in _SKU_DATE_BLOCKED_STATUS_CODES
+
+
+def _split_sku_leading_date(sku: str) -> Tuple[Optional[str], str]:
+    """先頭が YYYYMMDD のとき (8桁, 残り) を返す。それ以外は (None, 全体)。"""
+    sku = (sku or "").strip()
+    if len(sku) >= 8 and sku[:8].isdigit():
+        return sku[:8], sku[8:]
+    return None, sku
+
+
+def _is_valid_yyyymmdd(s: str) -> bool:
+    if len(s) != 8 or not s.isdigit():
+        return False
+    try:
+        datetime.strptime(s, "%Y%m%d")
+        return True
+    except ValueError:
+        return False
 
 
 def _style_tp_tier_text(color: str, *widgets: QWidget) -> None:
@@ -184,6 +225,9 @@ class PurchaseRowEditDialog(QDialog):
         # parent=None で作成し、メイン画面を前面に出さない（編集時もブラウザが隠れないようにする）
         super().__init__(None)
         self.record = record
+        self._last_committed_sku = str(record.get("SKU") or record.get("sku") or "").strip()
+        self._sku_date_edit: Optional[QLineEdit] = None
+        self._sku_suffix_rest: str = ""
         self._product_widget = product_widget if product_widget is not None else parent
         self._csv_inventory_snapshot = csv_inventory_snapshot or {}
         # メイン画面を操作しても編集ダイアログが背面に回らないようにする
@@ -216,7 +260,43 @@ class PurchaseRowEditDialog(QDialog):
         self._title_label.setMaximumWidth(340)
         info_layout.addRow("商品名:", self._title_label)
         info_layout.addRow("ASIN:", QLabel(self._record_str("ASIN") or "-"))
-        info_layout.addRow("SKU:", QLabel(self._record_str("SKU") or "-"))
+        sku_full = self._record_str("SKU") or self._record_str("sku") or ""
+        date_prefix, rest_suffix = _split_sku_leading_date(sku_full)
+        locked = _sku_date_edit_locked(self.record)
+        if locked or date_prefix is None:
+            sku_lbl = QLabel(sku_full or "-")
+            if locked:
+                sku_lbl.setToolTip(
+                    "販売中・販売済み・一部販売済みの商品は、SKU先頭の日付（8桁）を変更できません。"
+                )
+            elif not sku_full:
+                sku_lbl.setToolTip("")
+            else:
+                sku_lbl.setToolTip(
+                    "SKUが先頭8桁の日付（YYYYMMDD）形式ではないため、日付のみの変更はできません。"
+                )
+            info_layout.addRow("SKU:", sku_lbl)
+        else:
+            self._sku_suffix_rest = rest_suffix
+            sku_row = QHBoxLayout()
+            self._sku_date_edit = QLineEdit()
+            self._sku_date_edit.setMaxLength(8)
+            self._sku_date_edit.setFixedWidth(92)
+            self._sku_date_edit.setText(date_prefix)
+            self._sku_date_edit.setPlaceholderText("YYYYMMDD")
+            self._sku_date_edit.setToolTip(
+                "先頭8桁（仕入日など）のみ変更できます。出品日と見なされる場合の調整・自社寝かせ在庫向けです。"
+            )
+            self._sku_date_edit.textChanged.connect(self._on_sku_date_text_changed)
+            suf_lbl = QLabel(rest_suffix if rest_suffix else "")
+            suf_lbl.setStyleSheet("color: #b0b0b0;")
+            suf_lbl.setWordWrap(False)
+            suf_lbl.setToolTip("SKUのこの部分は変更できません（日付8桁のみ編集可）。")
+            sku_row.addWidget(self._sku_date_edit, 0)
+            sku_row.addWidget(suf_lbl, 1)
+            sku_wrap = QWidget()
+            sku_wrap.setLayout(sku_row)
+            info_layout.addRow("SKU:", sku_wrap)
         self._condition_label = QLabel(self._record_condition_label_text())
         self._condition_label.setWordWrap(True)
         self._condition_label.setMaximumWidth(340)
@@ -495,6 +575,62 @@ class PurchaseRowEditDialog(QDialog):
             return ""
         return str(v).strip()
 
+    def _on_sku_date_text_changed(self, text: str) -> None:
+        """SKU日付欄は数字8桁のみ。"""
+        if self._sku_date_edit is None:
+            return
+        digits = "".join(c for c in text if c.isdigit())[:8]
+        if digits != text:
+            self._sku_date_edit.blockSignals(True)
+            self._sku_date_edit.setText(digits)
+            self._sku_date_edit.blockSignals(False)
+
+    def _apply_sku_date_change(self) -> bool:
+        """
+        日付編集ありの場合に record と DB の SKU を更新する。
+        失敗時は False（メッセージ表示済み想定）。
+        """
+        if self._sku_date_edit is None:
+            return True
+        raw = self._sku_date_edit.text().strip()
+        raw = "".join(c for c in raw if c.isdigit())
+        if len(raw) != 8:
+            QMessageBox.warning(self, "SKU", "日付は YYYYMMDD の8桁で入力してください。")
+            return False
+        if not _is_valid_yyyymmdd(raw):
+            QMessageBox.warning(self, "SKU", "日付が有効な暦日ではありません（YYYYMMDD を確認してください）。")
+            return False
+        new_sku = raw + self._sku_suffix_rest
+        old_sku = self._last_committed_sku
+        if new_sku == old_sku:
+            self.record["SKU"] = new_sku
+            self.record["sku"] = new_sku
+            return True
+
+        pw = self._product_widget
+        pdb = getattr(pw, "purchase_history_db", None) if pw else None
+        if pdb:
+            row_new = pdb.get_by_sku(new_sku)
+            row_old = pdb.get_by_sku(old_sku) if old_sku else None
+            if row_new is not None and (row_old is None or row_new.get("id") != row_old.get("id")):
+                QMessageBox.warning(
+                    self,
+                    "SKU",
+                    f"SKU「{new_sku}」は既に別の仕入データで使用されています。別の日付を指定してください。",
+                )
+                return False
+            if row_old is not None:
+                try:
+                    pdb.rename_sku(old_sku, new_sku)
+                except ValueError as e:
+                    QMessageBox.warning(self, "SKU", str(e))
+                    return False
+
+        self.record["SKU"] = new_sku
+        self.record["sku"] = new_sku
+        self._last_committed_sku = new_sku
+        return True
+
     def _ta_price_edit(self, which: int) -> QLineEdit:
         return (self._ta0_edit, self._ta1_edit, self._ta2_edit, self._ta3_edit)[which]
 
@@ -612,6 +748,8 @@ class PurchaseRowEditDialog(QDialog):
 
     def _apply(self) -> None:
         """仕入DBに反映する（ダイアログは閉じない＝ブラウザを見たまま続けられる）"""
+        if not self._apply_sku_date_change():
+            return
         tp0 = self._ta0_edit.text().strip()
         tp1 = self._ta1_edit.text().strip()
         tp2 = self._ta2_edit.text().strip()

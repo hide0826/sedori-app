@@ -268,6 +268,30 @@ class PurchaseDatabase:
         )
         return [dict(r) for r in cur.fetchall()]
 
+    def rename_sku(self, old_sku: str, new_sku: str) -> bool:
+        """
+        purchases テーブル上の主キー相当（sku 列）を変更する。
+        new_sku が既に別行で使われている場合は ValueError。
+        """
+        old_sku = (old_sku or "").strip()
+        new_sku = (new_sku or "").strip()
+        if not old_sku or not new_sku:
+            raise ValueError("old_sku と new_sku は必須です")
+        if old_sku == new_sku:
+            return True
+        if self.get_by_sku(new_sku):
+            raise ValueError(f"SKU「{new_sku}」は既に使用されています")
+        existing = self.get_by_sku(old_sku)
+        if not existing:
+            return False
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE purchases SET sku = ?, updated_at = CURRENT_TIMESTAMP WHERE sku = ?",
+            (new_sku, old_sku),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def delete(self, sku: str) -> bool:
         """SKUで仕入情報を削除"""
         cur = self.conn.cursor()

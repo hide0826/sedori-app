@@ -2143,3 +2143,35 @@
 
 **最終更新**: 2026-05-03
 **更新者**: Agentモード（実装）
+
+### 2026-05-06（仕入DB: SKU日付編集条件追加・販売中理由統一・ステータス絞り込みUI刷新）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. **仕入行編集でSKU先頭日付（8桁）のみを条件付き編集可能化**
+     - `purchase_row_edit_dialog.py`:
+       - ステータスが `selling` / `sold` / `partially_sold`（表示ラベル含む）の行は編集不可。
+       - それ以外で SKU が `YYYYMMDD...` 形式のとき、先頭8桁のみ編集可能に。
+       - 入力は数字8桁・有効日付を検証し、保存時は `purchase_db.rename_sku` で DB の SKU も更新。
+     - `purchase_db.py`:
+       - `rename_sku(old_sku, new_sku)` を追加（重複SKUは `ValueError`）。
+  2. **販売中ステータス理由を「在庫CSV連動:」へ統一**
+     - `repricer_widget.py`: 在庫CSV同期で `selling` 更新時に `status_reason="在庫CSV連動:"` を保存。
+     - `product_widget.py`: `selling` かつ理由空欄時に表示・保存側へ既定理由を補完。
+  3. **仕入DB検索のステータスフィルタを全面改修**
+     - `product_widget.py`:
+       - 単一プルダウンから、折りたたみ可能な複数チェック方式へ変更（8ステータス対応）。
+       - 黒背景テーマで視認性を調整（白背景化防止）。
+       - レイアウトを横一列化し、`販売済み` の右に小型 `クリア` ボタンを配置。
+       - チェック変更時は 80ms デバウンスでフィルタ再適用し、連続操作の体感を改善。
+- **変更ファイル**:
+  - `python/desktop/ui/purchase_row_edit_dialog.py`
+  - `python/desktop/database/purchase_db.py`
+  - `python/desktop/ui/repricer_widget.py`
+  - `python/desktop/ui/product_widget.py`
+  - `docs/cursor_development_progress.md`
+- **次回**:
+  - ステータス絞り込み行が環境差（DPI/フォント）で崩れる場合、`QFontMetrics` ベースでボタン幅を自動算出する。
+  - SKU日付編集の監査ログ（旧SKU→新SKU、更新日時、更新者）を必要に応じて追加する。
+
+**最終更新**: 2026-05-06
+**更新者**: Agentモード（実装）

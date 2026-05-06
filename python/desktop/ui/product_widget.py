@@ -15,12 +15,13 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 import copy
 
-from PySide6.QtCore import Qt, QMimeData, QUrl, QSettings
+from PySide6.QtCore import Qt, QMimeData, QUrl, QSettings, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QGroupBox, QFormLayout, QLineEdit, QDialog, QDialogButtonBox,
     QMessageBox, QLabel, QTabWidget, QHeaderView, QFileDialog, QMenu, QApplication,
-    QAbstractItemView, QComboBox, QProgressDialog,
+    QAbstractItemView, QComboBox, QProgressDialog, QCheckBox, QToolButton, QScrollArea, QFrame,
+    QSizePolicy,
 )
 from PySide6.QtGui import QDrag, QPixmap, QDesktopServices, QCursor, QColor
 
@@ -36,6 +37,21 @@ import json
 import logging
 
 logger = logging.getLogger(__name__)
+
+# 仕入DBでステータスが「販売中」のときの既定ステータス理由（在庫・価格改定CSV連動）
+_PURCHASE_STATUS_REASON_SELLING_INVENTORY_CSV = "在庫CSV連動:"
+
+# 仕入DB検索：ステータス複数選択（表示ラベル, 内部コード）— テーブル内コンボと同一順
+_PURCHASE_STATUS_FILTER_OPTIONS: Tuple[Tuple[str, str], ...] = (
+    ("出品可能", "ready"),
+    ("破損", "damaged"),
+    ("登録不可", "unlistable"),
+    ("保管中", "storage"),
+    ("次回出品予定", "pending"),
+    ("販売中", "selling"),
+    ("一部販売済み", "partially_sold"),
+    ("販売済み", "sold"),
+)
 
 from database.product_db import ProductDatabase
 from database.warranty_db import WarrantyDatabase
@@ -566,17 +582,9 @@ class ProductWidget(QWidget):
         self.purchase_search_jan.setPlaceholderText("JANで検索")
         search_layout.addWidget(self.purchase_search_jan, 0, 7)
         
-        # ステータスフィルタ
-        search_layout.addWidget(QLabel("ステータス:"), 1, 0)
-        self.purchase_status_filter = QComboBox()
-        self.purchase_status_filter.addItem("すべて", "")
-        self.purchase_status_filter.addItem("出品可能", "ready")
-        self.purchase_status_filter.addItem("破損", "damaged")
-        self.purchase_status_filter.addItem("登録不可", "unlistable")
-        self.purchase_status_filter.addItem("保管中", "storage")
-        self.purchase_status_filter.addItem("次回出品予定", "pending")
-        self.purchase_status_filter.currentIndexChanged.connect(self.filter_purchase_records)
-        search_layout.addWidget(self.purchase_status_filter, 1, 1)
+        # ステータスフィルタ（複数チェック・折りたたみ可能）
+        status_filter_panel = self._build_purchase_status_collapsible_filter()
+        search_layout.addWidget(status_filter_panel, 1, 0, 1, 10)
         
         # 検索ボタン
         search_btn = QPushButton("検索")
@@ -1975,13 +1983,132 @@ class ProductWidget(QWidget):
         self.update_purchase_count_label()
         self.save_purchase_snapshot()
 
+    def _build_purchase_status_collapsible_filter(self) -> QWidget:
+        """仕入DB検索：ステータスを複数選択でき、パネルは折りたたみ可能。"""
+        self._purchase_status_checkboxes: List[Tuple[str, QCheckBox]] = []
+        self._purchase_status_filter_apply_timer = QTimer(self)
+        self._purchase_status_filter_apply_timer.setSingleShot(True)
+        self._purchase_status_filter_apply_timer.timeout.connect(self.filter_purchase_records)
+        outer = QWidget()
+        outer.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        v = QVBoxLayout(outer)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(2)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(8)
+        self._purchase_status_filter_toggle = QToolButton()
+        self._purchase_status_filter_toggle.setCheckable(True)
+        self._purchase_status_filter_toggle.setChecked(True)
+        self._purchase_status_filter_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._purchase_status_filter_toggle.setText("ステータスで絞り込み")
+        self._purchase_status_filter_toggle.setArrowType(Qt.DownArrow)
+        self._purchase_status_filter_toggle.toggled.connect(self._on_purchase_status_filter_section_toggled)
+        head.addWidget(self._purchase_status_filter_toggle, 0)
+        hint = QLabel("チェックしたものだけ表示（未選択＝全ステータス）")
+        hint.setStyleSheet("color: #b0b0b0; font-size: 11px;")
+        hint.setWordWrap(False)
+        head.addWidget(hint, 0)
+        v.addLayout(head)
+
+        self._purchase_status_filter_scroll = QScrollArea()
+        # 中身の高さに合わせ、ビューポート内で無駄に縦に伸ばさない
+        self._purchase_status_filter_scroll.setWidgetResizable(False)
+        self._purchase_status_filter_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._purchase_status_filter_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._purchase_status_filter_scroll.setFrameShape(QFrame.StyledPanel)
+        self._purchase_status_filter_scroll.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+        )
+        # ダークテーマ：ビューポートが白のままだと文字が読めないため背景を黒系に固定
+        _sf_bg = "#0a0a0a"
+        self._purchase_status_filter_scroll.setStyleSheet(
+            f"QScrollArea {{ background-color: {_sf_bg}; border: 1px solid #444444; }}"
+            "QScrollBar:vertical { background: #1a1a1a; width: 10px; margin: 0; }"
+            "QScrollBar::handle:vertical { background: #555555; min-height: 24px; border-radius: 4px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+        )
+        self._purchase_status_filter_scroll.viewport().setStyleSheet(
+            f"background-color: {_sf_bg};"
+        )
+
+        inner = QWidget()
+        inner.setStyleSheet(
+            f"QWidget {{ background-color: {_sf_bg}; }}"
+            "QCheckBox { color: #f0f0f0; spacing: 6px; }"
+            "QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #888888; "
+            "background-color: #252525; border-radius: 2px; }"
+            "QCheckBox::indicator:checked { background-color: #3d7ec4; border-color: #5a9ee0; }"
+        )
+        row = QHBoxLayout(inner)
+        row.setContentsMargins(6, 2, 6, 2)
+        row.setSpacing(12)
+        for label, code in _PURCHASE_STATUS_FILTER_OPTIONS:
+            cb = QCheckBox(label)
+            cb.stateChanged.connect(self._on_purchase_status_filter_checkbox_changed)
+            self._purchase_status_checkboxes.append((code, cb))
+            row.addWidget(cb, 0)
+        clear_btn = QPushButton("クリア")
+        clear_btn.setToolTip("ステータスのチェックだけ外します（他の検索条件はそのまま）")
+        clear_btn.setFixedSize(72, 22)
+        clear_btn.setStyleSheet("font-size: 11px; padding: 0 4px;")
+        clear_btn.clicked.connect(self._on_purchase_status_filter_clear_clicked)
+        row.addWidget(clear_btn, 0)
+        row.addStretch(1)
+
+        self._purchase_status_filter_scroll.setWidget(inner)
+        inner.adjustSize()
+        _sh = inner.sizeHint()
+        _frame = max(4, self._purchase_status_filter_scroll.frameWidth() * 2)
+        self._purchase_status_filter_scroll.setFixedHeight(max(34, _sh.height() + _frame + 2))
+        self._purchase_status_filter_scroll.setFixedWidth(_sh.width() + _frame + 6)
+        v.addWidget(self._purchase_status_filter_scroll, 0, Qt.AlignmentFlag.AlignLeft)
+        return outer
+
+    def _on_purchase_status_filter_section_toggled(self, expanded: bool) -> None:
+        if hasattr(self, "_purchase_status_filter_scroll"):
+            self._purchase_status_filter_scroll.setVisible(expanded)
+        if hasattr(self, "_purchase_status_filter_toggle"):
+            self._purchase_status_filter_toggle.setArrowType(
+                Qt.DownArrow if expanded else Qt.RightArrow
+            )
+
+    def _purchase_status_filter_selected_codes(self) -> set:
+        codes: set = set()
+        for code, cb in getattr(self, "_purchase_status_checkboxes", []):
+            if cb.isChecked():
+                codes.add(str(code).lower())
+        return codes
+
+    def _reset_purchase_status_filter_checkboxes(self) -> None:
+        for _, cb in getattr(self, "_purchase_status_checkboxes", []):
+            cb.blockSignals(True)
+            cb.setChecked(False)
+            cb.blockSignals(False)
+
+    def _on_purchase_status_filter_clear_clicked(self) -> None:
+        self._reset_purchase_status_filter_checkboxes()
+        self.filter_purchase_records()
+
+    def _on_purchase_status_filter_checkbox_changed(self, _state: int) -> None:
+        """
+        チェック連打時に毎回全件再描画しないよう、短いデバウンスで反映する。
+        体感の引っ掛かりを減らす目的。
+        """
+        t = getattr(self, "_purchase_status_filter_apply_timer", None)
+        if t is None:
+            self.filter_purchase_records()
+            return
+        t.start(80)
+
     def filter_purchase_records(self):
         """検索条件でフィルタリング"""
         date_query = self.purchase_search_date.text().strip()
         sku_query = self.purchase_search_sku.text().strip().lower()
         asin_query = self.purchase_search_asin.text().strip().lower()
         jan_query = self.purchase_search_jan.text().strip().lower()
-        status_filter = self.purchase_status_filter.currentData()
+        status_selected = self._purchase_status_filter_selected_codes()
         # マスターがなければ空で初期化
         if not hasattr(self, 'purchase_all_records_master') or self.purchase_all_records_master is None:
             self.purchase_all_records_master = []
@@ -2020,12 +2147,11 @@ class ProductWidget(QWidget):
                 if jan_query in str(r.get("JAN") or r.get("jan") or "").lower()
             ]
 
-        # ステータスフィルタ
-        if status_filter:
-            sf = str(status_filter).lower()
+        # ステータスフィルタ（複数チェック時はいずれかに一致）
+        if status_selected:
             filtered_records = [
                 r for r in filtered_records
-                if str(r.get("ステータス") or r.get("status") or "ready").lower() == sf
+                if str(r.get("ステータス") or r.get("status") or "ready").lower() in status_selected
             ]
 
         # 結果を反映
@@ -2039,7 +2165,7 @@ class ProductWidget(QWidget):
         self.purchase_search_sku.clear()
         self.purchase_search_asin.clear()
         self.purchase_search_jan.clear()
-        self.purchase_status_filter.setCurrentIndex(0)  # "すべて"を選択
+        self._reset_purchase_status_filter_checkboxes()
         self.purchase_records = list(self.purchase_all_records) if hasattr(self, 'purchase_all_records') else []
         self.populate_purchase_table(self.purchase_records)
         self.update_purchase_count_label()
@@ -2375,6 +2501,13 @@ class ProductWidget(QWidget):
                         if status_reason:
                             row["ステータス理由"] = status_reason
                             row["status_reason"] = status_reason
+                        if str(status or "").strip().lower() == "selling":
+                            sr_now = str(
+                                row.get("ステータス理由") or row.get("status_reason") or ""
+                            ).strip()
+                            if not sr_now:
+                                row["ステータス理由"] = _PURCHASE_STATUS_REASON_SELLING_INVENTORY_CSV
+                                row["status_reason"] = _PURCHASE_STATUS_REASON_SELLING_INVENTORY_CSV
                         tp0 = purchase_info.get("tp0") or ""
                         tp1 = purchase_info.get("tp1") or purchase_info.get("ta1") or ""
                         tp2 = purchase_info.get("tp2") or purchase_info.get("ta2") or ""
@@ -2868,6 +3001,13 @@ class ProductWidget(QWidget):
                         rec["status"] = new_status
                         # ステータス設定日時を更新
                         rec["status_set_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        if new_status == "selling":
+                            cur_r = str(
+                                rec.get("ステータス理由") or rec.get("status_reason") or ""
+                            ).strip()
+                            if not cur_r:
+                                rec["ステータス理由"] = _PURCHASE_STATUS_REASON_SELLING_INVENTORY_CSV
+                                rec["status_reason"] = _PURCHASE_STATUS_REASON_SELLING_INVENTORY_CSV
                         
                         # purchase_all_records / master / purchase_records を更新
                         sku = rec.get("SKU") or rec.get("sku")
@@ -2881,6 +3021,8 @@ class ProductWidget(QWidget):
                                             t_rec["ステータス"] = new_status
                                             t_rec["status"] = new_status
                                             t_rec["status_set_at"] = rec["status_set_at"]
+                                            t_rec["ステータス理由"] = rec.get("ステータス理由") or rec.get("status_reason") or ""
+                                            t_rec["status_reason"] = rec.get("status_reason") or rec.get("ステータス理由") or ""
                                             break
                         
                         # データベースに保存（ステータス理由も含める）
@@ -2918,12 +3060,7 @@ class ProductWidget(QWidget):
                         self._update_row_color_by_status(r, new_status)
 
                         # ステータスフィルタをリセットして再描画（変更後に行が消えないよう常に全件表示に戻す）
-                        if hasattr(self, 'purchase_status_filter'):
-                            try:
-                                self.purchase_status_filter.blockSignals(True)
-                                self.purchase_status_filter.setCurrentIndex(0)  # 「すべて」
-                            finally:
-                                self.purchase_status_filter.blockSignals(False)
+                        self._reset_purchase_status_filter_checkboxes()
 
                         # フィルタを再適用（全件表示）してテーブルを再描画
                         self.filter_purchase_records()
@@ -2942,6 +3079,13 @@ class ProductWidget(QWidget):
                 elif header == "ステータス理由":
                     # ステータス理由列の処理：編集可能なテキスト
                     reason_value = str(value) if value else ""
+                    st_row = str(
+                        record.get("ステータス") or record.get("status") or ""
+                    ).strip().lower()
+                    if st_row == "selling" and not reason_value.strip():
+                        reason_value = _PURCHASE_STATUS_REASON_SELLING_INVENTORY_CSV
+                        record["ステータス理由"] = reason_value
+                        record["status_reason"] = reason_value
                     item = QTableWidgetItem(reason_value)
                     item.setFlags(item.flags() | Qt.ItemIsEditable)
                     # 編集時の処理は、itemChangedシグナルで処理（後で接続）
@@ -2974,6 +3118,12 @@ class ProductWidget(QWidget):
                     # レコード側の値も更新
                     record["ステータス"] = "selling"
                     record["status"] = "selling"
+                    lr = str(
+                        record.get("ステータス理由") or record.get("status_reason") or ""
+                    ).strip()
+                    if not lr:
+                        record["ステータス理由"] = _PURCHASE_STATUS_REASON_SELLING_INVENTORY_CSV
+                        record["status_reason"] = _PURCHASE_STATUS_REASON_SELLING_INVENTORY_CSV
                     # テーブル上のコンボボックスも更新（シグナルは発火させない）
                     if "ステータス" in columns:
                         status_col_idx = columns.index("ステータス")
