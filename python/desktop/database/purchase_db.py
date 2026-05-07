@@ -56,6 +56,7 @@ class PurchaseDatabase:
               receipt_id INTEGER,
               comment TEXT,
               other_cost INTEGER DEFAULT 0,
+              storage_fee INTEGER DEFAULT 0,
               sales_channel TEXT DEFAULT 'Amazon',
               created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
               updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -107,6 +108,8 @@ class PurchaseDatabase:
             ("listed_date", "TEXT"),
             ("repricing_enabled", "INTEGER DEFAULT 1"),
             ("sales_channel", "TEXT DEFAULT 'Amazon'"),
+            # SP-API運用時に使う在庫保管手数料（現UIでは非表示運用可）
+            ("storage_fee", "INTEGER DEFAULT 0"),
         ]
 
         for col_name, col_def in new_columns:
@@ -170,6 +173,7 @@ class PurchaseDatabase:
             "receipt_id",
             "comment",
             "other_cost",
+            "storage_fee",
             "sales_channel",
             "expected_margin",
             "expected_roi",

@@ -234,6 +234,75 @@ class StoreDatabase:
                 UPDATE expense_destinations SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
             END
         """)
+
+        # online_platforms テーブル作成（電脳プラットフォームマスタ）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS online_platforms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform_code TEXT UNIQUE NOT NULL,
+                platform_name TEXT UNIQUE NOT NULL,
+                category TEXT NOT NULL DEFAULT 'モール',
+                code_prefix TEXT NOT NULL,
+                is_active INTEGER DEFAULT 1,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS update_online_platforms_timestamp
+            AFTER UPDATE ON online_platforms
+            FOR EACH ROW
+            BEGIN
+                UPDATE online_platforms SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            END
+        """)
+
+        # online_stores テーブル作成（電脳店舗マスタ）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS online_stores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                supplier_code TEXT UNIQUE NOT NULL,
+                platform_id INTEGER NOT NULL,
+                shop_name TEXT NOT NULL,
+                registration_number TEXT,
+                notes TEXT,
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (platform_id) REFERENCES online_platforms(id)
+            )
+        """)
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS update_online_stores_timestamp
+            AFTER UPDATE ON online_stores
+            FOR EACH ROW
+            BEGIN
+                UPDATE online_stores SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            END
+        """)
+
+        # wholesalers テーブル作成（問屋マスタ）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS wholesalers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                wholesaler_code TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                registration_number TEXT,
+                notes TEXT,
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS update_wholesalers_timestamp
+            AFTER UPDATE ON wholesalers
+            FOR EACH ROW
+            BEGIN
+                UPDATE wholesalers SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            END
+        """)
         
         conn.commit()
     
@@ -1814,4 +1883,331 @@ class StoreDatabase:
             'updated': updated,
             'errors': errors
         }
+
+    # ==================== online_platforms テーブル操作（電脳プラットフォーム） ====================
+
+    def add_online_platform(self, data: Dict[str, Any]) -> int:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO online_platforms (platform_code, platform_name, category, code_prefix, is_active, notes)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            (data.get('platform_code') or '').strip().upper(),
+            (data.get('platform_name') or '').strip(),
+            (data.get('category') or 'モール').strip(),
+            (data.get('code_prefix') or '').strip().upper(),
+            int(data.get('is_active', 1)),
+            data.get('notes') or '',
+        ))
+        conn.commit()
+        return cursor.lastrowid
+
+    def update_online_platform(self, platform_id: int, data: Dict[str, Any]) -> bool:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE online_platforms SET
+                platform_code = ?, platform_name = ?, category = ?,
+                code_prefix = ?, is_active = ?, notes = ?
+            WHERE id = ?
+        """, (
+            (data.get('platform_code') or '').strip().upper(),
+            (data.get('platform_name') or '').strip(),
+            (data.get('category') or 'モール').strip(),
+            (data.get('code_prefix') or '').strip().upper(),
+            int(data.get('is_active', 1)),
+            data.get('notes') or '',
+            platform_id,
+        ))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def delete_online_platform(self, platform_id: int) -> bool:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM online_platforms WHERE id = ?", (platform_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def get_online_platform(self, platform_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM online_platforms WHERE id = ?", (platform_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def get_online_platform_by_name(self, platform_name: str) -> Optional[Dict[str, Any]]:
+        name = (platform_name or '').strip()
+        if not name:
+            return None
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM online_platforms WHERE platform_name = ?", (name,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def list_online_platforms(self, active_only: bool = False, category: Optional[str] = None) -> List[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        where = []
+        params: List[Any] = []
+        if active_only:
+            where.append("is_active = 1")
+        if category:
+            where.append("category = ?")
+            params.append(category)
+        sql = "SELECT * FROM online_platforms"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY category, platform_name"
+        cursor.execute(sql, tuple(params))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def check_online_platform_code_exists(self, platform_code: str, exclude_id: Optional[int] = None) -> bool:
+        code = (platform_code or '').strip().upper()
+        if not code:
+            return False
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        if exclude_id:
+            cursor.execute("SELECT COUNT(*) FROM online_platforms WHERE platform_code = ? AND id != ?", (code, exclude_id))
+        else:
+            cursor.execute("SELECT COUNT(*) FROM online_platforms WHERE platform_code = ?", (code,))
+        return cursor.fetchone()[0] > 0
+
+    # ==================== online_stores テーブル操作（電脳店舗） ====================
+
+    def get_max_online_store_code_for_prefix(self, prefix: str) -> Optional[str]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT supplier_code FROM online_stores WHERE supplier_code LIKE ?",
+            (f"{prefix}-%",),
+        )
+        rows = cursor.fetchall()
+        codes = [row[0] for row in rows if row[0]]
+        if not codes:
+            return None
+        max_num = 0
+        for code in codes:
+            try:
+                _, num = code.rsplit('-', 1)
+                max_num = max(max_num, int(num))
+            except Exception:
+                continue
+        if max_num <= 0:
+            return None
+        return f"{prefix}-{max_num:04d}"
+
+    def get_next_online_store_code(self, prefix: str) -> str:
+        p = (prefix or 'ONL').strip().upper()
+        max_code = self.get_max_online_store_code_for_prefix(p)
+        if not max_code:
+            return f"{p}-0001"
+        try:
+            _, num = max_code.rsplit('-', 1)
+            return f"{p}-{int(num) + 1:04d}"
+        except Exception:
+            return f"{p}-0001"
+
+    def add_online_store(self, data: Dict[str, Any]) -> int:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO online_stores (supplier_code, platform_id, shop_name, registration_number, notes, is_active)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            (data.get('supplier_code') or '').strip().upper(),
+            int(data.get('platform_id')),
+            (data.get('shop_name') or '').strip(),
+            (data.get('registration_number') or '').strip(),
+            data.get('notes') or '',
+            int(data.get('is_active', 1)),
+        ))
+        conn.commit()
+        return cursor.lastrowid
+
+    def update_online_store(self, store_id: int, data: Dict[str, Any]) -> bool:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE online_stores SET
+                supplier_code = ?, platform_id = ?, shop_name = ?,
+                registration_number = ?, notes = ?, is_active = ?
+            WHERE id = ?
+        """, (
+            (data.get('supplier_code') or '').strip().upper(),
+            int(data.get('platform_id')),
+            (data.get('shop_name') or '').strip(),
+            (data.get('registration_number') or '').strip(),
+            data.get('notes') or '',
+            int(data.get('is_active', 1)),
+            store_id,
+        ))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def delete_online_store(self, store_id: int) -> bool:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM online_stores WHERE id = ?", (store_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def get_online_store(self, store_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT s.*, p.platform_name, p.category, p.code_prefix
+            FROM online_stores s
+            JOIN online_platforms p ON p.id = s.platform_id
+            WHERE s.id = ?
+        """, (store_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def list_online_stores(self, search_term: Optional[str] = None, active_only: bool = False) -> List[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        where = []
+        params: List[Any] = []
+        if search_term:
+            where.append("(s.shop_name LIKE ? OR s.supplier_code LIKE ? OR p.platform_name LIKE ?)")
+            pattern = f"%{search_term}%"
+            params.extend([pattern, pattern, pattern])
+        if active_only:
+            where.append("s.is_active = 1")
+        sql = """
+            SELECT s.*, p.platform_name, p.category, p.code_prefix
+            FROM online_stores s
+            JOIN online_platforms p ON p.id = s.platform_id
+        """
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY p.category, p.platform_name, s.shop_name"
+        cursor.execute(sql, tuple(params))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def check_online_store_code_exists(self, supplier_code: str, exclude_id: Optional[int] = None) -> bool:
+        code = (supplier_code or '').strip().upper()
+        if not code:
+            return False
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        if exclude_id:
+            cursor.execute("SELECT COUNT(*) FROM online_stores WHERE supplier_code = ? AND id != ?", (code, exclude_id))
+        else:
+            cursor.execute("SELECT COUNT(*) FROM online_stores WHERE supplier_code = ?", (code,))
+        return cursor.fetchone()[0] > 0
+
+    # ==================== wholesalers テーブル操作（問屋） ====================
+
+    def get_max_wholesaler_code_for_prefix(self, prefix: str) -> Optional[str]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT wholesaler_code FROM wholesalers WHERE wholesaler_code LIKE ?", (f"{prefix}-%",))
+        rows = cursor.fetchall()
+        codes = [row[0] for row in rows if row[0]]
+        if not codes:
+            return None
+        max_num = 0
+        for code in codes:
+            try:
+                _, num = code.rsplit('-', 1)
+                max_num = max(max_num, int(num))
+            except Exception:
+                continue
+        if max_num <= 0:
+            return None
+        return f"{prefix}-{max_num:04d}"
+
+    def get_next_wholesaler_code(self, prefix: str = "WS") -> str:
+        p = (prefix or 'WS').strip().upper()
+        max_code = self.get_max_wholesaler_code_for_prefix(p)
+        if not max_code:
+            return f"{p}-0001"
+        try:
+            _, num = max_code.rsplit('-', 1)
+            return f"{p}-{int(num) + 1:04d}"
+        except Exception:
+            return f"{p}-0001"
+
+    def add_wholesaler(self, data: Dict[str, Any]) -> int:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO wholesalers (wholesaler_code, name, registration_number, notes, is_active)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            (data.get('wholesaler_code') or '').strip().upper(),
+            (data.get('name') or '').strip(),
+            (data.get('registration_number') or '').strip(),
+            data.get('notes') or '',
+            int(data.get('is_active', 1)),
+        ))
+        conn.commit()
+        return cursor.lastrowid
+
+    def update_wholesaler(self, wholesaler_id: int, data: Dict[str, Any]) -> bool:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE wholesalers SET
+                wholesaler_code = ?, name = ?, registration_number = ?, notes = ?, is_active = ?
+            WHERE id = ?
+        """, (
+            (data.get('wholesaler_code') or '').strip().upper(),
+            (data.get('name') or '').strip(),
+            (data.get('registration_number') or '').strip(),
+            data.get('notes') or '',
+            int(data.get('is_active', 1)),
+            wholesaler_id,
+        ))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def delete_wholesaler(self, wholesaler_id: int) -> bool:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM wholesalers WHERE id = ?", (wholesaler_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def get_wholesaler(self, wholesaler_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM wholesalers WHERE id = ?", (wholesaler_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def list_wholesalers(self, search_term: Optional[str] = None, active_only: bool = False) -> List[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        where = []
+        params: List[Any] = []
+        if search_term:
+            where.append("(name LIKE ? OR wholesaler_code LIKE ?)")
+            pattern = f"%{search_term}%"
+            params.extend([pattern, pattern])
+        if active_only:
+            where.append("is_active = 1")
+        sql = "SELECT * FROM wholesalers"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY name"
+        cursor.execute(sql, tuple(params))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def check_wholesaler_code_exists(self, wholesaler_code: str, exclude_id: Optional[int] = None) -> bool:
+        code = (wholesaler_code or '').strip().upper()
+        if not code:
+            return False
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        if exclude_id:
+            cursor.execute("SELECT COUNT(*) FROM wholesalers WHERE wholesaler_code = ? AND id != ?", (code, exclude_id))
+        else:
+            cursor.execute("SELECT COUNT(*) FROM wholesalers WHERE wholesaler_code = ?", (code,))
+        return cursor.fetchone()[0] > 0
 

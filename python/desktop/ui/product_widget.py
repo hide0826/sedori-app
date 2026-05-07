@@ -2291,6 +2291,12 @@ class ProductWidget(QWidget):
                 if col_idx in tp_indices:
                     is_visible = (self.purchase_view_mode == "tp")
                 self.purchase_table.setColumnHidden(col_idx, not is_visible)
+        # 在庫保管手数料はSP-API運用時まで非表示
+        if "在庫保管手数料" in self.purchase_columns:
+            self.purchase_table.setColumnHidden(
+                self.purchase_columns.index("在庫保管手数料"),
+                True
+            )
     
     def update_purchase_count_label(self):
         """保存件数ラベルを更新"""

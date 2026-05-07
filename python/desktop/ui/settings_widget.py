@@ -346,6 +346,11 @@ class SettingsWidget(QWidget):
         )
         self.amazon_seller_id_edit.setClearButtonEnabled(True)
         amazon_layout.addWidget(self.amazon_seller_id_edit, 0, 1)
+        amazon_layout.addWidget(QLabel("FBA料金シミュレーターURL:"), 1, 0)
+        self.amazon_fba_simulator_url_edit = QLineEdit()
+        self.amazon_fba_simulator_url_edit.setPlaceholderText("https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP")
+        self.amazon_fba_simulator_url_edit.setClearButtonEnabled(True)
+        amazon_layout.addWidget(self.amazon_fba_simulator_url_edit, 1, 1)
         layout.addWidget(amazon_group)
         
         layout.addStretch()
@@ -798,6 +803,12 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.keepa_api_key_edit.setText(self.settings.value("keepa/api_key", ""))
         # Amazon 自店セラーID
         self.amazon_seller_id_edit.setText(self.settings.value("amazon/seller_id", ""))
+        self.amazon_fba_simulator_url_edit.setText(
+            self.settings.value(
+                "amazon/fba_simulator_url",
+                "https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP"
+            )
+        )
         # 3-6-9版（開発段階ではデフォルトON）
         self.pro_enabled_cb.setChecked(self.settings.value("pro/enabled", True, type=bool))
         gemini_model = self.settings.value("ocr/gemini_model", "gemini-flash-latest")
@@ -845,6 +856,11 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             self.settings.setValue("keepa/api_key", self.keepa_api_key_edit.text())
             # Amazon 自店セラーID
             self.settings.setValue("amazon/seller_id", self.amazon_seller_id_edit.text().strip())
+            self.settings.setValue(
+                "amazon/fba_simulator_url",
+                self.amazon_fba_simulator_url_edit.text().strip()
+                or "https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP"
+            )
             # 3-6-9版
             self.settings.setValue("pro/enabled", self.pro_enabled_cb.isChecked())
             
@@ -898,6 +914,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.gemini_api_key_edit.setText("")
         self.keepa_api_key_edit.setText("")
         self.amazon_seller_id_edit.setText("")
+        self.amazon_fba_simulator_url_edit.setText("https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP")
         self.gemini_model_combo.setCurrentText("gemini-flash-latest")
         self.pro_enabled_cb.setChecked(True)  # 開発段階ではデフォルトON
         
@@ -943,6 +960,8 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             },
             "amazon": {
                 "seller_id": self.amazon_seller_id_edit.text().strip(),
+                "fba_simulator_url": self.amazon_fba_simulator_url_edit.text().strip()
+                or "https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP",
             },
             "pro": {
                 "enabled": self.pro_enabled_cb.isChecked(),

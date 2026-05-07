@@ -193,7 +193,8 @@ QLineEdit {
 
 QLineEdit:focus {
     border: 1px solid #5aa2ff;
-    background-color: #404040;
+    background-color: #3c3c3c;
+    color: #ffffff;
 }
 
 /* 複数行テキスト入力の視認性を統一 */
@@ -232,6 +233,35 @@ QLineEdit:disabled {
     border-color: #444444;
 }
 
+/* 入力コントロール共通: OS既定の白背景を抑止 */
+QAbstractSpinBox, QDateEdit, QDateTimeEdit, QTimeEdit {
+    background-color: #3c3c3c;
+    color: #ffffff;
+    border: 1px solid #555555;
+    border-radius: 3px;
+    padding: 4px 8px;
+    selection-background-color: #0078d4;
+    selection-color: #ffffff;
+}
+
+QAbstractSpinBox:focus, QDateEdit:focus, QDateTimeEdit:focus, QTimeEdit:focus {
+    border: 1px solid #5aa2ff;
+    background-color: #3c3c3c;
+    color: #ffffff;
+}
+
+/* スピンボックス等の内部エディタが白背景になるケースを抑止 */
+QAbstractSpinBox QLineEdit,
+QDateEdit QLineEdit,
+QDateTimeEdit QLineEdit,
+QTimeEdit QLineEdit,
+QComboBox QLineEdit {
+    background-color: #3c3c3c;
+    color: #ffffff;
+    selection-background-color: #0078d4;
+    selection-color: #ffffff;
+}
+
 /* コンボボックス */
 QComboBox {
     background-color: #3c3c3c;
@@ -248,7 +278,8 @@ QComboBox:hover {
 
 QComboBox:focus {
     border: 1px solid #5aa2ff;
-    background-color: rgba(255,255,255,0.08);
+    background-color: #3c3c3c;
+    color: #ffffff;
 }
 
 QComboBox::drop-down {
@@ -343,7 +374,8 @@ QSpinBox {
 
 QSpinBox:focus, QDoubleSpinBox:focus, QDateTimeEdit:focus {
     border: 1px solid #5aa2ff;
-    background-color: rgba(255,255,255,0.08);
+    background-color: #3c3c3c;
+    color: #ffffff;
 }
 
 QSpinBox::up-button {

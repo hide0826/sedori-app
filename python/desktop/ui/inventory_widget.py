@@ -18,12 +18,14 @@ from PySide6.QtWidgets import (
     QToolButton, QApplication,
 )
 from PySide6.QtCore import Qt, QDate, QTime, QDateTime, Signal, QSettings
-from PySide6.QtGui import QFont, QColor, QPalette, QStandardItemModel, QStandardItem
+from PySide6.QtGui import QFont, QColor, QPalette, QStandardItemModel, QStandardItem, QDesktopServices
+from PySide6.QtCore import QUrl
 import pandas as pd
 from pathlib import Path
 import re
 import sys
 import os
+import tempfile
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from html import escape
@@ -41,6 +43,8 @@ from database.warranty_db import WarrantyDatabase
 from ui.star_rating_widget import StarRatingWidget
 from utils.route_utils import mark_route_flags_from_folder
 from utils.settings_helper import is_pro_enabled
+from services.keepa_service import KeepaService
+from services.ocr_service import OCRService
 
 # ファイル操作エリア直下の手順ラベル用（①〜⑧）。ハイライトは 1..8 / なしは None
 _WORKFLOW_PIPELINE_SEGMENTS = [
@@ -550,6 +554,680 @@ class SpotPurchaseDialog(QDialog):
         }
 
 
+class SinglePurchaseInputDialog(QDialog):
+    """単品仕入のひな型入力ダイアログ（実店舗/電脳/問屋を共通入力）"""
+
+    SOURCE_TYPE_OPTIONS = ["実店舗", "電脳", "問屋"]
+    SOURCE_CHANNEL_PRESETS = ["Amazon", "楽天", "ヤフショ", "メルカリ", "ヤフオク", "問屋A"]
+    CONDITION_PRESETS = ["新品", "中古(ほぼ新品)", "中古(非常に良い)", "中古(良い)", "中古(可)"]
+
+    def __init__(self, condition_template_db, get_condition_key_func, parent=None):
+        super().__init__(parent)
+        self.condition_template_db = condition_template_db
+        self.get_condition_key = get_condition_key_func
+        self.store_db = StoreDatabase()
+        self.keepa_service = KeepaService()
+        self.ocr_service = OCRService()
+        self.setWindowTitle("単品仕入入力（ひな型）")
+        self.setMinimumWidth(520)
+        self._build_ui()
+
+    def _build_ui(self):
+        # Windows環境で編集可能コンボの選択時に
+        # 「白背景 + 白文字」になるケースを回避するため、ダイアログ内で明示指定する。
+        self.setStyleSheet(
+            """
+            QLineEdit, QAbstractSpinBox, QDateEdit, QPlainTextEdit {
+                background-color: #3c3c3c;
+                color: #ffffff;
+                border: 1px solid #555555;
+                selection-background-color: #2d7dff;
+                selection-color: #ffffff;
+            }
+            QLineEdit:focus, QAbstractSpinBox:focus, QDateEdit:focus, QPlainTextEdit:focus {
+                background-color: #3c3c3c;
+                color: #ffffff;
+                border: 1px solid #5aa2ff;
+            }
+            QComboBox {
+                background-color: #3c3c3c;
+                color: #ffffff;
+                border: 1px solid #555555;
+                selection-background-color: #2d7dff;
+                selection-color: #ffffff;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #3c3c3c;
+                color: #ffffff;
+                border: 1px solid #555555;
+                selection-background-color: #0078d4;
+                selection-color: #ffffff;
+            }
+            QComboBox QLineEdit {
+                background-color: #3c3c3c;
+                color: #ffffff;
+                selection-background-color: #2d7dff;
+                selection-color: #ffffff;
+            }
+            """
+        )
+
+        layout = QFormLayout(self)
+
+        self.purchase_date_edit = QDateEdit()
+        self.purchase_date_edit.setCalendarPopup(True)
+        self.purchase_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.purchase_date_edit.setDate(QDate.currentDate())
+        layout.addRow("仕入れ日:", self.purchase_date_edit)
+
+        self.source_type_combo = QComboBox()
+        self.source_type_combo.addItems(self.SOURCE_TYPE_OPTIONS)
+        layout.addRow("仕入種別:", self.source_type_combo)
+
+        self.source_channel_combo = QComboBox()
+        self.source_channel_combo.setEditable(True)
+        self.source_channel_combo.addItems(self.SOURCE_CHANNEL_PRESETS)
+        self.source_channel_combo.currentTextChanged.connect(self._on_source_channel_changed)
+        layout.addRow("仕入チャネル:", self.source_channel_combo)
+
+        self.source_supplier_combo = QComboBox()
+        self.source_supplier_combo.setEditable(False)
+        self.source_supplier_combo.currentIndexChanged.connect(self._on_source_supplier_changed)
+        layout.addRow("仕入先候補:", self.source_supplier_combo)
+
+        self.order_id_edit = QLineEdit()
+        self.order_id_edit.setPlaceholderText("注文番号（任意）")
+        layout.addRow("注文番号:", self.order_id_edit)
+
+        self.store_code_edit = QLineEdit()
+        self.store_code_edit.setPlaceholderText("実店舗なら店舗コード、電脳/問屋なら空欄でも可")
+        layout.addRow("店舗コード:", self.store_code_edit)
+
+        self.asin_edit = QLineEdit()
+        self.asin_edit.setPlaceholderText("ASIN")
+        self.asin_edit.editingFinished.connect(self._on_asin_editing_finished)
+        asin_row = QWidget()
+        asin_row_layout = QHBoxLayout(asin_row)
+        asin_row_layout.setContentsMargins(0, 0, 0, 0)
+        asin_row_layout.addWidget(self.asin_edit)
+        self.keepa_fill_btn = QPushButton("Keepa補完")
+        self.keepa_fill_btn.setToolTip("ASINからKeepa情報を取得してJANと商品名を補完します")
+        self.keepa_fill_btn.clicked.connect(self._fill_from_keepa_button_clicked)
+        asin_row_layout.addWidget(self.keepa_fill_btn)
+        layout.addRow("ASIN:", asin_row)
+
+        self.jan_edit = QLineEdit()
+        self.jan_edit.setPlaceholderText("JAN（任意）")
+        layout.addRow("JAN:", self.jan_edit)
+
+        self.title_edit = QLineEdit()
+        self.title_edit.setPlaceholderText("商品名")
+        layout.addRow("商品名:", self.title_edit)
+
+        self.condition_combo = QComboBox()
+        self.condition_combo.setEditable(True)
+        self.condition_combo.addItems(self.CONDITION_PRESETS)
+        self.condition_combo.setCurrentText("中古(良い)")
+        layout.addRow("コンディション:", self.condition_combo)
+
+        self.quantity_spin = QSpinBox()
+        self.quantity_spin.setRange(1, 999)
+        self.quantity_spin.setValue(1)
+        layout.addRow("仕入れ個数:", self.quantity_spin)
+
+        self.purchase_price_spin = QSpinBox()
+        self.purchase_price_spin.setRange(0, 10_000_000)
+        self.purchase_price_spin.setSingleStep(100)
+        layout.addRow("仕入れ価格:", self.purchase_price_spin)
+
+        self.planned_price_spin = QSpinBox()
+        self.planned_price_spin.setRange(0, 10_000_000)
+        self.planned_price_spin.setSingleStep(100)
+        layout.addRow("販売予定価格:", self.planned_price_spin)
+
+        self.shipping_combo = QComboBox()
+        self.shipping_combo.addItems(SHIPPING_METHOD_OPTIONS)
+        self.shipping_combo.setCurrentText("FBA")
+        layout.addRow("発送方法:", self.shipping_combo)
+
+        self.sales_channel_combo = QComboBox()
+        self.sales_channel_combo.addItems(SALES_CHANNEL_OPTIONS)
+        self.sales_channel_combo.setCurrentText("Amazon")
+        layout.addRow("販売チャネル:", self.sales_channel_combo)
+
+        self.amazon_fee_spin = QSpinBox()
+        self.amazon_fee_spin.setRange(0, 10_000_000)
+        self.amazon_fee_spin.setSingleStep(10)
+        layout.addRow("Amazon手数料:", self.amazon_fee_spin)
+
+        self.shipping_cost_spin = QSpinBox()
+        self.shipping_cost_spin.setRange(0, 10_000_000)
+        self.shipping_cost_spin.setSingleStep(10)
+        layout.addRow("出荷費用:", self.shipping_cost_spin)
+
+        self.storage_fee_spin = QSpinBox()
+        self.storage_fee_spin.setRange(0, 10_000_000)
+        self.storage_fee_spin.setSingleStep(10)
+        layout.addRow("在庫保管手数料:", self.storage_fee_spin)
+
+        fee_action_row = QWidget()
+        fee_action_layout = QHBoxLayout(fee_action_row)
+        fee_action_layout.setContentsMargins(0, 0, 0, 0)
+        self.open_fba_simulator_btn = QPushButton("FBA料金シミュレーターを開く")
+        self.open_fba_simulator_btn.clicked.connect(self._open_fba_simulator_url)
+        fee_action_layout.addWidget(self.open_fba_simulator_btn)
+        self.ocr_fee_btn = QPushButton("貼り付けOCRで手数料読込")
+        self.ocr_fee_btn.setToolTip("コピー済みスクリーンショットをクリップボードから読み取ります（画像が無い場合はファイル選択）")
+        self.ocr_fee_btn.clicked.connect(self._load_fees_from_image_ocr)
+        fee_action_layout.addWidget(self.ocr_fee_btn)
+        layout.addRow("", fee_action_row)
+
+        self.condition_note_edit = QPlainTextEdit()
+        self.condition_note_edit.setMinimumHeight(70)
+        self.condition_note_edit.setPlaceholderText("コンディション説明（任意）")
+        layout.addRow("コンディション説明:", self.condition_note_edit)
+
+        self.missing_manual_checkbox = QCheckBox("取説欠品")
+        self.missing_inner_box_checkbox = QCheckBox("内箱欠品")
+        self.missing_custom1_checkbox = QCheckBox("カスタム1")
+        self.missing_custom2_checkbox = QCheckBox("カスタム2")
+        self.missing_custom3_checkbox = QCheckBox("カスタム3")
+        _missing_cb_style = """
+                QCheckBox {
+                    background-color: #3c3c3c;
+                    color: #ffffff;
+                    font-weight: bold;
+                    border: 1px solid #555555;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                }
+                QCheckBox::indicator {
+                    width: 16px;
+                    height: 16px;
+                }
+            """
+        for cb in (
+            self.missing_manual_checkbox,
+            self.missing_inner_box_checkbox,
+            self.missing_custom1_checkbox,
+            self.missing_custom2_checkbox,
+            self.missing_custom3_checkbox,
+        ):
+            cb.setStyleSheet(_missing_cb_style)
+        self._apply_custom_missing_checkbox_labels()
+        self.missing_manual_checkbox.toggled.connect(self._sync_missing_custom_checkboxes_enabled)
+        self.missing_inner_box_checkbox.toggled.connect(self._sync_missing_custom_checkboxes_enabled)
+
+        missing_opts = QWidget()
+        missing_opts_layout = QVBoxLayout(missing_opts)
+        missing_opts_layout.setContentsMargins(0, 0, 0, 0)
+        row1 = QHBoxLayout()
+        row1.addWidget(self.missing_manual_checkbox)
+        row1.addWidget(self.missing_inner_box_checkbox)
+        row1.addStretch()
+        missing_opts_layout.addLayout(row1)
+        row2 = QHBoxLayout()
+        row2.addWidget(self.missing_custom1_checkbox)
+        row2.addWidget(self.missing_custom2_checkbox)
+        row2.addWidget(self.missing_custom3_checkbox)
+        row2.addStretch()
+        missing_opts_layout.addLayout(row2)
+        layout.addRow("欠品・詳細（選択）:", missing_opts)
+
+        self.call_condition_note_btn = QPushButton("コンディション説明呼び出し")
+        self.call_condition_note_btn.setToolTip("選択したコンディションに対応する説明をコンディション説明タブから読み込みます")
+        self.call_condition_note_btn.clicked.connect(self._on_call_condition_note)
+        layout.addRow("", self.call_condition_note_btn)
+
+        self.comment_edit = QPlainTextEdit()
+        self.comment_edit.setMinimumHeight(80)
+        self.comment_edit.setPlaceholderText("メモ（任意）")
+        layout.addRow("コメント:", self.comment_edit)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        layout.addRow(bb)
+        self._sync_missing_custom_checkboxes_enabled()
+        self.source_type_combo.currentTextChanged.connect(self._on_source_type_changed)
+        self._on_source_type_changed(self.source_type_combo.currentText())
+
+    def accept(self):
+        if not self.asin_edit.text().strip():
+            QMessageBox.warning(self, "入力エラー", "ASINは必須です。")
+            return
+        if not self.title_edit.text().strip():
+            QMessageBox.warning(self, "入力エラー", "商品名は必須です。")
+            return
+        super().accept()
+
+    def _apply_custom_missing_checkbox_labels(self) -> None:
+        """詳細説明タブで保存したカスタム名称をチェックボックス表示に反映"""
+        try:
+            md = self.condition_template_db.load_missing_keywords()
+            lab = md.get("custom_labels") or {}
+            defaults = {"custom1": "カスタム1", "custom2": "カスタム2", "custom3": "カスタム3"}
+            self.missing_custom1_checkbox.setText(lab.get("custom1") or defaults["custom1"])
+            self.missing_custom2_checkbox.setText(lab.get("custom2") or defaults["custom2"])
+            self.missing_custom3_checkbox.setText(lab.get("custom3") or defaults["custom3"])
+        except Exception:
+            pass
+
+    def _sync_missing_custom_checkboxes_enabled(self) -> None:
+        """取説欠品・内箱欠品のどちらかがONのときはカスタムを選べない"""
+        fixed_on = self.missing_manual_checkbox.isChecked() or self.missing_inner_box_checkbox.isChecked()
+        custom_cbs = (
+            self.missing_custom1_checkbox,
+            self.missing_custom2_checkbox,
+            self.missing_custom3_checkbox,
+        )
+        for cb in custom_cbs:
+            if fixed_on:
+                cb.setChecked(False)
+            cb.setEnabled(not fixed_on)
+            cb.setToolTip(
+                "取説欠品・内箱欠品のチェックを外すと、こちらを選べます。"
+                if fixed_on
+                else ""
+            )
+
+    def _on_call_condition_note(self):
+        condition_text = self.condition_combo.currentText().strip()
+        if not condition_text:
+            QMessageBox.information(self, "呼び出し", "先に「コンディション」を選択してください。")
+            return
+        try:
+            condition_key = self.get_condition_key(condition_text)
+            text = self.condition_template_db.get_condition_description_text(condition_key)
+            if not text:
+                QMessageBox.information(
+                    self,
+                    "呼び出し",
+                    f"コンディション「{condition_text}」に対応する説明が登録されていません。\nコンディション説明タブで登録してください。"
+                )
+                return
+            text = _normalize_condition_note_newlines(text)
+
+            # 欠品・詳細（カスタム）チェックに応じて「詳細説明」タブの文面を挿入
+            manual_checked = bool(self.missing_manual_checkbox.isChecked())
+            inner_box_checked = bool(self.missing_inner_box_checkbox.isChecked())
+            missing_key = ""
+            if manual_checked and inner_box_checked:
+                missing_key = "取説・内箱欠品"
+            elif manual_checked:
+                missing_key = "取説欠品"
+            elif inner_box_checked:
+                missing_key = "内箱欠品"
+
+            missing_data = self.condition_template_db.load_missing_keywords()
+            kw = missing_data.get("keywords", {}) or {}
+
+            if missing_key:
+                missing_text = str(kw.get(missing_key, "") or "").strip()
+                if missing_text:
+                    if "{欠品}" in text:
+                        text = text.replace("{欠品}", missing_text)
+                    elif "【付属品】" in text:
+                        text = text.replace("【付属品】", f"【付属品】{missing_text}")
+                    else:
+                        text = f"{text}\n【付属品】{missing_text}".strip()
+
+            extra_parts: List[str] = []
+            for ck, cb in (
+                ("custom1", self.missing_custom1_checkbox),
+                ("custom2", self.missing_custom2_checkbox),
+                ("custom3", self.missing_custom3_checkbox),
+            ):
+                if cb.isChecked():
+                    part = str(kw.get(ck, "") or "").strip()
+                    if part:
+                        extra_parts.append(part)
+            if extra_parts:
+                extra_block = "\n".join(extra_parts)
+                text = f"{text.rstrip()}\n{extra_block}".strip() if text.strip() else extra_block
+
+            self.condition_note_edit.setPlainText(text)
+        except Exception as e:
+            QMessageBox.warning(self, "呼び出しエラー", f"コンディション説明の呼び出しに失敗しました。\n{str(e)}")
+
+    def _on_source_type_changed(self, source_type: str):
+        source_type = (source_type or "").strip()
+        self.source_supplier_combo.blockSignals(True)
+        self.source_supplier_combo.clear()
+        self.source_channel_combo.blockSignals(True)
+        self.source_channel_combo.clear()
+
+        if source_type == "実店舗":
+            self.source_channel_combo.addItem("実店舗")
+            self.source_channel_combo.setCurrentText("実店舗")
+            for s in self.store_db.list_stores():
+                code = (s.get("store_code") or s.get("supplier_code") or "").strip()
+                name = (s.get("store_name") or "").strip()
+                if code and name:
+                    self.source_supplier_combo.addItem(f"{code} - {name}", {"code": code, "name": name})
+        elif source_type == "電脳":
+            platforms = self.store_db.list_online_platforms(active_only=True)
+            for p in platforms:
+                self.source_channel_combo.addItem(p.get("platform_name") or "")
+            if self.source_channel_combo.count() == 0:
+                self.source_channel_combo.addItems(self.SOURCE_CHANNEL_PRESETS)
+            self._reload_online_suppliers_for_channel(self.source_channel_combo.currentText().strip())
+        else:  # 問屋
+            self.source_channel_combo.addItem("問屋")
+            for w in self.store_db.list_wholesalers(active_only=True):
+                code = (w.get("wholesaler_code") or "").strip()
+                name = (w.get("name") or "").strip()
+                if code and name:
+                    self.source_supplier_combo.addItem(f"{code} - {name}", {"code": code, "name": name})
+
+        self.source_channel_combo.blockSignals(False)
+        self.source_supplier_combo.blockSignals(False)
+        self._on_source_supplier_changed()
+
+    def _on_source_channel_changed(self, channel: str):
+        source_type = (self.source_type_combo.currentText() or "").strip()
+        if source_type != "電脳":
+            return
+        self._reload_online_suppliers_for_channel((channel or "").strip())
+        self._on_source_supplier_changed()
+
+    def _reload_online_suppliers_for_channel(self, channel_name: str):
+        self.source_supplier_combo.blockSignals(True)
+        self.source_supplier_combo.clear()
+        rows = self.store_db.list_online_stores(active_only=True)
+        for r in rows:
+            p_name = (r.get("platform_name") or "").strip()
+            if channel_name and p_name != channel_name:
+                continue
+            code = (r.get("supplier_code") or "").strip()
+            shop = (r.get("shop_name") or "").strip()
+            if code and shop:
+                self.source_supplier_combo.addItem(f"{code} - {shop}", {"code": code, "name": shop})
+        self.source_supplier_combo.blockSignals(False)
+
+    def _on_source_supplier_changed(self):
+        data = self.source_supplier_combo.currentData()
+        if isinstance(data, dict):
+            self.store_code_edit.setText((data.get("code") or "").strip())
+        elif self.source_type_combo.currentText().strip() == "実店舗":
+            # 実店舗は候補未選択の場合、誤登録防止のため空にする
+            self.store_code_edit.clear()
+
+    def _extract_jan_from_raw_keepa_product(self, raw_product: Dict[str, Any]) -> str:
+        """Keepa生データからJAN(13桁)候補を抽出"""
+        candidates: List[str] = []
+        for key in ("eanList", "ean", "upcList", "upc"):
+            value = raw_product.get(key)
+            if value is None:
+                continue
+            if isinstance(value, list):
+                for v in value:
+                    s = str(v).strip()
+                    if s:
+                        candidates.append(s)
+            else:
+                txt = str(value).strip()
+                if not txt:
+                    continue
+                if "," in txt:
+                    candidates.extend([t.strip() for t in txt.split(",") if t.strip()])
+                else:
+                    candidates.append(txt)
+        for code in candidates:
+            digits = re.sub(r"\D", "", code)
+            if len(digits) == 13:
+                return digits
+        return ""
+
+    def _fill_from_keepa(self, show_success_message: bool = False):
+        asin = (self.asin_edit.text() or "").strip().upper()
+        self.asin_edit.setText(asin)
+        if not asin:
+            return
+        if len(asin) != 10:
+            return
+        try:
+            info, raw = self.keepa_service.fetch_product_with_raw(asin)
+        except Exception as e:
+            # 自動補完時はうるさくしない。手動補完時のみ通知。
+            if show_success_message:
+                QMessageBox.warning(self, "Keepa補完", f"Keepaからの取得に失敗しました。\n{str(e)}")
+            return
+
+        jan = self._extract_jan_from_raw_keepa_product(raw)
+        if jan:
+            self.jan_edit.setText(jan)
+        if info.title:
+            self.title_edit.setText(str(info.title).strip())
+
+        if show_success_message:
+            added = []
+            if jan:
+                added.append("JAN")
+            if info.title:
+                added.append("商品名")
+            if added:
+                QMessageBox.information(self, "Keepa補完", f"{'・'.join(added)}を補完しました。")
+            else:
+                QMessageBox.information(self, "Keepa補完", "補完可能なJAN/商品名が見つかりませんでした。")
+
+    def _on_asin_editing_finished(self):
+        self._fill_from_keepa(show_success_message=False)
+
+    def _fill_from_keepa_button_clicked(self):
+        self._fill_from_keepa(show_success_message=True)
+
+    def _open_fba_simulator_url(self):
+        settings = QSettings("HIRIO", "DesktopApp")
+        default_url = "https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP"
+        url = str(settings.value("amazon/fba_simulator_url", default_url) or default_url).strip()
+        if not url:
+            url = default_url
+        if not re.match(r"^https?://", url, flags=re.IGNORECASE):
+            QMessageBox.warning(self, "URL確認", "FBA料金シミュレーターURLが不正です。設定タブで確認してください。")
+            return
+        QDesktopServices.openUrl(QUrl(url))
+
+    @staticmethod
+    def _extract_yen_amount_from_text(text: str, labels: List[str]) -> Optional[int]:
+        if not text:
+            return None
+        normalized = text.replace("\u00a5", "¥")
+        patterns: List[re.Pattern] = []
+        for label in labels:
+            escaped = re.escape(label)
+            patterns.append(
+                re.compile(rf"{escaped}[^\n\r\d¥\-]*[-−]?\s*[¥￥]?\s*([0-9][0-9,]*)", re.IGNORECASE)
+            )
+        for pat in patterns:
+            m = pat.search(normalized)
+            if m:
+                raw = re.sub(r"[^\d]", "", m.group(1) or "")
+                if raw:
+                    try:
+                        return int(raw)
+                    except ValueError:
+                        continue
+        return None
+
+    @staticmethod
+    def _extract_yen_amount_by_keywords(
+        text: str,
+        must_include_keywords: List[str],
+    ) -> Optional[int]:
+        """
+        行単位で、指定キーワードをすべて含む行から金額を抽出する。
+        OCR揺れ（空白・全角/半角）に強くするため、比較時は空白除去して小文字化する。
+        """
+        if not text:
+            return None
+        lines = [ln.strip() for ln in text.replace("\r", "\n").split("\n") if ln.strip()]
+        normalized_keywords = [k.lower().replace(" ", "") for k in must_include_keywords if k]
+        for line in lines:
+            norm_line = line.lower().replace(" ", "")
+            if not all(k in norm_line for k in normalized_keywords):
+                continue
+            m = re.search(r"[-−]?\s*[¥￥]?\s*([0-9][0-9,]*)", line)
+            if not m:
+                continue
+            raw = re.sub(r"[^\d]", "", m.group(1) or "")
+            if not raw:
+                continue
+            try:
+                return int(raw)
+            except ValueError:
+                continue
+        return None
+
+    def _load_fees_from_image_ocr(self):
+        temp_image_path: Optional[str] = None
+        image_path = ""
+        source_name = "クリップボード"
+        clipboard = QApplication.clipboard()
+        clip_image = clipboard.image()
+        if clip_image and not clip_image.isNull():
+            fd, temp_image_path = tempfile.mkstemp(prefix="hirio_fee_ocr_", suffix=".png")
+            os.close(fd)
+            if not clip_image.save(temp_image_path, "PNG"):
+                try:
+                    os.unlink(temp_image_path)
+                except Exception:
+                    pass
+                QMessageBox.warning(self, "OCR", "クリップボード画像の保存に失敗しました。")
+                return
+            image_path = temp_image_path
+        else:
+            fallback = QMessageBox.question(
+                self,
+                "OCR",
+                "クリップボードに画像がありません。\nファイルを選択して読み込みますか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if fallback != QMessageBox.Yes:
+                return
+            source_name = "ファイル"
+            image_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "FBA料金シミュレーター画像を選択",
+                "",
+                "画像ファイル (*.png *.jpg *.jpeg *.webp *.bmp)"
+            )
+            if not image_path:
+                return
+        try:
+            result = self.ocr_service.extract_text(image_path, use_preprocessing=True)
+            text = str(result.get("text") or "")
+            if not text.strip():
+                QMessageBox.warning(self, "OCR", "文字を読み取れませんでした。別の画像でお試しください。")
+                return
+
+            amazon_fee = self._extract_yen_amount_from_text(
+                text,
+                ["Amazon手数料", "amazon手数料", "販売手数料", "referral fee"]
+            )
+            if amazon_fee is None:
+                # 「Amazon 手数料」のようなOCR揺れに対応
+                amazon_fee = self._extract_yen_amount_by_keywords(text, ["amazon", "手数料"])
+            if amazon_fee is None:
+                # 明細行しか拾えないケースは、販売手数料 + 基本成約料 + カテゴリー別成約料 を合算
+                referral_fee = self._extract_yen_amount_from_text(text, ["販売手数料", "referral fee"])
+                closing_fee = self._extract_yen_amount_from_text(text, ["基本成約料"])
+                category_fee = self._extract_yen_amount_from_text(text, ["カテゴリー別成約料"])
+                if referral_fee is not None:
+                    amazon_fee = referral_fee + (closing_fee or 0) + (category_fee or 0)
+            shipping_cost = self._extract_yen_amount_from_text(
+                text,
+                ["出荷費用", "出荷作業手数料", "配送代行手数料", "fulfillment fee"]
+            )
+            storage_fee = self._extract_yen_amount_from_text(
+                text,
+                ["在庫保管手数料", "月間在庫保管手数料", "storage fee"]
+            )
+
+            updated_items: List[str] = []
+            if amazon_fee is not None:
+                self.amazon_fee_spin.setValue(amazon_fee)
+                updated_items.append("Amazon手数料")
+            if shipping_cost is not None:
+                self.shipping_cost_spin.setValue(shipping_cost)
+                updated_items.append("出荷費用")
+            if storage_fee is not None:
+                self.storage_fee_spin.setValue(storage_fee)
+                updated_items.append("在庫保管手数料")
+
+            if not updated_items:
+                QMessageBox.information(
+                    self,
+                    "OCR",
+                    "手数料の候補を見つけられませんでした。画像を拡大して再撮影するか、手入力してください。"
+                )
+                return
+            QMessageBox.information(
+                self,
+                "OCR",
+                f"{source_name}OCRで {', '.join(updated_items)} を入力しました。数値を確認して保存してください。"
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "OCRエラー", f"画像読取に失敗しました。\n{str(e)}")
+        finally:
+            if temp_image_path:
+                try:
+                    os.unlink(temp_image_path)
+                except Exception:
+                    pass
+
+    def get_row_data(self) -> Dict[str, Any]:
+        purchase_price = int(self.purchase_price_spin.value())
+        planned_price = int(self.planned_price_spin.value())
+        amazon_fee = int(self.amazon_fee_spin.value())
+        shipping_cost = int(self.shipping_cost_spin.value())
+        storage_fee = int(self.storage_fee_spin.value())
+        expected_profit = planned_price - purchase_price - amazon_fee - shipping_cost - storage_fee
+        expected_margin = round((expected_profit / planned_price) * 100, 2) if planned_price > 0 else 0.0
+        expected_roi = round((expected_profit / purchase_price) * 100, 2) if purchase_price > 0 else 0.0
+
+        source_type = self.source_type_combo.currentText().strip()
+        source_channel = self.source_channel_combo.currentText().strip() or "未設定"
+        order_id = self.order_id_edit.text().strip()
+        store_code = self.store_code_edit.text().strip()
+        if not store_code:
+            store_code = f"{source_type}:{source_channel}"
+
+        header_comment = f"[単品仕入][{source_type}:{source_channel}]"
+        if order_id:
+            header_comment += f"[注文:{order_id}]"
+        body_comment = self.comment_edit.toPlainText().strip()
+        merged_comment = f"{header_comment} {body_comment}".strip()
+
+        condition_note = _to_stored_newlines(self.condition_note_edit.toPlainText().strip())
+
+        return {
+            "仕入れ日": self.purchase_date_edit.date().toString("yyyy-MM-dd"),
+            "コンディション": self.condition_combo.currentText().strip() or "中古(良い)",
+            "SKU": "未実装",
+            "ASIN": self.asin_edit.text().strip(),
+            "JAN": self.jan_edit.text().strip(),
+            "商品名": self.title_edit.text().strip(),
+            "仕入れ個数": int(self.quantity_spin.value()),
+            "仕入れ価格": purchase_price,
+            "販売予定価格": planned_price,
+            "見込み利益": expected_profit,
+            "損益分岐点": purchase_price,
+            "想定利益率": expected_margin,
+            "想定ROI": expected_roi,
+            "コメント": merged_comment,
+            "発送方法": self.shipping_combo.currentText().strip() or "FBA",
+            "販売チャネル": self.sales_channel_combo.currentText().strip() or "Amazon",
+            "Amazon手数料": amazon_fee,
+            "出荷費用": shipping_cost,
+            "在庫保管手数料": storage_fee,
+            "仕入先": store_code,
+            "価格改定": "ON",
+            "コンディション説明": condition_note,
+        }
+
+
 class InventoryWidget(QWidget):
     """仕入管理ウィジェット"""
     
@@ -759,6 +1437,12 @@ class InventoryWidget(QWidget):
         file_layout.addLayout(file_ops_layout)
         
         # スポット仕入（1店舗・スキマ時間用）
+        self.single_purchase_btn = QPushButton("単品仕入")
+        self.single_purchase_btn.setToolTip("単品仕入の入力ウィンドウを開いて、1件ずつ仕入データへ追加します")
+        self.single_purchase_btn.clicked.connect(lambda: self._run_action_with_status("単品仕入", self.open_single_purchase_dialog))
+        self.single_purchase_btn.setStyleSheet(green_button_style)
+        action_ops_layout.addWidget(self.single_purchase_btn)
+
         self.spot_purchase_btn = QPushButton("スポット")
         self.spot_purchase_btn.setToolTip("スキマ時間の1店舗スポット仕入をルート情報として登録し、ルートサマリー一覧に残します")
         self.spot_purchase_btn.clicked.connect(lambda: self._run_action_with_status("スポット", self.open_spot_purchase_dialog))
@@ -1088,7 +1772,7 @@ class InventoryWidget(QWidget):
         self.column_headers = [
             "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
             "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
-            "発送方法", "販売チャネル", "仕入先", "価格改定", "コンディション説明"
+            "発送方法", "販売チャネル", "Amazon手数料", "出荷費用", "在庫保管手数料", "仕入先", "価格改定", "コンディション説明"
         ]
         # 開発用タブでは、店舗コードの右に「3-6-9」カラムを追加
         if self.dev_mode:
@@ -1108,6 +1792,9 @@ class InventoryWidget(QWidget):
         except ValueError:
             pass
         self.data_table.setHorizontalHeaderLabels(display_headers)
+        # 在庫保管手数料はSP-API運用時に使う想定のため、現段階では一覧では非表示
+        if "在庫保管手数料" in self.column_headers:
+            self.data_table.setColumnHidden(self.column_headers.index("在庫保管手数料"), True)
         
         # 選択変更時の自動スクロール・ハイライト機能
         self.data_table.itemSelectionChanged.connect(self.on_data_selection_changed)
@@ -1451,6 +2138,44 @@ class InventoryWidget(QWidget):
             QMessageBox.critical(self, "エラー", f"スポット仕入ルート追加中にエラーが発生しました:\n{str(e)}")
             import traceback
             traceback.print_exc()
+
+    def open_single_purchase_dialog(self):
+        """単品仕入ダイアログを開き、入力データを仕入一覧へ1行追加する"""
+        dlg = SinglePurchaseInputDialog(
+            self.condition_template_db,
+            self._get_condition_key,
+            self
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        try:
+            row_data = dlg.get_row_data()
+            if self.inventory_data is None or len(self.inventory_data) == 0:
+                self.inventory_data = pd.DataFrame(columns=self.column_headers)
+
+            row_df = pd.DataFrame([row_data])
+            for col in self.column_headers:
+                if col not in row_df.columns:
+                    row_df[col] = ""
+            row_df = row_df[self.column_headers]
+
+            self.inventory_data = pd.concat([self.inventory_data, row_df], ignore_index=True)
+            self.filtered_data = self.inventory_data.copy()
+
+            self.update_table()
+            self.update_stats()
+            self.update_data_count()
+
+            self.clear_btn.setEnabled(True)
+            self.generate_sku_btn.setEnabled(True)
+            self.export_listing_btn.setEnabled(True)
+            self.antique_register_btn.setEnabled(True)
+
+            self.data_loaded.emit(len(self.inventory_data))
+            QMessageBox.information(self, "単品仕入", "単品仕入データを1件追加しました。")
+        except Exception as e:
+            QMessageBox.critical(self, "単品仕入エラー", f"単品仕入の追加に失敗しました:\n{str(e)}")
 
     def apply_route_template(self):
         """ルートテンプレートの読み込みを実行"""
@@ -1842,7 +2567,8 @@ class InventoryWidget(QWidget):
             BASE_COLUMNS_FOR_PURCHASE_DB = [
                 "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
                 "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
-                "発送方法", "販売チャネル", "仕入先", "価格改定", "コンディション説明"
+                "発送方法", "販売チャネル", "Amazon手数料", "出荷費用", "在庫保管手数料",
+                "仕入先", "価格改定", "コンディション説明"
             ]
             if self.filtered_data is not None and len(self.filtered_data) > 0:
                 cols = [c for c in BASE_COLUMNS_FOR_PURCHASE_DB if c in self.filtered_data.columns]
@@ -3003,6 +3729,13 @@ class InventoryWidget(QWidget):
             "salesChannel": "販売チャネル",
             "sales_channel": "販売チャネル",
             "platform": "販売チャネル",
+            # 手数料
+            "Amazon手数料": "Amazon手数料",
+            "amazon_fee": "Amazon手数料",
+            "出荷費用": "出荷費用",
+            "shipping_cost": "出荷費用",
+            "在庫保管手数料": "在庫保管手数料",
+            "storage_fee": "在庫保管手数料",
             # 仕入先
             "仕入先": "仕入先",
             "仕入元": "仕入先",
@@ -3181,7 +3914,7 @@ class InventoryWidget(QWidget):
                         item = QTableWidgetItem(value)
                     
                     # 価格列の数値フォーマット
-                    if column in ["仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点"]:
+                    if column in ["仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "Amazon手数料", "出荷費用", "在庫保管手数料"]:
                         try:
                             # 数値に変換できるかチェック
                             if value and str(value).replace(".", "").replace("-", "").replace(",", "").isdigit():
