@@ -555,16 +555,17 @@ class SpotPurchaseDialog(QDialog):
 
 
 class SinglePurchaseInputDialog(QDialog):
-    """単品仕入のひな型入力ダイアログ（実店舗/電脳/問屋を共通入力）"""
+    """単品仕入のひな型入力ダイアログ（実店舗/電脳/フリマ/問屋を共通入力）"""
 
-    SOURCE_TYPE_OPTIONS = ["実店舗", "電脳", "問屋"]
+    SOURCE_TYPE_OPTIONS = ["実店舗", "電脳", "フリマ", "問屋"]
     SOURCE_CHANNEL_PRESETS = ["Amazon", "楽天", "ヤフショ", "メルカリ", "ヤフオク", "問屋A"]
     CONDITION_PRESETS = ["新品", "中古(ほぼ新品)", "中古(非常に良い)", "中古(良い)", "中古(可)"]
 
-    def __init__(self, condition_template_db, get_condition_key_func, parent=None):
+    def __init__(self, condition_template_db, get_condition_key_func, inventory_widget=None, parent=None):
         super().__init__(parent)
         self.condition_template_db = condition_template_db
         self.get_condition_key = get_condition_key_func
+        self._inventory_widget = inventory_widget
         self.store_db = StoreDatabase()
         self.keepa_service = KeepaService()
         self.ocr_service = OCRService()
@@ -640,7 +641,7 @@ class SinglePurchaseInputDialog(QDialog):
         layout.addRow("注文番号:", self.order_id_edit)
 
         self.store_code_edit = QLineEdit()
-        self.store_code_edit.setPlaceholderText("実店舗なら店舗コード、電脳/問屋なら空欄でも可")
+        self.store_code_edit.setPlaceholderText("実店舗なら店舗コード、電脳/フリマ/問屋なら空欄でも可")
         layout.addRow("店舗コード:", self.store_code_edit)
 
         self.asin_edit = QLineEdit()
@@ -659,6 +660,35 @@ class SinglePurchaseInputDialog(QDialog):
         self.jan_edit = QLineEdit()
         self.jan_edit.setPlaceholderText("JAN（任意）")
         layout.addRow("JAN:", self.jan_edit)
+
+        self.sku_edit = QLineEdit()
+        self.sku_edit.setPlaceholderText("SKU（空欄は未実装。右のボタンで生成）")
+        sku_row = QWidget()
+        sku_row_layout = QHBoxLayout(sku_row)
+        sku_row_layout.setContentsMargins(0, 0, 0, 0)
+        sku_row_layout.addWidget(self.sku_edit)
+        self.generate_sku_btn = QPushButton("SKU生成")
+        self.generate_sku_btn.setToolTip(
+            "仕入データタブの「SKU生成」と同じ処理です（商品DBの重複照合・店舗マスタ・SKU日付・自己発送時の末尾M）。"
+        )
+        self.generate_sku_btn.clicked.connect(self._on_generate_sku_clicked)
+        self.generate_sku_btn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+            """
+        )
+        sku_row_layout.addWidget(self.generate_sku_btn)
+        layout.addRow("SKU:", sku_row)
 
         self.title_edit = QLineEdit()
         self.title_edit.setPlaceholderText("商品名")
@@ -717,7 +747,11 @@ class SinglePurchaseInputDialog(QDialog):
         self.open_fba_simulator_btn.clicked.connect(self._open_fba_simulator_url)
         fee_action_layout.addWidget(self.open_fba_simulator_btn)
         self.ocr_fee_btn = QPushButton("貼り付けOCRで手数料読込")
-        self.ocr_fee_btn.setToolTip("コピー済みスクリーンショットをクリップボードから読み取ります（画像が無い場合はファイル選択）")
+        self.ocr_fee_btn.setToolTip(
+            "コピー済みスクリーンショットをクリップボードから読み取ります（画像が無い場合はファイル選択）。"
+            "「Amazonから出荷」「出品者出荷」で発送方法（FBA/自己発送）、"
+            "「商品価格」は販売予定価格、手数料系は各欄に反映します。"
+        )
         self.ocr_fee_btn.clicked.connect(self._load_fees_from_image_ocr)
         fee_action_layout.addWidget(self.ocr_fee_btn)
         layout.addRow("", fee_action_row)
@@ -912,6 +946,13 @@ class SinglePurchaseInputDialog(QDialog):
             if self.source_channel_combo.count() == 0:
                 self.source_channel_combo.addItems(self.SOURCE_CHANNEL_PRESETS)
             self._reload_online_suppliers_for_channel(self.source_channel_combo.currentText().strip())
+        elif source_type == "フリマ":
+            markets = self.store_db.list_flea_markets(active_only=True)
+            for m in markets:
+                self.source_channel_combo.addItem(m.get("platform_name") or "")
+            if self.source_channel_combo.count() == 0:
+                self.source_channel_combo.addItems(self.SOURCE_CHANNEL_PRESETS)
+            self._reload_flea_suppliers_for_channel(self.source_channel_combo.currentText().strip())
         else:  # 問屋
             self.source_channel_combo.addItem("問屋")
             for w in self.store_db.list_wholesalers(active_only=True):
@@ -926,10 +967,13 @@ class SinglePurchaseInputDialog(QDialog):
 
     def _on_source_channel_changed(self, channel: str):
         source_type = (self.source_type_combo.currentText() or "").strip()
-        if source_type != "電脳":
-            return
-        self._reload_online_suppliers_for_channel((channel or "").strip())
-        self._on_source_supplier_changed()
+        ch = (channel or "").strip()
+        if source_type == "電脳":
+            self._reload_online_suppliers_for_channel(ch)
+            self._on_source_supplier_changed()
+        elif source_type == "フリマ":
+            self._reload_flea_suppliers_for_channel(ch)
+            self._on_source_supplier_changed()
 
     def _reload_online_suppliers_for_channel(self, channel_name: str):
         self.source_supplier_combo.blockSignals(True)
@@ -943,6 +987,19 @@ class SinglePurchaseInputDialog(QDialog):
             shop = (r.get("shop_name") or "").strip()
             if code and shop:
                 self.source_supplier_combo.addItem(f"{code} - {shop}", {"code": code, "name": shop})
+        self.source_supplier_combo.blockSignals(False)
+
+    def _reload_flea_suppliers_for_channel(self, channel_name: str):
+        """設定 > DB設定 > フリマ の有効マスタから、チャネル（プラットフォーム名）に合う候補を列挙"""
+        self.source_supplier_combo.blockSignals(True)
+        self.source_supplier_combo.clear()
+        for m in self.store_db.list_flea_markets(active_only=True):
+            p_name = (m.get("platform_name") or "").strip()
+            if channel_name and p_name != channel_name:
+                continue
+            code = (m.get("platform_code") or "").strip()
+            if code and p_name:
+                self.source_supplier_combo.addItem(f"{code} - {p_name}", {"code": code, "name": p_name})
         self.source_supplier_combo.blockSignals(False)
 
     def _on_source_supplier_changed(self):
@@ -1036,18 +1093,19 @@ class SinglePurchaseInputDialog(QDialog):
         patterns: List[re.Pattern] = []
         for label in labels:
             escaped = re.escape(label)
+            # 金額は半角・全角数字の両方（OCR揺れ対応）
             patterns.append(
-                re.compile(rf"{escaped}[^\n\r\d¥\-]*[-−]?\s*[¥￥]?\s*([0-9][0-9,]*)", re.IGNORECASE)
+                re.compile(
+                    rf"{escaped}[^\n\r\d¥￥０-９\-−]*[-−]?\s*[¥￥]?\s*([0-9０-９][0-9０-９,，]*)",
+                    re.IGNORECASE,
+                )
             )
         for pat in patterns:
             m = pat.search(normalized)
             if m:
-                raw = re.sub(r"[^\d]", "", m.group(1) or "")
-                if raw:
-                    try:
-                        return int(raw)
-                    except ValueError:
-                        continue
+                n = SinglePurchaseInputDialog._parse_yen_int_token(m.group(1) or "")
+                if n is not None:
+                    return n
         return None
 
     @staticmethod
@@ -1067,16 +1125,238 @@ class SinglePurchaseInputDialog(QDialog):
             norm_line = line.lower().replace(" ", "")
             if not all(k in norm_line for k in normalized_keywords):
                 continue
-            m = re.search(r"[-−]?\s*[¥￥]?\s*([0-9][0-9,]*)", line)
+            m = re.search(r"[-−]?\s*[¥￥]?\s*([0-9０-９][0-9０-９,，]*)", line)
             if not m:
                 continue
-            raw = re.sub(r"[^\d]", "", m.group(1) or "")
-            if not raw:
+            n = SinglePurchaseInputDialog._parse_yen_int_token(m.group(1) or "")
+            if n is not None:
+                return n
+        return None
+
+    @staticmethod
+    def _parse_yen_int_token(token: str) -> Optional[int]:
+        """OCRの金額トークン（全角数字・カンマ混在可）を int に変換"""
+        if not token:
+            return None
+        s = token.translate(str.maketrans("０１２３４５６７８９，", "0123456789,"))
+        raw = re.sub(r"[^\d]", "", s)
+        if not raw:
+            return None
+        try:
+            n = int(raw)
+            return n if n > 0 else None
+        except ValueError:
+            return None
+
+    # 料金シミュの「¥のみの行」でよく出るが商品価格ではない金額（先頭候補から除外）
+    _PLANNED_PRICE_STANDALONE_BLACKLIST = frozenset({9, 100, 425, 534, 757, 857})
+
+    @staticmethod
+    def _extract_planned_price_from_standalone_amount_lines(text: str) -> Optional[int]:
+        """
+        Tesseract 等でラベルが文字化けし、金額だけが「¥ 7,280」のように1行に出るケース向け。
+        行全体が（短い記号＋金額）程度のときだけ採用し、よくある手数料額はスキップする。
+        """
+        if not text:
+            return None
+        for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            s = line.strip()
+            if not s or "%" in s:
                 continue
-            try:
-                return int(raw)
-            except ValueError:
+            m = re.fullmatch(r"[^0-9０-９]{0,8}([0-9０-９][0-9０-９,，]*)\s*", s)
+            if not m:
                 continue
+            n = SinglePurchaseInputDialog._parse_yen_int_token(m.group(1) or "")
+            if n is None or n < 500:
+                continue
+            if n in SinglePurchaseInputDialog._PLANNED_PRICE_STANDALONE_BLACKLIST:
+                continue
+            return n
+        return None
+
+    @staticmethod
+    def _extract_planned_selling_price_yen(text: str) -> Optional[int]:
+        """
+        「商品価格」等から販売予定価格候補を抽出。
+        OCRでラベルと金額が別行になっても拾えるよう、空白除去全文マッチと近傍行走査を行う。
+        """
+        if not text:
+            return None
+        t = text.replace("\u00a5", "¥")
+        # 日本語ラベルは「改行なし1本化」で拾わない（売上の合計→次行Amazon手数料¥857が
+        # 1続きになり、857 等を誤認するため）。英字ラベルのみ ws_free で試す。
+        labels_compact_en = [
+            r"product\s*price",
+            r"item\s*price",
+            r"listing\s*price",
+        ]
+        ws_free = re.sub(r"[\s\r\n　\t]+", "", t, flags=re.UNICODE)
+        for pat in labels_compact_en:
+            m = re.search(
+                rf"(?:{pat})[:：\-−￥¥]*([0-9０-９][0-9０-９,，]*)",
+                ws_free,
+                flags=re.IGNORECASE,
+            )
+            if m:
+                n = SinglePurchaseInputDialog._parse_yen_int_token(m.group(1) or "")
+                if n is not None and n not in SinglePurchaseInputDialog._PLANNED_PRICE_STANDALONE_BLACKLIST:
+                    return n
+
+        # 従来どおり（同一行にラベル+金額がある場合）
+        # ※「売上」+「合計」キーワード検索は「売上の見積り」等と誤マッチするため使わない
+        for attempt in (
+            lambda: SinglePurchaseInputDialog._extract_yen_amount_from_text(
+                t,
+                [
+                    "商品価格",
+                    "売上の合計",
+                    "売上合計",
+                    "product price",
+                    "Product Price",
+                    "Item price",
+                    "Listing price",
+                ],
+            ),
+            lambda: SinglePurchaseInputDialog._extract_yen_amount_by_keywords(t, ["商品価格"]),
+        ):
+            v = attempt()
+            if v is not None and v not in SinglePurchaseInputDialog._PLANNED_PRICE_STANDALONE_BLACKLIST:
+                return v
+
+        # 「商品」「価格」が隣接行に分かれたOCR（出品者出荷で多い）
+        lines = [ln.rstrip() for ln in t.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+        nonempty_idx = [i for i, ln in enumerate(lines) if ln.strip()]
+        for k in range(len(nonempty_idx)):
+            seg = "".join(lines[j].strip() for j in nonempty_idx[k : min(k + 3, len(nonempty_idx))])
+            seg_nospace = re.sub(r"[\s　]+", "", seg)
+            if "商品価格" in seg_nospace or ("商品" in seg_nospace and "価格" in seg_nospace and "手数料" not in seg_nospace):
+                m = re.search(r"[-−￥¥:：]?\s*([0-9０-９][0-9０-９,，]*)", seg)
+                if m:
+                    n = SinglePurchaseInputDialog._parse_yen_int_token(m.group(1) or "")
+                    if n is not None and n not in SinglePurchaseInputDialog._PLANNED_PRICE_STANDALONE_BLACKLIST:
+                        return n
+
+        # ラベルが文字化けしても「価格」だけ残る行＋その後に金額ブロックが離れて出るケース（出品者出荷）
+        for i, line in enumerate(lines):
+            if "価格" not in line:
+                continue
+            if any(x in line for x in ("手数料", "成約料", "保管", "月額", "あたり")):
+                continue
+            if "配送料" in line or line.strip() in ("送料",):
+                continue
+            m = re.search(r"[-−]?\s*[¥￥]?\s*([0-9０-９][0-9０-９,，]*)", line)
+            if m:
+                n = SinglePurchaseInputDialog._parse_yen_int_token(m.group(1) or "")
+                if n is not None and n not in SinglePurchaseInputDialog._PLANNED_PRICE_STANDALONE_BLACKLIST:
+                    return n
+            for j in range(i + 1, min(i + 45, len(lines))):
+                fl = lines[j].strip()
+                if not fl:
+                    continue
+                if "配送料" in fl or fl in ("送料",):
+                    continue
+                if "その他の費用" in fl or "割引" in fl or "プロモーション" in fl:
+                    continue
+                if any(k in fl for k in ("手数料", "出荷費用", "在庫保管", "成約料", "純利益", "利益率", "見積り", "見積")):
+                    continue
+                if "費用" in fl and "商品あたり" in fl.replace(" ", "").replace("　", ""):
+                    continue
+                m = re.search(r"[-−]?\s*[¥￥]?\s*([0-9０-９][0-9０-９,，]*)", fl)
+                if m:
+                    n = SinglePurchaseInputDialog._parse_yen_int_token(m.group(1) or "")
+                    if n is not None and n not in SinglePurchaseInputDialog._PLANNED_PRICE_STANDALONE_BLACKLIST:
+                        return n
+
+        # ラベル行の直後数行から金額を探す（FBAシミュ等で縦並びのとき）
+        _skip_substrings = (
+            "配送料",
+            "送料",
+            "shipping",
+            "手数料",
+            "出荷費用",
+            "出荷作業",
+            "配送代行",
+            "在庫保管",
+            "成約料",
+            "純利益",
+            "利益率",
+            "見積",
+            "あたりの費用",
+            "費用",
+        )
+
+        def _line_skipped_for_price_follow(fl: str) -> bool:
+            s = fl.strip()
+            if not s:
+                return True
+            # 出品者出荷で商品価格の直後に来る「配送料」はスキップ（次の「売上の合計」等を拾う）
+            if "配送料" in s or "送料" in s:
+                return True
+            skip_tokens = [x for x in _skip_substrings if x != "費用"]
+            if any(x in s for x in skip_tokens):
+                return True
+            if "費用" in s and "商品あたり" in s.replace(" ", "").replace("　", ""):
+                return True
+            return False
+
+        for i, line in enumerate(lines):
+            low = line.lower().replace(" ", "").replace("　", "")
+            is_product_price_row = (
+                "商品価格" in low
+                or "productprice" in low
+                or ("itemprice" in low)
+                or ("listingprice" in low)
+            )
+            if not is_product_price_row:
+                if "商品" in low and "価格" in low and "手数料" not in low and "あたり" not in low:
+                    is_product_price_row = True
+            if not is_product_price_row:
+                continue
+            if any(x in line for x in ("あたり", "保管", "成約料", "純利益", "利益率")):
+                continue
+            m = re.search(r"[-−]?\s*[¥￥]?\s*([0-9０-９][0-9０-９,，]*)", line)
+            if m:
+                n = SinglePurchaseInputDialog._parse_yen_int_token(m.group(1) or "")
+                if n is not None and n not in SinglePurchaseInputDialog._PLANNED_PRICE_STANDALONE_BLACKLIST:
+                    return n
+            for j in range(i + 1, min(i + 30, len(lines))):
+                fl = lines[j].strip()
+                if _line_skipped_for_price_follow(fl):
+                    continue
+                if "その他の費用" in fl:
+                    continue
+                m = re.search(r"[-−]?\s*[¥￥]?\s*([0-9０-９][0-9０-９,，]*)", fl)
+                if m:
+                    n = SinglePurchaseInputDialog._parse_yen_int_token(m.group(1) or "")
+                    if n is not None and n not in SinglePurchaseInputDialog._PLANNED_PRICE_STANDALONE_BLACKLIST:
+                        return n
+
+        # 最後の手段: 行がほぼ「記号+金額」だけ（ラベル文字化けで金額列だけ読めた場合）
+        return SinglePurchaseInputDialog._extract_planned_price_from_standalone_amount_lines(t)
+
+    @staticmethod
+    def _detect_shipping_method_from_fee_simulator_ocr(text: str) -> Optional[str]:
+        """
+        Amazon料金シミュレーター等の先頭見出しから発送方法を推定。
+        - 「Amazonから出荷」→ FBA
+        - 「出品者出荷」→ 自己発送
+        先頭付近のみ見て、本文中の「Amazon」誤検出を減らす。
+        """
+        if not text:
+            return None
+        nonempty = [ln.strip() for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n") if ln.strip()]
+        head_joined = "".join(re.sub(r"[\s　]+", "", ln) for ln in nonempty[:14])
+        low = head_joined.lower()
+
+        idx_seller = head_joined.find("出品者出荷")
+        idx_amazon_ship = head_joined.find("Amazonから出荷")
+        if idx_amazon_ship < 0:
+            idx_amazon_ship = low.find("amazonから出荷")
+
+        if idx_seller >= 0 and (idx_amazon_ship < 0 or idx_seller < idx_amazon_ship):
+            return "自己発送"
+        if idx_amazon_ship >= 0:
+            return "FBA"
         return None
 
     def _load_fees_from_image_ocr(self):
@@ -1122,6 +1402,12 @@ class SinglePurchaseInputDialog(QDialog):
                 QMessageBox.warning(self, "OCR", "文字を読み取れませんでした。別の画像でお試しください。")
                 return
 
+            # FBAシミュ先頭見出し → 発送方法
+            shipping_method = self._detect_shipping_method_from_fee_simulator_ocr(text)
+
+            # FBAシミュ・出品画面などの「商品価格」→ 販売予定価格（別行OCRにも対応）
+            planned_from_ocr = self._extract_planned_selling_price_yen(text)
+
             amazon_fee = self._extract_yen_amount_from_text(
                 text,
                 ["Amazon手数料", "amazon手数料", "販売手数料", "referral fee"]
@@ -1146,6 +1432,14 @@ class SinglePurchaseInputDialog(QDialog):
             )
 
             updated_items: List[str] = []
+            if shipping_method:
+                idx = self.shipping_combo.findText(shipping_method)
+                if idx >= 0:
+                    self.shipping_combo.setCurrentIndex(idx)
+                    updated_items.append("発送方法")
+            if planned_from_ocr is not None:
+                self.planned_price_spin.setValue(planned_from_ocr)
+                updated_items.append("販売予定価格")
             if amazon_fee is not None:
                 self.amazon_fee_spin.setValue(amazon_fee)
                 updated_items.append("Amazon手数料")
@@ -1160,7 +1454,7 @@ class SinglePurchaseInputDialog(QDialog):
                 QMessageBox.information(
                     self,
                     "OCR",
-                    "手数料の候補を見つけられませんでした。画像を拡大して再撮影するか、手入力してください。"
+                    "見出し・商品価格・手数料の候補を見つけられませんでした。画像を拡大して再撮影するか、手入力してください。"
                 )
                 return
             QMessageBox.information(
@@ -1177,13 +1471,114 @@ class SinglePurchaseInputDialog(QDialog):
                 except Exception:
                     pass
 
+    def _on_generate_sku_clicked(self):
+        """仕入データタブの generate_sku と同系統（1件分・API・店舗マスタ・SKU日付・末尾M）。"""
+        inv = self._inventory_widget
+        if inv is None or not getattr(inv, "api_client", None):
+            QMessageBox.warning(self, "SKU生成", "仕入管理から開いていないため、SKUを生成できません。")
+            return
+
+        preview = self.get_row_data()
+        if inv._is_excluded_for_sku(preview):
+            QMessageBox.warning(
+                self,
+                "SKU生成",
+                "この内容はSKU生成の対象外です（コメントに「除外」が含まれる、または発送方法が空です）。",
+            )
+            return
+        if not (preview.get("ASIN") or "").strip() or not (preview.get("商品名") or "").strip():
+            QMessageBox.warning(self, "SKU生成", "ASINと商品名を入力してください。")
+            return
+
+        purchase_date = str(preview.get("仕入れ日", "") or "").strip()
+        asin = str(preview.get("ASIN", "") or "").strip()
+        existing = inv.lookup_existing_sku_for_date_asin(purchase_date, asin)
+        if existing:
+            self.sku_edit.setText(existing)
+            QMessageBox.information(
+                self,
+                "SKU生成",
+                f"商品DBに一致するSKUがありました。\n{existing}",
+            )
+            return
+
+        enriched = dict(preview)
+        for col in inv.column_headers:
+            if col not in enriched:
+                enriched[col] = ""
+
+        supplier_code = str(preview.get("仕入先", "") or "").strip()
+        store_not_found: List[str] = []
+        if supplier_code:
+            resolved = self.store_db.resolve_supplier_for_sku(supplier_code)
+            if resolved:
+                enriched["supplier_code"] = resolved["supplier_code"]
+                enriched["store_name"] = resolved.get("store_name", "")
+                enriched["store_id"] = resolved.get("store_id")
+            else:
+                store_not_found.append(supplier_code)
+                enriched["supplier_code"] = supplier_code
+                enriched["store_name"] = ""
+                enriched["store_id"] = None
+        else:
+            enriched["supplier_code"] = ""
+            enriched["store_name"] = ""
+            enriched["store_id"] = None
+
+        if store_not_found:
+            QMessageBox.warning(
+                self,
+                "店舗情報警告",
+                f"仕入先コードに対応する店舗が見つかりませんでした:\n{', '.join(store_not_found)}",
+            )
+
+        sku_date_str = None
+        if hasattr(inv, "sku_date_edit") and inv.sku_date_edit is not None:
+            d = inv.sku_date_edit.date()
+            if d.isValid():
+                sku_date_str = d.toString("yyyyMMdd")
+
+        try:
+            result = inv.api_client.inventory_generate_sku([enriched], sku_date=sku_date_str)
+        except Exception as e:
+            QMessageBox.critical(self, "SKU生成エラー", f"SKU生成中にエラーが発生しました:\n{str(e)}")
+            return
+
+        if result.get("status") != "success" or not result.get("results"):
+            QMessageBox.warning(self, "SKU生成失敗", "SKU生成に失敗しました。")
+            return
+
+        sku_res = result["results"][0]
+        if sku_res.get("status") != "success":
+            QMessageBox.warning(self, "SKU生成失敗", "SKU生成に失敗しました。")
+            return
+
+        generated_sku = sku_res.get("generated_sku") or ""
+        if hasattr(inv, "chk_append_m_for_self_ship") and inv.chk_append_m_for_self_ship.isChecked():
+            ship_method = str(self.shipping_combo.currentText() or "")
+            if "自己発送" in ship_method and isinstance(generated_sku, str) and generated_sku and not generated_sku.endswith("M"):
+                generated_sku = f"{generated_sku}M"
+
+        self.sku_edit.setText(generated_sku)
+        QMessageBox.information(self, "SKU生成完了", f"SKUを生成しました。\n{generated_sku}")
+
+        try:
+            inv.sku_generated.emit(1)
+        except Exception:
+            pass
+
+        if hasattr(inv, "sku_date_edit") and inv.sku_date_edit is not None:
+            inv.sku_date_edit.setDate(QDate.currentDate())
+
     def get_row_data(self) -> Dict[str, Any]:
         purchase_price = int(self.purchase_price_spin.value())
         planned_price = int(self.planned_price_spin.value())
         amazon_fee = int(self.amazon_fee_spin.value())
         shipping_cost = int(self.shipping_cost_spin.value())
         storage_fee = int(self.storage_fee_spin.value())
-        expected_profit = planned_price - purchase_price - amazon_fee - shipping_cost - storage_fee
+        # 仕入一覧と同式: 損益分岐点 = 仕入+Amazon手数料+出荷、見込み利益 = 販売予定-損益分岐点（保管手数料は含めない）
+        break_even_sum = purchase_price + amazon_fee + shipping_cost
+        expected_profit = planned_price - break_even_sum
         expected_margin = round((expected_profit / planned_price) * 100, 2) if planned_price > 0 else 0.0
         expected_roi = round((expected_profit / purchase_price) * 100, 2) if purchase_price > 0 else 0.0
 
@@ -1202,10 +1597,14 @@ class SinglePurchaseInputDialog(QDialog):
 
         condition_note = _to_stored_newlines(self.condition_note_edit.toPlainText().strip())
 
+        sku_text = self.sku_edit.text().strip()
+        if not sku_text:
+            sku_text = "未実装"
+
         return {
             "仕入れ日": self.purchase_date_edit.date().toString("yyyy-MM-dd"),
             "コンディション": self.condition_combo.currentText().strip() or "中古(良い)",
-            "SKU": "未実装",
+            "SKU": sku_text,
             "ASIN": self.asin_edit.text().strip(),
             "JAN": self.jan_edit.text().strip(),
             "商品名": self.title_edit.text().strip(),
@@ -1213,7 +1612,7 @@ class SinglePurchaseInputDialog(QDialog):
             "仕入れ価格": purchase_price,
             "販売予定価格": planned_price,
             "見込み利益": expected_profit,
-            "損益分岐点": purchase_price,
+            "損益分岐点": break_even_sum,
             "想定利益率": expected_margin,
             "想定ROI": expected_roi,
             "コメント": merged_comment,
@@ -1243,6 +1642,8 @@ class InventoryWidget(QWidget):
         self.inventory_data = None
         self.filtered_data = None
         self.excluded_highlight_on = False
+        # 仕入一覧の見込み利益・損益分岐点の再計算中は itemChanged を無視（ループ防止）
+        self._profit_recalc_block = False
         # ワークフロー状態（工程6まで完了して一時停止中かどうか）
         self.workflow_paused_after_step6 = False
         
@@ -1800,6 +2201,8 @@ class InventoryWidget(QWidget):
         self.data_table.itemSelectionChanged.connect(self.on_data_selection_changed)
         # 行のダブルクリックで編集ダイアログを開く
         self.data_table.itemDoubleClicked.connect(self._on_data_row_double_clicked)
+        # 仕入れ価格・販売予定価格・手数料・出荷費用の変更で見込み利益等を即時再計算
+        self.data_table.itemChanged.connect(self._on_inventory_table_item_changed)
         
         # テーブルをグループに追加（stretch factorを1に設定してスクロール可能に）
         data_layout.addWidget(self.data_table, 1)
@@ -2144,7 +2547,8 @@ class InventoryWidget(QWidget):
         dlg = SinglePurchaseInputDialog(
             self.condition_template_db,
             self._get_condition_key,
-            self
+            inventory_widget=self,
+            parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -3098,6 +3502,49 @@ class InventoryWidget(QWidget):
                 self.update_table()
         except Exception:
             pass
+
+    def lookup_existing_sku_for_date_asin(self, purchase_date: str, asin: str) -> Optional[str]:
+        """
+        商品DB（仕入スナップショット・products）から、同一仕入日時・ASINのSKUを1件返す。
+        単品仕入ダイアログのSKU生成で、テーブルに載せる前の重複防止に使用。
+        """
+        purchase_date = (purchase_date or "").strip()
+        asin = (asin or "").strip()
+        if not purchase_date or not asin:
+            return None
+
+        purchase_records: List[Dict[str, Any]] = []
+        try:
+            snapshots = self.product_purchase_db.list_snapshots()
+            if snapshots:
+                latest_snapshot = self.product_purchase_db.get_snapshot(snapshots[0]["id"])
+                if latest_snapshot and latest_snapshot.get("data"):
+                    purchase_records = latest_snapshot["data"]
+        except Exception:
+            pass
+
+        if purchase_records:
+            normalized_target_datetime = self._normalize_datetime_for_match(purchase_date)
+            for purchase_record in purchase_records:
+                record_datetime = str(
+                    purchase_record.get("仕入れ日", "") or purchase_record.get("purchase_date", "")
+                ).strip()
+                record_asin = str(purchase_record.get("ASIN", "") or purchase_record.get("asin", "")).strip()
+                record_sku = str(purchase_record.get("SKU", "") or purchase_record.get("sku", "")).strip()
+                normalized_record_datetime = self._normalize_datetime_for_match(record_datetime)
+                if normalized_record_datetime == normalized_target_datetime:
+                    if record_asin.upper() == asin.upper() and record_sku and record_sku != "未実装":
+                        return record_sku
+
+        try:
+            product = self.product_db.find_by_date_and_asin(purchase_date, asin)
+            if product and product.get("sku"):
+                s = str(product["sku"]).strip()
+                if s and s != "未実装":
+                    return s
+        except Exception:
+            pass
+        return None
     
     def _normalize_date_for_match(self, date_str: str) -> str:
         """
@@ -3818,7 +4265,7 @@ class InventoryWidget(QWidget):
         return new_df
     
     def _calculate_margin_and_roi(self, df: pd.DataFrame) -> pd.DataFrame:
-        """利益率とROIを計算してDataFrameに追加"""
+        """見込み利益・損益分岐点・利益率・ROIを同一式で計算してDataFrameに反映"""
         # 数値列を数値型に変換（エラー時はNaN）
         def safe_float(x):
             try:
@@ -3830,37 +4277,39 @@ class InventoryWidget(QWidget):
             except (ValueError, TypeError):
                 return 0.0
         
-        # 必要な列を数値型に変換
         purchase_price = df.get("仕入れ価格", pd.Series([0.0] * len(df))).apply(safe_float)
         planned_price = df.get("販売予定価格", pd.Series([0.0] * len(df))).apply(safe_float)
-        expected_profit = df.get("見込み利益", pd.Series([0.0] * len(df))).apply(safe_float)
-        
-        # 利益率 = (見込み利益 / 販売予定価格) * 100
-        # ゼロ除算を防ぐ
+        amazon_fee = df.get("Amazon手数料", pd.Series([0.0] * len(df))).apply(safe_float)
+        shipping_cost = df.get("出荷費用", pd.Series([0.0] * len(df))).apply(safe_float)
+
+        # 損益分岐点 = 仕入れ価格 + Amazon手数料 + 出荷費用
+        # 見込み利益 = 販売予定価格 - 損益分岐点（在庫保管手数料は含めない）
+        break_even = purchase_price + amazon_fee + shipping_cost
+        expected_profit = planned_price - break_even
+
+        df["損益分岐点"] = break_even.round(0)
+        df["見込み利益"] = expected_profit.round(0)
+
         margin = pd.Series([0.0] * len(df), dtype=float)
         for i in range(len(df)):
             if planned_price.iloc[i] > 0:
                 margin.iloc[i] = (expected_profit.iloc[i] / planned_price.iloc[i]) * 100
             else:
                 margin.iloc[i] = 0.0
-        
-        # ROI = (見込み利益 / 仕入れ価格) * 100
-        # ゼロ除算を防ぐ
+
         roi = pd.Series([0.0] * len(df), dtype=float)
         for i in range(len(df)):
             if purchase_price.iloc[i] > 0:
                 roi.iloc[i] = (expected_profit.iloc[i] / purchase_price.iloc[i]) * 100
             else:
                 roi.iloc[i] = 0.0
-        
-        # 小数点第2位で四捨五入
+
         margin = margin.round(2)
         roi = roi.round(2)
-        
-        # DataFrameに追加
+
         df["想定利益率"] = margin
         df["想定ROI"] = roi
-        
+
         return df
                 
     def update_table(self):
@@ -3965,6 +4414,107 @@ class InventoryWidget(QWidget):
         has_data = self.data_table.rowCount() > 0
         if hasattr(self, 'data_clear_btn'):
             self.data_clear_btn.setEnabled(has_data)
+
+    def _parse_table_int_cell(self, table_row: int, col_name: str) -> int:
+        """仕入一覧テーブルのセルを整数（円）として解釈"""
+        try:
+            j = self.column_headers.index(col_name)
+        except ValueError:
+            return 0
+        item = self.data_table.item(table_row, j)
+        if not item:
+            return 0
+        s = str(item.text()).replace(",", "").strip()
+        if not s or s.lower() == "nan":
+            return 0
+        try:
+            return int(float(s))
+        except (ValueError, TypeError):
+            return 0
+
+    def _write_table_money_cell(self, table_row: int, col_name: str, value: int) -> None:
+        j = self.column_headers.index(col_name)
+        item = self.data_table.item(table_row, j)
+        if not item:
+            item = QTableWidgetItem()
+            self.data_table.setItem(table_row, j, item)
+        item.setText(f"{int(value):,.0f}")
+
+    def _write_table_rate_cell(self, table_row: int, col_name: str, value: float) -> None:
+        j = self.column_headers.index(col_name)
+        item = self.data_table.item(table_row, j)
+        if not item:
+            item = QTableWidgetItem()
+            self.data_table.setItem(table_row, j, item)
+        item.setText(f"{float(value):.2f}")
+
+    def _recalculate_profit_for_table_row(self, table_row: int) -> None:
+        """
+        仕入れ価格・販売予定価格・Amazon手数料・出荷費用から
+        見込み利益・損益分岐点・想定利益率・想定ROIを再計算してテーブルとDataFrameに反映。
+        """
+        if self.filtered_data is None or table_row < 0 or table_row >= len(self.filtered_data):
+            return
+        purchase = self._parse_table_int_cell(table_row, "仕入れ価格")
+        planned = self._parse_table_int_cell(table_row, "販売予定価格")
+        amazon = self._parse_table_int_cell(table_row, "Amazon手数料")
+        ship = self._parse_table_int_cell(table_row, "出荷費用")
+        break_even = purchase + amazon + ship
+        profit = planned - break_even
+        margin = round((profit / planned) * 100, 2) if planned > 0 else 0.0
+        roi = round((profit / purchase) * 100, 2) if purchase > 0 else 0.0
+
+        self._profit_recalc_block = True
+        try:
+            self._write_table_money_cell(table_row, "損益分岐点", break_even)
+            self._write_table_money_cell(table_row, "見込み利益", profit)
+            self._write_table_rate_cell(table_row, "想定利益率", margin)
+            self._write_table_rate_cell(table_row, "想定ROI", roi)
+        finally:
+            self._profit_recalc_block = False
+
+        try:
+            idx = self.filtered_data.index[table_row]
+            for col, val in (
+                ("仕入れ価格", purchase),
+                ("販売予定価格", planned),
+                ("Amazon手数料", amazon),
+                ("出荷費用", ship),
+                ("損益分岐点", break_even),
+                ("見込み利益", profit),
+            ):
+                if col in self.filtered_data.columns:
+                    self.filtered_data.at[idx, col] = val
+                if self.inventory_data is not None and idx in self.inventory_data.index and col in self.inventory_data.columns:
+                    self.inventory_data.at[idx, col] = val
+            for col, val in (("想定利益率", margin), ("想定ROI", roi)):
+                if col in self.filtered_data.columns:
+                    self.filtered_data.at[idx, col] = val
+                if self.inventory_data is not None and idx in self.inventory_data.index and col in self.inventory_data.columns:
+                    self.inventory_data.at[idx, col] = val
+        except Exception as e:
+            print(f"利益再計算のDataFrame同期エラー: {e}")
+
+        try:
+            self.update_stats()
+        except Exception:
+            pass
+
+    def _on_inventory_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if getattr(self, "_profit_recalc_block", False):
+            return
+        if self.filtered_data is None or item is None:
+            return
+        row = item.row()
+        col = item.column()
+        if col < 0 or col >= len(self.column_headers):
+            return
+        col_name = self.column_headers[col]
+        if col_name not in ("仕入れ価格", "販売予定価格", "Amazon手数料", "出荷費用"):
+            return
+        if row < 0 or row >= len(self.filtered_data):
+            return
+        self._recalculate_profit_for_table_row(row)
 
     def _is_excluded_row(self, row: dict) -> bool:
         """除外条件の判定: コメントに『除外』または 発送方法がFBA以外"""
@@ -4193,27 +4743,31 @@ class InventoryWidget(QWidget):
     
     def _apply_edited_row_to_table(self, table_row_index: int, result: Dict[str, Any]):
         """編集結果をテーブルの指定行に反映し、filtered_data / inventory_data も更新する"""
-        for j, column in enumerate(self.column_headers):
-            if j >= self.data_table.columnCount():
-                break
-            value = result.get(column, "")
-            if value is None:
-                value = ""
-            value = str(value)
-            item = self.data_table.item(table_row_index, j)
-            if not item:
-                item = QTableWidgetItem(value)
-                self.data_table.setItem(table_row_index, j, item)
-            else:
-                item.setText(value)
-            if column == "商品名":
-                item.setToolTip(value)
-                item.setData(Qt.UserRole, value)
-                item.setText(value[:50] + "..." if len(value) > 50 else value)
-            if column == "SKU":
-                item.setData(Qt.UserRole, value)  # フルSKUを保持（保存時に使用）
-            if column == "コンディション説明":
-                item.setToolTip(_normalize_condition_note_newlines(value))
+        self.data_table.blockSignals(True)
+        try:
+            for j, column in enumerate(self.column_headers):
+                if j >= self.data_table.columnCount():
+                    break
+                value = result.get(column, "")
+                if value is None:
+                    value = ""
+                value = str(value)
+                item = self.data_table.item(table_row_index, j)
+                if not item:
+                    item = QTableWidgetItem(value)
+                    self.data_table.setItem(table_row_index, j, item)
+                else:
+                    item.setText(value)
+                if column == "商品名":
+                    item.setToolTip(value)
+                    item.setData(Qt.UserRole, value)
+                    item.setText(value[:50] + "..." if len(value) > 50 else value)
+                if column == "SKU":
+                    item.setData(Qt.UserRole, value)  # フルSKUを保持（保存時に使用）
+                if column == "コンディション説明":
+                    item.setToolTip(_normalize_condition_note_newlines(value))
+        finally:
+            self.data_table.blockSignals(False)
         # filtered_data / inventory_data をテーブルから再取得して同期
         df = self.get_table_data()
         if df is not None and len(df) > 0 and self.filtered_data is not None:
@@ -4257,6 +4811,8 @@ class InventoryWidget(QWidget):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             result = dlg.get_result()
             self._apply_edited_row_to_table(row_index, result)
+            # 一覧と同じ損益式で見込み利益・損益分岐点・率を揃える
+            self._recalculate_profit_for_table_row(row_index)
         
     def update_data_count(self):
         """データ件数の更新"""
@@ -4925,16 +5481,13 @@ class InventoryWidget(QWidget):
                 supplier_code = item.get('仕入先', '').strip()
                 
                 if supplier_code:
-                    # 店舗マスタから店舗情報を取得（store_code優先、互換性のため仕入れ先コードも許容）
-                    store_info = self.store_db.get_store_by_code(supplier_code)
-                    
-                    if store_info:
-                        # 店舗情報を追加
-                        enriched_item['supplier_code'] = supplier_code
-                        enriched_item['store_name'] = store_info.get('store_name', '')
-                        enriched_item['store_id'] = store_info.get('id')
+                    # 実店舗マスタ → 電脳店舗マスタの順で解決
+                    resolved = self.store_db.resolve_supplier_for_sku(supplier_code)
+                    if resolved:
+                        enriched_item['supplier_code'] = resolved['supplier_code']
+                        enriched_item['store_name'] = resolved.get('store_name', '')
+                        enriched_item['store_id'] = resolved.get('store_id')
                     else:
-                        # 店舗が見つからない場合の警告を記録
                         store_not_found_warnings.append(supplier_code)
                         enriched_item['supplier_code'] = supplier_code
                         enriched_item['store_name'] = ''

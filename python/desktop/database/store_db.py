@@ -515,6 +515,60 @@ class StoreDatabase:
         if row:
             return self._row_to_dict(row)
         return None
+
+    def get_online_store_by_supplier_code(self, supplier_code: str) -> Optional[Dict[str, Any]]:
+        """電脳店舗マスタ（online_stores）を supplier_code で1件取得。プラットフォーム名を付与。"""
+        code = (supplier_code or "").strip().upper()
+        if not code:
+            return None
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT s.*, p.platform_name, p.category, p.code_prefix
+            FROM online_stores s
+            JOIN online_platforms p ON p.id = s.platform_id
+            WHERE s.supplier_code = ?
+            """,
+            (code,),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def resolve_supplier_for_sku(self, supplier_code: str) -> Optional[Dict[str, Any]]:
+        """
+        SKU生成向けに仕入先を解決する。
+        実店舗(stores) → 電脳店舗(online_stores)の順で検索する。
+        戻り: {"supplier_code", "store_name", "store_id"} または None
+        """
+        code = (supplier_code or "").strip()
+        if not code:
+            return None
+        physical = self.get_store_by_code(code)
+        if physical:
+            return {
+                "supplier_code": code,
+                "store_name": (physical.get("store_name") or "").strip(),
+                "store_id": physical.get("id"),
+            }
+        online = self.get_online_store_by_supplier_code(code)
+        if online:
+            shop = (online.get("shop_name") or "").strip()
+            plat = (online.get("platform_name") or "").strip()
+            if plat and shop:
+                display_name = f"{plat} {shop}"
+            elif shop:
+                display_name = shop
+            elif plat:
+                display_name = plat
+            else:
+                display_name = code
+            return {
+                "supplier_code": code,
+                "store_name": display_name,
+                "store_id": online.get("id"),
+            }
+        return None
     
     def list_stores(self, search_term: Optional[str] = None) -> List[Dict[str, Any]]:
         """店舗一覧を取得（検索対応）"""

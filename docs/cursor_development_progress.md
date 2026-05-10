@@ -2191,3 +2191,31 @@
 
 **最終更新**: 2026-05-06
 **更新者**: Agentモード（実装）
+
+### 2026-05-10（仕入管理: 単品仕入拡張・OCR強化・SKU生成・店舗解決・一覧利益のリアルタイム計算）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. **単品仕入の仕入種別に「フリマ」**  
+     - `inventory_widget.py`: `SinglePurchaseInputDialog` の仕入種別にフリマを追加。仕入チャネル・仕入先候補は `StoreDatabase.list_flea_markets`（設定 > DB設定 > フリマ）の有効マスタから取得。
+  2. **貼り付けOCR（手数料読込）の拡張**  
+     - 商品価格 → 販売予定価格への反映（別行OCR・全角数字・売上の合計・配送料スキップ・ラベル文字化け時の単独行フォールバック等）。  
+     - 見出し「Amazonから出荷」「出品者出荷」から発送方法（FBA / 自己発送）を推定。  
+     - 日本語ラベルの「改行除去1本化」マッチを廃止し、手数料誤認（857等）を防止。
+  3. **単品仕入に SKU 行と「SKU生成」ボタン**  
+     - 仕入データタブの SKU 生成と同系統（商品DB重複照合、`inventory_generate_sku`、SKU日付、自己発送末尾M、電脳店舗を含む店舗解決）。
+  4. **SKU生成時の仕入先解決**  
+     - `store_db.py`: `get_online_store_by_supplier_code` / `resolve_supplier_for_sku`（実店舗 → 電脳店舗）。一括 SKU 生成・単品ダイアログの両方で利用。
+  5. **仕入データ一覧のリアルタイム利益計算**  
+     - 仕入れ価格・販売予定価格・Amazon手数料・出荷費用の編集で、見込み利益・損益分岐点・想定利益率・想定ROIを即時再計算（`itemChanged`）。損益分岐点 = 仕入 + Amazon手数料 + 出荷費用（在庫保管手数料は含めない）。CSV取込の `_calculate_margin_and_roi`・単品仕入 `get_row_data` を同一式に統一。行編集ダイアログ適用時は `blockSignals` + 再計算。
+- **変更ファイル**:
+  - `python/desktop/ui/inventory_widget.py`
+  - `python/desktop/database/store_db.py`
+  - `python/desktop/data/missing_keywords.json`（欠品ラベル等のローカルデータ）
+  - `docs/cursor_development_progress.md`
+  - `D:\HIRIO\docs\cursor_development_progress.md`
+- **次回**:
+  - フリマ仕入先のみ `flea_markets` 解決にフォールバックする要否の整理。
+  - 在庫保管手数料を損益に含めるオプションが必要かの検討。
+
+**最終更新**: 2026-05-10
+**更新者**: Agentモード（実装）
