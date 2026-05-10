@@ -220,7 +220,8 @@ class MainWindow(QMainWindow):
             repricer_tabs = QTabWidget()
             repricer_tabs.addTab(self.repricer_widget, "改定実行")
             repricer_tabs.addTab(self.repricer_settings_widget, "改定ルール")
-            self.tab_widget.addTab(repricer_tabs, "価格改定")
+            old_reprice_tab_index = self.tab_widget.addTab(repricer_tabs, "旧価格改定")
+            self.tab_widget.setTabVisible(old_reprice_tab_index, False)
 
             # 既存の価格改定タブを複製した「3-6-9価格改定」タブ
             self.repricer_widget_369 = RepricerWidget(self.api_client, mode="369")
@@ -228,7 +229,7 @@ class MainWindow(QMainWindow):
             repricer_tabs_369 = QTabWidget()
             repricer_tabs_369.addTab(self.repricer_widget_369, "改定実行")
             repricer_tabs_369.addTab(self.repricer_settings_widget_369, "改定ルール")
-            self.tab_widget.addTab(repricer_tabs_369, "3-6-9価格改定")
+            self.tab_widget.addTab(repricer_tabs_369, "価格改定")
 
             from ui.inventory_widget import InventoryWidget
             from ui.condition_template_widget import ConditionTemplateWidget
@@ -237,10 +238,15 @@ class MainWindow(QMainWindow):
             inventory_tabs = QTabWidget()
             inventory_tabs.addTab(self.inventory_widget, "仕入データ")
             inventory_tabs.addTab(self.condition_template_widget, "コンディション説明")
-            self.tab_widget.addTab(inventory_tabs, "仕入管理")
+            old_inventory_tab_index = self.tab_widget.addTab(inventory_tabs, "旧仕入管理")
+            self.tab_widget.setTabVisible(old_inventory_tab_index, False)
             # 3-6-9仕入管理: 同一機能だが data_dev / 別QSettings で独立インスタンス（本番DBを壊さない）
             self.inventory_widget_dev = InventoryWidget(self.api_client, dev_mode=True)
-            self.tab_widget.addTab(self.inventory_widget_dev, "3-6-9仕入管理")
+            self.condition_template_widget_dev = ConditionTemplateWidget()
+            inventory_tabs_dev = QTabWidget()
+            inventory_tabs_dev.addTab(self.inventory_widget_dev, "仕入データ")
+            inventory_tabs_dev.addTab(self.condition_template_widget_dev, "コンディション説明")
+            self.tab_widget.addTab(inventory_tabs_dev, "仕入管理")
             return False
 
         if phase == 1:

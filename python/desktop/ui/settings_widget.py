@@ -359,24 +359,33 @@ class SettingsWidget(QWidget):
     def setup_db_settings_tab(self, parent):
         """DB設定タブ（チェーン店コードマッピング）"""
         from database.store_db import StoreDatabase
+        from ui.store_master_widget import (
+            OnlinePlatformListWidget,
+            WholesalerListWidget,
+            FleaMarketListWidget,
+        )
         
         db_widget = QWidget()
         layout = QVBoxLayout(db_widget)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
-        
-        # 説明ラベル
+
+        db_tabs = QTabWidget()
+
+        # チェーン店コードマッピングタブ
+        chain_mapping_widget = QWidget()
+        chain_layout = QVBoxLayout(chain_mapping_widget)
+        chain_layout.setContentsMargins(0, 0, 0, 0)
+        chain_layout.setSpacing(10)
+
         info_label = QLabel("チェーン店名とコードのマッピングを設定します。店舗名に含まれる文字列をパターンとして登録できます。")
         info_label.setWordWrap(True)
-        layout.addWidget(info_label)
-        
-        # チェーン店コードマッピングテーブル
+        chain_layout.addWidget(info_label)
+
         table_group = QGroupBox("チェーン店コードマッピング")
         table_layout = QVBoxLayout(table_group)
-        
-        # テーブル
+
         self.chain_mapping_table = QTableWidget()
-        # ID / チェーン店コード / 店舗名パターン / 優先度 / 有効 / その他
         self.chain_mapping_table.setColumnCount(6)
         self.chain_mapping_table.setHorizontalHeaderLabels([
             "ID", "チェーン店コード", "店舗名パターン", "優先度", "有効", "その他"
@@ -384,20 +393,18 @@ class SettingsWidget(QWidget):
         self.chain_mapping_table.setAlternatingRowColors(True)
         self.chain_mapping_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.chain_mapping_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        
-        # ヘッダー設定
+
         header = self.chain_mapping_table.horizontalHeader()
         header.setStretchLastSection(False)
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # ID
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # コード
-        header.setSectionResizeMode(2, QHeaderView.Stretch)  # パターン
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # 優先度
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # 有効
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)  # その他
-        
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+
         table_layout.addWidget(self.chain_mapping_table)
 
-        # 「その他」列の説明
         others_info_label = QLabel(
             "「その他」列が「はい」の行は、どのパターンにも当てはまらない店舗に付与するデフォルトのチェーンコードとして使われます。\n"
             "※ 通常は1行のみ「はい」にすることを推奨します。"
@@ -405,18 +412,17 @@ class SettingsWidget(QWidget):
         others_info_label.setWordWrap(True)
         others_info_label.setStyleSheet("color: #666; font-size: 9pt;")
         table_layout.addWidget(others_info_label)
-        
-        # 操作ボタン
+
         button_layout = QHBoxLayout()
-        
+
         add_btn = QPushButton("追加")
         add_btn.clicked.connect(lambda: self.add_chain_mapping())
         button_layout.addWidget(add_btn)
-        
+
         edit_btn = QPushButton("編集")
         edit_btn.clicked.connect(lambda: self.edit_chain_mapping())
         button_layout.addWidget(edit_btn)
-        
+
         delete_btn = QPushButton("削除")
         delete_btn.clicked.connect(lambda: self.delete_chain_mapping())
         delete_btn.setStyleSheet("""
@@ -426,25 +432,31 @@ class SettingsWidget(QWidget):
             }
         """)
         button_layout.addWidget(delete_btn)
-        
+
         refresh_btn = QPushButton("更新")
         refresh_btn.clicked.connect(lambda: self.load_chain_mappings())
         button_layout.addWidget(refresh_btn)
-        
+
         button_layout.addStretch()
         table_layout.addLayout(button_layout)
-        
-        layout.addWidget(table_group)
-        
-        # データベース接続
+
+        chain_layout.addWidget(table_group)
+        chain_layout.addStretch()
+
         self.store_db = StoreDatabase()
-        
-        # データを読み込み
         self.load_chain_mappings()
-        
-        layout.addStretch()
+
+        db_tabs.addTab(chain_mapping_widget, "チェーン店コード")
+        self.online_platform_db_widget = OnlinePlatformListWidget()
+        db_tabs.addTab(self.online_platform_db_widget, "電脳プラットフォーム")
+        self.wholesaler_db_widget = WholesalerListWidget()
+        db_tabs.addTab(self.wholesaler_db_widget, "問屋")
+        self.flea_market_widget = FleaMarketListWidget()
+        db_tabs.addTab(self.flea_market_widget, "フリマ")
+
+        layout.addWidget(db_tabs)
         parent.addTab(db_widget, "DB設定")
-    
+
     def load_chain_mappings(self):
         """チェーン店コードマッピングを読み込む"""
         mappings = self.store_db.list_chain_store_code_mappings()

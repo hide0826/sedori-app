@@ -303,6 +303,30 @@ class StoreDatabase:
                 UPDATE wholesalers SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
             END
         """)
+
+        # flea_markets テーブル作成（フリマプラットフォームマスタ・販売手数料率など）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS flea_markets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform_code TEXT UNIQUE NOT NULL,
+                platform_name TEXT UNIQUE NOT NULL,
+                category TEXT NOT NULL DEFAULT 'フリマ',
+                code_prefix TEXT NOT NULL,
+                fee_rate REAL,
+                is_active INTEGER DEFAULT 1,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS update_flea_markets_timestamp
+            AFTER UPDATE ON flea_markets
+            FOR EACH ROW
+            BEGIN
+                UPDATE flea_markets SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            END
+        """)
         
         conn.commit()
     
@@ -1974,6 +1998,92 @@ class StoreDatabase:
             cursor.execute("SELECT COUNT(*) FROM online_platforms WHERE platform_code = ? AND id != ?", (code, exclude_id))
         else:
             cursor.execute("SELECT COUNT(*) FROM online_platforms WHERE platform_code = ?", (code,))
+        return cursor.fetchone()[0] > 0
+
+    # ==================== flea_markets テーブル操作（フリマプラットフォーム） ====================
+
+    def add_flea_market(self, data: Dict[str, Any]) -> int:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        fee = data.get("fee_rate")
+        fee_val = float(fee) if fee is not None and fee != "" else None
+        cursor.execute("""
+            INSERT INTO flea_markets (
+                platform_code, platform_name, category, code_prefix, fee_rate, is_active, notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            (data.get('platform_code') or '').strip().upper(),
+            (data.get('platform_name') or '').strip(),
+            (data.get('category') or 'フリマ').strip(),
+            (data.get('code_prefix') or '').strip().upper(),
+            fee_val,
+            int(data.get('is_active', 1)),
+            data.get('notes') or '',
+        ))
+        conn.commit()
+        return cursor.lastrowid
+
+    def update_flea_market(self, market_id: int, data: Dict[str, Any]) -> bool:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        fee = data.get("fee_rate")
+        fee_val = float(fee) if fee is not None and fee != "" else None
+        cursor.execute("""
+            UPDATE flea_markets SET
+                platform_code = ?, platform_name = ?, category = ?,
+                code_prefix = ?, fee_rate = ?, is_active = ?, notes = ?
+            WHERE id = ?
+        """, (
+            (data.get('platform_code') or '').strip().upper(),
+            (data.get('platform_name') or '').strip(),
+            (data.get('category') or 'フリマ').strip(),
+            (data.get('code_prefix') or '').strip().upper(),
+            fee_val,
+            int(data.get('is_active', 1)),
+            data.get('notes') or '',
+            market_id,
+        ))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def delete_flea_market(self, market_id: int) -> bool:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM flea_markets WHERE id = ?", (market_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def get_flea_market(self, market_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM flea_markets WHERE id = ?", (market_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def list_flea_markets(self, active_only: bool = False) -> List[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        sql = "SELECT * FROM flea_markets"
+        if active_only:
+            sql += " WHERE is_active = 1"
+        sql += " ORDER BY platform_name"
+        cursor.execute(sql)
+        return [dict(row) for row in cursor.fetchall()]
+
+    def check_flea_market_code_exists(self, platform_code: str, exclude_id: Optional[int] = None) -> bool:
+        code = (platform_code or '').strip().upper()
+        if not code:
+            return False
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        if exclude_id:
+            cursor.execute(
+                "SELECT COUNT(*) FROM flea_markets WHERE platform_code = ? AND id != ?",
+                (code, exclude_id),
+            )
+        else:
+            cursor.execute("SELECT COUNT(*) FROM flea_markets WHERE platform_code = ?", (code,))
         return cursor.fetchone()[0] > 0
 
     # ==================== online_stores テーブル操作（電脳店舗） ====================
