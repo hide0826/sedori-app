@@ -155,6 +155,18 @@ class LedgerDatabase:
         ):
             _ensure_column("ledger_entries", name, ctype)
 
+        # 法人系区分を「法人」に統一（店舗/店舗法人/EC法人 → 法人）
+        try:
+            for old in ("店舗", "店舗法人", "EC法人"):
+                cur.execute(
+                    "UPDATE ledger_entries SET counterparty_type = ? "
+                    "WHERE TRIM(COALESCE(counterparty_type, '')) = ?",
+                    ("法人", old),
+                )
+            self.conn.commit()
+        except Exception:
+            pass
+
     # === Insert/Query ===
     def insert_ledger_rows(self, rows: List[Dict[str, Any]]) -> int:
         if not rows:

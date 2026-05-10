@@ -265,6 +265,8 @@ class StoreDatabase:
                 supplier_code TEXT UNIQUE NOT NULL,
                 platform_id INTEGER NOT NULL,
                 shop_name TEXT NOT NULL,
+                address TEXT,
+                phone TEXT,
                 registration_number TEXT,
                 notes TEXT,
                 is_active INTEGER DEFAULT 1,
@@ -281,6 +283,14 @@ class StoreDatabase:
                 UPDATE online_stores SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
             END
         """)
+        for ddl in (
+            "ALTER TABLE online_stores ADD COLUMN address TEXT",
+            "ALTER TABLE online_stores ADD COLUMN phone TEXT",
+        ):
+            try:
+                cursor.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
 
         # wholesalers テーブル作成（問屋マスタ）
         cursor.execute("""
@@ -2179,12 +2189,17 @@ class StoreDatabase:
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO online_stores (supplier_code, platform_id, shop_name, registration_number, notes, is_active)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO online_stores (
+                supplier_code, platform_id, shop_name, address, phone,
+                registration_number, notes, is_active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             (data.get('supplier_code') or '').strip().upper(),
             int(data.get('platform_id')),
             (data.get('shop_name') or '').strip(),
+            (data.get('address') or '').strip(),
+            (data.get('phone') or '').strip(),
             (data.get('registration_number') or '').strip(),
             data.get('notes') or '',
             int(data.get('is_active', 1)),
@@ -2198,12 +2213,15 @@ class StoreDatabase:
         cursor.execute("""
             UPDATE online_stores SET
                 supplier_code = ?, platform_id = ?, shop_name = ?,
+                address = ?, phone = ?,
                 registration_number = ?, notes = ?, is_active = ?
             WHERE id = ?
         """, (
             (data.get('supplier_code') or '').strip().upper(),
             int(data.get('platform_id')),
             (data.get('shop_name') or '').strip(),
+            (data.get('address') or '').strip(),
+            (data.get('phone') or '').strip(),
             (data.get('registration_number') or '').strip(),
             data.get('notes') or '',
             int(data.get('is_active', 1)),
@@ -2237,9 +2255,12 @@ class StoreDatabase:
         where = []
         params: List[Any] = []
         if search_term:
-            where.append("(s.shop_name LIKE ? OR s.supplier_code LIKE ? OR p.platform_name LIKE ?)")
+            where.append(
+                "(s.shop_name LIKE ? OR s.supplier_code LIKE ? OR p.platform_name LIKE ? "
+                "OR IFNULL(s.address,'') LIKE ? OR IFNULL(s.phone,'') LIKE ?)"
+            )
             pattern = f"%{search_term}%"
-            params.extend([pattern, pattern, pattern])
+            params.extend([pattern, pattern, pattern, pattern, pattern])
         if active_only:
             where.append("s.is_active = 1")
         sql = """

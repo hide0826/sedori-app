@@ -124,6 +124,13 @@ class AntiqueWidget(QWidget):
         ]
         self.ALL_COLUMNS = self.COMMON_COLUMNS + self.STORE_COLUMNS + self.FLEA_COLUMNS + self.PERSON_COLUMNS
 
+        # 法人ルート（DB・入力コンボは「法人」）。旧リリース値はマイグレーションで法人へ統一。
+        self.COUNTERPARTY_CORP_TYPES = frozenset({"法人"})
+        # 店舗系カラムを使う相手区分（未マイグレーションDBや外部データ読み取りのフォールバック）
+        self.COUNTERPARTY_STORE_ROUTE_TYPES = frozenset(
+            {"法人", "店舗", "店舗法人", "EC法人"}
+        )
+
         # サブタブ
         self.tabs = QTabWidget()
         self.tab_input = QWidget()
@@ -181,7 +188,7 @@ class AntiqueWidget(QWidget):
         h.setContentsMargins(10, 10, 10, 10)
         h.setSpacing(10)
         self.cmb_counterparty = QComboBox()
-        self.cmb_counterparty.addItems(["店舗", "フリマ", "個人"])
+        self.cmb_counterparty.addItems(["法人", "フリマ", "個人"])
         h.addWidget(QLabel("区分:"))
         h.addWidget(self.cmb_counterparty)
 
@@ -346,7 +353,7 @@ class AntiqueWidget(QWidget):
         if not self.ed_hinmei.text().strip(): missing.append("品名")
         if not self.ed_identifier.text().strip(): missing.append("識別情報")
         cp = self.cmb_counterparty.currentText()
-        if cp == '店舗':
+        if cp == "法人":
             if not self.store_name.text().strip(): missing.append("仕入先名")
             # レシート番号は任意（未実装のため空でも可）
         elif cp == 'フリマ':
@@ -363,11 +370,11 @@ class AntiqueWidget(QWidget):
         row = {
             'entry_date': self.ed_entry_date.date().toString('yyyy-MM-dd'),
             'counterparty_type': cp,
-            'counterparty_name': (self.store_name.text().strip() if cp == '店舗' else (self.person_name.text().strip() if cp == '個人' else None)),
-            'counterparty_branch': self.store_name.text().strip() if cp == '店舗' else None,
-            'counterparty_address': self.store_address.text().strip() if cp == '店舗' else None,
-            'contact': self.store_contact.text().strip() if cp == '店舗' else None,
-            'receipt_no': self.store_receipt.text().strip() if cp == '店舗' else None,
+            'counterparty_name': (self.store_name.text().strip() if cp in self.COUNTERPARTY_CORP_TYPES else (self.person_name.text().strip() if cp == '個人' else None)),
+            'counterparty_branch': self.store_branch.text().strip() if cp in self.COUNTERPARTY_CORP_TYPES else None,
+            'counterparty_address': self.store_address.text().strip() if cp in self.COUNTERPARTY_CORP_TYPES else None,
+            'contact': self.store_contact.text().strip() if cp in self.COUNTERPARTY_CORP_TYPES else None,
+            'receipt_no': self.store_receipt.text().strip() if cp in self.COUNTERPARTY_CORP_TYPES else None,
             'platform': 'フリマ' if cp == 'フリマ' else None,
             'platform_order_id': self.flea_order_id.text().strip() if cp == 'フリマ' else None,
             'platform_user': self.flea_user.text().strip() if cp == 'フリマ' else None,
@@ -386,7 +393,7 @@ class AntiqueWidget(QWidget):
             'unit_price': unit,
             'amount': amount,
             'identifier': self.ed_identifier.text().strip(),
-            'transaction_method': '買受' if cp == '店舗' else (self.transaction_method.text().strip() if hasattr(self, 'transaction_method') else None),
+            'transaction_method': '買受' if cp in self.COUNTERPARTY_CORP_TYPES else (self.transaction_method.text().strip() if hasattr(self, 'transaction_method') else None),
             'notes': None,
             'correction_of': None
         }
@@ -401,16 +408,17 @@ class AntiqueWidget(QWidget):
     def _on_counterparty_changed(self, text: str) -> None:
         """相手区分の切替に応じて、該当フォームのみを表示する。"""
         try:
+            corp = text in self.COUNTERPARTY_CORP_TYPES
             if hasattr(self, 'grp_store'):
-                self.grp_store.setVisible(text == '店舗')
+                self.grp_store.setVisible(corp)
             if hasattr(self, 'grp_flea'):
                 self.grp_flea.setVisible(text == 'フリマ')
             if hasattr(self, 'grp_person'):
                 self.grp_person.setVisible(text == '個人')
             if hasattr(self, 'btn_import_store'):
-                self.btn_import_store.setVisible(text == '店舗')
+                self.btn_import_store.setVisible(corp)
             if hasattr(self, 'grp_store_list'):
-                self.grp_store_list.setVisible(text == '店舗')
+                self.grp_store_list.setVisible(corp)
         except Exception as e:
             print(f"counterparty toggle error: {e}")
 
@@ -786,7 +794,7 @@ class AntiqueWidget(QWidget):
                     "unit_price": unit_v,
                     "amount": amount_v,
                     "identifier": identifier_v,
-                    "counterparty_type": "店舗",
+                    "counterparty_type": "法人",
                     # 備考は仕入管理タブのコメントからは自動移行しない（古物台帳側で別管理）
                     "notes": None,
                     # 店舗列（支店/住所/連絡先/レシート番号は不明のため空）
@@ -956,7 +964,7 @@ class AntiqueWidget(QWidget):
                     "unit_price": unit_v,
                     "amount": amount_v,
                     "identifier": identifier_v,
-                    "counterparty_type": "店舗",
+                    "counterparty_type": "法人",
                     # 備考は仕入管理タブのコメントからは自動移行しない（古物台帳側で別管理）
                     "notes": None,
                     # 店舗列（支店/住所/連絡先/レシート番号は不明のため空）
@@ -968,9 +976,9 @@ class AntiqueWidget(QWidget):
                     "sku": str(sku_s.iloc[i] or '') if 'SKU' in df.columns else "",
                 })
             
-            # 相手区分を「店舗」に設定
+            # 相手区分を「法人」に設定（実店舗ルート取込のデフォルト）
             if hasattr(self, 'cmb_counterparty'):
-                idx_store = self.cmb_counterparty.findText('店舗')
+                idx_store = self.cmb_counterparty.findText('法人')
                 if idx_store >= 0:
                     self.cmb_counterparty.setCurrentIndex(idx_store)
             
@@ -1135,8 +1143,9 @@ class AntiqueWidget(QWidget):
     def _commit_imported_store_rows(self) -> None:
         """取込プレビューの店舗行を、現在の共通テンプレ値と合成して台帳へ一括登録"""
         try:
-            if self.cmb_counterparty.currentText() != '店舗':
-                QMessageBox.warning(self, "相手区分", "相手区分を『店舗』にしてください。")
+            cp_sel = self.cmb_counterparty.currentText()
+            if cp_sel != "法人":
+                QMessageBox.warning(self, "相手区分", "相手区分を『法人』にしてください。")
                 return
             rows = getattr(self, '_imported_store_rows', [])
             if not rows:
@@ -1167,7 +1176,7 @@ class AntiqueWidget(QWidget):
                 amount_v = r.get('amount') or (int(qty_v) * int(unit_v))
                 row = {
                     'entry_date': r.get('entry_date') or self.ed_entry_date.date().toString('yyyy-MM-dd'),
-                    'counterparty_type': '店舗',
+                    'counterparty_type': cp_sel,
                     'counterparty_name': str(r.get('counterparty_name', '')).strip(),
                     'receipt_no': str(r.get('receipt_no', '')).strip() or None,
                     'platform': None,
@@ -1405,6 +1414,9 @@ class AntiqueWidget(QWidget):
         """フィルタエリアの設定"""
         filter_group = QGroupBox("フィルタ")
         filter_layout = QHBoxLayout(filter_group)
+        # QGroupBox をネストすると縦方向に大きく膨らむため、内側はフラット1行にする
+        filter_layout.setContentsMargins(8, 4, 8, 4)
+        filter_layout.setSpacing(8)
         
         # 検索ボックス
         search_label = QLabel("検索:")
@@ -1437,21 +1449,25 @@ class AntiqueWidget(QWidget):
         # 相手区分フィルタ
         filter_layout.addWidget(QLabel("相手区分:"))
         self.cmb_counterparty_filter = QComboBox()
-        self.cmb_counterparty_filter.addItems(["すべて", "店舗", "フリマ", "個人"])
+        self.cmb_counterparty_filter.addItems(["すべて", "法人", "フリマ", "個人"])
         self.cmb_counterparty_filter.currentTextChanged.connect(self._on_counterparty_filter_changed)
         filter_layout.addWidget(self.cmb_counterparty_filter)
 
-        # 列グループ表示トグル
-        self.grp_toggles = QGroupBox("列グループ表示")
-        toggles = QHBoxLayout(self.grp_toggles)
-        self.chk_group_store = QCheckBox("店舗")
+        # 列グループ表示トグル（ネスト QGroupBox 禁止：高さが不要に増える）
+        toggles_row = QWidget()
+        toggles = QHBoxLayout(toggles_row)
+        toggles.setContentsMargins(0, 0, 0, 0)
+        toggles.setSpacing(10)
+        toggles.addWidget(QLabel("列グループ表示:"))
+        # 法人ルートは店舗系カラム（STORE_COLUMNS）1グループ
+        self.chk_group_corp = QCheckBox("法人")
         self.chk_group_flea = QCheckBox("フリマ")
         self.chk_group_person = QCheckBox("個人")
-        for cb in (self.chk_group_store, self.chk_group_flea, self.chk_group_person):
+        for cb in (self.chk_group_corp, self.chk_group_flea, self.chk_group_person):
             cb.toggled.connect(self.apply_column_visibility)
             toggles.addWidget(cb)
         toggles.addStretch()
-        filter_layout.addWidget(self.grp_toggles)
+        filter_layout.addWidget(toggles_row)
 
         # フィルタリセットボタン
         self.reset_filters_btn = QPushButton("フィルタリセット")
@@ -1921,8 +1937,8 @@ class AntiqueWidget(QWidget):
         self.max_price_spin.setValue(999999)
         if hasattr(self, 'cmb_counterparty_filter'):
             self.cmb_counterparty_filter.setCurrentIndex(0)
-        if hasattr(self, 'chk_group_store'):
-            self.chk_group_store.setChecked(False)
+        if hasattr(self, "chk_group_corp"):
+            self.chk_group_corp.setChecked(False)
         if hasattr(self, 'chk_group_flea'):
             self.chk_group_flea.setChecked(False)
         if hasattr(self, 'chk_group_person'):
@@ -2049,6 +2065,11 @@ class AntiqueWidget(QWidget):
         except Exception:
             pass
 
+    def _store_column_group_visible(self) -> bool:
+        """「法人」列グループが ON なら店舗系列カラムを表示。"""
+        c = getattr(self, "chk_group_corp", None)
+        return bool(c and c.isChecked())
+
     def apply_column_visibility(self):
         """列グループの表示/非表示を適用（共通は常時表示）"""
         try:
@@ -2059,8 +2080,9 @@ class AntiqueWidget(QWidget):
             for k, _ in self.COMMON_COLUMNS:
                 self.data_table.setColumnHidden(key_to_index[k], False)
             # グループはトグル
+            store_vis = self._store_column_group_visible()
             for k, _ in self.STORE_COLUMNS:
-                self.data_table.setColumnHidden(key_to_index[k], not self.chk_group_store.isChecked())
+                self.data_table.setColumnHidden(key_to_index[k], not store_vis)
             for k, _ in self.FLEA_COLUMNS:
                 self.data_table.setColumnHidden(key_to_index[k], not self.chk_group_flea.isChecked())
             for k, _ in self.PERSON_COLUMNS:
@@ -2070,21 +2092,21 @@ class AntiqueWidget(QWidget):
 
     def _on_counterparty_filter_changed(self, text: str):
         # 相手区分フィルタ選択に応じてグループトグルを自動ON/OFF
-        if text == '店舗':
-            self.chk_group_store.setChecked(True)
+        if text == "法人":
+            self.chk_group_corp.setChecked(True)
             self.chk_group_flea.setChecked(False)
             self.chk_group_person.setChecked(False)
         elif text == 'フリマ':
-            self.chk_group_store.setChecked(False)
+            self.chk_group_corp.setChecked(False)
             self.chk_group_flea.setChecked(True)
             self.chk_group_person.setChecked(False)
         elif text == '個人':
-            self.chk_group_store.setChecked(False)
+            self.chk_group_corp.setChecked(False)
             self.chk_group_flea.setChecked(False)
             self.chk_group_person.setChecked(True)
         else:
             # すべて
-            self.chk_group_store.setChecked(False)
+            self.chk_group_corp.setChecked(False)
             self.chk_group_flea.setChecked(False)
             self.chk_group_person.setChecked(False)
         # テーブル行を相手区分で絞り込み（該当なしなら 0 件表示）
@@ -2123,13 +2145,13 @@ class AntiqueWidget(QWidget):
     ) -> Tuple[List[str], List[str]]:
         """
         出力行の相手区分に応じた列セット（アプリの列グループ定義に準拠）。
-        - 店舗のみ: 共通 + 店舗（個人・フリマ専用列は含めない）
+        - 法人系: 共通 + 店舗列（値は「法人」および旧リリース互換）
         - フリマのみ: 共通 + フリマ
         - 個人のみ: 共通 + 個人
         - 複合: 共通 + 含まれる区分に対応するグループの和集合
-        相手区分が空・または「店舗/フリマ/個人」以外が混ざる場合は全列。
+        相手区分が空・または既知の区分以外が混ざる場合は全列。
         """
-        canonical = frozenset({"店舗", "フリマ", "個人"})
+        canonical = frozenset({"法人", "店舗", "店舗法人", "EC法人", "フリマ", "個人"})
         found: set[str] = set()
         for r in rows:
             t = str(r.get("counterparty_type") or "").strip()
@@ -2142,7 +2164,7 @@ class AntiqueWidget(QWidget):
 
         pairs: List[Tuple[str, str]] = []
         pairs.extend(self.COMMON_COLUMNS)
-        if "店舗" in found:
+        if found & self.COUNTERPARTY_STORE_ROUTE_TYPES:
             pairs.extend(self.STORE_COLUMNS)
         if "フリマ" in found:
             pairs.extend(self.FLEA_COLUMNS)
@@ -2185,6 +2207,19 @@ class AntiqueWidget(QWidget):
         df = pd.DataFrame(data_for_df)
         return df[headers]
 
+    def _ledger_rows_for_pdf_counterparty_display(
+        self, rows: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """PDF 明細用: 相手区分の法人系を表記上「法人」にそろえる（CSV/Excel・DB・画面は変更しない）。"""
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            ct = str(d.get("counterparty_type") or "").strip()
+            if ct in self.COUNTERPARTY_STORE_ROUTE_TYPES:
+                d["counterparty_type"] = "法人"
+            out.append(d)
+        return out
+
     def _ledger_export_period_label(self) -> str:
         """閲覧・出力の日付範囲を表紙用テキストに。"""
         try:
@@ -2196,18 +2231,26 @@ class AntiqueWidget(QWidget):
             pass
         return ""
 
-    def _export_output_category_label(self, rows: List[Dict[str, Any]]) -> str:
-        """出力明細に含まれる相手区分を表記（店舗／フリマ／個人およびその複合）。"""
+    def _export_output_category_label(
+        self, rows: List[Dict[str, Any]], *, for_pdf: bool = False
+    ) -> str:
+        """出力明細に含まれる相手区分を表記。for_pdf=True のとき法人系は「法人」にまとめる。"""
         if not rows:
             return "—"
-        priority = ("店舗", "フリマ", "個人")
         seen: Dict[str, None] = {}
         for r in rows:
             t = str(r.get("counterparty_type") or "").strip()
-            if t:
-                seen.setdefault(t, None)
+            if not t:
+                continue
+            if for_pdf and t in self.COUNTERPARTY_STORE_ROUTE_TYPES:
+                t = "法人"
+            seen.setdefault(t, None)
         if not seen:
             return "—"
+        if for_pdf:
+            priority = ("法人", "フリマ", "個人")
+        else:
+            priority = ("法人", "フリマ", "個人", "店舗", "店舗法人", "EC法人")
         parts: List[str] = []
         for p in priority:
             if p in seen:
@@ -2216,12 +2259,14 @@ class AntiqueWidget(QWidget):
             parts.append(t)
         return "/".join(parts)
 
-    def _cover_sheet_key_values(self, row_count: int, rows: List[Dict[str, Any]]) -> List[Tuple[str, str]]:
-        """表紙用（項目, 内容）の行リスト。Excel/PDF 共通。"""
+    def _cover_sheet_key_values(
+        self, row_count: int, rows: List[Dict[str, Any]], *, for_pdf: bool = False
+    ) -> List[Tuple[str, str]]:
+        """表紙用（項目, 内容）の行リスト。for_pdf=True で出力区分を PDF 向けに正規化。"""
         op = self.get_operator_info()
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         period = self._ledger_export_period_label()
-        out_cat = self._export_output_category_label(rows)
+        out_cat = self._export_output_category_label(rows, for_pdf=for_pdf)
         return [
             ("帳簿名", "古物台帳"),
             ("出力区分", out_cat),
@@ -2237,8 +2282,11 @@ class AntiqueWidget(QWidget):
         ]
 
     def _build_excel_cover_dataframe(self, row_count: int, rows: List[Dict[str, Any]]) -> pd.DataFrame:
-        """表紙シート用（項目・内容の2列）。"""
-        return pd.DataFrame(self._cover_sheet_key_values(row_count, rows), columns=["項目", "内容"])
+        """表紙シート用（項目・内容の2列）。アプリ内の区分表記のまま。"""
+        return pd.DataFrame(
+            self._cover_sheet_key_values(row_count, rows, for_pdf=False),
+            columns=["項目", "内容"],
+        )
 
     def _group_rows_by_entry_month(
         self, rows: List[Dict[str, Any]]
@@ -2355,7 +2403,7 @@ class AntiqueWidget(QWidget):
             from desktop.utils.ledger_pdf_export import write_ledger_pdf
 
             target = resolve_unique_path(Path(file_path))
-            cover_pairs = self._cover_sheet_key_values(len(rows), rows)
+            cover_pairs = self._cover_sheet_key_values(len(rows), rows, for_pdf=True)
             sorted_keys, by_month = self._group_rows_by_entry_month(rows)
 
             pdf_keys, pdf_headers = self._export_columns_for_counterparty_rows(rows)
@@ -2364,7 +2412,8 @@ class AntiqueWidget(QWidget):
             sections: List[Tuple[str, List[Dict[str, Any]]]] = []
             for mk in sorted_keys:
                 part_rows = by_month[mk]
-                df_part = self._build_ledger_dataframe(part_rows, pdf_keys, pdf_headers)
+                part_pdf = self._ledger_rows_for_pdf_counterparty_display(part_rows)
+                df_part = self._build_ledger_dataframe(part_pdf, pdf_keys, pdf_headers)
                 records = df_part.to_dict("records")
                 if mk == "__nodate__":
                     title = "日付未設定"

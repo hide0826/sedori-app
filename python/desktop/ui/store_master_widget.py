@@ -2763,6 +2763,12 @@ class OnlineStoreEditDialog(QDialog):
         self.shop_name_edit.setPlaceholderText("ショップ名 / 出品者名")
         self.shop_name_edit.textChanged.connect(self._on_shop_name_changed)
         form.addRow("店舗名:", self.shop_name_edit)
+        self.address_edit = QLineEdit()
+        self.address_edit.setPlaceholderText("住所（任意）")
+        form.addRow("住所:", self.address_edit)
+        self.phone_edit = QLineEdit()
+        self.phone_edit.setPlaceholderText("電話番号（任意）")
+        form.addRow("電話番号:", self.phone_edit)
         self.registration_edit = QLineEdit()
         form.addRow("登録番号:", self.registration_edit)
         self.active_check = QCheckBox("有効")
@@ -2807,6 +2813,8 @@ class OnlineStoreEditDialog(QDialog):
                 break
         self.code_edit.setText(self.data.get("supplier_code", ""))
         self.shop_name_edit.setText(self.data.get("shop_name", ""))
+        self.address_edit.setText(self.data.get("address", "") or "")
+        self.phone_edit.setText(self.data.get("phone", "") or "")
         self.registration_edit.setText(self.data.get("registration_number", ""))
         self.notes_edit.setText(self.data.get("notes", ""))
         self.active_check.setChecked(bool(self.data.get("is_active", 1)))
@@ -2817,6 +2825,8 @@ class OnlineStoreEditDialog(QDialog):
             "platform_id": pdata.get("id"),
             "supplier_code": self.code_edit.text().strip().upper(),
             "shop_name": self.shop_name_edit.text().strip(),
+            "address": self.address_edit.text().strip(),
+            "phone": self.phone_edit.text().strip(),
             "registration_number": self.registration_edit.text().strip(),
             "is_active": 1 if self.active_check.isChecked() else 0,
             "notes": self.notes_edit.text().strip(),
@@ -3156,27 +3166,35 @@ class OnlineStoreListWidget(QWidget):
 
     def load_data(self):
         rows = self.db.list_online_stores(search_term=(self.search_edit.text() or "").strip(), active_only=False)
-        cols = ["ID", "店舗コード", "店舗名", "プラットフォーム", "区分", "登録番号", "有効", "備考"]
+        # 店舗一覧と同様に 店舗名の直後に 住所・電話番号
+        cols = [
+            "ID", "店舗コード", "店舗名", "住所", "電話番号",
+            "プラットフォーム", "区分", "登録番号", "有効", "備考",
+        ]
         self.table.setRowCount(len(rows)); self.table.setColumnCount(len(cols)); self.table.setHorizontalHeaderLabels(cols)
         for i, r in enumerate(rows):
             self.table.setItem(i, 0, QTableWidgetItem(str(r.get("id", ""))))
             self.table.setItem(i, 1, QTableWidgetItem(r.get("supplier_code", "")))
             self.table.setItem(i, 2, QTableWidgetItem(r.get("shop_name", "")))
-            self.table.setItem(i, 3, QTableWidgetItem(r.get("platform_name", "")))
-            self.table.setItem(i, 4, QTableWidgetItem(r.get("category", "")))
-            self.table.setItem(i, 5, QTableWidgetItem(r.get("registration_number", "")))
-            self.table.setItem(i, 6, QTableWidgetItem("ON" if r.get("is_active", 1) else "OFF"))
-            self.table.setItem(i, 7, QTableWidgetItem(r.get("notes", "")))
+            self.table.setItem(i, 3, QTableWidgetItem(r.get("address", "") or ""))
+            self.table.setItem(i, 4, QTableWidgetItem(r.get("phone", "") or ""))
+            self.table.setItem(i, 5, QTableWidgetItem(r.get("platform_name", "")))
+            self.table.setItem(i, 6, QTableWidgetItem(r.get("category", "")))
+            self.table.setItem(i, 7, QTableWidgetItem(r.get("registration_number", "")))
+            self.table.setItem(i, 8, QTableWidgetItem("ON" if r.get("is_active", 1) else "OFF"))
+            self.table.setItem(i, 9, QTableWidgetItem(r.get("notes", "")))
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setSectionResizeMode(2, QHeaderView.Stretch)  # 店舗名
-        header.setSectionResizeMode(7, QHeaderView.Stretch)  # 備考
+        header.setSectionResizeMode(3, QHeaderView.Stretch)  # 住所
+        header.setSectionResizeMode(9, QHeaderView.Stretch)  # 備考
         self.table.setColumnWidth(0, 48)    # ID
         self.table.setColumnWidth(1, 110)   # 店舗コード
-        self.table.setColumnWidth(3, 140)   # プラットフォーム
-        self.table.setColumnWidth(4, 80)    # 区分
-        self.table.setColumnWidth(5, 120)   # 登録番号
-        self.table.setColumnWidth(6, 60)    # 有効
+        self.table.setColumnWidth(4, 110)   # 電話番号
+        self.table.setColumnWidth(5, 140)   # プラットフォーム
+        self.table.setColumnWidth(6, 80)    # 区分
+        self.table.setColumnWidth(7, 120)   # 登録番号
+        self.table.setColumnWidth(8, 60)    # 有効
         self.table.verticalHeader().setDefaultSectionSize(26)
 
     def _get_selected_id(self) -> Optional[int]:
