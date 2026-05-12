@@ -268,6 +268,7 @@ class StoreDatabase:
                 address TEXT,
                 phone TEXT,
                 registration_number TEXT,
+                secondhand_license_number TEXT,
                 notes TEXT,
                 is_active INTEGER DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -286,6 +287,7 @@ class StoreDatabase:
         for ddl in (
             "ALTER TABLE online_stores ADD COLUMN address TEXT",
             "ALTER TABLE online_stores ADD COLUMN phone TEXT",
+            "ALTER TABLE online_stores ADD COLUMN secondhand_license_number TEXT",
         ):
             try:
                 cursor.execute(ddl)
@@ -2191,9 +2193,9 @@ class StoreDatabase:
         cursor.execute("""
             INSERT INTO online_stores (
                 supplier_code, platform_id, shop_name, address, phone,
-                registration_number, notes, is_active
+                registration_number, secondhand_license_number, notes, is_active
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             (data.get('supplier_code') or '').strip().upper(),
             int(data.get('platform_id')),
@@ -2201,6 +2203,7 @@ class StoreDatabase:
             (data.get('address') or '').strip(),
             (data.get('phone') or '').strip(),
             (data.get('registration_number') or '').strip(),
+            (data.get('secondhand_license_number') or '').strip(),
             data.get('notes') or '',
             int(data.get('is_active', 1)),
         ))
@@ -2214,7 +2217,8 @@ class StoreDatabase:
             UPDATE online_stores SET
                 supplier_code = ?, platform_id = ?, shop_name = ?,
                 address = ?, phone = ?,
-                registration_number = ?, notes = ?, is_active = ?
+                registration_number = ?, secondhand_license_number = ?,
+                notes = ?, is_active = ?
             WHERE id = ?
         """, (
             (data.get('supplier_code') or '').strip().upper(),
@@ -2223,6 +2227,7 @@ class StoreDatabase:
             (data.get('address') or '').strip(),
             (data.get('phone') or '').strip(),
             (data.get('registration_number') or '').strip(),
+            (data.get('secondhand_license_number') or '').strip(),
             data.get('notes') or '',
             int(data.get('is_active', 1)),
             store_id,
@@ -2257,10 +2262,12 @@ class StoreDatabase:
         if search_term:
             where.append(
                 "(s.shop_name LIKE ? OR s.supplier_code LIKE ? OR p.platform_name LIKE ? "
-                "OR IFNULL(s.address,'') LIKE ? OR IFNULL(s.phone,'') LIKE ?)"
+                "OR IFNULL(s.address,'') LIKE ? OR IFNULL(s.phone,'') LIKE ? "
+                "OR IFNULL(s.registration_number,'') LIKE ? "
+                "OR IFNULL(s.secondhand_license_number,'') LIKE ?)"
             )
             pattern = f"%{search_term}%"
-            params.extend([pattern, pattern, pattern, pattern, pattern])
+            params.extend([pattern, pattern, pattern, pattern, pattern, pattern, pattern])
         if active_only:
             where.append("s.is_active = 1")
         sql = """

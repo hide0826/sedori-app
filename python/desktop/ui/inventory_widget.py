@@ -613,7 +613,14 @@ class SinglePurchaseInputDialog(QDialog):
             """
         )
 
-        layout = QFormLayout(self)
+        main_layout = QVBoxLayout(self)
+        self._splitter = QSplitter(Qt.Horizontal)
+
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        left_panel = QWidget()
+        layout = QFormLayout(left_panel)
 
         self.purchase_date_edit = QDateEdit()
         self.purchase_date_edit.setCalendarPopup(True)
@@ -818,12 +825,51 @@ class SinglePurchaseInputDialog(QDialog):
         self.comment_edit.setPlaceholderText("メモ（任意）")
         layout.addRow("コメント:", self.comment_edit)
 
+        left_scroll.setWidget(left_panel)
+        self._splitter.addWidget(left_scroll)
+
+        self._channel_detail_widget = QWidget()
+        self._channel_detail_widget.setMinimumWidth(300)
+        ch_outer = QVBoxLayout(self._channel_detail_widget)
+        self._channel_detail_title = QLabel()
+        self._channel_detail_title.setWordWrap(True)
+        self._channel_detail_title.setStyleSheet("font-weight: bold; padding: 4px 0;")
+        ch_outer.addWidget(self._channel_detail_title)
+        ch_form = QFormLayout()
+        self.detail_platform_edit = QLineEdit()
+        self.detail_platform_edit.setPlaceholderText("プラットフォーム名（任意・仕入チャネルから補完可）")
+        ch_form.addRow("プラットフォーム:", self.detail_platform_edit)
+        self.detail_transaction_id_edit = QLineEdit()
+        self.detail_transaction_id_edit.setPlaceholderText("取引ID（任意）")
+        ch_form.addRow("取引ID:", self.detail_transaction_id_edit)
+        self.detail_seller_username_edit = QLineEdit()
+        self.detail_seller_username_edit.setPlaceholderText("ユーザー名・出品者名（任意）")
+        ch_form.addRow("ユーザー名:", self.detail_seller_username_edit)
+        self.detail_listing_url_edit = QLineEdit()
+        self.detail_listing_url_edit.setPlaceholderText("出品ページURL（任意）")
+        ch_form.addRow("出品URL:", self.detail_listing_url_edit)
+        self.detail_tracking_edit = QLineEdit()
+        self.detail_tracking_edit.setPlaceholderText("伝票番号・追跡番号（任意）")
+        ch_form.addRow("伝票番号:", self.detail_tracking_edit)
+        self.detail_prefecture_edit = QLineEdit()
+        self.detail_prefecture_edit.setPlaceholderText("受取都道府県（任意）")
+        ch_form.addRow("受取都道府県:", self.detail_prefecture_edit)
+        ch_outer.addLayout(ch_form)
+        ch_outer.addStretch()
+        self._splitter.addWidget(self._channel_detail_widget)
+        self._splitter.setStretchFactor(0, 3)
+        self._splitter.setStretchFactor(1, 2)
+        self._splitter.setSizes([620, 400])
+
+        main_layout.addWidget(self._splitter)
+
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
-        layout.addRow(bb)
+        main_layout.addWidget(bb)
         self._sync_missing_custom_checkboxes_enabled()
         self.source_type_combo.currentTextChanged.connect(self._on_source_type_changed)
+        self.source_channel_combo.currentTextChanged.connect(self._on_detail_channel_text_for_platform)
         self._on_source_type_changed(self.source_type_combo.currentText())
 
     def accept(self):
@@ -964,6 +1010,43 @@ class SinglePurchaseInputDialog(QDialog):
         self.source_channel_combo.blockSignals(False)
         self.source_supplier_combo.blockSignals(False)
         self._on_source_supplier_changed()
+        self._sync_channel_detail_panel()
+
+    def _on_detail_channel_text_for_platform(self, text: str):
+        """仕入チャネル変更時、右ペインのプラットフォームが空なら同じ文字列で補完。"""
+        if not self._channel_detail_widget.isVisible():
+            return
+        if self.detail_platform_edit.text().strip():
+            return
+        self.detail_platform_edit.setText((text or "").strip())
+
+    def _clear_channel_detail_fields(self) -> None:
+        for w in (
+            self.detail_platform_edit,
+            self.detail_transaction_id_edit,
+            self.detail_seller_username_edit,
+            self.detail_listing_url_edit,
+            self.detail_tracking_edit,
+            self.detail_prefecture_edit,
+        ):
+            w.clear()
+
+    def _sync_channel_detail_panel(self) -> None:
+        st = (self.source_type_combo.currentText() or "").strip()
+        show = st in ("フリマ", "電脳")
+        self._channel_detail_widget.setVisible(show)
+        if show:
+            self.setMinimumWidth(960)
+            self._channel_detail_title.setText(
+                "フリマ取引情報" if st == "フリマ" else "電脳取引情報"
+            )
+            if not self.detail_platform_edit.text().strip():
+                self.detail_platform_edit.setText(
+                    (self.source_channel_combo.currentText() or "").strip()
+                )
+        else:
+            self.setMinimumWidth(520)
+            self._clear_channel_detail_fields()
 
     def _on_source_channel_changed(self, channel: str):
         source_type = (self.source_type_combo.currentText() or "").strip()
@@ -1601,6 +1684,21 @@ class SinglePurchaseInputDialog(QDialog):
         if not sku_text:
             sku_text = "未実装"
 
+        if source_type in ("フリマ", "電脳"):
+            platform_val = self.detail_platform_edit.text().strip() or source_channel
+            tx_id = self.detail_transaction_id_edit.text().strip()
+            seller_name = self.detail_seller_username_edit.text().strip()
+            listing_url = self.detail_listing_url_edit.text().strip()
+            tracking_no = self.detail_tracking_edit.text().strip()
+            recv_pref = self.detail_prefecture_edit.text().strip()
+        else:
+            platform_val = ""
+            tx_id = ""
+            seller_name = ""
+            listing_url = ""
+            tracking_no = ""
+            recv_pref = ""
+
         return {
             "仕入れ日": self.purchase_date_edit.date().toString("yyyy-MM-dd"),
             "コンディション": self.condition_combo.currentText().strip() or "中古(良い)",
@@ -1622,6 +1720,12 @@ class SinglePurchaseInputDialog(QDialog):
             "出荷費用": shipping_cost,
             "在庫保管手数料": storage_fee,
             "仕入先": store_code,
+            "プラットフォーム": platform_val,
+            "取引ID": tx_id,
+            "ユーザー名": seller_name,
+            "出品URL": listing_url,
+            "伝票番号": tracking_no,
+            "受取都道府県": recv_pref,
             "価格改定": "ON",
             "コンディション説明": condition_note,
         }
@@ -2183,7 +2287,19 @@ class InventoryWidget(QWidget):
                 base_idx = len(self.column_headers)
             extra_columns = ["3-6-9"]
             self.column_headers[base_idx:base_idx] = extra_columns
-        
+        try:
+            bi = self.column_headers.index("価格改定")
+            self.column_headers[bi:bi] = [
+                "プラットフォーム",
+                "取引ID",
+                "ユーザー名",
+                "出品URL",
+                "伝票番号",
+                "受取都道府県",
+            ]
+        except ValueError:
+            pass
+
         self.data_table.setColumnCount(len(self.column_headers))
         # 表示用のヘッダーラベルを作成（「仕入先」→「店舗コード」に置き換え）
         display_headers = list(self.column_headers)
@@ -4188,6 +4304,18 @@ class InventoryWidget(QWidget):
             "仕入元": "仕入先",
             "店舗": "仕入先",
             "supplier": "仕入先",
+            # フリマ・電脳取引情報（単品仕入・CSV共通列名）
+            "プラットフォーム": "プラットフォーム",
+            "platform": "プラットフォーム",
+            "取引ID": "取引ID",
+            "transaction_id": "取引ID",
+            "ユーザー名": "ユーザー名",
+            "出品URL": "出品URL",
+            "listing_url": "出品URL",
+            "伝票番号": "伝票番号",
+            "tracking_number": "伝票番号",
+            "受取都道府県": "受取都道府県",
+            "prefecture": "受取都道府県",
             # コンディション説明（後で処理予定、一旦空）
             "コンディション説明": "コンディション説明",
             "conditionNote": "コンディション説明",

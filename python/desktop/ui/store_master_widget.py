@@ -16,9 +16,9 @@ from PySide6.QtWidgets import (
     QLabel, QGroupBox, QFileDialog, QTextEdit,
     QComboBox, QCheckBox, QDialogButtonBox, QTabWidget,
     QProgressDialog, QApplication, QListWidget, QListWidgetItem,
-    QSplitter, QDoubleSpinBox,
+    QSplitter, QDoubleSpinBox, QAbstractItemView, QSizePolicy,
 )
-from PySide6.QtCore import Qt, Signal, QMimeData
+from PySide6.QtCore import Qt, Signal, QMimeData, QSettings
 from PySide6.QtGui import QColor, QDrag
 from typing import Tuple, List, Dict, Any, Optional
 import sys
@@ -2771,6 +2771,9 @@ class OnlineStoreEditDialog(QDialog):
         form.addRow("電話番号:", self.phone_edit)
         self.registration_edit = QLineEdit()
         form.addRow("登録番号:", self.registration_edit)
+        self.secondhand_license_edit = QLineEdit()
+        self.secondhand_license_edit.setPlaceholderText("任意")
+        form.addRow("古物商許可番号:", self.secondhand_license_edit)
         self.active_check = QCheckBox("有効")
         self.active_check.setChecked(True)
         form.addRow("状態:", self.active_check)
@@ -2784,7 +2787,9 @@ class OnlineStoreEditDialog(QDialog):
 
     def _load_platforms(self):
         self.platform_combo.clear()
-        for p in self.db.list_online_platforms(active_only=True):
+        # 新規は有効なプラットフォームのみ。編集時は無効化済みのものも含めて一覧し、現在値と整合させる。
+        active_only = self.data is None
+        for p in self.db.list_online_platforms(active_only=active_only):
             self.platform_combo.addItem(f"{p.get('platform_name')} ({p.get('category')})", p)
 
     def _on_platform_changed(self):
@@ -2804,6 +2809,12 @@ class OnlineStoreEditDialog(QDialog):
         prefix = pdata.get("code_prefix") or pdata.get("platform_code") or "ONL"
         self.code_edit.setText(self.db.get_next_online_store_code(prefix))
 
+    def accept(self):
+        fw = QApplication.focusWidget()
+        if fw is not None:
+            fw.clearFocus()
+        super().accept()
+
     def _load_data(self):
         current_platform_id = self.data.get("platform_id")
         for i in range(self.platform_combo.count()):
@@ -2816,6 +2827,7 @@ class OnlineStoreEditDialog(QDialog):
         self.address_edit.setText(self.data.get("address", "") or "")
         self.phone_edit.setText(self.data.get("phone", "") or "")
         self.registration_edit.setText(self.data.get("registration_number", ""))
+        self.secondhand_license_edit.setText(self.data.get("secondhand_license_number", "") or "")
         self.notes_edit.setText(self.data.get("notes", ""))
         self.active_check.setChecked(bool(self.data.get("is_active", 1)))
 
@@ -2828,6 +2840,7 @@ class OnlineStoreEditDialog(QDialog):
             "address": self.address_edit.text().strip(),
             "phone": self.phone_edit.text().strip(),
             "registration_number": self.registration_edit.text().strip(),
+            "secondhand_license_number": self.secondhand_license_edit.text().strip(),
             "is_active": 1 if self.active_check.isChecked() else 0,
             "notes": self.notes_edit.text().strip(),
         }
@@ -3142,9 +3155,12 @@ class FleaMarketListWidget(QWidget):
 
 
 class OnlineStoreListWidget(QWidget):
+    _COL_WIDTHS_SETTINGS_KEY = "store_master/online_stores_column_widths"
+
     def __init__(self):
         super().__init__()
         self.db = StoreDatabase()
+        self._online_store_restoring_widths = False
         self._build_ui()
         self.load_data()
 
@@ -3162,14 +3178,74 @@ class OnlineStoreListWidget(QWidget):
         self.table = QTableWidget()
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setAlternatingRowColors(True)
-        layout.addWidget(self.table)
+        # セル直接編集は DB に保存されない（一覧は参照専用）。変更は「編集」または行ダブルクリック。
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.cellDoubleClicked.connect(self._on_online_store_cell_double_clicked)
+        self.table.setToolTip("内容の保存は「編集」ボタン、または行のダブルクリックで開くダイアログから行ってください。")
+        self.table.horizontalHeader().sectionResized.connect(self._save_online_store_column_widths)
+        self.table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout.addWidget(self.table, 1)
+
+    def _online_store_fixed_column_count(self) -> int:
+        """最終列は Stretch で余白を埋めるため、ユーザー幅の対象はこれ未満の列。"""
+        n = self.table.columnCount()
+        return max(0, n - 1)
+
+    def _save_online_store_column_widths(self, *_):
+        if self._online_store_restoring_widths:
+            return
+        try:
+            s = QSettings("HIRIO", "SedoriDesktopApp")
+            nfix = self._online_store_fixed_column_count()
+            if nfix <= 0:
+                return
+            widths = [self.table.columnWidth(i) for i in range(nfix)]
+            s.setValue(self._COL_WIDTHS_SETTINGS_KEY, widths)
+        except Exception:
+            pass
+
+    def _restore_online_store_column_widths(self):
+        try:
+            s = QSettings("HIRIO", "SedoriDesktopApp")
+            widths = s.value(self._COL_WIDTHS_SETTINGS_KEY)
+            if not widths or not isinstance(widths, (list, tuple)):
+                return
+            n = self.table.columnCount()
+            nfix = self._online_store_fixed_column_count()
+            if nfix <= 0:
+                return
+            wlist = list(widths)
+            # 以前は全列分を保存していた場合に対応（最終列は Stretch のため無視）
+            if len(wlist) == n:
+                wlist = wlist[:nfix]
+            elif len(wlist) != nfix:
+                return
+            self._online_store_restoring_widths = True
+            try:
+                for i, val in enumerate(wlist):
+                    try:
+                        w = int(val)
+                        if w > 0:
+                            self.table.setColumnWidth(i, w)
+                    except (TypeError, ValueError):
+                        continue
+            finally:
+                self._online_store_restoring_widths = False
+        except Exception:
+            self._online_store_restoring_widths = False
+
+    def _on_online_store_cell_double_clicked(self, row: int, _col: int):
+        if row < 0 or row >= self.table.rowCount():
+            return
+        self.table.selectRow(row)
+        self.edit_item()
 
     def load_data(self):
         rows = self.db.list_online_stores(search_term=(self.search_edit.text() or "").strip(), active_only=False)
         # 店舗一覧と同様に 店舗名の直後に 住所・電話番号
         cols = [
             "ID", "店舗コード", "店舗名", "住所", "電話番号",
-            "プラットフォーム", "区分", "登録番号", "有効", "備考",
+            "プラットフォーム", "区分", "登録番号", "古物商許可番号", "有効", "備考",
         ]
         self.table.setRowCount(len(rows)); self.table.setColumnCount(len(cols)); self.table.setHorizontalHeaderLabels(cols)
         for i, r in enumerate(rows):
@@ -3181,20 +3257,26 @@ class OnlineStoreListWidget(QWidget):
             self.table.setItem(i, 5, QTableWidgetItem(r.get("platform_name", "")))
             self.table.setItem(i, 6, QTableWidgetItem(r.get("category", "")))
             self.table.setItem(i, 7, QTableWidgetItem(r.get("registration_number", "")))
-            self.table.setItem(i, 8, QTableWidgetItem("ON" if r.get("is_active", 1) else "OFF"))
-            self.table.setItem(i, 9, QTableWidgetItem(r.get("notes", "")))
+            self.table.setItem(i, 8, QTableWidgetItem(r.get("secondhand_license_number", "") or ""))
+            self.table.setItem(i, 9, QTableWidgetItem("ON" if r.get("is_active", 1) else "OFF"))
+            self.table.setItem(i, 10, QTableWidgetItem(r.get("notes", "")))
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.Stretch)  # 店舗名
-        header.setSectionResizeMode(3, QHeaderView.Stretch)  # 住所
-        header.setSectionResizeMode(9, QHeaderView.Stretch)  # 備考
+        last_col = self.table.columnCount() - 1
+        for col in range(last_col):
+            header.setSectionResizeMode(col, QHeaderView.Interactive)
+        header.setSectionResizeMode(last_col, QHeaderView.Stretch)
         self.table.setColumnWidth(0, 48)    # ID
         self.table.setColumnWidth(1, 110)   # 店舗コード
+        self.table.setColumnWidth(2, 140)   # 店舗名
+        self.table.setColumnWidth(3, 160)   # 住所
         self.table.setColumnWidth(4, 110)   # 電話番号
         self.table.setColumnWidth(5, 140)   # プラットフォーム
         self.table.setColumnWidth(6, 80)    # 区分
         self.table.setColumnWidth(7, 120)   # 登録番号
-        self.table.setColumnWidth(8, 60)    # 有効
+        self.table.setColumnWidth(8, 130)   # 古物商許可番号
+        self.table.setColumnWidth(9, 60)    # 有効
+        # 備考列は Stretch（画面幅に合わせて拡張）
+        self._restore_online_store_column_widths()
         self.table.verticalHeader().setDefaultSectionSize(26)
 
     def _get_selected_id(self) -> Optional[int]:
