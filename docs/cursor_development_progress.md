@@ -2233,3 +2233,39 @@
 
 **最終更新**: 2026-05-10
 **更新者**: Agentモード（実装）
+
+### 2026-05-13（仕入ルート備考→店舗マスタ・Excel、フリマユーザー、ルート証憑フラグ・解析タブ整理）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. **仕入管理「ルートテンプレ読込」と店舗一覧の備考（`stores.notes`）**  
+     - ルート情報テーブルのメモ列を編集可能にし、カンマ区切りトークンを店舗マスタの備考へ追記（重複なし）。保存先は **DBの `stores.notes`（データベース管理＞店舗マスタ＞店舗一覧の備考列）**。旧データ用に `custom_fields.notes` も同一文字列へ同期。  
+     - **ルート登録**の「テンプレート生成」では、店舗訪問テーブルに行がある場合も **テーブル備考列＋マスタ備考** をマージして Excel の備考へ渡す。
+  2. **店舗マスタ: フリマ常連ユーザー**  
+     - `flea_market_users` テーブルと CRUD（`store_db.py`）。店舗マスタに「フリマユーザー一覧」タブ、追加・編集ダイアログ（`store_master_widget.py`）。  
+     - `get_flea_market_by_platform_code` / `get_flea_market_by_platform_name` を追加。
+  3. **ルートフォルダ名解析・証憑フラグ・一覧即時更新**（`route_utils.py`）  
+     - フォルダ名の日付＋ルート名パターンを拡張（`_` 区切り、`YYYY-MM-DD` 等）。同一日複数ルートの特定を強化。  
+     - `mark_route_flags_from_folder` 完了時にルート一覧再読込コールバックを実行（`main_window` で登録）。  
+     - レシート確定フローで証憑フラグを即時更新するよう変更（`receipt_widget.py`）。
+  4. **その他**  
+     - **分析**タブに「店舗スコア」を移設（`analysis_widget.py`）。店舗マスタから `StoreScoreWidget` 参照を削除。  
+     - **設定**の DB 系タブ文言整理（「店舗コード設定」「ECコード」「フリマコード」等）、問屋タブを設定から外す（`settings_widget.py`）。  
+     - **ルート一覧**のフラグ更新で既存 `self.route_db` を利用（`route_list_widget.py`）。
+- **変更ファイル**:
+  - `python/desktop/ui/inventory_widget.py`
+  - `python/desktop/ui/route_summary_widget.py`
+  - `python/desktop/database/store_db.py`
+  - `python/desktop/ui/store_master_widget.py`
+  - `python/desktop/utils/route_utils.py`
+  - `python/desktop/ui/main_window.py`
+  - `python/desktop/ui/receipt_widget.py`
+  - `python/desktop/ui/analysis_widget.py`
+  - `python/desktop/ui/settings_widget.py`
+  - `python/desktop/ui/route_list_widget.py`
+  - `docs/cursor_development_progress.md`
+- **次回**:
+  - ルート備考・店舗備考の実機での一連動線（テンプレ読込→一覧確認→テンプレ生成）の再確認。
+  - フリマユーザーと仕入入力の自動補完連携が未接続なら仕様に沿って接続。
+
+**最終更新**: 2026-05-13
+**更新者**: Agentモード（実装）

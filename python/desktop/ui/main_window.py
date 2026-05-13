@@ -262,6 +262,8 @@ class MainWindow(QMainWindow):
             self.route_list_widget = RouteListWidget()
             route_tabs.addTab(self.route_list_widget, "ルートサマリー")
             self.route_summary_widget.data_saved.connect(self.route_list_widget.load_routes)
+            from utils.route_utils import set_route_list_refresh_callback
+            set_route_list_refresh_callback(self.route_list_widget.load_routes)
             self.tab_widget.addTab(route_tabs, "ルート")
             # 本番用仕入管理タブと開発用仕入管理タブの両方にルートウィジェットを接続
             self.inventory_widget.set_route_summary_widget(self.route_summary_widget)

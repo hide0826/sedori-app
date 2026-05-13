@@ -9172,7 +9172,15 @@ class ReceiptWidget(QWidget):
             # プログレスダイアログを閉じる
             progress.setValue(total_steps)
             progress.close()
-            
+
+            # ルート証憑フラグ（レシート確定完了）— progress 終了後に実行
+            try:
+                base_folder = getattr(self, "current_folder", None) or getattr(self, "default_folder", None)
+                if base_folder:
+                    mark_route_flags_from_folder(base_folder, evidence_completed=True)
+            except Exception as e:
+                print(f"証憑フラグ更新エラー: {e}")
+
             if receipt_count == 0 and warranty_count == 0 and error_count == 0:
                 # 処理対象がなかった場合
                 QMessageBox.information(
@@ -9645,9 +9653,8 @@ class ReceiptWidget(QWidget):
                 base_folder = self.current_folder
             elif getattr(self, "default_folder", None):
                 base_folder = self.default_folder
-            # フリーズ回避のため、ここでは即時更新しない（予約のみ）
             if base_folder:
-                setattr(self, "_pending_route_evidence_flag_update", str(base_folder))
+                mark_route_flags_from_folder(base_folder, evidence_completed=True)
         except Exception as e:
             print(f"証憑フラグ更新エラー: {e}")
         t_end = perf_counter()

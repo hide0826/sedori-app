@@ -339,7 +339,38 @@ class StoreDatabase:
                 UPDATE flea_markets SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
             END
         """)
-        
+
+        # flea_market_users テーブル作成（フリマ常連ユーザーの登録マスタ）
+        # 目的: 仕入データ入力時に登録済みユーザーなら入力を自動補完するため
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS flea_market_users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform_code TEXT NOT NULL,
+                platform_name TEXT,
+                username TEXT NOT NULL,
+                unique_id TEXT,
+                rating_tier TEXT,
+                identity_verified INTEGER DEFAULT 0,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS update_flea_market_users_timestamp
+            AFTER UPDATE ON flea_market_users
+            FOR EACH ROW
+            BEGIN
+                UPDATE flea_market_users SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            END
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_flea_market_users_platform ON flea_market_users(platform_code)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_flea_market_users_username ON flea_market_users(username)"
+        )
+
         conn.commit()
     
     def close(self):
@@ -547,10 +578,45 @@ class StoreDatabase:
         row = cursor.fetchone()
         return dict(row) if row else None
 
+    def get_flea_market_by_platform_code(self, code: str) -> Optional[Dict[str, Any]]:
+        """フリマコード（platform_code / code_prefix）で flea_markets を1件取得。"""
+        code_u = (code or "").strip().upper()
+        if not code_u:
+            return None
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM flea_markets
+            WHERE UPPER(TRIM(platform_code)) = ? OR UPPER(TRIM(code_prefix)) = ?
+            ORDER BY id LIMIT 1
+            """,
+            (code_u, code_u),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def get_flea_market_by_platform_name(self, name: str) -> Optional[Dict[str, Any]]:
+        """フリマの表示名称（platform_name）で flea_markets を1件取得（大小無視）。"""
+        n = (name or "").strip()
+        if not n:
+            return None
+        nl = n.lower()
+        for m in self.list_flea_markets(active_only=False):
+            pn = (m.get("platform_name") or "").strip()
+            if not pn:
+                continue
+            if pn == n or pn.lower() == nl:
+                return m
+        return None
+
     def resolve_supplier_for_sku(self, supplier_code: str) -> Optional[Dict[str, Any]]:
         """
         SKU生成向けに仕入先を解決する。
-        実店舗(stores) → 電脳店舗(online_stores)の順で検索する。
+        実店舗(stores) → 電脳店舗(online_stores) → フリマ(flea_markets)の順で検索する。
+
+        フリマは「設定 > 店舗コード設定 > フリマコード」のマスタ（flea_markets）で一致させ、
+        SKUテンプレートの supplier トークンには code_prefix（未設定時は platform_code）を渡す。
         戻り: {"supplier_code", "store_name", "store_id"} または None
         """
         code = (supplier_code or "").strip()
@@ -579,6 +645,22 @@ class StoreDatabase:
                 "supplier_code": code,
                 "store_name": display_name,
                 "store_id": online.get("id"),
+            }
+        # フリマ（単品仕入で仕入先に platform_code が入るケース、または「フリマ:メルカリ」形式）
+        flea = self.get_flea_market_by_platform_code(code)
+        if not flea and ":" in code:
+            flea = self.get_flea_market_by_platform_name(code.split(":", 1)[-1].strip())
+        if not flea:
+            flea = self.get_flea_market_by_platform_name(code)
+        if flea:
+            sku_token = (flea.get("code_prefix") or flea.get("platform_code") or "").strip().upper()
+            if not sku_token:
+                sku_token = code.upper()
+            pname = (flea.get("platform_name") or "").strip()
+            return {
+                "supplier_code": sku_token,
+                "store_name": pname or sku_token,
+                "store_id": None,
             }
         return None
     
@@ -2151,6 +2233,125 @@ class StoreDatabase:
         else:
             cursor.execute("SELECT COUNT(*) FROM flea_markets WHERE platform_code = ?", (code,))
         return cursor.fetchone()[0] > 0
+
+    # ==================== flea_market_users テーブル操作（フリマ常連ユーザー） ====================
+
+    def add_flea_market_user(self, data: Dict[str, Any]) -> int:
+        """フリマユーザーを追加。id を返す。"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO flea_market_users (
+                platform_code, platform_name, username, unique_id,
+                rating_tier, identity_verified, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            (data.get('platform_code') or '').strip().upper(),
+            (data.get('platform_name') or '').strip(),
+            (data.get('username') or '').strip(),
+            (data.get('unique_id') or '').strip(),
+            (data.get('rating_tier') or '').strip(),
+            1 if data.get('identity_verified') else 0,
+            data.get('notes') or '',
+        ))
+        conn.commit()
+        return cursor.lastrowid
+
+    def update_flea_market_user(self, user_id: int, data: Dict[str, Any]) -> bool:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE flea_market_users SET
+                platform_code = ?, platform_name = ?, username = ?,
+                unique_id = ?, rating_tier = ?, identity_verified = ?, notes = ?
+            WHERE id = ?
+        """, (
+            (data.get('platform_code') or '').strip().upper(),
+            (data.get('platform_name') or '').strip(),
+            (data.get('username') or '').strip(),
+            (data.get('unique_id') or '').strip(),
+            (data.get('rating_tier') or '').strip(),
+            1 if data.get('identity_verified') else 0,
+            data.get('notes') or '',
+            user_id,
+        ))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def delete_flea_market_user(self, user_id: int) -> bool:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM flea_market_users WHERE id = ?", (user_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def get_flea_market_user(self, user_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM flea_market_users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def list_flea_market_users(
+        self,
+        platform_code: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """フリマユーザー一覧を取得。
+        - platform_code 指定時はそのプラットフォームのみに絞り込み。
+        - search 指定時は username / unique_id / notes / platform_name に対する部分一致。
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        sql = "SELECT * FROM flea_market_users WHERE 1=1"
+        params: List[Any] = []
+        if platform_code:
+            sql += " AND platform_code = ?"
+            params.append(platform_code.strip().upper())
+        if search:
+            like = f"%{search.strip()}%"
+            sql += (
+                " AND (username LIKE ? OR unique_id LIKE ?"
+                " OR notes LIKE ? OR platform_name LIKE ?)"
+            )
+            params.extend([like, like, like, like])
+        sql += " ORDER BY platform_name, username"
+        cursor.execute(sql, params)
+        return [dict(row) for row in cursor.fetchall()]
+
+    def find_flea_market_user(
+        self,
+        platform_code: str,
+        username: Optional[str] = None,
+        unique_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """仕入入力の自動補完用：プラットフォーム＋（ユーザー名 or 固有ID）で1件検索。
+        固有ID優先で一致を試み、見つからなければユーザー名で一致を試みる。
+        """
+        code = (platform_code or '').strip().upper()
+        if not code:
+            return None
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        uid = (unique_id or '').strip()
+        if uid:
+            cursor.execute(
+                "SELECT * FROM flea_market_users WHERE platform_code = ? AND unique_id = ? LIMIT 1",
+                (code, uid),
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+        name = (username or '').strip()
+        if name:
+            cursor.execute(
+                "SELECT * FROM flea_market_users WHERE platform_code = ? AND username = ? LIMIT 1",
+                (code, name),
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+        return None
 
     # ==================== online_stores テーブル操作（電脳店舗） ====================
 

@@ -756,7 +756,18 @@ class RouteSummaryWidget(QWidget):
             route_code = self.store_db.get_route_code_by_name(route_name)
             return route_code or route_name  # ルートコードが見つからない場合はルート名を返す
         return ""
-    
+
+    @staticmethod
+    def _merge_notes_for_template_export(*parts: str) -> str:
+        """カンマ区切りの備考を結合し、トークン単位で重複を除いて Excel 出力用の1文字列にする。"""
+        seen: List[str] = []
+        for part in parts:
+            for seg in str(part or "").split(","):
+                s = seg.strip()
+                if s and s not in seen:
+                    seen.append(s)
+        return ", ".join(seen)
+
     def get_stores_from_table(self) -> List[Dict[str, Any]]:
         """テーブルから訪問順序に基づいて店舗一覧を取得"""
         try:
@@ -804,6 +815,9 @@ class RouteSummaryWidget(QWidget):
             # 店舗マスタから詳細情報を取得
             for data in table_data:
                 store_code = data['store_code']
+                row = data['row']
+                notes_item = table.item(row, 10)
+                table_notes = notes_item.text().strip() if notes_item else ''
                 store_info = self.store_db.get_store_by_code(store_code)
                 if store_info:
                     # 店舗マスタの情報をコピー
@@ -811,10 +825,11 @@ class RouteSummaryWidget(QWidget):
                     # テーブルの店舗名を優先（ユーザーが変更している可能性があるため）
                     if data['store_name']:
                         store['store_name'] = data['store_name']
-                    # 店舗マスタの備考欄を取得
-                    custom_fields = store_info.get('custom_fields', {})
-                    notes = custom_fields.get('notes', '')
-                    store['notes'] = notes
+                    # 店舗マスタ備考（stores.notes と custom_fields.notes）とテーブル備考列をマージ
+                    sql_notes = str(store.get("notes", "") or "").strip()
+                    cf_notes = str((store.get("custom_fields") or {}).get("notes", "") or "").strip()
+                    master_notes = self._merge_notes_for_template_export(sql_notes, cf_notes)
+                    store["notes"] = self._merge_notes_for_template_export(master_notes, table_notes)
                     stores.append(store)
                 else:
                     # 店舗マスタにない場合はテーブルの情報のみで作成
@@ -822,7 +837,7 @@ class RouteSummaryWidget(QWidget):
                         'store_code': store_code,
                         'supplier_code': store_code,  # 互換性のため
                         'store_name': data['store_name'],
-                        'notes': ''
+                        'notes': self._merge_notes_for_template_export(table_notes),
                     }
                     stores.append(store)
             
@@ -1608,9 +1623,11 @@ class RouteSummaryWidget(QWidget):
                             store_info = self.store_db.get_store_by_code(any_code)
                             if store_info:
                                 custom_fields = store_info.get('custom_fields', {})
-                                notes = custom_fields.get('notes', '')
-                                # storesに備考を追加（テンプレート生成時に使用）
-                                store['notes'] = notes
+                                sql_notes = str(store_info.get('notes', '') or '').strip()
+                                cf_notes = str(custom_fields.get('notes', '') or '').strip()
+                                store['notes'] = self._merge_notes_for_template_export(
+                                    sql_notes, cf_notes
+                                )
                     store_codes = [
                         (store.get('store_code') or store.get('supplier_code'))
                         for store in stores

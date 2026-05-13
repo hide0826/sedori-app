@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QSpinBox, QDateEdit, QFileDialog,
     QDialog, QDialogButtonBox, QSizePolicy, QInputDialog,
     QPlainTextEdit, QScrollArea, QFormLayout, QTimeEdit,
-    QToolButton, QApplication,
+    QToolButton, QApplication, QAbstractItemView,
 )
 from PySide6.QtCore import Qt, QDate, QTime, QDateTime, Signal, QSettings
 from PySide6.QtGui import QFont, QColor, QPalette, QStandardItemModel, QStandardItem, QDesktopServices
@@ -555,9 +555,9 @@ class SpotPurchaseDialog(QDialog):
 
 
 class SinglePurchaseInputDialog(QDialog):
-    """単品仕入のひな型入力ダイアログ（実店舗/電脳/フリマ/問屋を共通入力）"""
+    """単品仕入のひな型入力ダイアログ（実店舗/電脳/フリマを共通入力）"""
 
-    SOURCE_TYPE_OPTIONS = ["実店舗", "電脳", "フリマ", "問屋"]
+    SOURCE_TYPE_OPTIONS = ["実店舗", "電脳", "フリマ"]
     SOURCE_CHANNEL_PRESETS = ["Amazon", "楽天", "ヤフショ", "メルカリ", "ヤフオク", "問屋A"]
     CONDITION_PRESETS = ["新品", "中古(ほぼ新品)", "中古(非常に良い)", "中古(良い)", "中古(可)"]
 
@@ -648,7 +648,7 @@ class SinglePurchaseInputDialog(QDialog):
         layout.addRow("注文番号:", self.order_id_edit)
 
         self.store_code_edit = QLineEdit()
-        self.store_code_edit.setPlaceholderText("実店舗なら店舗コード、電脳/フリマ/問屋なら空欄でも可")
+        self.store_code_edit.setPlaceholderText("実店舗なら店舗コード、電脳/フリマなら空欄でも可")
         layout.addRow("店舗コード:", self.store_code_edit)
 
         self.asin_edit = QLineEdit()
@@ -855,6 +855,16 @@ class SinglePurchaseInputDialog(QDialog):
         self.detail_prefecture_edit.setPlaceholderText("受取都道府県（任意）")
         ch_form.addRow("受取都道府県:", self.detail_prefecture_edit)
         ch_outer.addLayout(ch_form)
+
+        self.register_flea_user_master_btn = QPushButton("フリマユーザーをマスタ登録")
+        self.register_flea_user_master_btn.setToolTip(
+            "右側に入力したプラットフォーム・ユーザー名などを、"
+            "「データベース管理 > 店舗マスタ > フリマユーザー一覧」に登録します。"
+        )
+        self.register_flea_user_master_btn.clicked.connect(self._on_register_flea_market_user_master)
+        self.register_flea_user_master_btn.setVisible(False)
+        ch_outer.addWidget(self.register_flea_user_master_btn)
+
         ch_outer.addStretch()
         self._splitter.addWidget(self._channel_detail_widget)
         self._splitter.setStretchFactor(0, 3)
@@ -999,11 +1009,13 @@ class SinglePurchaseInputDialog(QDialog):
             if self.source_channel_combo.count() == 0:
                 self.source_channel_combo.addItems(self.SOURCE_CHANNEL_PRESETS)
             self._reload_flea_suppliers_for_channel(self.source_channel_combo.currentText().strip())
-        else:  # 問屋
-            self.source_channel_combo.addItem("問屋")
-            for w in self.store_db.list_wholesalers(active_only=True):
-                code = (w.get("wholesaler_code") or "").strip()
-                name = (w.get("name") or "").strip()
+        else:
+            # 想定外の仕入種別（旧バージョンの「問屋」など）のときは実店舗と同じ構成にする
+            self.source_channel_combo.addItem("実店舗")
+            self.source_channel_combo.setCurrentText("実店舗")
+            for s in self.store_db.list_stores():
+                code = (s.get("store_code") or s.get("supplier_code") or "").strip()
+                name = (s.get("store_name") or "").strip()
                 if code and name:
                     self.source_supplier_combo.addItem(f"{code} - {name}", {"code": code, "name": name})
 
@@ -1035,6 +1047,8 @@ class SinglePurchaseInputDialog(QDialog):
         st = (self.source_type_combo.currentText() or "").strip()
         show = st in ("フリマ", "電脳")
         self._channel_detail_widget.setVisible(show)
+        if hasattr(self, "register_flea_user_master_btn"):
+            self.register_flea_user_master_btn.setVisible(st == "フリマ")
         if show:
             self.setMinimumWidth(960)
             self._channel_detail_title.setText(
@@ -1047,6 +1061,95 @@ class SinglePurchaseInputDialog(QDialog):
         else:
             self.setMinimumWidth(520)
             self._clear_channel_detail_fields()
+
+    def _resolve_flea_market_from_single_purchase_form(self) -> Optional[Dict[str, Any]]:
+        """仕入チャネル／プラットフォーム欄から flea_markets の1行を特定する。"""
+        name = (self.detail_platform_edit.text() or "").strip() or (
+            self.source_channel_combo.currentText() or ""
+        ).strip()
+        if not name:
+            return None
+        markets = self.store_db.list_flea_markets(active_only=False)
+        for m in markets:
+            if (m.get("platform_name") or "").strip() == name:
+                return m
+        nl = name.lower()
+        for m in markets:
+            pn = (m.get("platform_name") or "").strip()
+            if pn.lower() == nl:
+                return m
+        return None
+
+    def _on_register_flea_market_user_master(self) -> None:
+        """単品仕入入力中のフリマ取引情報から、フリマユーザー一覧マスタへ登録する。"""
+        if (self.source_type_combo.currentText() or "").strip() != "フリマ":
+            QMessageBox.information(
+                self,
+                "マスタ登録",
+                "仕入種別が「フリマ」のときだけ利用できます。",
+            )
+            return
+        market = self._resolve_flea_market_from_single_purchase_form()
+        if not market:
+            QMessageBox.warning(
+                self,
+                "マスタ登録",
+                "フリマプラットフォームを特定できませんでした。\n"
+                "「設定 > 店舗コード設定 > フリマコード」に名称が一致する行があるか確認してください。",
+            )
+            return
+        code = (market.get("platform_code") or "").strip().upper()
+        pname = (market.get("platform_name") or "").strip()
+        username = (self.detail_seller_username_edit.text() or "").strip()
+        listing = (self.detail_listing_url_edit.text() or "").strip()
+        tx_id = (self.detail_transaction_id_edit.text() or "").strip()
+        unique_id = listing or tx_id
+
+        try:
+            from ui.store_master_widget import FleaMarketUserEditDialog
+        except Exception as e:
+            QMessageBox.warning(self, "マスタ登録", f"登録画面の読み込みに失敗しました:\n{e}")
+            return
+
+        existing = self.store_db.find_flea_market_user(
+            code, username=username or None, unique_id=unique_id or None
+        )
+        if existing:
+            r = QMessageBox.question(
+                self,
+                "マスタ登録",
+                "同じプラットフォームで、ユーザー名または固有IDが一致する登録が既にあります。\n"
+                "編集画面を開きますか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if r != QMessageBox.Yes:
+                return
+            dlg = FleaMarketUserEditDialog(self, data=existing)
+        else:
+            prefill: Dict[str, Any] = {
+                "platform_code": code,
+                "platform_name": pname,
+                "username": username,
+                "unique_id": unique_id,
+                "rating_tier": "",
+                "identity_verified": 0,
+                "notes": "",
+            }
+            dlg = FleaMarketUserEditDialog(self, data=prefill)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        data = dlg.get_data()
+        try:
+            if existing:
+                self.store_db.update_flea_market_user(int(existing["id"]), data)
+                QMessageBox.information(self, "マスタ登録", "フリマユーザーマスタを更新しました。")
+            else:
+                self.store_db.add_flea_market_user(data)
+                QMessageBox.information(self, "マスタ登録", "フリマユーザーマスタに登録しました。")
+        except Exception as e:
+            QMessageBox.warning(self, "マスタ登録", f"保存に失敗しました:\n{e}")
 
     def _on_source_channel_changed(self, channel: str):
         source_type = (self.source_type_combo.currentText() or "").strip()
@@ -1555,7 +1658,7 @@ class SinglePurchaseInputDialog(QDialog):
                     pass
 
     def _on_generate_sku_clicked(self):
-        """仕入データタブの generate_sku と同系統（1件分・API・店舗マスタ・SKU日付・末尾M）。"""
+        """仕入データタブの generate_sku と同系統（1件分・API・店舗/電脳/フリママスタ・SKU日付・末尾M）。"""
         inv = self._inventory_widget
         if inv is None or not getattr(inv, "api_client", None):
             QMessageBox.warning(self, "SKU生成", "仕入管理から開いていないため、SKUを生成できません。")
@@ -2422,9 +2525,13 @@ class InventoryWidget(QWidget):
         self.route_template_table.setHorizontalHeaderLabels(headers)
         self.route_template_table.setAlternatingRowColors(True)
         self.route_template_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.route_template_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        # メモ列のみ編集可能（ダブルクリック等）。他列は行単位のため実質コード列は編集しにくいが、必要なら後で調整。
+        self.route_template_table.setEditTriggers(
+            QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed | QAbstractItemView.SelectedClicked
+        )
         # 選択変更時のイベントハンドラ
         self.route_template_table.itemSelectionChanged.connect(self.on_route_selection_changed)
+        self.route_template_table.itemChanged.connect(self._on_route_template_memo_changed)
         header = self.route_template_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         # 評価列（列インデックス9）だけは後で手動調整するため、一旦Interactiveに設定
@@ -2847,121 +2954,131 @@ class InventoryWidget(QWidget):
             "訪問順序", "店舗コード", "店舗名", "IN時間", "OUT時間",
             "滞在(分)", "移動(分)", "想定粗利", "仕入点数", "評価", "メモ"
         ]
-        self.route_template_table.setRowCount(len(visits))
-        self.route_template_table.setColumnCount(len(headers))
-        self.route_template_table.setHorizontalHeaderLabels(headers)
-        for row, visit in enumerate(visits):
-            def _set(col: int, value: Any):
-                item = QTableWidgetItem("" if value is None else str(value))
-                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                self.route_template_table.setItem(row, col, item)
-            
-            _set(0, visit.get('visit_order', row + 1))
-            _set(1, visit.get('store_code', ''))
-            _set(2, visit.get('store_name', ''))
-            _set(3, self._format_hm(visit.get('store_in_time')))
-            _set(4, self._format_hm(visit.get('store_out_time')))
-            _set(5, visit.get('stay_duration', ''))
-            _set(6, visit.get('travel_time_from_prev', ''))
-            _set(7, visit.get('store_gross_profit', ''))
-            _set(8, visit.get('store_item_count', ''))
-            
-            # 評価列に星評価ウィジェットを設定（ルート登録タブのロジックに合わせる）
-            store_rating = visit.get('store_rating')
-            try:
-                rating_value = float(store_rating) if store_rating not in (None, '') else 0.0
-            except (TypeError, ValueError):
-                rating_value = 0.0
-            # 星評価ウィジェットを設定（編集不可）
-            star_widget = StarRatingWidget(self.route_template_table, rating=rating_value, star_size=14)
-            star_widget.setEnabled(False)  # 編集不可にする
-            self.route_template_table.setCellWidget(row, 9, star_widget)
-            
-            # メモ列（列インデックス10）は読み込み専用
-            # 店舗マスタの備考欄からメモを取得して表示
-            store_code = visit.get('store_code', '')
-            memo_text = visit.get('store_notes', '')
-            if store_code and not memo_text:
-                # 店舗マスタから備考を取得（store_code優先、互換性のため仕入れ先コードも許容）
-                store_info = self.store_db.get_store_by_code(store_code)
-                if store_info:
-                    custom_fields = store_info.get('custom_fields', {})
-                    memo_text = custom_fields.get('notes', '')
-            
-            _set(10, memo_text)
-        
+        self.route_template_table.blockSignals(True)
+        try:
+            self.route_template_table.setRowCount(len(visits))
+            self.route_template_table.setColumnCount(len(headers))
+            self.route_template_table.setHorizontalHeaderLabels(headers)
+            for row, visit in enumerate(visits):
+                def _set(col: int, value: Any):
+                    item = QTableWidgetItem("" if value is None else str(value))
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                    self.route_template_table.setItem(row, col, item)
+
+                _set(0, visit.get('visit_order', row + 1))
+                _set(1, visit.get('store_code', ''))
+                _set(2, visit.get('store_name', ''))
+                _set(3, self._format_hm(visit.get('store_in_time')))
+                _set(4, self._format_hm(visit.get('store_out_time')))
+                _set(5, visit.get('stay_duration', ''))
+                _set(6, visit.get('travel_time_from_prev', ''))
+                _set(7, visit.get('store_gross_profit', ''))
+                _set(8, visit.get('store_item_count', ''))
+
+                store_rating = visit.get('store_rating')
+                try:
+                    rating_value = float(store_rating) if store_rating not in (None, '') else 0.0
+                except (TypeError, ValueError):
+                    rating_value = 0.0
+                star_widget = StarRatingWidget(self.route_template_table, rating=rating_value, star_size=14)
+                star_widget.setEnabled(False)
+                self.route_template_table.setCellWidget(row, 9, star_widget)
+
+                store_code = visit.get('store_code', '')
+                memo_text = visit.get('store_notes', '')
+                if store_code and not str(memo_text).strip():
+                    store_info = self.store_db.get_store_by_code(store_code)
+                    if store_info:
+                        sql_n = str(store_info.get("notes", "") or "").strip()
+                        cf_n = str((store_info.get("custom_fields") or {}).get("notes", "") or "").strip()
+                        memo_text = self._merge_comma_note_tokens(sql_n, cf_n)
+                memo_item = QTableWidgetItem("" if memo_text is None else str(memo_text))
+                memo_item.setFlags(
+                    (memo_item.flags() | Qt.ItemIsEditable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    & ~Qt.ItemIsUserCheckable
+                )
+                self.route_template_table.setItem(row, 10, memo_item)
+        finally:
+            self.route_template_table.blockSignals(False)
+
         # 列幅の調整（評価列の右端が見切れないように）
         self.route_template_table.resizeColumnsToContents()
-        
+
         # 評価列（列インデックス9）の幅を自動調整（StarRatingWidgetのsizeHint()に基づく）
-        # 最初の行の星評価ウィジェットから実際のサイズを取得
         if len(visits) > 0:
             first_star_widget = self.route_template_table.cellWidget(0, 9)
             if first_star_widget and isinstance(first_star_widget, StarRatingWidget):
-                # sizeHint()で推奨サイズを取得
                 recommended_size = first_star_widget.sizeHint()
-                # 余裕を持たせて+10px追加
                 rating_column_width = recommended_size.width() + 10
                 self.route_template_table.setColumnWidth(9, rating_column_width)
             else:
-                # フォールバック: 固定幅を設定
                 self.route_template_table.setColumnWidth(9, 130)
         else:
-            # データがない場合のフォールバック
             self.route_template_table.setColumnWidth(9, 130)
-        
-        # ボタンの有効/無効を更新
+
         has_route_data = self.route_template_table.rowCount() > 0
         if hasattr(self, 'route_clear_btn'):
             self.route_clear_btn.setEnabled(has_route_data)
 
+    @staticmethod
+    def _merge_comma_note_tokens(*parts: str) -> str:
+        """カンマ区切りの文字列をまとめ、トークン単位で重複を除く。"""
+        seen: List[str] = []
+        for part in parts:
+            for seg in str(part or "").split(","):
+                s = seg.strip()
+                if s and s not in seen:
+                    seen.append(s)
+        return ", ".join(seen)
+
+    def _merge_note_tokens_into_store_master(self, store_code: str, text: str) -> bool:
+        """店舗マスタの備考（DBの stores.notes = データベース管理＞店舗一覧の備考列）へ追記する。
+        旧データ用に custom_fields.notes も同じ統合結果へ揃える。
+        """
+        store_code = (store_code or "").strip()
+        memo_text = (text or "").strip()
+        if not store_code or not memo_text:
+            return False
+        store_info = self.store_db.get_store_by_code(store_code)
+        if not store_info:
+            return False
+        sql_notes = str(store_info.get("notes", "") or "").strip()
+        custom_fields = dict(store_info.get("custom_fields") or {})
+        cf_notes = str(custom_fields.get("notes", "") or "").strip()
+        before = self._merge_comma_note_tokens(sql_notes, cf_notes)
+        after = self._merge_comma_note_tokens(sql_notes, cf_notes, memo_text)
+        if before == after:
+            return False
+        store_id = store_info["id"]
+        try:
+            self.store_db.update_store_notes(store_id, after)
+            if str(custom_fields.get("notes", "") or "").strip() != after:
+                custom_fields["notes"] = after
+                self.store_db.update_store(
+                    store_id,
+                    {"custom_fields": custom_fields},
+                )
+            return True
+        except Exception as e:
+            print(f"店舗マスタの備考欄更新エラー: {e}")
+            return False
+
+    def _on_route_template_memo_changed(self, item: QTableWidgetItem):
+        """仕入管理＞ルート情報のメモ列編集で店舗マスタ備考へカンマ区切り追記する。"""
+        if not item or item.column() != 10:
+            return
+        row = item.row()
+        code_item = self.route_template_table.item(row, 1)
+        store_code = code_item.text().strip() if code_item else ""
+        self._merge_note_tokens_into_store_master(store_code, item.text())
+
     def _save_memos_to_store_master(self, visits: List[Dict[str, Any]]):
         """ルートテンプレート読み込み時にメモ欄があれば店舗マスタの備考欄に保存・追記"""
         for visit in visits:
-            store_code = visit.get('store_code', '')
-            memo_text = visit.get('store_notes', '').strip()
-            
-            # メモ欄が空の場合はスキップ
-            if not store_code or not memo_text:
-                continue
-            
-            # 店舗マスタから現在の備考を取得（store_code優先、互換性のため仕入れ先コードも許容）
-            store_info = self.store_db.get_store_by_code(store_code)
-            if not store_info:
-                continue
-            
-            # custom_fieldsから現在のnotesを取得
-            custom_fields = store_info.get('custom_fields', {})
-            current_notes = custom_fields.get('notes', '').strip()
-            
-            # 新しいメモを追記（カンマ区切り）
-            if current_notes:
-                # 既存の備考に新しいメモを追記（重複チェック）
-                notes_list = [n.strip() for n in current_notes.split(',') if n.strip()]
-                if memo_text not in notes_list:
-                    notes_list.append(memo_text)
-                    updated_notes = ', '.join(notes_list)
-                else:
-                    updated_notes = current_notes  # 既に存在する場合は変更なし
-            else:
-                updated_notes = memo_text  # 既存の備考がない場合は新しいメモを設定
-            
-            # 店舗マスタの備考欄を更新
-            custom_fields['notes'] = updated_notes
-            store_data = {
-                'affiliated_route_name': store_info.get('affiliated_route_name'),
-                'route_code': store_info.get('route_code'),
-                'supplier_code': store_info.get('supplier_code'),
-                'store_name': store_info.get('store_name'),
-                'address': store_info.get('address'),
-                'phone': store_info.get('phone'),
-                'custom_fields': custom_fields
-            }
-            
-            try:
-                self.store_db.update_store(store_info['id'], store_data)
-            except Exception as e:
-                print(f"店舗マスタの備考欄更新エラー: {e}")
+            self._merge_note_tokens_into_store_master(
+                visit.get("store_code", ""),
+                visit.get("store_notes", ""),
+            )
     
     def _calculate_store_rating_from_visit(self, visit: Dict[str, Any]) -> float:
         """店舗訪問データから評価を計算（ルート登録タブのロジックに合わせる）"""
@@ -5583,7 +5700,7 @@ class InventoryWidget(QWidget):
             self.route_delete_row_btn.setEnabled(has_selection)
         
     def generate_sku(self):
-        """SKU生成（店舗マスタ連携対応）"""
+        """SKU生成（店舗マスタ・電脳店舗・フリマコード連携）"""
         if self.filtered_data is None:
             QMessageBox.warning(self, "エラー", "データがありません")
             return

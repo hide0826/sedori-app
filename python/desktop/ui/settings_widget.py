@@ -361,7 +361,6 @@ class SettingsWidget(QWidget):
         from database.store_db import StoreDatabase
         from ui.store_master_widget import (
             OnlinePlatformListWidget,
-            WholesalerListWidget,
             FleaMarketListWidget,
         )
         
@@ -448,14 +447,12 @@ class SettingsWidget(QWidget):
 
         db_tabs.addTab(chain_mapping_widget, "チェーン店コード")
         self.online_platform_db_widget = OnlinePlatformListWidget()
-        db_tabs.addTab(self.online_platform_db_widget, "電脳プラットフォーム")
-        self.wholesaler_db_widget = WholesalerListWidget()
-        db_tabs.addTab(self.wholesaler_db_widget, "問屋")
+        db_tabs.addTab(self.online_platform_db_widget, "ECコード")
         self.flea_market_widget = FleaMarketListWidget()
-        db_tabs.addTab(self.flea_market_widget, "フリマ")
+        db_tabs.addTab(self.flea_market_widget, "フリマコード")
 
         layout.addWidget(db_tabs)
-        parent.addTab(db_widget, "DB設定")
+        parent.addTab(db_widget, "店舗コード設定")
 
     def load_chain_mappings(self):
         """チェーン店コードマッピングを読み込む"""

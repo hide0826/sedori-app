@@ -432,9 +432,7 @@ class RouteListWidget(QWidget):
             return
 
         try:
-            from database.route_db import RouteDatabase
-            db = RouteDatabase()
-            db.set_route_flag(route_id, flag_name, item.checkState() == Qt.Checked)
+            self.route_db.set_route_flag(route_id, flag_name, item.checkState() == Qt.Checked)
         except Exception as e:
             # エラーが出てもUIはそのままにしておき、コンソールにだけ出力
             print(f"ルートフラグ更新エラー (route_id={route_id}, flag={flag_name}): {e}")

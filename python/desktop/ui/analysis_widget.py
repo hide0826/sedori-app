@@ -119,6 +119,17 @@ class AnalysisWidget(QWidget):
             no_graph_label.setAlignment(Qt.AlignCenter)
             self.tab_widget.addTab(no_graph_label, "グラフ分析")
         
+        # 店舗スコアタブ（旧：店舗マスタ配下から移設）
+        try:
+            from ui.store_score_widget import StoreScoreWidget
+            self.store_score_widget = StoreScoreWidget()
+            self.tab_widget.addTab(self.store_score_widget, "店舗スコア")
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"StoreScoreWidget load error: {e}")
+            error_label = QLabel(f"店舗スコアの読み込みに失敗しました:\n{e}")
+            error_label.setAlignment(Qt.AlignCenter)
+            self.tab_widget.addTab(error_label, "店舗スコア")
+        
         parent_layout.addWidget(self.tab_widget)
     
     def create_stats_widget(self) -> QWidget:
