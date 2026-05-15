@@ -10,6 +10,7 @@ SQLiteデータベースを使用した店舗マスタ管理
 
 import sqlite3
 import json
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -832,13 +833,16 @@ class StoreDatabase:
         cursor.execute("SELECT COUNT(*) FROM stores")
         total_stores = cursor.fetchone()[0]
         
-        # 有効なカスタムフィールド数
-        cursor.execute("SELECT COUNT(*) FROM store_custom_fields WHERE is_active = 1")
-        active_fields = cursor.fetchone()[0]
+        # routes マスタに登録されているルート数
+        try:
+            cursor.execute("SELECT COUNT(*) FROM routes")
+            registered_routes = cursor.fetchone()[0]
+        except sqlite3.OperationalError:
+            registered_routes = 0
         
         return {
             'total_stores': total_stores,
-            'active_custom_fields': active_fields
+            'registered_routes': registered_routes,
         }
     
     def get_route_names(self) -> List[str]:
@@ -1633,8 +1637,15 @@ class StoreDatabase:
         
         return mapping_dict
     
-    def find_chain_code_by_store_name(self, store_name: str) -> Optional[str]:
-        """店舗名からチェーン店コードを検索"""
+    def find_chain_code_by_store_name(
+        self, store_name: str, apply_default_when_unmatched: bool = True
+    ) -> Optional[str]:
+        """店舗名からチェーン店コードを検索
+
+        apply_default_when_unmatched:
+            True のとき、パターン未一致でも is_default_for_others のコードを返す（従来どおり）。
+            False のときはパターン一致時のみ返し、未一致は None（店舗コード自動採番用）。
+        """
         conn = self._get_connection()
         cursor = conn.cursor()
         
@@ -1661,6 +1672,9 @@ class StoreDatabase:
                         return chain_code
             except json.JSONDecodeError:
                 continue
+
+        if not apply_default_when_unmatched:
+            return None
 
         # どのパターンにもマッチしなかった場合は「その他」用のチェーンコードがあればそれを返す
         try:
@@ -1817,33 +1831,32 @@ class StoreDatabase:
         
         return f"{max_prefix}-{max_number:02d}"
     
-    def get_next_store_code_from_store_name(self, store_name: str) -> str:
-        """店舗名から次の店舗コードを生成"""
-        # チェーン店コードマッピングから検索
-        chain_code = self.find_chain_code_by_store_name(store_name)
-        
+    def get_next_store_code_from_store_name(self, store_name: str) -> Optional[str]:
+        """店舗名から次の店舗コードを生成。マッピングのパターンに一致するチェーンのみ（未一致は None）。"""
+        chain_code = self.find_chain_code_by_store_name(
+            store_name, apply_default_when_unmatched=False
+        )
         if not chain_code:
-            # マッピングが見つからない場合は、その他用のデフォルトコードを検索
-            chain_code = self.find_default_chain_code_for_others()
-            if not chain_code:
-                # その他用も見つからない場合は、店舗名から自動抽出
-                chain_code = self._extract_store_prefix(store_name)
-        
-        # 既存の最大コードを取得
-        max_code = self.get_max_store_code_for_prefix(chain_code)
-        
+            return None
+        return self.get_next_store_code_for_prefix(chain_code)
+    
+    def get_next_store_code_for_prefix(self, prefix: str) -> Optional[str]:
+        """指定プレフィックスの次の店舗コード（既存の最大番号+1）。英大文字・数字のみをプレフィックスとして扱う。"""
+        raw = (prefix or "").strip().upper()
+        if not raw or not re.match(r"^[A-Z0-9]+$", raw):
+            return None
+        max_code = self.get_max_store_code_for_prefix(raw)
         if not max_code:
-            return f"{chain_code}-01"
-        
+            return f"{raw}-01"
         try:
-            if '-' in max_code:
-                code_prefix, number_part = max_code.rsplit('-', 1)
-                if code_prefix == chain_code:
+            if "-" in max_code:
+                code_prefix, number_part = max_code.rsplit("-", 1)
+                if code_prefix == raw:
                     next_number = int(number_part) + 1
                     return f"{code_prefix}-{next_number:02d}"
-            return f"{chain_code}-01"
+            return f"{raw}-01"
         except (ValueError, AttributeError):
-            return f"{chain_code}-01"
+            return f"{raw}-01"
     
     def find_default_chain_code_for_others(self) -> Optional[str]:
         """その他用のデフォルトチェーンコードを取得"""
@@ -1928,9 +1941,11 @@ class StoreDatabase:
                 continue
             
             try:
-                # 店舗名から店舗コードを生成
+                # 店舗名から店舗コードを生成（チェーン名が判別できる場合のみ）
                 store_code = self.get_next_store_code_from_store_name(store_name)
-                
+                if not store_code:
+                    continue
+
                 # 重複チェック（念のため）
                 cursor.execute("SELECT COUNT(*) FROM stores WHERE store_code = ?", (store_code,))
                 if cursor.fetchone()[0] > 0:

@@ -23,6 +23,7 @@ from PySide6.QtGui import QColor, QDrag
 from typing import Tuple, List, Dict, Any, Optional
 import sys
 import os
+import re
 import webbrowser
 
 # プロジェクトルートをパスに追加
@@ -101,6 +102,8 @@ class StoreEditDialog(QDialog):
         form_layout.addRow("ルートコード:", self.route_code_edit)
         
         self.store_code_edit = QLineEdit()
+        self.store_code_edit.setPlaceholderText("例: HA 入力後、別の欄へ移ると次の空き番号（HA-12）")
+        self.store_code_edit.editingFinished.connect(self._on_store_code_editing_finished)
         form_layout.addRow("店舗コード:", self.store_code_edit)
         
         self.store_name_edit = QLineEdit()
@@ -273,6 +276,25 @@ class StoreEditDialog(QDialog):
                 current_code = self.store_code_edit.text().strip()
                 if not current_code:
                     self.store_code_edit.setText(next_store_code)
+    
+    def _on_store_code_editing_finished(self):
+        """プレフィックスのみ（例: HA, HA-）のとき、確定で次の空き番号を付与する"""
+        raw = (self.store_code_edit.text() or "").strip().upper()
+        if not raw:
+            return
+        # すでに PREFIX-数字 の完全形なら変更しない
+        if re.match(r"^[A-Z0-9]+-\d+$", raw):
+            return
+        m = re.match(r"^([A-Z0-9]{2,10})-?$", raw)
+        if not m:
+            return
+        prefix = m.group(1)
+        next_code = self.db.get_next_store_code_for_prefix(prefix)
+        if not next_code or next_code == raw:
+            return
+        self.store_code_edit.blockSignals(True)
+        self.store_code_edit.setText(next_code)
+        self.store_code_edit.blockSignals(False)
     
     def load_data(self):
         """既存データを読み込む"""
@@ -950,18 +972,18 @@ class StoreListWidget(QWidget):
         """)
         button_layout.addWidget(import_btn)
         
-        # 追加ボタン
-        add_btn = QPushButton("追加")
+        # 店舗追加ボタン
+        add_btn = QPushButton("店舗追加")
         add_btn.clicked.connect(self.add_store)
         button_layout.addWidget(add_btn)
         
-        # 編集ボタン
-        edit_btn = QPushButton("編集")
+        # 店舗編集ボタン
+        edit_btn = QPushButton("店舗編集")
         edit_btn.clicked.connect(self.edit_store)
         button_layout.addWidget(edit_btn)
         
-        # 削除ボタン
-        delete_btn = QPushButton("削除")
+        # 店舗削除ボタン
+        delete_btn = QPushButton("店舗削除")
         delete_btn.clicked.connect(self.delete_store)
         delete_btn.setStyleSheet("""
             QPushButton {
@@ -974,11 +996,6 @@ class StoreListWidget(QWidget):
         button_layout.addWidget(delete_btn)
         
         button_layout.addStretch()
-        
-        # カスタムフィールド管理ボタン
-        custom_fields_btn = QPushButton("カスタムフィールド管理")
-        custom_fields_btn.clicked.connect(self.manage_custom_fields)
-        button_layout.addWidget(custom_fields_btn)
         
         # 新規ルート作成ボタン
         new_route_btn = QPushButton("新規ルート作成")
@@ -1194,28 +1211,63 @@ class StoreListWidget(QWidget):
         """ルート一覧を読み込む"""
         routes = self.db.list_routes_with_store_count()
         self.update_route_combo(routes)
+        self.update_statistics()
     
     def update_route_combo(self, routes: list):
         """ルート選択プルダウンを更新"""
+        # clear()/addItem() のたびに currentTextChanged が飛び、先頭ルートで
+        # current_selected_route が上書きされるため、再構築前に維持したいルート名を退避する。
+        # ルート呼び出し中は current_filtered_route を優先（編集ダイアログから戻った直後も同じルートに戻す）
+        preserve_route_name = self.current_filtered_route or self.current_selected_route
+
+        self.route_combo.blockSignals(True)
         self.route_combo.clear()
         # ルート情報リストをそのまま保持（順序を維持）
         self.route_data = list(routes) if routes else []
-        
+
         for route in self.route_data:
             route_name = route.get('route_name', '')
             route_code = route.get('route_code', '')
             store_count = route.get('store_count', 0)
             display_text = f"{route_name} ({route_code}) - {store_count}店舗"
-            
+
             self.route_combo.addItem(display_text)
-        
-        # 現在選択中のルートのGoogle Map URLを表示
-        if self.current_selected_route:
-            for route in self.route_data:
-                if route.get('route_name') == self.current_selected_route:
-                    url = route.get('google_map_url', '')
-                    self.google_map_url_edit.setText(url)
+
+        new_index = 0
+        if preserve_route_name and self.route_data:
+            for i, route in enumerate(self.route_data):
+                if route.get('route_name') == preserve_route_name:
+                    new_index = i
                     break
+
+        if self.route_combo.count() > 0:
+            self.route_combo.setCurrentIndex(new_index)
+
+        self.route_combo.blockSignals(False)
+
+        # block 中はシグナルが飛ばないため、URL・current_selected_route を同期
+        if self.route_combo.count() > 0 and self.route_combo.currentIndex() >= 0:
+            self.on_route_selection_changed(self.route_combo.currentText())
+    
+    def _adjust_route_combo_store_count(self, route_name: str, delta: int) -> None:
+        """ルート選択コンボの店舗数表示を delta 件ぶん更新（追加 +1 / 削除 -1 など）"""
+        name = (route_name or "").strip()
+        if not name or delta == 0:
+            return
+        for i, r in enumerate(self.route_data):
+            if (r.get("route_name") or "").strip() != name:
+                continue
+            cur = int(r.get("store_count", 0) or 0)
+            new_cnt = max(0, cur + delta)
+            r["store_count"] = new_cnt
+            rn = r.get("route_name", "") or ""
+            rc = r.get("route_code", "") or ""
+            disp = f"{rn} ({rc}) - {new_cnt}店舗"
+            if 0 <= i < self.route_combo.count():
+                self.route_combo.blockSignals(True)
+                self.route_combo.setItemText(i, disp)
+                self.route_combo.blockSignals(False)
+            break
     
     def on_route_selection_changed(self, text: str):
         """ルート選択変更時の処理"""
@@ -1791,7 +1843,7 @@ class StoreListWidget(QWidget):
         stats = self.db.get_statistics()
         self.stats_label.setText(
             f"統計: 店舗数 {stats['total_stores']}件, "
-            f"カスタムフィールド {stats['active_custom_fields']}件"
+            f"登録ルート数 {stats['registered_routes']}件"
         )
     
     def on_store_cell_changed(self, row: int, column: int):
@@ -1921,6 +1973,7 @@ class StoreListWidget(QWidget):
             
             # 一覧を再読み込み
             self.load_stores(self.search_edit.text())
+            self.load_routes()
             
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"Excelインポートに失敗しました:\n{str(e)}")
@@ -1936,12 +1989,17 @@ class StoreListWidget(QWidget):
             
             try:
                 data = dialog.get_data()
-                # 店舗コードが空の場合は自動生成
+                # 店舗コードが空の場合は自動生成（チェーン名がマッピングで判別できるときのみ）
                 if not data.get('store_code'):
                     store_name = data.get('store_name', '')
                     if store_name:
-                        data['store_code'] = self.db.get_next_store_code_from_store_name(store_name)
+                        generated = self.db.get_next_store_code_from_store_name(store_name)
+                        if generated:
+                            data['store_code'] = generated
                 self.db.add_store(data)
+                added_route = (data.get("affiliated_route_name") or "").strip()
+                if added_route:
+                    self._adjust_route_combo_store_count(added_route, 1)
                 QMessageBox.information(self, "完了", "店舗を追加しました")
                 self.load_stores(self.search_edit.text())
             except Exception as e:
@@ -1979,7 +2037,14 @@ class StoreListWidget(QWidget):
             
             try:
                 data = dialog.get_data()
+                old_route = (store_data.get("affiliated_route_name") or "").strip()
+                new_route = (data.get("affiliated_route_name") or "").strip()
                 self.db.update_store(store_id, data)
+                if old_route != new_route:
+                    if old_route:
+                        self._adjust_route_combo_store_count(old_route, -1)
+                    if new_route:
+                        self._adjust_route_combo_store_count(new_route, 1)
                 QMessageBox.information(self, "完了", "店舗を更新しました")
                 self.load_stores(self.search_edit.text())
             except Exception as e:
@@ -2015,14 +2080,18 @@ class StoreListWidget(QWidget):
             return
         
         try:
+            row_store = self.db.get_store(store_id)
+            del_route = ((row_store or {}).get("affiliated_route_name") or "").strip()
             self.db.delete_store(store_id)
+            if del_route:
+                self._adjust_route_combo_store_count(del_route, -1)
             QMessageBox.information(self, "完了", "店舗を削除しました")
             self.load_stores(self.search_edit.text())
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"削除に失敗しました:\n{str(e)}")
     
     def manage_custom_fields(self):
-        """カスタムフィールド管理"""
+        """カスタムフィールド定義の管理ダイアログを開く。店舗一覧からのボタンは非表示だが、将来メニュー等から再利用可能。"""
         from ui.custom_fields_dialog import CustomFieldsDialog
         dialog = CustomFieldsDialog(self, self.db)
         dialog.exec()

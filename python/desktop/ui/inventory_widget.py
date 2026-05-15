@@ -6474,6 +6474,14 @@ class InventoryWidget(QWidget):
                 QMessageBox.warning(self, "警告", "ルート機能が未初期化です。ルータブが有効か確認してください。")
                 return
             
+            # 別テンプレ読み込み後も古い route_id が残っていると照合が誤った行に紐づくため、日付・コードで整合チェック
+            try:
+                _rd = self.route_summary_widget.get_route_data()
+                if hasattr(self.route_summary_widget, "invalidate_stale_route_binding"):
+                    self.route_summary_widget.invalidate_stale_route_binding(_rd)
+            except Exception:
+                pass
+            
             # 現在のルートIDを取得
             route_id = self.route_summary_widget.current_route_id
             temp_saved = False

@@ -2269,3 +2269,30 @@
 
 **最終更新**: 2026-05-13
 **更新者**: Agentモード（実装）
+
+### 2026-05-15（店舗マスタUI改善・店舗コード採番・画像管理確定処理の高速化・ルート照合ID整合）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. **店舗マスタ＞店舗一覧**  
+     - ルート編集後もルート選択コンボの選択を維持（`update_route_combo` でシグナルブロック＋`current_filtered_route` 復元）。  
+     - 操作ボタン文言: 「店舗追加」「店舗編集」「店舗削除」。カスタムフィールド管理ボタンは非表示（機能・`manage_custom_fields` は残置）。  
+     - 店舗追加時の店舗コード自動採番: チェーン名パターンに一致したときのみ（`find_chain_code_by_store_name(apply_default_when_unmatched=False)`）。未一致時は空のまま。  
+     - 店舗コード欄でプレフィックスのみ（例: HA）入力後フォーカスアウトで次の空き番号を付与（`get_next_store_code_for_prefix`）。  
+     - 店舗追加・削除・所属ルート変更時にルート選択コンボの「○店舗」件数をリアルタイム更新。統計欄は「登録ルート数」表示（カスタムフィールド件数を廃止）。
+  2. **画像管理: 確定処理の高速化**  
+     - JANグループ1枚目が「送信しない」チェックON（デフォルト）のとき、確定後の `add_registration_entry` でバーコード読取＋OCR分類（`is_barcode_only_image`）をスキップし、仕入DBに載った画像を商品画像として登録。確定処理・仕入日指定一括紐付けの両方に適用。
+  3. **仕入ルート: テンプレ読込と route_id の整合**  
+     - 別ルートのテンプレ誤読後に正しいテンプレで照合する際、古い `current_route_id` で別行を上書きしないよう、テンプレ読込時に ID 解除、`invalidate_stale_route_binding` を `save_data`・照合前に実行（`route_summary_widget.py` / `inventory_widget.py`）。
+- **変更ファイル**（リポジトリ `sedori-app.github`）:
+  - `python/desktop/ui/store_master_widget.py`
+  - `python/desktop/database/store_db.py`
+  - `python/desktop/ui/image_manager_widget.py`
+  - `python/desktop/ui/route_summary_widget.py`
+  - `python/desktop/ui/inventory_widget.py`
+  - `docs/cursor_development_progress.md`
+- **次回**:
+  - 1枚目チェックOFF時の確定処理（バーコード分類）の速度・精度の再確認。
+  - 画像管理スキャン時と確定時のバーコード読取二重化の整理（キャッシュ化の検討）。
+
+**最終更新**: 2026-05-15
+**更新者**: Agentモード（実装）

@@ -1173,6 +1173,10 @@ class RouteSummaryWidget(QWidget):
             self.last_loaded_template_path = file_path
             self.settings.setValue("route_template/last_selected", file_path)
             
+            # 別ルートのテンプレを誤読みしたあと正しいテンプレで照合し直す場合、
+            # 古い current_route_id のまま save すると DB の別行を更新してしまうため解除する
+            self.current_route_id = None
+            
             # 計算結果を更新
             getattr(self, 'update_calculation_results', lambda: None)()
             
@@ -2407,11 +2411,31 @@ class RouteSummaryWidget(QWidget):
         
         getattr(self, 'update_calculation_results', lambda: None)()
 
+    def invalidate_stale_route_binding(self, route_data: Dict[str, Any]) -> None:
+        """画面の日付・ルートコードと current_route_id の指す行が一致しなければ ID を解除する。
+
+        誤ったテンプレで一時保存したあと、正しいテンプレを読み込んだのに古い ID が残っていると、
+        save_data が同日同コードの解決をスキップして別ルート行を上書きしてしまうのを防ぐ。
+        """
+        if not self.current_route_id:
+            return
+        row = self.route_db.get_route_summary(self.current_route_id)
+        if not row:
+            self.current_route_id = None
+            return
+        want_date = str(route_data.get('route_date') or '').strip()
+        want_code = str(route_data.get('route_code') or '').strip()
+        got_date = str(row.get('route_date') or '').strip()
+        got_code = str(row.get('route_code') or '').strip()
+        if got_date != want_date or got_code != want_code:
+            self.current_route_id = None
+
     def save_data(self):
         """データを保存"""
         try:
             route_data = self.get_route_data()
             store_visits = self.get_store_visits_data()
+            self.invalidate_stale_route_binding(route_data)
             route_name_display = self.route_code_combo.currentText().strip() or route_data.get('route_code', '')
             
             if not route_data.get('route_code'):

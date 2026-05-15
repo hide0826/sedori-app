@@ -2074,7 +2074,10 @@ class ImageManagerWidget(QWidget):
                             skipped_count += len(image_paths)
                         # 既に登録済みでも画像登録タブに反映するため、record_snapshotがあれば追加
                         if record_snapshot:
-                            self.add_registration_entry(record_snapshot)
+                            self.add_registration_entry(
+                                record_snapshot,
+                                skip_barcode_classification=self._is_group_first_image_excluded(group),
+                            )
                     else:
                         failed_groups.append(jan)
 
@@ -2302,7 +2305,15 @@ class ImageManagerWidget(QWidget):
                 return str(value)
         return default
 
-    def add_registration_entry(self, record: Dict[str, Any]):
+    def _is_group_first_image_excluded(self, group: JanGroup) -> bool:
+        """JANグループ1枚目が「送信しない」チェックONか（デフォルトON＝バーコード用として除外）"""
+        if not group or not group.images:
+            return False
+        return bool(self.first_image_flags.get(group.images[0].path, True))
+
+    def add_registration_entry(
+        self, record: Dict[str, Any], skip_barcode_classification: bool = False
+    ):
         """仕入DBレコード情報を画像登録タブに追加（画像を商品画像とバーコード画像に分類）"""
         entry = {
             "condition": self._get_record_value(record, ["コンディション", "condition"]),
@@ -2333,26 +2344,34 @@ class ImageManagerWidget(QWidget):
         # 画像を商品画像とバーコード画像に分類
         product_images = []
         barcode_image = None
-        
-        for img_path in entry["images"]:
-            if not img_path:
-                continue
-            
-            # バーコード画像判定
-            try:
-                if self.image_service.is_barcode_only_image(img_path):
-                    # バーコード画像（最初の1枚のみ保存）
-                    if not barcode_image:
-                        barcode_image = img_path
-                else:
-                    # 商品画像（最大5枚）
-                    if len(product_images) < 5:
-                        product_images.append(img_path)
-            except Exception as e:
-                logger.warning(f"Failed to check if image is barcode-only: {e}, treating as product image")
-                # エラー時は商品画像として扱う
+
+        if skip_barcode_classification:
+            # 1枚目除外ON運用時: 仕入DBに載った画像は商品写真のみ想定（バーコード読取・OCRを省略）
+            for img_path in entry["images"]:
+                if not img_path:
+                    continue
                 if len(product_images) < 5:
                     product_images.append(img_path)
+        else:
+            for img_path in entry["images"]:
+                if not img_path:
+                    continue
+
+                # バーコード画像判定
+                try:
+                    if self.image_service.is_barcode_only_image(img_path):
+                        # バーコード画像（最初の1枚のみ保存）
+                        if not barcode_image:
+                            barcode_image = img_path
+                    else:
+                        # 商品画像（最大5枚）
+                        if len(product_images) < 5:
+                            product_images.append(img_path)
+                except Exception as e:
+                    logger.warning(f"Failed to check if image is barcode-only: {e}, treating as product image")
+                    # エラー時は商品画像として扱う
+                    if len(product_images) < 5:
+                        product_images.append(img_path)
         
         entry["product_images"] = product_images
         entry["barcode_image"] = barcode_image
@@ -4812,7 +4831,10 @@ class ImageManagerWidget(QWidget):
                         else:
                             skipped_count += len(image_paths)
                         if record_snapshot:
-                            self.add_registration_entry(record_snapshot)
+                            self.add_registration_entry(
+                                record_snapshot,
+                                skip_barcode_classification=self._is_group_first_image_excluded(group),
+                            )
                     else:
                         failed_groups.append(jan)
 
