@@ -6,7 +6,7 @@
 - 条件:
   - 日付=同日
   - 店舗=部分一致（店舗マスタ/学習辞書）
-  - 金額一致= |(合計 - 値引) - (アイテム合計)| <= 許容誤差（既定±10円）
+  - 金額一致= |(合計 - 値引) - (アイテム合計)| <= 許容誤差（既定±30円）
 
 - 学習:
   - ユーザーが選択/修正した店舗コードを `receipt_match_learnings` に蓄積
@@ -19,6 +19,7 @@ import unicodedata
 
 from ..database.store_db import StoreDatabase
 from ..database.receipt_db import ReceiptDatabase
+from .receipt_purchase_price_policy import RECEIPT_PRICE_DIFFERENCE_TOLERANCE
 
 
 @dataclass
@@ -34,8 +35,12 @@ class MatchCandidate:
 
 
 class ReceiptMatchingService:
-    def __init__(self, amount_tolerance: int = 10):
-        self.amount_tolerance = amount_tolerance
+    def __init__(self, amount_tolerance: Optional[int] = None):
+        self.amount_tolerance = (
+            RECEIPT_PRICE_DIFFERENCE_TOLERANCE
+            if amount_tolerance is None
+            else amount_tolerance
+        )
         self.store_db = StoreDatabase()
         self.receipt_db = ReceiptDatabase()
 

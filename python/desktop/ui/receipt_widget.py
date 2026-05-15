@@ -35,7 +35,7 @@ from PySide6.QtCore import Qt, QDate, QThread, Signal, QSettings, QTimer, QUrl, 
 from PySide6.QtGui import QPixmap, QTransform, QColor, QDesktopServices, QClipboard
 
 from desktop.utils.ui_utils import save_table_header_state, restore_table_header_state
-from desktop.utils.route_utils import mark_route_flags_from_folder
+from desktop.utils.route_utils import mark_route_evidence_completed
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -45,13 +45,21 @@ try:
     from services.receipt_service import ReceiptService  # python/desktop/services
     from services.receipt_matching_service import ReceiptMatchingService
     from services.purchase_break_even import compute_break_even_for_record
-    from services.receipt_purchase_price_policy import RECEIPT_MUTATES_PURCHASE_DB_PRICE
+    from services.receipt_purchase_price_policy import (
+        RECEIPT_MUTATES_PURCHASE_DB_PRICE,
+        RECEIPT_PRICE_DIFFERENCE_TOLERANCE,
+        is_acceptable_price_difference,
+    )
 except Exception:
     # 明示的パス指定のフォールバック
     from desktop.services.receipt_service import ReceiptService
     from desktop.services.receipt_matching_service import ReceiptMatchingService
     from desktop.services.purchase_break_even import compute_break_even_for_record
-    from desktop.services.receipt_purchase_price_policy import RECEIPT_MUTATES_PURCHASE_DB_PRICE
+    from desktop.services.receipt_purchase_price_policy import (
+        RECEIPT_MUTATES_PURCHASE_DB_PRICE,
+        RECEIPT_PRICE_DIFFERENCE_TOLERANCE,
+        is_acceptable_price_difference,
+    )
 from database.receipt_db import ReceiptDatabase
 from database.inventory_db import InventoryDatabase
 from database.store_db import StoreDatabase
@@ -449,6 +457,8 @@ class ReceiptWidget(QWidget):
         self._initial_data_loaded: bool = False
         # 確定処理の多重起動防止フラグ
         self._confirm_in_progress: bool = False
+        # 日付自動修復で「いいえ」を選んだレシートID（同一セッションで再確認しない）
+        self._date_repair_declined_ids: set[int] = set()
         
         self.setup_ui()
         
@@ -481,6 +491,27 @@ class ReceiptWidget(QWidget):
     def set_product_widget(self, product_widget):
         """ProductWidgetへの参照を設定"""
         self.product_widget = product_widget
+
+    def _ensure_product_widget_data_loaded(self) -> None:
+        """
+        データベース管理タブを開かなくても仕入DB（purchase_all_records）を参照できるようにする。
+        ProductWidget は showEvent で初回読み込みするため、証憑管理だけ先に使うと空になる。
+        """
+        if not self.product_widget:
+            return
+        try:
+            self.product_widget.ensure_initial_data_loaded()
+        except Exception as e:
+            logger.warning("仕入DBの先行読み込みに失敗しました: %s", e)
+
+    def _get_purchase_records(self) -> List[Dict[str, Any]]:
+        """仕入DBレコード一覧（必要なら先行読み込みしてから返す）"""
+        if not self.product_widget:
+            return []
+        self._ensure_product_widget_data_loaded()
+        if hasattr(self.product_widget, "get_all_purchase_records"):
+            return self.product_widget.get_all_purchase_records() or []
+        return getattr(self.product_widget, "purchase_all_records", []) or []
     
     def set_evidence_widget(self, evidence_widget):
         """EvidenceManagerWidgetへの参照を設定"""
@@ -1527,13 +1558,11 @@ class ReceiptWidget(QWidget):
             QMessageBox.warning(self, "警告", "レシートデータがありません。")
             return
         
-        # 仕入DBデータを取得
         if not self.product_widget:
             QMessageBox.warning(self, "警告", "仕入DBへの参照がありません。")
             return
-        
-        # 仕入DBの全データを取得
-        purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
+
+        purchase_records = self._get_purchase_records()
         if not purchase_records:
             QMessageBox.warning(self, "警告", "仕入DBにデータがありません。")
             return
@@ -1555,7 +1584,7 @@ class ReceiptWidget(QWidget):
                 if self.current_receipt_data:
                     self.current_receipt_data['items_count'] = candidate.items_count
             
-            if diff is not None and diff <= 10:
+            if is_acceptable_price_difference(diff):
                 if hasattr(self, 'match_result_label'):
                     self.match_result_label.setText(
                     f"マッチ成功: 差額 {diff}円（許容範囲内）\n"
@@ -2421,6 +2450,100 @@ class ReceiptWidget(QWidget):
         return code or name
 
     @staticmethod
+    def _format_price_difference_display(difference: Any) -> tuple[str, str]:
+        """差額ラベル用の表示文言と色を返す（±30円以内は OK）"""
+        try:
+            diff_int = int(round(float(difference)))
+        except (ValueError, TypeError):
+            return "差額: —", "#666666"
+        if is_acceptable_price_difference(diff_int):
+            return "差額: OK", "#4CAF50"
+        if diff_int == 0:
+            return "差額: ¥0", "#666666"
+        color = "#FF6B6B" if diff_int > 0 else "#4CAF50"
+        return f"差額: ¥{diff_int:,}", color
+
+    def _compute_linked_sku_total(
+        self,
+        linked_skus: List[str],
+        purchase_records: List[Dict[str, Any]],
+    ) -> int:
+        """紐付けSKUの仕入金額合計（仕入れ個数 × 仕入れ価格）"""
+        sku_total = 0
+        for sku in linked_skus:
+            for record in purchase_records:
+                record_sku = record.get('SKU') or record.get('sku', '')
+                if record_sku and record_sku.strip() == sku:
+                    price = record.get('仕入れ価格') or record.get('仕入価格') or record.get('purchase_price') or record.get('cost', 0)
+                    try:
+                        price = float(price) if price else 0
+                    except (ValueError, TypeError):
+                        price = 0
+                    quantity = record.get('仕入れ個数') or record.get('仕入個数') or record.get('quantity') or record.get('数量', 1)
+                    try:
+                        quantity = float(quantity) if quantity else 1
+                    except (ValueError, TypeError):
+                        quantity = 1
+                    sku_total += price * quantity
+                    break
+        return int(round(sku_total))
+
+    def _get_effective_price_difference(
+        self,
+        receipt: Dict[str, Any],
+        updates: Dict[str, Any],
+        purchase_records: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[int]:
+        """updates / DB / 紐付けSKU から差額を取得"""
+        if updates.get("price_difference") is not None:
+            try:
+                return int(round(float(updates["price_difference"])))
+            except (ValueError, TypeError):
+                pass
+        if receipt.get("price_difference") is not None:
+            try:
+                return int(round(float(receipt["price_difference"])))
+            except (ValueError, TypeError):
+                pass
+        if not purchase_records:
+            return None
+        linked_text = updates.get("linked_skus") or receipt.get("linked_skus") or ""
+        linked_skus = [s.strip() for s in linked_text.split(",") if s.strip()]
+        if not linked_skus:
+            return None
+        sku_total = self._compute_linked_sku_total(linked_skus, purchase_records)
+        receipt_total = updates.get("total_amount")
+        if receipt_total is None:
+            receipt_total = receipt.get("total_amount") or 0
+        try:
+            receipt_total = int(receipt_total) if receipt_total else 0
+        except (ValueError, TypeError):
+            receipt_total = 0
+        return int(sku_total - receipt_total)
+
+    def _apply_store_name_for_acceptable_difference(
+        self,
+        receipt: Dict[str, Any],
+        updates: Dict[str, Any],
+        purchase_records: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """差額が許容範囲内のとき、店舗名を店舗コード列と同じラベルに DB 保存用に揃える"""
+        diff = self._get_effective_price_difference(receipt, updates, purchase_records)
+        if not is_acceptable_price_difference(diff):
+            return
+
+        store_code = updates.get("store_code") or receipt.get("store_code") or ""
+        store_code = str(store_code).strip()
+        if " " in store_code:
+            store_code = store_code.split(" ")[0]
+        if not store_code:
+            return
+
+        label = self._format_store_code_label(store_code, receipt.get("store_name_raw") or "")
+        if label and updates.get("store_name_raw") != label:
+            updates["store_name_raw"] = label
+
+    @staticmethod
     def _normalize_purchase_date_text(value: Any) -> Optional[str]:
         """仕入日を yyyy/MM/dd 形式に正規化"""
         if not value:
@@ -2450,7 +2573,122 @@ class ReceiptWidget(QWidget):
         text = item.text().strip()
         return text.split(" ")[0] if text else ""
     
-    def refresh_receipt_list(self):
+    @staticmethod
+    def _is_receipt_document(receipt: Dict[str, Any]) -> bool:
+        """OCRテキストからレシート（保証書以外）か判定"""
+        ocr_text = receipt.get('ocr_text') or ""
+        if "保証書" in ocr_text or "保証期間" in ocr_text or "保証規定" in ocr_text:
+            return False
+        return True
+
+    @staticmethod
+    def _extract_purchase_date_key(purchase_date: str) -> Optional[str]:
+        """仕入日文字列から yyyy/mm/dd キーを抽出（日付異常検出・修復用）"""
+        if not purchase_date:
+            return None
+        date_only = str(purchase_date).strip()
+        if " " in date_only:
+            date_only = date_only.split(" ")[0]
+        date_only = date_only.replace("-", "/")
+        if not re.match(r"^\d{4}/\d{1,2}/\d{1,2}", date_only):
+            return None
+        parts = date_only.split("/")
+        try:
+            return f"{int(parts[0]):04d}/{int(parts[1]):02d}/{int(parts[2]):02d}"
+        except (ValueError, IndexError):
+            return None
+
+    def _get_majority_purchase_date_key(self, date_counter, threshold: float) -> Optional[str]:
+        """他レシートの多数派日付（50%以上）を返す。該当なしなら最多出現日"""
+        if not date_counter:
+            return None
+        for date_key, count in date_counter.most_common():
+            if count >= threshold:
+                return date_key
+        return date_counter.most_common(1)[0][0]
+
+    def _offer_purchase_date_auto_repair(
+        self,
+        receipts: List[Dict[str, Any]],
+        date_counter,
+        threshold: float,
+    ) -> bool:
+        """
+        日付が他レシートと大きく異なる行に修復確認を表示する。
+        1件でも修復したら True（一覧の再読み込みが必要）。
+        """
+        if len(date_counter) < 2:
+            return False
+
+        recommended_key = self._get_majority_purchase_date_key(date_counter, threshold)
+        if not recommended_key:
+            return False
+
+        rec_parts = recommended_key.split("/")
+        repaired_display = f"{rec_parts[0]}/{int(rec_parts[1]):02d}/{int(rec_parts[2]):02d}"
+        repaired_db_value = (
+            f"{int(rec_parts[0]):04d}/{int(rec_parts[1]):02d}/{int(rec_parts[2]):02d}"
+        )
+
+        repaired_any = False
+        for receipt in receipts:
+            if not self._is_receipt_document(receipt):
+                continue
+
+            receipt_id = receipt.get('id')
+            if not receipt_id or receipt_id in self._date_repair_declined_ids:
+                continue
+
+            purchase_date = receipt.get('purchase_date') or ""
+            date_key = self._extract_purchase_date_key(purchase_date)
+            if not date_key or date_counter.get(date_key, 0) >= threshold:
+                continue
+
+            purchase_time = (receipt.get('purchase_time') or "").strip()
+            current_display = purchase_date
+            if purchase_time:
+                current_display = f"{purchase_date} {purchase_time}"
+            after_display = repaired_display
+            if purchase_time:
+                after_display = f"{repaired_display} {purchase_time}"
+
+            file_path = receipt.get('original_file_path') or receipt.get('file_path') or ""
+            try:
+                file_name = Path(file_path).name if file_path else f"ID {receipt_id}"
+            except Exception:
+                file_name = f"ID {receipt_id}"
+
+            reply = QMessageBox.question(
+                self,
+                "日付の自動修復",
+                (
+                    f"レシート「{file_name}」の日付が他のレシートと異なります。\n\n"
+                    f"現在: {current_display}\n"
+                    f"修復後: {after_display}\n\n"
+                    f"{repaired_display} に修復しますか？"
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                try:
+                    self.receipt_db.update_receipt(
+                        int(receipt_id),
+                        {"purchase_date": repaired_db_value},
+                    )
+                    repaired_any = True
+                except Exception as e:
+                    QMessageBox.warning(
+                        self,
+                        "日付修復エラー",
+                        f"日付の更新に失敗しました:\n{e}",
+                    )
+            else:
+                self._date_repair_declined_ids.add(int(receipt_id))
+
+        return repaired_any
+
+    def refresh_receipt_list(self, offer_date_repair: bool = True):
         """レシート一覧を更新"""
         receipts = self.receipt_db.find_by_date_and_store(None)
         self.receipt_table.setRowCount(0)
@@ -2475,25 +2713,18 @@ class ReceiptWidget(QWidget):
         if default_title not in account_titles:
             account_titles.insert(0, default_title)
 
-        # 日付の異常検出用：全レシートの日付（yyyy/mm/dd部分）を集計
+        # 日付の異常検出用：レシート種別のみの日付（yyyy/mm/dd）を集計
         date_counter = Counter()
+        receipt_only_list: List[Dict[str, Any]] = []
         for receipt in receipts:
-            purchase_date = receipt.get('purchase_date') or ""
-            if purchase_date:
-                # 日付文字列から yyyy/mm/dd 部分を抽出
-                date_only = purchase_date.strip()
-                # 時刻が含まれている場合は除去
-                if " " in date_only:
-                    date_only = date_only.split(" ")[0]
-                # 形式を統一（yyyy/mm/dd または yyyy-mm-dd）
-                date_only = date_only.replace("-", "/")
-                # yyyy/mm/dd 形式に正規化
-                if re.match(r"^\d{4}/\d{1,2}/\d{1,2}", date_only):
-                    date_counter[date_only] += 1
+            if not self._is_receipt_document(receipt):
+                continue
+            receipt_only_list.append(receipt)
+            date_key = self._extract_purchase_date_key(receipt.get('purchase_date') or "")
+            if date_key:
+                date_counter[date_key] += 1
 
-        # 全レシート数
-        total_receipts = len(receipts) if receipts else 1
-        # 50%の閾値
+        total_receipts = len(receipt_only_list) if receipt_only_list else 1
         threshold = total_receipts * 0.5
 
         for receipt in receipts:
@@ -2540,23 +2771,14 @@ class ReceiptWidget(QWidget):
                 if purchase_time:
                     date_display = f"{purchase_date} {purchase_time}"
                 
-                # 日付の異常検出：yyyy/mm/dd部分が他のレシートと50%以上一致しているかチェック
+                # 日付の異常検出：他レシートの50%未満の日付は赤字
                 date_item = QTableWidgetItem(date_display)
-                if purchase_date:
-                    # 日付文字列から yyyy/mm/dd 部分を抽出
-                    date_only = purchase_date.strip()
-                    if " " in date_only:
-                        date_only = date_only.split(" ")[0]
-                    date_only = date_only.replace("-", "/")
-                    # yyyy/mm/dd 形式に正規化
-                    if re.match(r"^\d{4}/\d{1,2}/\d{1,2}", date_only):
-                        # この日付の出現回数を取得
-                        date_count = date_counter.get(date_only, 0)
-                        # 50%未満の場合は赤字で表示
-                        if date_count < threshold:
-                            date_item.setForeground(QColor("#FF6B6B"))  # 赤字
-                        else:
-                            date_item.setForeground(QColor("#FFFFFF"))  # 白字（デフォルト）
+                date_key = self._extract_purchase_date_key(purchase_date)
+                if date_key:
+                    if date_counter.get(date_key, 0) < threshold:
+                        date_item.setForeground(QColor("#FF6B6B"))
+                    else:
+                        date_item.setForeground(QColor("#FFFFFF"))
                 
                 self.receipt_table.setItem(row, 4, date_item)
                 
@@ -2577,18 +2799,17 @@ class ReceiptWidget(QWidget):
                         diff_val = None
 
                     if diff_val is not None:
-                        # 差額が0の場合は完全マッチとして「OK」を緑色で表示
-                        if diff_val == 0:
+                        if is_acceptable_price_difference(diff_val):
                             difference_text = "OK"
+                            difference_item = QTableWidgetItem(difference_text)
+                            difference_item.setForeground(QColor("#4CAF50"))
                         else:
                             difference_text = f"¥{diff_val:,}"
-
-                        difference_item = QTableWidgetItem(difference_text)
-                        # 差額の色分け（プラス: 赤、マイナス/ゼロOK: 緑）
-                        if diff_val > 0:
-                            difference_item.setForeground(QColor("#FF6B6B"))
-                        else:
-                            difference_item.setForeground(QColor("#4CAF50"))
+                            difference_item = QTableWidgetItem(difference_text)
+                            if diff_val > 0:
+                                difference_item.setForeground(QColor("#FF6B6B"))
+                            else:
+                                difference_item.setForeground(QColor("#4CAF50"))
                         self.receipt_table.setItem(row, 8, difference_item)
                     else:
                         self.receipt_table.setItem(row, 8, QTableWidgetItem(""))
@@ -2602,9 +2823,8 @@ class ReceiptWidget(QWidget):
                 store_item.setData(Qt.UserRole, store_code)
                 self.receipt_table.setItem(row, 9, store_item)
 
-                # 差額OK（完全マッチ）の場合は、店舗名カラムを店舗コードカラムの店舗名で上書き
-                # → 店舗コード側のラベル（コード＋正式店舗名）を店舗名としても表示
-                if diff_val == 0 and store_label:
+                # 差額OK（許容範囲内）の場合は、店舗名を店舗コードの正式名称で上書き
+                if diff_val is not None and is_acceptable_price_difference(diff_val) and store_label:
                     self.receipt_table.setItem(row, 5, QTableWidgetItem(store_label))
                 
                 # 登録番号（10列目） - 適格請求書の登録番号 T + 13桁
@@ -2717,6 +2937,11 @@ class ReceiptWidget(QWidget):
 
                 self.warranty_table.blockSignals(False)
                 warranty_row += 1
+
+        if offer_date_repair and receipt_only_list and len(date_counter) >= 2:
+            if self._offer_purchase_date_auto_repair(receipt_only_list, date_counter, threshold):
+                self.refresh_receipt_list(offer_date_repair=False)
+                return
 
         self.on_receipt_selection_changed()
 
@@ -3169,7 +3394,7 @@ class ReceiptWidget(QWidget):
         if not self.product_widget:
             QMessageBox.warning(self, "警告", "仕入DBへの参照がありません。")
             return
-        purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
+        purchase_records = self._get_purchase_records()
         if not purchase_records:
             QMessageBox.warning(self, "警告", "仕入DBにデータがありません。")
             return
@@ -3385,41 +3610,19 @@ class ReceiptWidget(QWidget):
                     # 既存のSKUと候補SKUをマージ（重複を避ける）
                     merged_skus = list(set(existing_skus + candidate_skus))
                     updates["linked_skus"] = ','.join(merged_skus)
-                    
-                    # 紐付けSKUの合計金額を計算（仕入れ個数 × 仕入れ価格）
-                    sku_total = 0
-                    for sku in merged_skus:
-                        for record in purchase_records:
-                            record_sku = record.get('SKU') or record.get('sku', '')
-                            if record_sku and record_sku.strip() == sku:
-                                # 仕入れ価格を取得
-                                price = record.get('仕入れ価格') or record.get('仕入価格') or record.get('purchase_price') or record.get('cost', 0)
-                                try:
-                                    price = float(price) if price else 0
-                                except (ValueError, TypeError):
-                                    price = 0
-                                # 仕入れ個数を取得
-                                quantity = record.get('仕入れ個数') or record.get('仕入個数') or record.get('quantity') or record.get('数量', 1)
-                                try:
-                                    quantity = float(quantity) if quantity else 1
-                                except (ValueError, TypeError):
-                                    quantity = 1
-                                # 金額 = 仕入れ個数 × 仕入れ価格
-                                total_amount = price * quantity
-                                sku_total += total_amount
-                                break
-                    
-                    # レシートの合計金額を取得
+                    sku_total = self._compute_linked_sku_total(merged_skus, purchase_records)
                     receipt_total = receipt.get('total_amount') or 0
                     try:
                         receipt_total = int(receipt_total) if receipt_total else 0
                     except (ValueError, TypeError):
                         receipt_total = 0
-                    
-                    # 差額を計算
-                    difference = sku_total - receipt_total
-                    updates["price_difference"] = int(difference)
-                
+                    updates["price_difference"] = int(sku_total - receipt_total)
+
+                # 差額OKの行は店舗名を店舗コード列と同じ表示に揃える
+                self._apply_store_name_for_acceptable_difference(
+                    receipt, updates, purchase_records
+                )
+
                 if updates:
                     # 10円以下の差額の場合は自動修正を提案
                     difference = updates.get("price_difference")
@@ -3953,8 +4156,8 @@ class ReceiptWidget(QWidget):
         if not self.product_widget:
             QMessageBox.warning(self, "警告", "仕入DBへの参照がありません。")
             return
-        
-        purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
+
+        purchase_records = self._get_purchase_records()
         if not purchase_records:
             QMessageBox.warning(self, "警告", "仕入DBにデータがありません。")
             return
@@ -6558,8 +6761,7 @@ class ReceiptWidget(QWidget):
             # 合計金額と差額を表示（後で更新できるように変数に保存）
             receipt_total = int(receipt_data.get('total_amount') or 0)
             difference = total_price - receipt_total
-            difference_text = f"差額: ¥{int(difference):,}" if difference != 0 else "差額: ¥0"
-            difference_color = "#FF6B6B" if difference > 0 else "#4CAF50" if difference < 0 else "#666666"
+            difference_text, difference_color = self._format_price_difference_display(difference)
             
             total_label = QLabel(f"合計: ¥{int(total_price):,} ({difference_text})")
             total_label.setStyleSheet(f"font-weight: bold; font-size: 12pt; color: {difference_color};")
@@ -6948,8 +7150,8 @@ class ReceiptWidget(QWidget):
                     if show_message:
                         QMessageBox.warning(None, "警告", "仕入DBへの参照がありません。")
                     return
-                
-                purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
+
+                purchase_records = self._get_purchase_records()
                 if not purchase_records:
                     if show_message:
                         QMessageBox.warning(None, "警告", "仕入DBにデータがありません。")
@@ -7496,7 +7698,7 @@ class ReceiptWidget(QWidget):
                     
                     # 差額を計算（SKU合計 - レシート合計（値引き後））
                     difference = sku_total - receipt_total_after_discount
-                    # 差額が0の場合も 0 を保存しておき、一覧では「OK」表示にする
+                    # 実差額を保存（一覧では ±30円以内を「OK」表示。仕入DBの金額は変更しない）
                     updates['price_difference'] = int(difference)
                 else:
                     # 科目が「仕入」以外の場合は紐付けSKUをクリアし、差額は0（OK表示）にする
@@ -8410,8 +8612,7 @@ class ReceiptWidget(QWidget):
         
         # 差額を計算
         difference = total_price - receipt_total
-        difference_text = f"差額: ¥{int(difference):,}" if difference != 0 else "差額: ¥0"
-        difference_color = "#FF6B6B" if difference > 0 else "#4CAF50" if difference < 0 else "#666666"
+        difference_text, difference_color = self._format_price_difference_display(difference)
         
         # 合計ラベルを更新（オブジェクト名で検索）
         total_label = parent.findChild(QLabel, "sku_total_label")
@@ -9176,8 +9377,14 @@ class ReceiptWidget(QWidget):
             # ルート証憑フラグ（レシート確定完了）— progress 終了後に実行
             try:
                 base_folder = getattr(self, "current_folder", None) or getattr(self, "default_folder", None)
-                if base_folder:
-                    mark_route_flags_from_folder(base_folder, evidence_completed=True)
+                route_id = mark_route_evidence_completed(
+                    folder_path=base_folder,
+                    receipts=all_receipts,
+                )
+                if route_id:
+                    print(f"[DEBUG] ルート証憑フラグを更新: route_id={route_id}")
+                else:
+                    print("[DEBUG] ルート証憑フラグ: 対応するルートサマリーが見つかりませんでした")
             except Exception as e:
                 print(f"証憑フラグ更新エラー: {e}")
 
@@ -9653,8 +9860,12 @@ class ReceiptWidget(QWidget):
                 base_folder = self.current_folder
             elif getattr(self, "default_folder", None):
                 base_folder = self.default_folder
-            if base_folder:
-                mark_route_flags_from_folder(base_folder, evidence_completed=True)
+            route_id = mark_route_evidence_completed(
+                folder_path=base_folder,
+                receipts=all_receipts,
+            )
+            if route_id:
+                print(f"[DEBUG] ルート証憑フラグを更新: route_id={route_id}")
         except Exception as e:
             print(f"証憑フラグ更新エラー: {e}")
         t_end = perf_counter()

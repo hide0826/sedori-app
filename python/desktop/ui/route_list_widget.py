@@ -139,6 +139,34 @@ class RouteListWidget(QWidget):
         
         parent_layout.addWidget(table_group)
     
+    def refresh_route_flags(self, route_id: int) -> bool:
+        """指定ルートの出品・証憑・画像チェック列だけDB値で更新（一覧全体の再計算はしない）"""
+        route = self.route_db.get_route_summary(route_id)
+        if not route:
+            return False
+
+        for row in range(self.table.rowCount()):
+            id_item = self.table.item(row, 0)
+            if not id_item or id_item.data(Qt.UserRole) != route_id:
+                continue
+
+            self.table.blockSignals(True)
+            try:
+                for col_index, key in (
+                    (2, "listing_completed"),
+                    (3, "evidence_completed"),
+                    (4, "images_completed"),
+                ):
+                    flag_item = self.table.item(row, col_index)
+                    if not flag_item:
+                        continue
+                    checked = bool(route.get(key) or 0)
+                    flag_item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+            finally:
+                self.table.blockSignals(False)
+            return True
+        return False
+
     def load_routes(self):
         """ルート一覧を読み込む"""
         # 既存データの同期（毎回実行して最新化）
@@ -283,7 +311,11 @@ class RouteListWidget(QWidget):
                                'total_item_count', 'purchase_success_rate', 'avg_purchase_price']:
                         if key in route:
                             update_data[key] = route[key]
-                    
+                    # 進捗フラグは一覧表示の値を維持（COALESCE 任せにしない）
+                    for flag_key in ('listing_completed', 'evidence_completed', 'images_completed'):
+                        if flag_key in route:
+                            update_data[flag_key] = bool(route.get(flag_key) or 0)
+
                     self.route_db.update_route_summary(route_id, update_data)
                 except Exception as e:
                     # エラーは無視（表示は継続）

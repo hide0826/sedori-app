@@ -1,3 +1,18 @@
+## 2026-05-15 証憑管理（レシート）の照合・ルート証憑フラグ連携
+
+- **目的**: 証憑管理タブだけでレシート確定・一括マッチングまで完結できるようにし、ルートサマリーの進捗チェック（証憑）と整合させる。仕入DBの金額は変更しない方針（`RECEIPT_MUTATES_PURCHASE_DB_PRICE=False`）を維持したまま差額許容を表示に反映する。
+- **変更**: `python/desktop/ui/receipt_widget.py`
+  - **日付自動修復**: 他レシートの多数派日付と比較し、異常日付に Yes/No で修復確認（同一セッションで「いいえ」は再提示しない）。
+  - **差額 ±30円以内を「OK」**（緑表示）。店舗名は差額OK時に店舗コード正式名へ揃える。
+  - **一括マッチング**: 差額OK行の `store_name_raw` を店舗コード表示と同一に更新。仕入DBは `_get_purchase_records()` で先行読み込み（DB管理タブ未表示でも可）。
+- **変更**: `python/desktop/services/receipt_purchase_price_policy.py`, `receipt_matching_service.py`
+  - `RECEIPT_PRICE_DIFFERENCE_TOLERANCE = 30` と `is_acceptable_price_difference()` を追加。マッチング許容も30円に統一。
+- **変更**: `python/desktop/utils/route_utils.py`, `route_list_widget.py`, `main_window.py`, `route_management_widget.py`
+  - 確定後に **証憑フラグ**（`evidence_completed`）を更新。フォルダ名に加え **レシート購入日（最多日）** からルートサマリーを推定。
+  - `refresh_route_flags(route_id)` で一覧のチェック列のみ即時反映（DBはONでも画面が古いままになる問題を解消）。
+- **動作確認**: 確定後ログ `route_id=42` 更新、再起動後ルートサマリー証憑ONを確認。
+- **Git**: （本コミット）
+
 ## 2026-05-10（続き）古物台帳相手区分・台帳DBマイグレーション・電脳店舗住所電話
 
 - **目的**: 古物台帳の相手区分を実務に合わせて「法人／フリマ／個人」に一本化し、PDFでは法人表記に揃える。台帳DBの旧区分をマイグレーションする。電脳店舗マスタに店舗一覧と同様の住所・電話を持たせる。

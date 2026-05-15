@@ -45,6 +45,13 @@ class RouteManagementWidget(QWidget):
         self.route_summary_widget.data_saved.connect(self.route_list_widget.load_routes)
         self.route_summary_widget.data_saved.connect(self.route_visit_widget.load_data)
 
+        try:
+            from utils.route_utils import set_route_list_refresh_callback, set_route_list_widget
+            set_route_list_refresh_callback(self.route_list_widget.load_routes)
+            set_route_list_widget(self.route_list_widget)
+        except Exception:
+            pass
+
         if inventory_widget is not None:
             self.set_inventory_widget(inventory_widget)
 

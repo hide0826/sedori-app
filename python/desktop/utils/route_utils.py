@@ -17,13 +17,14 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from database.route_db import RouteDatabase
 from database.store_db import StoreDatabase
 
 # ルート一覧（RouteListWidget）の再読込。main_window 初期化時に登録する。
 _route_list_refresh_cb: Optional[Callable[[], None]] = None
+_route_list_widget: Any = None
 
 
 def set_route_list_refresh_callback(fn: Optional[Callable[[], None]]) -> None:
@@ -32,7 +33,22 @@ def set_route_list_refresh_callback(fn: Optional[Callable[[], None]]) -> None:
     _route_list_refresh_cb = fn
 
 
-def _invoke_route_list_refresh() -> None:
+def set_route_list_widget(widget: Any) -> None:
+    """ルートサマリー一覧ウィジェットへの参照（行単位のチェック更新用）。"""
+    global _route_list_widget
+    _route_list_widget = widget
+
+
+def _invoke_route_list_refresh(route_id: Optional[int] = None) -> None:
+    """一覧を再読込する。route_id 指定時は該当行のチェック列だけ先に更新する。"""
+    if route_id is not None and _route_list_widget is not None:
+        refresh_fn = getattr(_route_list_widget, "refresh_route_flags", None)
+        if callable(refresh_fn):
+            try:
+                if refresh_fn(int(route_id)):
+                    return
+            except Exception:
+                pass
     if _route_list_refresh_cb is None:
         return
     try:
@@ -158,6 +174,93 @@ def find_route_summary_from_folder(folder_path: str | Path) -> Optional[dict]:
     return None
 
 
+def _normalize_receipt_route_date(purchase_date: Any) -> Optional[str]:
+    """レシートの purchase_date を route_summaries.route_date 形式 (yyyy-MM-dd) に正規化"""
+    if not purchase_date:
+        return None
+    date_str = str(purchase_date).strip()
+    if not date_str:
+        return None
+    if " " in date_str:
+        date_str = date_str.split(" ")[0]
+    if "T" in date_str:
+        date_str = date_str.split("T")[0]
+    date_str = date_str.replace("/", "-")
+    try:
+        from datetime import datetime
+        return datetime.strptime(date_str[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
+def find_route_summary_from_receipts(
+    receipts: List[Dict[str, Any]],
+    folder_path: str | Path | None = None,
+) -> Optional[dict]:
+    """
+    レシート一覧の購入日（最多日）から route_summaries を推定する。
+    フォルダパスがあれば先にフォルダ名マッチを試し、同一日に複数ルートがある場合の補助にも使う。
+    """
+    if not receipts:
+        return None
+
+    if folder_path:
+        route = find_route_summary_from_folder(folder_path)
+        if route:
+            return route
+
+    date_counter: Dict[str, int] = {}
+    for receipt in receipts:
+        normalized = _normalize_receipt_route_date(receipt.get("purchase_date"))
+        if normalized:
+            date_counter[normalized] = date_counter.get(normalized, 0) + 1
+
+    if not date_counter:
+        return None
+
+    route_date = max(date_counter.items(), key=lambda item: item[1])[0]
+    route_db = RouteDatabase()
+    candidates = route_db.list_route_summaries(start_date=route_date, end_date=route_date)
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    if folder_path:
+        route = find_route_summary_from_folder(folder_path)
+        if route and (route.get("route_date") or "")[:10] == route_date[:10]:
+            return route
+
+    return candidates[0]
+
+
+def mark_route_evidence_completed(
+    folder_path: str | Path | None = None,
+    receipts: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[int]:
+    """
+    証憑管理の「確定」後にルートサマリーの証憑チェックを ON にする。
+    1. レシート画像フォルダ名からルートを特定
+    2. 失敗時はレシート日付（最多日）からルートサマリーを推定
+    """
+    route = None
+    if folder_path:
+        route = find_route_summary_from_folder(folder_path)
+    if not route and receipts:
+        route = find_route_summary_from_receipts(receipts, folder_path=folder_path)
+    if not route:
+        return None
+
+    route_id = route.get("id")
+    if not route_id:
+        return None
+
+    rid = int(route_id)
+    RouteDatabase().set_route_flag(rid, "evidence_completed", True)
+    _invoke_route_list_refresh(rid)
+    return rid
+
+
 def mark_route_flags_from_folder(
     folder_path: str | Path,
     listing_completed: bool = False,
@@ -189,5 +292,5 @@ def mark_route_flags_from_folder(
     if images_completed:
         route_db.set_route_flag(route_id, "images_completed", True)
 
-    _invoke_route_list_refresh()
+    _invoke_route_list_refresh(int(route_id))
     return route_id
