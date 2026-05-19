@@ -75,6 +75,21 @@ class JanGroup(NamedTuple):
     images: List[ImageRecord]
 
 
+class AutoCorrectPreset(NamedTuple):
+    """出品向け自動補正プリセット（contrast / brightness / sharpness の倍率）"""
+    contrast: float
+    brightness: float
+    sharpness: float
+
+
+AUTO_CORRECT_PRESETS: Dict[str, AutoCorrectPreset] = {
+    "weak": AutoCorrectPreset(contrast=1.08, brightness=1.03, sharpness=1.10),
+    "standard": AutoCorrectPreset(contrast=1.18, brightness=1.06, sharpness=1.22),
+    "strong": AutoCorrectPreset(contrast=1.28, brightness=1.10, sharpness=1.35),
+}
+DEFAULT_AUTO_CORRECT_PRESET = "standard"
+
+
 class ImageService:
     """画像管理サービス"""
     
@@ -447,7 +462,156 @@ class ImageService:
         records.sort(key=lambda r: r.capture_dt if r.capture_dt else datetime.min)
         
         return records
-    
+
+    @staticmethod
+    def resolve_auto_correct_preset(preset_id: Optional[str]) -> AutoCorrectPreset:
+        key = (preset_id or DEFAULT_AUTO_CORRECT_PRESET).strip().lower()
+        return AUTO_CORRECT_PRESETS.get(key, AUTO_CORRECT_PRESETS[DEFAULT_AUTO_CORRECT_PRESET])
+
+    @staticmethod
+    def apply_product_auto_correct(
+        img: Image.Image,
+        preset_id: str = DEFAULT_AUTO_CORRECT_PRESET,
+    ) -> Image.Image:
+        """
+        出品向けの簡易自動補正（AIなし: 明るさ・コントラスト・シャープ）。
+        """
+        preset = ImageService.resolve_auto_correct_preset(preset_id)
+        if img.mode not in ("RGB", "L"):
+            work = img.convert("RGB")
+        else:
+            work = img.convert("RGB") if img.mode == "L" else img.copy()
+
+        work = ImageEnhance.Contrast(work).enhance(preset.contrast)
+        work = ImageEnhance.Brightness(work).enhance(preset.brightness)
+        work = ImageEnhance.Sharpness(work).enhance(preset.sharpness)
+        return work
+
+    def load_image_for_auto_correct_preview(
+        self,
+        image_path: str,
+        preset_id: str = DEFAULT_AUTO_CORRECT_PRESET,
+    ) -> Image.Image:
+        """EXIF補正後にプリセットを適用したプレビュー用画像を返す。"""
+        with Image.open(image_path) as src:
+            img = ImageOps.exif_transpose(src)
+            return self.apply_product_auto_correct(img, preset_id)
+
+    @staticmethod
+    def _save_format_for_path(dest_path: str, lightweight: bool) -> tuple[str, dict]:
+        """保存先パスから PIL 保存形式とオプションを決める。"""
+        ext = Path(dest_path).suffix.lower()
+        if lightweight or ext in (".jpg", ".jpeg"):
+            return "JPEG", {"quality": 85 if lightweight else 92, "optimize": True}
+        if ext == ".png":
+            return "PNG", {}
+        if ext == ".webp":
+            return "WEBP", {"quality": 90}
+        return "JPEG", {"quality": 92, "optimize": True}
+
+    def rename_image_file(
+        self,
+        source_path: str,
+        dest_path: str,
+        *,
+        lightweight: bool = False,
+        auto_correct: bool = False,
+        auto_correct_preset: str = DEFAULT_AUTO_CORRECT_PRESET,
+        max_long_edge: int = 1600,
+        jpeg_quality: int = 85,
+    ) -> None:
+        """
+        リネーム（必要なら自動補正・軽量化）を行う。
+        lightweight / auto_correct がともに False のときは os.rename のみ。
+        """
+        source_path = os.path.normpath(source_path)
+        dest_path = os.path.normpath(dest_path)
+        if not os.path.isfile(source_path):
+            raise FileNotFoundError(f"source not found: {source_path}")
+
+        if not lightweight and not auto_correct:
+            if os.path.normcase(os.path.abspath(source_path)) != os.path.normcase(
+                os.path.abspath(dest_path)
+            ):
+                os.rename(source_path, dest_path)
+            return
+
+        size_before = os.path.getsize(source_path)
+        dest_dir = os.path.dirname(os.path.abspath(dest_path))
+        if not dest_dir:
+            dest_dir = os.path.abspath(os.path.curdir)
+
+        tmp_path: Optional[str] = None
+        try:
+            with Image.open(source_path) as src:
+                img = ImageOps.exif_transpose(src)
+                if auto_correct:
+                    img = self.apply_product_auto_correct(img, auto_correct_preset)
+                if lightweight:
+                    img = img.convert("RGB")
+                    w, h = img.size
+                    long_edge = max(w, h)
+                    if long_edge > max_long_edge:
+                        scale = max_long_edge / float(long_edge)
+                        new_w = max(1, int(round(w * scale)))
+                        new_h = max(1, int(round(h * scale)))
+                        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                    save_format = "JPEG"
+                    save_kwargs = {"quality": jpeg_quality, "optimize": True}
+                else:
+                    if img.mode in ("RGBA", "LA", "P"):
+                        if img.mode == "P" and "transparency" in img.info:
+                            img = img.convert("RGBA")
+                        elif img.mode == "P":
+                            img = img.convert("RGB")
+                    elif img.mode != "RGB":
+                        img = img.convert("RGB")
+                    save_format, save_kwargs = self._save_format_for_path(dest_path, lightweight=False)
+
+                fd, tmp_path = tempfile.mkstemp(
+                    suffix=".tmp",
+                    prefix="hir_rename_",
+                    dir=dest_dir,
+                )
+                os.close(fd)
+                img.save(tmp_path, save_format, **save_kwargs)
+
+            size_after = os.path.getsize(tmp_path)
+            if size_after == 0:
+                raise ValueError("rename image output is empty")
+
+            with Image.open(tmp_path) as chk:
+                chk.load()
+
+            os.replace(tmp_path, dest_path)
+            tmp_path = None
+
+            logger.info(
+                "Rename image (lightweight=%s, auto_correct=%s, preset=%s): %.3f MB -> %.3f MB %s -> %s",
+                lightweight,
+                auto_correct,
+                auto_correct_preset if auto_correct else "-",
+                size_before / (1024.0 * 1024.0),
+                size_after / (1024.0 * 1024.0),
+                source_path,
+                dest_path,
+            )
+
+            if os.path.normcase(os.path.abspath(source_path)) != os.path.normcase(
+                os.path.abspath(dest_path)
+            ):
+                try:
+                    os.remove(source_path)
+                except OSError as exc:
+                    logger.warning("Could not remove source after rename: %s (%s)", source_path, exc)
+        except Exception:
+            if tmp_path and os.path.isfile(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            raise
+
     def lightweight_jpeg_rename(
         self,
         source_path: str,
@@ -460,82 +624,14 @@ class ImageService:
         一時ファイルに保存し検証後、os.replace で dest に反映する。
         source と dest が異なるパスなら、成功後に source を削除する。
         """
-        source_path = os.path.normpath(source_path)
-        dest_path = os.path.normpath(dest_path)
-        if not os.path.isfile(source_path):
-            raise FileNotFoundError(f"source not found: {source_path}")
-
-        size_before = os.path.getsize(source_path)
-        dest_dir = os.path.dirname(os.path.abspath(dest_path))
-        if not dest_dir:
-            dest_dir = os.path.abspath(os.path.curdir)
-
-        tmp_path: Optional[str] = None
-        try:
-            with Image.open(source_path) as src:
-                img = ImageOps.exif_transpose(src)
-                img = img.convert("RGB")
-                w, h = img.size
-                long_edge = max(w, h)
-                if long_edge > max_long_edge:
-                    scale = max_long_edge / float(long_edge)
-                    new_w = max(1, int(round(w * scale)))
-                    new_h = max(1, int(round(h * scale)))
-                    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-
-                fd, tmp_path = tempfile.mkstemp(
-                    suffix=".tmp",
-                    prefix="hir_lightweight_",
-                    dir=dest_dir,
-                )
-                os.close(fd)
-                img.save(tmp_path, "JPEG", quality=jpeg_quality, optimize=True)
-
-            size_after = os.path.getsize(tmp_path)
-            if size_after == 0:
-                raise ValueError("lightweight JPEG output is empty")
-
-            with Image.open(tmp_path) as chk:
-                chk.load()
-
-            os.replace(tmp_path, dest_path)
-            tmp_path = None
-
-            mb_b = size_before / (1024.0 * 1024.0)
-            mb_a = size_after / (1024.0 * 1024.0)
-            if size_before > 0:
-                reduced_pct = (1.0 - (size_after / float(size_before))) * 100.0
-                logger.info(
-                    "Lightweight JPEG rename: %.3f MB -> %.3f MB (%.1f%% reduction) %s -> %s",
-                    mb_b,
-                    mb_a,
-                    reduced_pct,
-                    source_path,
-                    dest_path,
-                )
-            else:
-                logger.info(
-                    "Lightweight JPEG rename: %.3f MB -> %.3f MB %s -> %s",
-                    mb_b,
-                    mb_a,
-                    source_path,
-                    dest_path,
-                )
-
-            if os.path.normcase(os.path.abspath(source_path)) != os.path.normcase(
-                os.path.abspath(dest_path)
-            ):
-                try:
-                    os.remove(source_path)
-                except OSError as exc:
-                    logger.warning("Could not remove source after lightweight rename: %s (%s)", source_path, exc)
-        except Exception:
-            if tmp_path and os.path.isfile(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-            raise
+        self.rename_image_file(
+            source_path,
+            dest_path,
+            lightweight=True,
+            auto_correct=False,
+            max_long_edge=max_long_edge,
+            jpeg_quality=jpeg_quality,
+        )
     
     def group_by_jan(self, records: List[ImageRecord]) -> List[JanGroup]:
         """

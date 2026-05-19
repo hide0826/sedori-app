@@ -11,6 +11,7 @@ import sys
 import os
 import json
 import re
+import io
 import concurrent.futures
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -26,9 +27,10 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QSplitter, QGroupBox, QFormLayout,
     QFileDialog, QMessageBox, QSizePolicy, QTextEdit, QProgressDialog,
     QInputDialog, QMenu, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
-    QTabWidget, QSpinBox
+    QTabWidget, QSpinBox, QComboBox
 )
 from PySide6.QtGui import QPixmap, QFont, QDrag, QDropEvent, QImageReader, QImage, QDesktopServices, QCursor
+from PIL import Image, ImageOps
 
 from desktop.utils.ui_utils import save_table_header_state, restore_table_header_state
 from desktop.utils.route_utils import mark_route_flags_from_folder
@@ -38,11 +40,21 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 # デスクトップ側servicesを優先して読み込む
 try:
-    from services.image_service import ImageService, ImageRecord, JanGroup  # python/desktop/services
+    from services.image_service import (  # python/desktop/services
+        ImageService,
+        ImageRecord,
+        JanGroup,
+        DEFAULT_AUTO_CORRECT_PRESET,
+    )
     from services.ocr_service import OCRService
 except Exception:
     # 明示的パス指定のフォールバック
-    from desktop.services.image_service import ImageService, ImageRecord, JanGroup
+    from desktop.services.image_service import (
+        ImageService,
+        ImageRecord,
+        JanGroup,
+        DEFAULT_AUTO_CORRECT_PRESET,
+    )
     from desktop.services.ocr_service import OCRService
 
 from database.image_db import ImageDatabase
@@ -597,13 +609,33 @@ class ImageManagerWidget(QWidget):
         folder_layout.addWidget(self.clear_images_btn)
 
         folder_outer.addLayout(folder_layout)
+        rename_options_row = QHBoxLayout()
+        rename_options_row.setSpacing(16)
         self.lightweight_rename_checkbox = QCheckBox("リネーム時に軽量化（長辺1600px・JPEG品質85・EXIF削除）")
         self.lightweight_rename_checkbox.setToolTip(
             "有効にすると、SKUリネーム時に画像を再エンコードします。"
             "一時ファイルへ保存してから置き換えるため、失敗時も元ファイルを保護しやすくなります。"
         )
-        self.lightweight_rename_checkbox.stateChanged.connect(self._on_lightweight_rename_preference_changed)
-        folder_outer.addWidget(self.lightweight_rename_checkbox)
+        self.lightweight_rename_checkbox.stateChanged.connect(self._on_rename_option_preference_changed)
+        self.auto_correct_rename_checkbox = QCheckBox("リネーム時に自動補正（明るさ・コントラスト・シャープ）")
+        self.auto_correct_rename_checkbox.setToolTip(
+            "有効にすると、リネーム時にAIを使わず画像を補正します。"
+            "軽量化のON/OFFとは独立して使えます（補正のみ・補正＋軽量化の両方が可能）。"
+        )
+        self.auto_correct_rename_checkbox.stateChanged.connect(self._on_rename_option_preference_changed)
+        rename_options_row.addWidget(self.lightweight_rename_checkbox)
+        rename_options_row.addWidget(self.auto_correct_rename_checkbox)
+        rename_options_row.addWidget(QLabel("補正:"))
+        self.auto_correct_preset_combo = QComboBox()
+        for label, preset_id in (("弱", "weak"), ("標準", "standard"), ("強", "strong")):
+            self.auto_correct_preset_combo.addItem(label, preset_id)
+        self.auto_correct_preset_combo.setToolTip(
+            "リネーム時の自動補正の強さ。右のプレビューで補正後の見え方を確認できます。"
+        )
+        self.auto_correct_preset_combo.currentIndexChanged.connect(self._on_auto_correct_preset_changed)
+        rename_options_row.addWidget(self.auto_correct_preset_combo)
+        rename_options_row.addStretch()
+        folder_outer.addLayout(rename_options_row)
         
         layout.addWidget(folder_group)
         
@@ -680,14 +712,34 @@ class ImageManagerWidget(QWidget):
         right_group = QGroupBox("詳細情報")
         right_layout = QVBoxLayout(right_group)
         
-        # プレビュー
-        preview_label = QLabel("プレビュー")
-        self.preview_label = QLabel()
-        self.preview_label.setMinimumSize(256, 256)
-        self.preview_label.setStyleSheet("border: 1px solid gray; background-color: #f0f0f0;")
-        self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setText("画像を選択してください")
-        self.preview_label.setScaledContents(True)
+        # プレビュー（元画像 / 補正後）
+        preview_group = QGroupBox("プレビュー")
+        preview_group_layout = QVBoxLayout(preview_group)
+        preview_split = QHBoxLayout()
+        preview_style = "border: 1px solid gray; background-color: #f0f0f0;"
+        orig_col = QVBoxLayout()
+        orig_col.addWidget(QLabel("元画像"))
+        self.preview_original_label = QLabel()
+        self.preview_original_label.setMinimumSize(180, 180)
+        self.preview_original_label.setStyleSheet(preview_style)
+        self.preview_original_label.setAlignment(Qt.AlignCenter)
+        self.preview_original_label.setText("画像を選択")
+        self.preview_original_label.setScaledContents(True)
+        orig_col.addWidget(self.preview_original_label)
+        corr_col = QVBoxLayout()
+        self.preview_corrected_caption = QLabel("補正後（標準）")
+        corr_col.addWidget(self.preview_corrected_caption)
+        self.preview_corrected_label = QLabel()
+        self.preview_corrected_label.setMinimumSize(180, 180)
+        self.preview_corrected_label.setStyleSheet(preview_style)
+        self.preview_corrected_label.setAlignment(Qt.AlignCenter)
+        self.preview_corrected_label.setText("画像を選択")
+        self.preview_corrected_label.setScaledContents(True)
+        corr_col.addWidget(self.preview_corrected_label)
+        preview_split.addLayout(orig_col)
+        preview_split.addLayout(corr_col)
+        preview_group_layout.addLayout(preview_split)
+        self.preview_label = self.preview_original_label
         
         # 詳細情報フォーム
         detail_form = QFormLayout()
@@ -724,8 +776,7 @@ class ImageManagerWidget(QWidget):
         button_layout.addWidget(self.read_barcode_btn)
         button_layout.addWidget(self.save_jan_btn)
         
-        right_layout.addWidget(preview_label)
-        right_layout.addWidget(self.preview_label)
+        right_layout.addWidget(preview_group)
         right_layout.addLayout(detail_form)
         right_layout.addLayout(button_layout)
         right_layout.addStretch()
@@ -781,6 +832,14 @@ class ImageManagerWidget(QWidget):
                     lw = config.get('image_manager_lightweight_rename')
                     if lw is not None:
                         self.lightweight_rename_checkbox.setChecked(bool(lw))
+                    ac = config.get('image_manager_auto_correct_on_rename')
+                    if ac is not None:
+                        self.auto_correct_rename_checkbox.setChecked(bool(ac))
+                    preset_id = config.get(
+                        'image_manager_auto_correct_preset',
+                        DEFAULT_AUTO_CORRECT_PRESET,
+                    )
+                    self._set_auto_correct_preset_combo(preset_id)
         except Exception as e:
             print(f"Failed to load last directory: {e}")
     
@@ -802,7 +861,9 @@ class ImageManagerWidget(QWidget):
                 config['image_manager_default_root_dir'] = self.default_root_dir
 
             config['image_manager_lightweight_rename'] = self.lightweight_rename_checkbox.isChecked()
-            
+            config['image_manager_auto_correct_on_rename'] = self.auto_correct_rename_checkbox.isChecked()
+            config['image_manager_auto_correct_preset'] = self._auto_correct_preset_id()
+
             # 設定ファイルを保存
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.config_path, 'w', encoding='utf-8') as f:
@@ -810,9 +871,110 @@ class ImageManagerWidget(QWidget):
         except Exception as e:
             print(f"Failed to save last directory: {e}")
 
-    def _on_lightweight_rename_preference_changed(self, _state: int = 0) -> None:
-        """リネーム時軽量化の ON/OFF を設定ファイルへ保存する"""
+    def _on_rename_option_preference_changed(self, _state: int = 0) -> None:
+        """リネーム時オプション（軽量化・自動補正）を設定ファイルへ保存する"""
         self.save_last_directory()
+
+    def _auto_correct_preset_id(self) -> str:
+        idx = self.auto_correct_preset_combo.currentIndex()
+        if idx < 0:
+            return DEFAULT_AUTO_CORRECT_PRESET
+        data = self.auto_correct_preset_combo.itemData(idx)
+        return str(data) if data else DEFAULT_AUTO_CORRECT_PRESET
+
+    def _set_auto_correct_preset_combo(self, preset_id: str) -> None:
+        target = (preset_id or DEFAULT_AUTO_CORRECT_PRESET).strip().lower()
+        self.auto_correct_preset_combo.blockSignals(True)
+        try:
+            for i in range(self.auto_correct_preset_combo.count()):
+                if str(self.auto_correct_preset_combo.itemData(i)) == target:
+                    self.auto_correct_preset_combo.setCurrentIndex(i)
+                    break
+            else:
+                self.auto_correct_preset_combo.setCurrentIndex(1)
+            label = self.auto_correct_preset_combo.currentText()
+            self.preview_corrected_caption.setText(f"補正後（{label}）")
+        finally:
+            self.auto_correct_preset_combo.blockSignals(False)
+
+    def _on_auto_correct_preset_changed(self, _index: int = 0) -> None:
+        """補正プリセット変更時にプレビューと設定を更新"""
+        preset_id = self._auto_correct_preset_id()
+        label = self.auto_correct_preset_combo.currentText()
+        self.preview_corrected_caption.setText(f"補正後（{label}）")
+        self.save_last_directory()
+        self._refresh_image_previews()
+
+    @staticmethod
+    def _pil_image_to_qpixmap(pil_img: Image.Image) -> QPixmap:
+        buffer = io.BytesIO()
+        pil_img.save(buffer, format="PNG")
+        pixmap = QPixmap()
+        pixmap.loadFromData(buffer.getvalue())
+        return pixmap
+
+    def _scale_pixmap_for_label(self, pixmap: QPixmap, label: QLabel) -> QPixmap:
+        if pixmap.isNull():
+            return pixmap
+        size = label.size()
+        if size.width() < 32 or size.height() < 32:
+            size = label.minimumSize()
+        return pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+    def _refresh_image_previews(self) -> None:
+        """選択中画像の元／補正後プレビューを更新"""
+        if not self.selected_image_path or not os.path.isfile(self.selected_image_path):
+            self._clear_image_preview_panels()
+            return
+        try:
+            with Image.open(self.selected_image_path) as src:
+                original = ImageOps.exif_transpose(src)
+            orig_pix = self._scale_pixmap_for_label(
+                self._pil_image_to_qpixmap(original.convert("RGB")),
+                self.preview_original_label,
+            )
+            self.preview_original_label.setPixmap(orig_pix)
+            self.preview_original_label.setText("")
+
+            preset_id = self._auto_correct_preset_id()
+            corrected = self.image_service.apply_product_auto_correct(original, preset_id)
+            corr_pix = self._scale_pixmap_for_label(
+                self._pil_image_to_qpixmap(corrected),
+                self.preview_corrected_label,
+            )
+            self.preview_corrected_label.setPixmap(corr_pix)
+            self.preview_corrected_label.setText("")
+        except Exception as e:
+            logger.warning("プレビュー更新エラー: %s", e)
+            self.preview_original_label.setText("プレビュー失敗")
+            self.preview_corrected_label.setText("プレビュー失敗")
+
+    def _clear_image_preview_panels(self) -> None:
+        self.preview_original_label.clear()
+        self.preview_original_label.setText("画像を選択")
+        self.preview_corrected_label.clear()
+        self.preview_corrected_label.setText("画像を選択")
+
+    def _rename_progress_label(self) -> str:
+        """リネーム進捗ダイアログ用のラベル文言"""
+        parts: List[str] = []
+        if self.auto_correct_rename_checkbox.isChecked():
+            parts.append("補正")
+        if self.lightweight_rename_checkbox.isChecked():
+            parts.append("軽量化")
+        if parts:
+            return "リネーム・" + "・".join(parts) + "中..."
+        return "リネーム処理中..."
+
+    def _rename_image_file(self, source_path: str, dest_path: str) -> None:
+        """チェックボックスに応じてリネーム（補正のみ／軽量化のみ／両方／通常）を実行"""
+        self.image_service.rename_image_file(
+            source_path,
+            dest_path,
+            lightweight=self.lightweight_rename_checkbox.isChecked(),
+            auto_correct=self.auto_correct_rename_checkbox.isChecked(),
+            auto_correct_preset=self._auto_correct_preset_id(),
+        )
     
     def select_directory(self):
         """フォルダ選択ダイアログを表示"""
@@ -1102,8 +1264,7 @@ class ImageManagerWidget(QWidget):
             self.image_list.clear()
             
             # 詳細パネルをクリア
-            self.preview_label.clear()
-            self.preview_label.setText("画像を選択してください")
+            self._clear_image_preview_panels()
             self.jan_edit.clear()
             self.capture_time_label.setText("-")
             self.file_name_label.setText("-")
@@ -1249,19 +1410,8 @@ class ImageManagerWidget(QWidget):
             return
         
         self.selected_image_path = image_path
-        
-        # プレビューを更新
-        pixmap = QPixmap(image_path)
-        if not pixmap.isNull():
-            # プレビューサイズに調整
-            preview_size = self.preview_label.size()
-            scaled_pixmap = pixmap.scaled(
-                preview_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
-            )
-            self.preview_label.setPixmap(scaled_pixmap)
-        else:
-            self.preview_label.setText("画像を読み込めませんでした")
-        
+        self._refresh_image_previews()
+
         # 詳細情報を更新
         record = next((r for r in self.image_records if r.path == image_path), None)
         if record:
@@ -1816,12 +1966,7 @@ class ImageManagerWidget(QWidget):
             return
 
         # 2. リネーム処理の実行
-        progress_label = (
-            "リネーム・軽量化中..."
-            if self.lightweight_rename_checkbox.isChecked()
-            else "リネーム処理中..."
-        )
-        progress = QProgressDialog(progress_label, "キャンセル", 0, len(rename_operations), self)
+        progress = QProgressDialog(self._rename_progress_label(), "キャンセル", 0, len(rename_operations), self)
         progress.setWindowModality(Qt.WindowModal)
         progress.show()
 
@@ -1835,11 +1980,8 @@ class ImageManagerWidget(QWidget):
             
             old_path_str = record.path
             try:
-                if self.lightweight_rename_checkbox.isChecked():
-                    self.image_service.lightweight_jpeg_rename(old_path_str, new_path_str)
-                else:
-                    os.rename(old_path_str, new_path_str)
-                
+                self._rename_image_file(old_path_str, new_path_str)
+
                 # DBレコードを更新
                 db_record = self.image_db.get_by_file_path(old_path_str)
                 if db_record:
@@ -4441,12 +4583,7 @@ class ImageManagerWidget(QWidget):
             return
 
         # 実際のリネーム処理
-        progress_label = (
-            "リネーム・軽量化中..."
-            if self.lightweight_rename_checkbox.isChecked()
-            else "リネーム処理中..."
-        )
-        progress = QProgressDialog(progress_label, "キャンセル", 0, len(rename_operations), self)
+        progress = QProgressDialog(self._rename_progress_label(), "キャンセル", 0, len(rename_operations), self)
         progress.setWindowModality(Qt.WindowModal)
         progress.show()
 
@@ -4460,10 +4597,7 @@ class ImageManagerWidget(QWidget):
 
             old_path_str = record.path
             try:
-                if self.lightweight_rename_checkbox.isChecked():
-                    self.image_service.lightweight_jpeg_rename(old_path_str, new_path_str)
-                else:
-                    os.rename(old_path_str, new_path_str)
+                self._rename_image_file(old_path_str, new_path_str)
 
                 # DBレコードを更新
                 db_record = self.image_db.get_by_file_path(old_path_str)
@@ -4998,7 +5132,7 @@ class ImageManagerWidget(QWidget):
                 # 5. 詳細パネルをクリア
                 if self.selected_image_path == image_path:
                     self.selected_image_path = None
-                    self.preview_label.setText("画像を選択してください")
+                    self._clear_image_preview_panels()
                     self.jan_edit.clear()
                     self.capture_time_label.setText("-")
                     self.file_name_label.setText("-")

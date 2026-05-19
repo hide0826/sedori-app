@@ -1,3 +1,18 @@
+## 2026-05-19 仕入統計の見込み利益修正・画像管理の自動補正プリセット
+
+- **目的**: CSV取込後の「想定見込み利益」がExcel合計とずれる問題を解消する。画像リネーム時にAIなしの自動補正を追加し、弱／標準／強のプリセットでプレビュー確認できるようにする。
+- **変更**: `python/desktop/ui/inventory_widget.py`
+  - CSV取込時、**見込み利益・損益分岐点が入っている行は上書きしない**（未入力行のみ `販売予定 − (仕入 + 手数料)` で算出）。
+  - **想定見込み利益**の集計を `見込み利益 × 仕入れ個数` に統一（ルート照合の想定粗利と同じ考え方）。
+  - `update_table` 中は `blockSignals` で `itemChanged` による補正上書きを防止（表表示と統計の不一致を解消）。
+- **変更**: `python/desktop/services/image_service.py`, `python/desktop/ui/image_manager_widget.py`
+  - リネーム時 **自動補正**（明るさ・コントラスト・シャープ）を軽量化と独立してON/OFF可能。
+  - 補正プリセット **弱 / 標準 / 強**（`AUTO_CORRECT_PRESETS`）。設定は `image_manager_auto_correct_preset` に保存。
+  - 詳細パネルに **元画像｜補正後** の並列プレビュー。プリセット変更で補正後を即時更新。
+  - `rename_image_file()` で補正・軽量化・通常リネームを一本化。
+- **設定**: `config/inventory_settings.json` に `image_manager_auto_correct_on_rename`, `image_manager_auto_correct_preset` を追加可能。
+- **Git**: （本コミット）
+
 ## 2026-05-15 証憑管理（レシート）の照合・ルート証憑フラグ連携
 
 - **目的**: 証憑管理タブだけでレシート確定・一括マッチングまで完結できるようにし、ルートサマリーの進捗チェック（証憑）と整合させる。仕入DBの金額は変更しない方針（`RECEIPT_MUTATES_PURCHASE_DB_PRICE=False`）を維持したまま差額許容を表示に反映する。

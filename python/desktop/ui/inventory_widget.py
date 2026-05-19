@@ -4509,51 +4509,86 @@ class InventoryWidget(QWidget):
         
         return new_df
     
+    @staticmethod
+    def _cell_has_numeric_value(value) -> bool:
+        """CSVセルなどに数値が入っているか（空欄・NaNは未入力）"""
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return False
+        return str(value).strip() != ""
+
+    @staticmethod
+    def _row_quantity_multiplier(row) -> float:
+        """統計・ルート照合と同様、見込み利益に掛ける仕入れ個数（未入力は1）"""
+        for key in ("仕入れ個数", "purchase_count", "quantity", "数量"):
+            if key not in row.index and key not in row:
+                continue
+            try:
+                val = row.get(key)
+                if val is None or (isinstance(val, float) and pd.isna(val)) or str(val).strip() == "":
+                    continue
+                q = float(str(val).replace(",", "").strip())
+                return max(0.0, q)
+            except (ValueError, TypeError):
+                continue
+        return 1.0
+
     def _calculate_margin_and_roi(self, df: pd.DataFrame) -> pd.DataFrame:
-        """見込み利益・損益分岐点・利益率・ROIを同一式で計算してDataFrameに反映"""
-        # 数値列を数値型に変換（エラー時はNaN）
+        """
+        見込み利益・損益分岐点・利益率・ROIを反映する。
+        CSVに見込み利益／損益分岐点がある行は取込値を優先し、
+        未入力行のみ 販売予定 − (仕入 + Amazon手数料 + 出荷費用) で算出する。
+        """
         def safe_float(x):
             try:
                 if pd.isna(x) or x == "" or str(x).strip() == "":
                     return 0.0
-                # カンマ区切りを除去
                 x_str = str(x).replace(",", "").strip()
                 return float(x_str)
             except (ValueError, TypeError):
                 return 0.0
-        
-        purchase_price = df.get("仕入れ価格", pd.Series([0.0] * len(df))).apply(safe_float)
-        planned_price = df.get("販売予定価格", pd.Series([0.0] * len(df))).apply(safe_float)
-        amazon_fee = df.get("Amazon手数料", pd.Series([0.0] * len(df))).apply(safe_float)
-        shipping_cost = df.get("出荷費用", pd.Series([0.0] * len(df))).apply(safe_float)
 
-        # 損益分岐点 = 仕入れ価格 + Amazon手数料 + 出荷費用
-        # 見込み利益 = 販売予定価格 - 損益分岐点（在庫保管手数料は含めない）
-        break_even = purchase_price + amazon_fee + shipping_cost
-        expected_profit = planned_price - break_even
+        n = len(df)
+        purchase_price = df.get("仕入れ価格", pd.Series([0.0] * n)).apply(safe_float)
+        planned_price = df.get("販売予定価格", pd.Series([0.0] * n)).apply(safe_float)
+        amazon_fee = df.get("Amazon手数料", pd.Series([0.0] * n)).apply(safe_float)
+        shipping_cost = df.get("出荷費用", pd.Series([0.0] * n)).apply(safe_float)
+
+        profit_col = df.get("見込み利益", pd.Series([""] * n))
+        be_col = df.get("損益分岐点", pd.Series([""] * n))
+        has_profit = profit_col.apply(self._cell_has_numeric_value)
+        has_be = be_col.apply(self._cell_has_numeric_value)
+
+        calc_break_even = purchase_price + amazon_fee + shipping_cost
+        expected_profit = planned_price - calc_break_even
+        break_even = calc_break_even.copy()
+
+        if has_profit.any():
+            expected_profit = expected_profit.where(~has_profit, profit_col.apply(safe_float))
+        if has_be.any():
+            break_even = break_even.where(~has_be, be_col.apply(safe_float))
+
+        # 片方だけCSVにある場合はもう片方を販売予定から補完
+        only_profit = has_profit & ~has_be
+        if only_profit.any():
+            break_even = break_even.where(~only_profit, (planned_price - expected_profit))
+
+        only_be = has_be & ~has_profit
+        if only_be.any():
+            expected_profit = expected_profit.where(~only_be, (planned_price - break_even))
 
         df["損益分岐点"] = break_even.round(0)
         df["見込み利益"] = expected_profit.round(0)
 
-        margin = pd.Series([0.0] * len(df), dtype=float)
-        for i in range(len(df)):
+        margin = pd.Series([0.0] * n, dtype=float)
+        roi = pd.Series([0.0] * n, dtype=float)
+        for i in range(n):
             if planned_price.iloc[i] > 0:
                 margin.iloc[i] = (expected_profit.iloc[i] / planned_price.iloc[i]) * 100
-            else:
-                margin.iloc[i] = 0.0
-
-        roi = pd.Series([0.0] * len(df), dtype=float)
-        for i in range(len(df)):
             if purchase_price.iloc[i] > 0:
                 roi.iloc[i] = (expected_profit.iloc[i] / purchase_price.iloc[i]) * 100
-            else:
-                roi.iloc[i] = 0.0
 
-        margin = margin.round(2)
-        roi = roi.round(2)
-
-        df["想定利益率"] = margin
-        df["想定ROI"] = roi
+        df["想定利益率"] = margin.round(2)
+        df["想定ROI"] = roi.round(2)
 
         return df
                 
@@ -4568,7 +4603,9 @@ class InventoryWidget(QWidget):
         self.data_table.setRowCount(row_count)
         
         # データの設定（テーブルの行番号は0から始まる連続した番号にする）
+        # 価格列の setItem で itemChanged が走ると見込み利益が再計算され CSV 取込値が壊れるためシグナルを止める
         processed_rows = 0
+        self.data_table.blockSignals(True)
         try:
             # iterrows()の代わりに、インデックスで直接アクセス
             for table_row_idx in range(row_count):
@@ -4635,6 +4672,8 @@ class InventoryWidget(QWidget):
             print(f"[ERROR] update_table: データ設定中にエラー発生: {e}")
             import traceback
             traceback.print_exc()
+        finally:
+            self.data_table.blockSignals(False)
         
         print(f"[DEBUG] update_table: 処理完了。設定した行数={processed_rows}, テーブルの行数={self.data_table.rowCount()}, filtered_data行数={row_count}")
         
@@ -5258,7 +5297,12 @@ class InventoryWidget(QWidget):
             if profit <= 0:
                 continue
 
-            base_profit[bucket] += profit
+            qty = self._row_quantity_multiplier(row)
+            if qty <= 0:
+                continue
+
+            weighted_profit = profit * qty
+            base_profit[bucket] += weighted_profit
             # 発送方法に応じて係数を切り替える
             shipping = str(row.get("発送方法", "") or "").strip()
             is_fba = "fba" in shipping.upper() if shipping else False
@@ -5273,7 +5317,7 @@ class InventoryWidget(QWidget):
                 # 想定外は6グループ相当として扱う
                 z = 0.7
 
-            eff_profit[bucket] += profit * z
+            eff_profit[bucket] += weighted_profit * z
 
         total_base = base_profit["3"] + base_profit["6"] + base_profit["9"]
         total_eff = eff_profit["3"] + eff_profit["6"] + eff_profit["9"]
@@ -5409,7 +5453,7 @@ class InventoryWidget(QWidget):
                 "    15%以下 → 安全圏 / 15〜25% → 注意圏 / 25%以上 → 危険域 と判定します。\n"
                 "\n"
                 "【仕入健全度(金額3-6-9)】\n"
-                "・上記と同じ3/6/9分類を使いながら、「見込み利益」列の金額で重み付けします。\n"
+                "・上記と同じ3/6/9分類を使いながら、「見込み利益 × 仕入れ個数」の金額で重み付けします。\n"
                 "・各行ごとに、コメントから 3/6/9 を決めたあと、\n"
                 "    3グループ: 見込み利益 × 0.9\n"
                 "    6グループ: 見込み利益 × 0.7\n"
@@ -5418,8 +5462,8 @@ class InventoryWidget(QWidget):
                 "・3:6:9 = 実効見込み利益の比率(%) を表示し、9グループ比率の閾値は件数ベースと同じです。\n"
                 "\n"
                 "【実効見込み利益】\n"
-                "・想定見込み利益合計 = 全行の見込み利益の合計（除外・テストを除く）\n"
-                "・実効見込み利益合計 = 各行の「見込み利益 × 上記の係数」を足し合わせた値\n"
+                "・想定見込み利益合計 = 全行の（見込み利益 × 仕入れ個数）の合計（除外・テストを除く）\n"
+                "・実効見込み利益合計 = 各行の「見込み利益 × 仕入れ個数 × 上記の係数」を足し合わせた値\n"
                 "・実現率(%) = 実効見込み利益合計 ÷ 想定見込み利益合計 × 100\n"
                 "  （= 値崩れ・保管料・送料を加味した現実的な期待利益率）\n"
             )

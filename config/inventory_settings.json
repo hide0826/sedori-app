@@ -3,6 +3,8 @@
   "seqScope": "day",
   "seqStart": 1,
   "image_manager_default_root_dir": "D:/せどり総合/店舗せどり仕入リスト入れ/仕入帳",
-  "image_manager_last_directory": "D:/せどり総合/店舗せどり仕入リスト入れ/仕入帳/20260502葛飾ー千葉柏ルート/商品画像",
-  "image_manager_lightweight_rename": true
+  "image_manager_last_directory": "D:/せどり総合/店舗せどり仕入リスト入れ/仕入帳/20260516千葉船橋ルート/商品画像",
+  "image_manager_lightweight_rename": true,
+  "image_manager_auto_correct_on_rename": false,
+  "image_manager_auto_correct_preset": "standard"
 }
