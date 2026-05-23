@@ -2687,7 +2687,7 @@ class OnlinePlatformEditDialog(QDialog):
 
 
 class FleaMarketEditDialog(QDialog):
-    """フリマプラットフォーム追加・編集（区分は固定でフリマ、手数料率あり）"""
+    """フリマプラットフォーム追加・編集（区分は固定でフリマ。手数料率はフリマ設定タブで編集）"""
 
     def __init__(self, parent=None, data=None):
         super().__init__(parent)
@@ -2717,13 +2717,6 @@ class FleaMarketEditDialog(QDialog):
         self.prefix_edit.setPlaceholderText("例: MRC")
         self.prefix_edit.textEdited.connect(self._on_prefix_edited)
         form.addRow("接頭辞:", self.prefix_edit)
-        self.fee_spin = QDoubleSpinBox()
-        self.fee_spin.setRange(-1.0, 100.0)
-        self.fee_spin.setDecimals(2)
-        self.fee_spin.setSingleStep(0.5)
-        self.fee_spin.setSpecialValueText("未設定")
-        self.fee_spin.setToolTip("「未設定」のままなら DB に保存されません（後から入力する場合に使用）")
-        form.addRow("手数料率 (%):", self.fee_spin)
         self.active_check = QCheckBox("有効")
         self.active_check.setChecked(True)
         form.addRow("状態:", self.active_check)
@@ -2734,21 +2727,11 @@ class FleaMarketEditDialog(QDialog):
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         layout.addWidget(bb)
-        if not self.data:
-            self.fee_spin.setValue(-1.0)
 
     def _load_data(self):
         self.code_edit.setText(self.data.get("platform_code", ""))
         self.name_edit.setText(self.data.get("platform_name", ""))
         self.prefix_edit.setText(self.data.get("code_prefix", ""))
-        fr = self.data.get("fee_rate")
-        if fr is None:
-            self.fee_spin.setValue(-1.0)
-        else:
-            try:
-                self.fee_spin.setValue(float(fr))
-            except (TypeError, ValueError):
-                self.fee_spin.setValue(-1.0)
         self.active_check.setChecked(bool(self.data.get("is_active", 1)))
         self.notes_edit.setText(self.data.get("notes", ""))
         self._manual_code = True
@@ -2792,14 +2775,11 @@ class FleaMarketEditDialog(QDialog):
             self.prefix_edit.setText(prefix)
 
     def get_data(self) -> Dict[str, Any]:
-        v = self.fee_spin.value()
-        fee_rate = None if v < 0 else v
         return {
             "platform_code": self.code_edit.text().strip().upper(),
             "platform_name": self.name_edit.text().strip(),
             "category": "フリマ",
             "code_prefix": self.prefix_edit.text().strip().upper(),
-            "fee_rate": fee_rate,
             "is_active": 1 if self.active_check.isChecked() else 0,
             "notes": self.notes_edit.text().strip(),
         }
@@ -3079,7 +3059,7 @@ class OnlinePlatformListWidget(QWidget):
 
 
 class FleaMarketListWidget(QWidget):
-    """フリマプラットフォーム一覧（設定 > DB設定）。電脳プラットフォームと同レイアウト＋手数料率列"""
+    """フリマプラットフォーム一覧（設定 > 店舗コード設定 > フリマコード）"""
 
     def __init__(self):
         super().__init__()
@@ -3105,7 +3085,8 @@ class FleaMarketListWidget(QWidget):
         top.addWidget(del_btn)
         layout.addLayout(top)
         caution_label = QLabel(
-            "古物台帳記帳のため、名称は正式名称（例: メルカリ、ラクマ）での登録を推奨します。"
+            "古物台帳記帳のため、名称は正式名称（例: メルカリ、ラクマ）での登録を推奨します。\n"
+            "手数料率は「設定 > フリマ設定」で入力してください。"
         )
         caution_label.setWordWrap(True)
         caution_label.setStyleSheet("color: #ffc107; padding: 2px 0px;")
@@ -3122,7 +3103,7 @@ class FleaMarketListWidget(QWidget):
         s = (self.search_edit.text() or "").strip().lower()
         if s:
             rows = [r for r in rows if s in str(r.get("platform_name", "")).lower()]
-        cols = ["ID", "コード", "名称", "区分", "接頭辞", "手数料率", "有効", "備考"]
+        cols = ["ID", "コード", "名称", "区分", "接頭辞", "有効", "備考"]
         self.table.setRowCount(len(rows))
         self.table.setColumnCount(len(cols))
         self.table.setHorizontalHeaderLabels(cols)
@@ -3132,27 +3113,17 @@ class FleaMarketListWidget(QWidget):
             self.table.setItem(i, 2, QTableWidgetItem(r.get("platform_name", "")))
             self.table.setItem(i, 3, QTableWidgetItem(r.get("category", "フリマ")))
             self.table.setItem(i, 4, QTableWidgetItem(r.get("code_prefix", "")))
-            fr = r.get("fee_rate")
-            if fr is None:
-                fee_text = ""
-            else:
-                try:
-                    fee_text = f"{float(fr):.2f}"
-                except (TypeError, ValueError):
-                    fee_text = ""
-            self.table.setItem(i, 5, QTableWidgetItem(fee_text))
-            self.table.setItem(i, 6, QTableWidgetItem("ON" if r.get("is_active", 1) else "OFF"))
-            self.table.setItem(i, 7, QTableWidgetItem(r.get("notes", "")))
+            self.table.setItem(i, 5, QTableWidgetItem("ON" if r.get("is_active", 1) else "OFF"))
+            self.table.setItem(i, 6, QTableWidgetItem(r.get("notes", "")))
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
-        header.setSectionResizeMode(7, QHeaderView.Stretch)
+        header.setSectionResizeMode(6, QHeaderView.Stretch)
         self.table.setColumnWidth(0, 48)
         self.table.setColumnWidth(1, 80)
         self.table.setColumnWidth(3, 80)
         self.table.setColumnWidth(4, 80)
-        self.table.setColumnWidth(5, 90)
-        self.table.setColumnWidth(6, 60)
+        self.table.setColumnWidth(5, 60)
         self.table.verticalHeader().setDefaultSectionSize(26)
 
     def _get_selected_id(self) -> Optional[int]:

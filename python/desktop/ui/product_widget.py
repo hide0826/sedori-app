@@ -39,6 +39,17 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+try:
+    from desktop.services.flea_market_record_utils import (
+        resolve_local_image_path,
+        resolve_record_product_images,
+    )
+except ImportError:
+    from services.flea_market_record_utils import (  # type: ignore
+        resolve_local_image_path,
+        resolve_record_product_images,
+    )
+
 # 仕入DBでステータスが「販売中」のときの既定ステータス理由（在庫・価格改定CSV連動）
 _PURCHASE_STATUS_REASON_SELLING_INVENTORY_CSV = "在庫CSV連動:"
 
@@ -2441,6 +2452,7 @@ class ProductWidget(QWidget):
                 row["保証最終日"] = comment_warranty
             # コメントの「1ta/1tp数字」「2ta/2tp数字」からTP1/TP2を補完
             self._fill_tp_from_comment(row)
+            resolve_record_product_images(row)
 
             if sku:
                 try:
@@ -2793,10 +2805,18 @@ class ProductWidget(QWidget):
                 elif header and header.startswith("画像") and header[2:].isdigit():
                     image_path = value or ""
                     if image_path:
+                        resolved = resolve_local_image_path(str(image_path), record)
+                        if resolved:
+                            image_path = resolved
+                            record[header] = resolved
                         image_name = Path(image_path).name
                         item = QTableWidgetItem(image_name)
                         item.setData(Qt.UserRole, image_path)
-                        item.setToolTip(f"クリックで画像を開く\n{image_path}")
+                        exists = Path(image_path).is_file()
+                        tip = f"クリックで画像を開く\n{image_path}"
+                        if not exists:
+                            tip += "\n（ファイル未検出・画像管理フォルダ内を再探索します）"
+                        item.setToolTip(tip)
                         item.setForeground(Qt.white)  # 青色から白色に変更
                         font = item.font()
                         font.setUnderline(True)
@@ -3762,7 +3782,6 @@ class ProductWidget(QWidget):
             # UserRoleにファイルパスがない、またはファイルが存在しない場合は、テキストから再検索
             file_path_found = False
             if file_path:
-                from pathlib import Path
                 file_path_obj = Path(file_path)
                 # ファイルパスが存在するか確認
                 if file_path_obj.exists() and file_path_obj.is_file():
@@ -3802,7 +3821,6 @@ class ProductWidget(QWidget):
                                             break
             
             if file_path:
-                from pathlib import Path
                 image_file = Path(file_path)
                 if image_file.exists() and image_file.is_file():
                     # OSのデフォルトアプリで画像を開く
@@ -3853,7 +3871,6 @@ class ProductWidget(QWidget):
             warranty_info = None
             
             if file_path:
-                from pathlib import Path
                 file_path_obj = Path(file_path)
                 # ファイルパスが存在するか確認
                 if file_path_obj.exists() and file_path_obj.is_file():
@@ -3882,7 +3899,6 @@ class ProductWidget(QWidget):
                             pass
             
             if file_path:
-                from pathlib import Path
                 image_file = Path(file_path)
                 if image_file.exists() and image_file.is_file():
                     # OSのデフォルトアプリで画像を開く
@@ -3922,11 +3938,31 @@ class ProductWidget(QWidget):
             
             # ファイルパスを取得（UserRoleに保存されている）
             file_path = item.data(Qt.UserRole)
+            record = self._purchase_record_for_table_row(row)
+            if file_path and record:
+                image_file = Path(file_path)
+                if not image_file.is_file():
+                    resolved = resolve_local_image_path(str(file_path), record)
+                    if resolved:
+                        file_path = resolved
+                        item.setData(Qt.UserRole, resolved)
+                        record[header_text] = resolved
+                        idx = None
+                        if header_text in self.purchase_columns:
+                            idx = self.purchase_columns.index(header_text)
+                        if idx is not None:
+                            name_item = QTableWidgetItem(Path(resolved).name)
+                            name_item.setData(Qt.UserRole, resolved)
+                            name_item.setToolTip(f"クリックで画像を開く\n{resolved}")
+                            font = name_item.font()
+                            font.setUnderline(True)
+                            name_item.setFont(font)
+                            name_item.setForeground(Qt.white)
+                            self.purchase_table.setItem(row, idx, name_item)
             
             if file_path:
-                from pathlib import Path
                 image_file = Path(file_path)
-                if image_file.exists():
+                if image_file.is_file():
                     # 画像を表示
                     from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel
                     from PySide6.QtGui import QPixmap
@@ -3953,6 +3989,40 @@ class ProductWidget(QWidget):
         else:
             # その他の列をダブルクリックした場合は Keepa 編集ダイアログを開く
             self._open_purchase_row_edit(row)
+
+    def _purchase_record_for_table_row(self, row: int) -> Optional[Dict[str, Any]]:
+        """仕入DBテーブルの行に対応するレコード辞書を返す。"""
+        row_id: Optional[int] = None
+        try:
+            for c in range(self.purchase_table.columnCount()):
+                it = self.purchase_table.item(row, c)
+                if it is None:
+                    continue
+                v = it.data(Qt.UserRole + 1)
+                if v is None:
+                    continue
+                row_id = int(v)
+                break
+        except (TypeError, ValueError):
+            row_id = None
+
+        row_map = getattr(self, "_purchase_row_map", {}) or {}
+        if row_id is not None and row_id in row_map:
+            return row_map[row_id]
+
+        sku = (self._get_value_from_row(row, ["SKU", "sku"]) or "").strip()
+        if sku:
+            for rec in getattr(self, "purchase_records", None) or getattr(self, "purchase_all_records", []) or []:
+                if (rec.get("SKU") or rec.get("sku") or "").strip() == sku:
+                    return rec
+        view_records = getattr(self, "purchase_records", None) or getattr(self, "purchase_all_records", [])
+        if (
+            view_records
+            and not self.purchase_table.isSortingEnabled()
+            and 0 <= row < len(view_records)
+        ):
+            return view_records[row]
+        return None
 
     def _open_purchase_row_edit(self, row: Optional[int] = None) -> None:
         """仕入DB行の編集ダイアログ（Keepa・TP1/TP2 編集）を開く"""

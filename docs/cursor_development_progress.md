@@ -1,3 +1,34 @@
+## 2026-05-23 フリマ出品情報生成・フリマ設定タブ・画像パス解決
+
+- **目的**: 仕入DB行編集からフリマ向け出品文案（Gemini）と画像ドラッグを提供する。手数料率・AI固定文は「設定 > フリマ設定」に集約。ファイル名のみ残った仕入画像も探索して表示できるようにする。
+- **フリマ出品情報（`purchase_row_edit_dialog.py` → `flea_market_listing_dialog.py`）**
+  - 起動時は未生成。下部 **「出品文案を生成」** で Gemini 実行。
+  - **文案スタイル**: 標準／簡潔／丁寧。 **今回だけ含める文言**（1行）をプロンプト・出品説明末尾に反映。
+  - 出品説明は **1フィールド（出品説明）** に統合（旧・商品説明＋詳細の説明を廃止）。
+  - 右ペイン: 画像1〜6 をドラッグでメルカリ等へドロップ。
+- **設定 > フリマ設定**（`flea_market_settings_widget.py`）
+  - 上: フリマコード登録済みプラットフォームごとの **手数料率**（`flea_markets.fee_rate`）。
+  - 下: **必ず含める文**・**追加プロンプト**（QSettings）。
+- **フリマコード**（`store_master_widget.py`）: 手数料率列を削除（編集時は fee_rate を上書きしない）。
+- **Gemini**（`gemini_flea_market_service.py`）: 出品説明 JSON、スタイル別指示、設定の追加プロンプト・必須フッター連結。
+- **画像パス**（`flea_market_record_utils.py` / `product_widget.py`）
+  - ファイル名のみのとき `inventory_settings.json` の画像フォルダ・`商品画像`・日付プレフィックス付きルートフォルダを探索。
+  - 仕入DB表示・クリック時に解決。`on_purchase_table_cell_clicked` の `Path` **UnboundLocalError** を修正（関数内 import 削除）。
+- **変更ファイル**:
+  - `python/desktop/ui/flea_market_listing_dialog.py`（新規）
+  - `python/desktop/ui/flea_market_settings_widget.py`（新規）
+  - `python/desktop/services/gemini_flea_market_service.py`（新規）
+  - `python/desktop/services/flea_market_record_utils.py`（新規）
+  - `python/desktop/services/flea_market_settings.py`（新規）
+  - `python/desktop/ui/settings_widget.py`
+  - `python/desktop/ui/store_master_widget.py`
+  - `python/desktop/database/store_db.py`
+  - `python/desktop/ui/purchase_row_edit_dialog.py`
+  - `python/desktop/ui/product_widget.py`
+  - `docs/cursor_development_progress.md`
+- **Git**: （本コミット）
+- **次回**: 手数料率をフリマ出品の価格提案・利益表示に連携、販売チャネルとプラットフォームの紐づけ
+
 ## 2026-05-19（続き）仕入管理UX・ルート訪問DB正規化・テンプレ時刻検証
 
 - **目的**: 仕入〜ルート〜古物の一連操作を誤操作しにくくし、ルート訪問DBと照合の前提となる時刻データの品質を上げる。

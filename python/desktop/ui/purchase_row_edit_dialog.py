@@ -420,6 +420,13 @@ class PurchaseRowEditDialog(QDialog):
         )
         seller_info_btn.clicked.connect(self._show_keepa_offer_details)
         keepa_btn_row.addWidget(seller_info_btn, 1)
+        flea_btn = QPushButton("フリマ情報生成")
+        flea_btn.setToolTip(
+            "Gemini でフリマ向けのタイトル・商品説明を生成します。"
+            "商品説明には JANコードとコンディション説明を含めます。画像1〜6はドラッグでメルカリ等へ登録できます。"
+        )
+        flea_btn.clicked.connect(self._open_flea_market_listing)
+        keepa_btn_row.addWidget(flea_btn, 1)
         layout.addLayout(keepa_btn_row)
 
         # --- TP0 / TP1 / TP2 / TP3 編集（各帯：価格 → 目標利益率 → 概算利益、色分け）---
@@ -494,6 +501,24 @@ class PurchaseRowEditDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         buttons.addButton(close_btn, QDialogButtonBox.AcceptRole)
         layout.addWidget(buttons)
+
+    def _open_flea_market_listing(self) -> None:
+        """フリマ出品情報ダイアログを開く（Gemini文案・画像ドラッグ）。"""
+        try:
+            from ui.flea_market_listing_dialog import FleaMarketListingDialog
+        except ImportError:
+            from desktop.ui.flea_market_listing_dialog import FleaMarketListingDialog
+        dlg = FleaMarketListingDialog(
+            self.record,
+            parent=self,
+            product_widget=self._product_widget,
+            auto_generate=False,
+        )
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+        dlg.setModal(False)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _open_keepa_in_browser(self) -> None:
         """選択行の ASIN で Keepa を既定ブラウザで開き、Windows の場合はブラウザを前面・左半分にリサイズ"""

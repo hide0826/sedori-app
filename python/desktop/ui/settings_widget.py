@@ -51,6 +51,7 @@ class SettingsWidget(QWidget):
         self.setup_display_tab(tab_widget)
         self.setup_advanced_tab(tab_widget)
         self.setup_db_settings_tab(tab_widget)
+        self.setup_flea_market_settings_tab(tab_widget)
         self.setup_about_tab(tab_widget)
         
         layout.addWidget(tab_widget)
@@ -454,6 +455,15 @@ class SettingsWidget(QWidget):
         layout.addWidget(db_tabs)
         parent.addTab(db_widget, "店舗コード設定")
 
+    def setup_flea_market_settings_tab(self, parent):
+        """フリマ設定タブ（手数料率・AI出品文案）"""
+        try:
+            from ui.flea_market_settings_widget import FleaMarketSettingsWidget
+        except ImportError:
+            from desktop.ui.flea_market_settings_widget import FleaMarketSettingsWidget
+        self.flea_market_settings_widget = FleaMarketSettingsWidget()
+        parent.addTab(self.flea_market_settings_widget, "フリマ設定")
+
     def load_chain_mappings(self):
         """チェーン店コードマッピングを読み込む"""
         mappings = self.store_db.list_chain_store_code_mappings()
@@ -824,6 +834,9 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         if gemini_model not in [self.gemini_model_combo.itemText(i) for i in range(self.gemini_model_combo.count())]:
             self.gemini_model_combo.addItem(gemini_model)
         self.gemini_model_combo.setCurrentText(gemini_model)
+
+        if hasattr(self, "flea_market_settings_widget"):
+            self.flea_market_settings_widget.reload()
         
     def save_settings(self):
         """設定の保存"""
@@ -872,6 +885,9 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             )
             # 3-6-9版
             self.settings.setValue("pro/enabled", self.pro_enabled_cb.isChecked())
+
+            if hasattr(self, "flea_market_settings_widget"):
+                self.flea_market_settings_widget.save_all()
             
             # 設定変更シグナルを発火
             settings_dict = self.get_current_settings()

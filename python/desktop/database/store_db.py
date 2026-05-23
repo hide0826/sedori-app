@@ -2190,23 +2190,43 @@ class StoreDatabase:
     def update_flea_market(self, market_id: int, data: Dict[str, Any]) -> bool:
         conn = self._get_connection()
         cursor = conn.cursor()
-        fee = data.get("fee_rate")
-        fee_val = float(fee) if fee is not None and fee != "" else None
-        cursor.execute("""
-            UPDATE flea_markets SET
-                platform_code = ?, platform_name = ?, category = ?,
-                code_prefix = ?, fee_rate = ?, is_active = ?, notes = ?
-            WHERE id = ?
-        """, (
+        params = (
             (data.get('platform_code') or '').strip().upper(),
             (data.get('platform_name') or '').strip(),
             (data.get('category') or 'フリマ').strip(),
             (data.get('code_prefix') or '').strip().upper(),
-            fee_val,
             int(data.get('is_active', 1)),
             data.get('notes') or '',
             market_id,
-        ))
+        )
+        if "fee_rate" in data:
+            fee = data.get("fee_rate")
+            fee_val = float(fee) if fee is not None and fee != "" else None
+            cursor.execute("""
+                UPDATE flea_markets SET
+                    platform_code = ?, platform_name = ?, category = ?,
+                    code_prefix = ?, fee_rate = ?, is_active = ?, notes = ?
+                WHERE id = ?
+            """, (*params[:4], fee_val, *params[4:]))
+        else:
+            cursor.execute("""
+                UPDATE flea_markets SET
+                    platform_code = ?, platform_name = ?, category = ?,
+                    code_prefix = ?, is_active = ?, notes = ?
+                WHERE id = ?
+            """, params)
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def update_flea_market_fee_rate(self, market_id: int, fee_rate: Optional[float]) -> bool:
+        """フリマ設定タブ用: 手数料率のみ更新。"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        fee_val = float(fee_rate) if fee_rate is not None else None
+        cursor.execute(
+            "UPDATE flea_markets SET fee_rate = ? WHERE id = ?",
+            (fee_val, market_id),
+        )
         conn.commit()
         return cursor.rowcount > 0
 
