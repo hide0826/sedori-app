@@ -12,6 +12,7 @@ import unicodedata
 import calendar
 from datetime import datetime, date
 from pathlib import Path
+from contextlib import contextmanager
 from typing import Optional, List, Dict, Any, Tuple
 import copy
 
@@ -369,6 +370,7 @@ class ProductWidget(QWidget):
         self._purchase_row_id_counter: int = 1
         # 重いデータ読み込みが完了しているかどうか
         self._initial_data_loaded: bool = False
+        self._initial_load_in_progress: bool = False
 
         self.setup_ui()
         # テーブルの列幅を復元（データ件数に依存しない軽量処理）
@@ -382,23 +384,63 @@ class ProductWidget(QWidget):
         save_table_column_widths(self.purchase_table, "ProductWidget/PurchaseTableColumnWidths")
         save_table_header_state(self.sales_table, "ProductWidget/SalesTableState")
 
+    @contextmanager
+    def _initial_db_load_busy_scope(self):
+        """データベース管理タブ初回表示時の待機表示（砂時計＋くるくるダイアログ）。"""
+        progress = QProgressDialog(
+            "商品DB・仕入DB・販売データを読み込んでいます...",
+            None,
+            0,
+            0,
+            self,
+        )
+        progress.setWindowTitle("データベース管理")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.setEnabled(False)
+        parent_tabs = self.parent()
+        if isinstance(parent_tabs, QTabWidget):
+            parent_tabs.setEnabled(False)
+        QApplication.processEvents()
+        try:
+            yield
+        finally:
+            QApplication.restoreOverrideCursor()
+            progress.close()
+            self.setEnabled(True)
+            if isinstance(parent_tabs, QTabWidget):
+                parent_tabs.setEnabled(True)
+            QApplication.processEvents()
+
     def ensure_initial_data_loaded(self) -> None:
         """
         商品一覧・仕入/販売DBの初回読み込みを遅延実行する。
         - 起動直後には実行せず、タブが初めて表示されたタイミングなどで呼び出す。
         """
-        if self._initial_data_loaded:
+        if self._initial_data_loaded or self._initial_load_in_progress:
             return
 
-        # 商品一覧テーブル
-        self.load_products()
-        # 仕入スナップショットから最新状態を復元
-        self.restore_latest_purchase_snapshot()
-        # 仕入・販売テーブルに反映
-        self.load_purchase_data(self.purchase_records)
-        self.load_sales_data()
+        self._initial_load_in_progress = True
+        try:
+            with self._initial_db_load_busy_scope():
+                # 商品一覧テーブル
+                self.load_products()
+                QApplication.processEvents()
+                # 仕入スナップショットから最新状態を復元
+                self.restore_latest_purchase_snapshot()
+                QApplication.processEvents()
+                # 仕入・販売テーブルに反映
+                self.load_purchase_data(self.purchase_records)
+                QApplication.processEvents()
+                self.load_sales_data()
+                QApplication.processEvents()
 
-        self._initial_data_loaded = True
+            self._initial_data_loaded = True
+        finally:
+            self._initial_load_in_progress = False
 
     def showEvent(self, event):
         """

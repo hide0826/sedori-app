@@ -86,10 +86,26 @@ class RouteVisitDatabase:
 
     # ==================== 登録処理 ====================
 
-    def replace_route_visits(self, route_date: str, route_code: str, route_name: str, visits: List[Dict[str, Any]]):
+    def replace_route_visits(
+        self,
+        route_date: str,
+        route_code: str,
+        route_name: str,
+        visits: List[Dict[str, Any]],
+        *,
+        normalize: bool = True,
+    ):
         """指定されたルートの日付・ルートコードに紐づく訪問データを丸ごと差し替える"""
         if not route_date or not route_code:
             return
+
+        visits_to_save = list(visits)
+        if normalize and visits_to_save:
+            try:
+                from desktop.services.route_visit_normalize import normalize_route_visits
+            except ImportError:
+                from services.route_visit_normalize import normalize_route_visits  # type: ignore
+            visits_to_save = normalize_route_visits(visits_to_save, route_date)
 
         conn = self._get_connection()
         cur = conn.cursor()
@@ -110,7 +126,7 @@ class RouteVisitDatabase:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """
 
-            for visit in visits:
+            for visit in visits_to_save:
                 cur.execute(insert_sql, (
                     route_date,
                     route_code,
@@ -151,6 +167,32 @@ class RouteVisitDatabase:
         cur.execute(query, params)
         rows = cur.fetchall()
         return [dict(row) for row in rows]
+
+    def list_route_visit_groups(self) -> List[tuple]:
+        """登録済みの (route_date, route_code, route_name) 一覧"""
+        conn = self._get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT route_date, route_code, MAX(route_name) AS route_name
+            FROM route_visit_logs
+            GROUP BY route_date, route_code
+            ORDER BY route_date DESC, route_code ASC
+        """)
+        return [(row["route_date"], row["route_code"], row["route_name"]) for row in cur.fetchall()]
+
+    def list_route_visits_raw(self, route_date: str, route_code: str) -> List[Dict[str, Any]]:
+        """指定ルートの全訪問行（IN/OUT 未入力含む）を visit_order 順で取得"""
+        conn = self._get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM route_visit_logs
+            WHERE route_date = ? AND route_code = ?
+            ORDER BY visit_order ASC, id ASC
+            """,
+            (route_date, route_code),
+        )
+        return [dict(row) for row in cur.fetchall()]
 
     def get_store_visit_aggregates(self) -> List[Dict[str, Any]]:
         """店舗コードごとに想定粗利・仕入点数・評価を集計（route_visit_logs のみ）。

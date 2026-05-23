@@ -209,6 +209,20 @@ class MainWindow(QMainWindow):
             self.restore_tab_order()
             raise
 
+    def _on_main_tab_current_changed(self, index: int) -> None:
+        """データベース管理タブを初めて開いたときに商品DBの遅延読み込みを開始する。"""
+        try:
+            if index < 0:
+                return
+            db_tabs = getattr(self, "_db_management_tabs", None)
+            if db_tabs is None or self.tab_widget.widget(index) is not db_tabs:
+                return
+            product_widget = getattr(self, "product_widget", None)
+            if product_widget is not None:
+                product_widget.ensure_initial_data_loaded()
+        except Exception:
+            pass
+
     def _setup_tabs_phase(self, phase: int) -> bool:
         """タブを1フェーズずつ構築。True を返すと全タブ完了。"""
         if phase == 0:
@@ -301,7 +315,11 @@ class MainWindow(QMainWindow):
             db_management_tabs.addTab(self.product_widget, "商品DB")
             db_management_tabs.addTab(self.store_master_widget, "店舗マスタ")
             db_management_tabs.addTab(self.route_visit_widget, "ルート訪問DB")
+            self._db_management_tabs = db_management_tabs
             self.tab_widget.addTab(db_management_tabs, "データベース管理")
+            if not getattr(self, "_db_mgmt_tab_hook_connected", False):
+                self.tab_widget.currentChanged.connect(self._on_main_tab_current_changed)
+                self._db_mgmt_tab_hook_connected = True
             # 基礎データ取得タブ（Amazonレポート/SP-API 連携の入口）
             self.data_acquisition_widget = DataAcquisitionWidget()
             self.tab_widget.addTab(self.data_acquisition_widget, "データ取得")

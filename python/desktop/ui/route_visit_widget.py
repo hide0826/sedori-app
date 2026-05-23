@@ -29,6 +29,7 @@ class RouteVisitLogWidget(QWidget):
 
         self.setup_ui()
         self.load_route_codes()
+        self._repair_all_saved_visits()
         self.load_data()
 
     def setup_ui(self):
@@ -66,7 +67,7 @@ class RouteVisitLogWidget(QWidget):
 
         # 操作ボタン
         refresh_btn = QPushButton("再読込")
-        refresh_btn.clicked.connect(self.load_data)
+        refresh_btn.clicked.connect(self.refresh_data)
         filter_layout.addWidget(refresh_btn)
 
         clear_btn = QPushButton("フィルタ解除")
@@ -152,6 +153,25 @@ class RouteVisitLogWidget(QWidget):
             print(f"ルートコードの取得に失敗しました: {e}")
 
         self.route_combo.blockSignals(False)
+
+    def _repair_all_saved_visits(self) -> None:
+        """既存の route_visit_logs を IN/OUT 時刻順に補正（表示・集計前に1回実行）。"""
+        try:
+            try:
+                from desktop.services.route_visit_normalize import repair_all_route_visits_in_db
+            except ImportError:
+                from services.route_visit_normalize import repair_all_route_visits_in_db  # type: ignore
+            repaired = repair_all_route_visits_in_db(self.visit_db)
+            if repaired > 0:
+                print(f"ルート訪問DB: {repaired} ルート分の訪問順・移動時間を補正しました")
+        except Exception as e:
+            print(f"ルート訪問DB補正エラー: {e}")
+
+    def refresh_data(self):
+        """DB補正のうえで一覧を再読込する"""
+        self._repair_all_saved_visits()
+        self.load_route_codes()
+        self.load_data()
 
     def load_data(self):
         """テーブルの再描画"""

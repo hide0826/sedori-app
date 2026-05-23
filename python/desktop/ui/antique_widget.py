@@ -1140,6 +1140,25 @@ class AntiqueWidget(QWidget):
         except Exception:
             pass
 
+    def _switch_to_inventory_management_tab(self) -> None:
+        """メインウィンドウの「仕入管理」タブ（仕入データサブタブ）へ切り替える。"""
+        parent = self.parent()
+        while parent:
+            tab_widget = getattr(parent, "tab_widget", None)
+            if tab_widget is not None:
+                for i in range(tab_widget.count()):
+                    if tab_widget.tabText(i) == "仕入管理":
+                        tab_widget.setCurrentIndex(i)
+                        nested = tab_widget.widget(i)
+                        if isinstance(nested, QTabWidget):
+                            for j in range(nested.count()):
+                                if nested.tabText(j) == "仕入データ":
+                                    nested.setCurrentIndex(j)
+                                    break
+                        return
+                break
+            parent = parent.parent()
+
     def _commit_imported_store_rows(self) -> None:
         """取込プレビューの店舗行を、現在の共通テンプレ値と合成して台帳へ一括登録"""
         try:
@@ -1230,7 +1249,15 @@ class AntiqueWidget(QWidget):
                 self.reload_ledger_rows()
             except Exception:
                 pass
-            QMessageBox.information(self, "登録完了", f"{n}件を台帳に登録しました。『閲覧・出力』で確認できます。")
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setWindowTitle("登録完了")
+            box.setText(f"{n}件を台帳に登録しました。『閲覧・出力』で確認できます。")
+            btn_back_inventory = box.addButton("仕入管理に戻る", QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Ok)
+            box.exec()
+            if box.clickedButton() == btn_back_inventory:
+                self._switch_to_inventory_management_tab()
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"一括登録でエラーが発生しました:\n{e}")
 

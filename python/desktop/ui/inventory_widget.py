@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView,
     QGroupBox, QSplitter, QMessageBox, QFrame,
     QCheckBox, QSpinBox, QDateEdit, QFileDialog,
-    QDialog, QDialogButtonBox, QSizePolicy, QInputDialog,
+    QDialog, QDialogButtonBox, QSizePolicy, QInputDialog, QProgressDialog,
     QPlainTextEdit, QScrollArea, QFormLayout, QTimeEdit,
     QToolButton, QApplication, QAbstractItemView,
 )
@@ -26,6 +26,7 @@ import re
 import sys
 import os
 import tempfile
+from contextlib import contextmanager
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from html import escape
@@ -1981,7 +1982,9 @@ class InventoryWidget(QWidget):
         
         # DB保存ボタン
         self.db_save_btn = QPushButton("DB保存")
-        self.db_save_btn.clicked.connect(lambda: self._run_action_with_status("DB保存", self.save_to_databases))
+        self.db_save_btn.clicked.connect(
+            lambda: self._run_action_with_status("DB保存", self._confirm_condition_edit_then_save_to_databases)
+        )
         self.db_save_btn.setStyleSheet(green_button_style)
         
         # アクションボタンセクション
@@ -2804,13 +2807,26 @@ class InventoryWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "単品仕入エラー", f"単品仕入の追加に失敗しました:\n{str(e)}")
 
+    def _get_last_csv_import_folder(self) -> str:
+        """直近の CSV 取込で開いたフォルダ（存在する場合のみ）。"""
+        from pathlib import Path
+        try:
+            last_folder = self._get_qsettings().value("inventory/last_csv_folder", "", type=str)
+            if last_folder and Path(last_folder).exists():
+                return str(last_folder)
+        except Exception:
+            pass
+        return ""
+
     def apply_route_template(self):
         """ルートテンプレートの読み込みを実行"""
         if not self.route_summary_widget:
             QMessageBox.warning(self, "ルートテンプレート", "ルート機能が未初期化です。ルータブが有効か確認してください。")
             return
         try:
-            file_path = self.route_summary_widget.load_template()
+            file_path = self.route_summary_widget.load_template(
+                initial_dir=self._get_last_csv_import_folder() or None
+            )
             if not file_path:
                 # route_template_status は削除済み
                 return
@@ -3189,9 +3205,62 @@ class InventoryWidget(QWidget):
             route_code=route_code
         )
         QMessageBox.information(self, "統合保存", f"統合スナップショットを保存しました。\n{snapshot_name}")
+
+    def _confirm_condition_edit_then_save_to_databases(self) -> bool:
+        """
+        DB保存前にコンディション（説明）の編集完了を確認する。
+        OK のときだけ save_to_databases を実行する。
+        """
+        reply = QMessageBox.question(
+            self,
+            "DB保存",
+            "コンディション編集はお済ですか？\n\n"
+            "【OK】… 仕入データをデータベースに保存します\n"
+            "【キャンセル】… 保存せず、一覧で編集を続けます",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Ok:
+            return False
+        self.save_to_databases()
+        return True
+
+    @contextmanager
+    def _db_save_busy_scope(self):
+        """DB保存中の待機表示（砂時計カーソル＋くるくるダイアログ）。"""
+        progress = QProgressDialog(
+            "仕入データとルート情報をデータベースに保存しています...",
+            None,
+            0,
+            0,
+            self,
+        )
+        progress.setWindowTitle("DB保存")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        db_btn = getattr(self, "db_save_btn", None)
+        if db_btn is not None:
+            db_btn.setEnabled(False)
+        QApplication.processEvents()
+        try:
+            yield
+        finally:
+            QApplication.restoreOverrideCursor()
+            progress.close()
+            if db_btn is not None:
+                db_btn.setEnabled(True)
+            QApplication.processEvents()
     
     def save_to_databases(self):
         """仕入データ一覧とルート情報をそれぞれのDBに保存"""
+        with self._db_save_busy_scope():
+            self._save_to_databases_impl()
+
+    def _save_to_databases_impl(self):
+        """save_to_databases の本体（busy 表示は呼び出し側で包む）"""
         import json
         
         messages = []
@@ -3257,7 +3326,9 @@ class InventoryWidget(QWidget):
                 new_count = 0
                 skipped_count = 0
                 
-                for record in purchase_records:
+                for rec_idx, record in enumerate(purchase_records):
+                    if rec_idx % 25 == 0:
+                        QApplication.processEvents()
                     dt_asin_key = self._get_datetime_asin_key(record)
                     if dt_asin_key and dt_asin_key in existing_datetime_asin_keys:
                         # 同じ仕入時間・同じASINが既存にある場合はスキップ（重複登録・上書き防止）
@@ -4187,38 +4258,15 @@ class InventoryWidget(QWidget):
         # 7. DB保存
         if not self._should_run_step(
             "工程6: DB保存",
-            "統合された仕入データをデータベースに保存します。"
+            "コンディション（説明）の編集確認のあと、仕入データをデータベースに保存します。"
         ):
             return
         self._set_workflow_pipeline_highlight(6)
         QApplication.processEvents()
-        self.save_to_databases()
+        if not self._confirm_condition_edit_then_save_to_databases():
+            self._update_workflow_status("ワークフロー: 工程6で中断（コンディション編集待ち）", emphasize=True)
+            return
 
-        # 工程6完了後、工程7に進む前にコンディション説明編集の確認（1工程ずつ確認モード時のみ）
-        if hasattr(self, "step_by_step_checkbox") and self.step_by_step_checkbox.isChecked():
-            reply = QMessageBox.question(
-                self,
-                "コンディション説明の編集",
-                "工程6（DB保存）が完了しました。\n\n"
-                "出品CSV生成の前に、仕入データ一覧の「コンディション説明」を編集しますか？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
-            )
-            if reply == QMessageBox.Yes:
-                # ワークフローを一時停止状態にし、ステータスとボタン色を更新
-                self.workflow_paused_after_step6 = True
-                self._update_workflow_status("ワークフロー: 工程6まで完了（コンディション説明編集中。スタートで工程7から再開できます）", emphasize=True)
-                self._apply_start_button_style("paused")
-                QMessageBox.information(
-                    self,
-                    "コンディション説明を編集してください",
-                    "このダイアログを閉じたあとで、仕入データ一覧の「コンディション説明」列を自由に編集してください。\n\n"
-                    "編集が終わったら、もう一度「スタート」ボタンを押すと、\n"
-                    "工程7（出品CSV生成）と工程8（古物台帳生成）を自動で続きから実行できます。"
-                )
-                # ユーザーがコンディション説明を編集できるように、ここでスタートワークフローを一旦終了する
-                return
-        
         # 8. 出品CSV生成（保存ダイアログは従来どおり表示）
         if not self._should_run_step(
             "工程7: 出品CSV生成",

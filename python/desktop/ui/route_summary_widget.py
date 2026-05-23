@@ -1121,13 +1121,18 @@ class RouteSummaryWidget(QWidget):
                 f"訪問順序の保存中にエラーが発生しました:\n{str(e)}\n\n詳細はコンソールを確認してください。"
             )
     
-    def load_template(self, file_path: Optional[str] = None) -> Optional[str]:
+    def load_template(
+        self,
+        file_path: Optional[str] = None,
+        initial_dir: Optional[str] = None,
+    ) -> Optional[str]:
         """
         テンプレートファイルを読み込む
         
         Args:
             file_path: 直接読み込むテンプレートファイルパス。
                        None の場合はファイル選択ダイアログを表示する。
+            initial_dir: ファイル選択ダイアログの初期フォルダ（仕入CSV取込フォルダ等）。
         
         Returns:
             読み込んだファイルパス（キャンセル時や失敗時はNone）
@@ -1135,9 +1140,14 @@ class RouteSummaryWidget(QWidget):
         try:
             # パスが指定されていない場合はダイアログで選択
             if not file_path:
-                # 前回選択したフォルダを取得
-                last_path = self.settings.value("route_template/last_selected", "")
-                default_dir = os.path.dirname(last_path) if last_path and os.path.exists(last_path) else ""
+                default_dir = ""
+                if initial_dir and os.path.isdir(initial_dir):
+                    default_dir = initial_dir
+                else:
+                    # 前回選択したテンプレートのフォルダ
+                    last_path = self.settings.value("route_template/last_selected", "")
+                    if last_path and os.path.exists(last_path):
+                        default_dir = os.path.dirname(last_path)
                 
                 # ファイル選択ダイアログ
                 file_path, _ = QFileDialog.getOpenFileName(
@@ -1179,6 +1189,8 @@ class RouteSummaryWidget(QWidget):
             
             # 計算結果を更新
             getattr(self, 'update_calculation_results', lambda: None)()
+
+            self._warn_route_template_time_issues_if_any()
             
             return file_path
             
@@ -1188,6 +1200,45 @@ class RouteSummaryWidget(QWidget):
             traceback.print_exc()
             return None
     
+    def _collect_route_template_time_issues(self) -> List[str]:
+        """読込済みの route_data・店舗訪問表から時刻の不整合を検出する。"""
+        try:
+            from desktop.services.route_template_time_validation import collect_route_template_time_issues
+        except ImportError:
+            from services.route_template_time_validation import collect_route_template_time_issues  # type: ignore
+
+        route_data = getattr(self, "route_data", {}) or {}
+        exclude = {"出発時刻", "帰宅時刻", "往路高速代", "復路高速代"}
+        visits: List[Dict[str, Any]] = []
+        for i in range(self.store_visits_table.rowCount()):
+            code = self._get_table_item(i, 1)
+            if code in exclude:
+                continue
+            visits.append(
+                {
+                    "store_code": code,
+                    "store_name": self._get_table_item(i, 2),
+                    "store_in_time": self._get_table_item(i, 3),
+                    "store_out_time": self._get_table_item(i, 4),
+                }
+            )
+        return collect_route_template_time_issues(route_data, visits)
+
+    def _warn_route_template_time_issues_if_any(self) -> None:
+        """出発/帰宅・店舗IN/OUT が揃っていない場合に警告を表示する。"""
+        issues = self._collect_route_template_time_issues()
+        if not issues:
+            return
+        QMessageBox.warning(
+            self,
+            "ルートテンプレート: 時刻の確認",
+            "次の時刻が対になっていないため、正しいデータが取得・計算できない可能性があります。\n\n"
+            + "\n".join(issues)
+            + "\n\n"
+            "Excelの「店舗訪問詳細」シート（出発時刻・帰宅時刻の行と、各店舗の IN/OUT 列）を"
+            "修正してから、再度「ルートテンプレ読込」を実行してください。",
+        )
+
     def _load_excel_template(self, file_path: str):
         """Excelテンプレートファイルを読み込む"""
         try:

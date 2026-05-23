@@ -1,3 +1,31 @@
+## 2026-05-19（続き）仕入管理UX・ルート訪問DB正規化・テンプレ時刻検証
+
+- **目的**: 仕入〜ルート〜古物の一連操作を誤操作しにくくし、ルート訪問DBと照合の前提となる時刻データの品質を上げる。
+- **仕入管理（`inventory_widget.py`）**
+  - **DB保存**: 「コンディション編集はお済ですか？」確認後にのみ保存。保存中はくるくるダイアログ・待機カーソル・DB保存ボタン無効化。
+  - **ルートテンプレ読込**: 直前の CSV 取込フォルダ（`inventory/last_csv_folder`）をファイル選択の初期フォルダに使用。
+- **古物台帳（`antique_widget.py`）**
+  - 取込プレビュー一括登録完了後、既存メッセージに加え **仕入管理に戻る** ボタンで仕入管理タブへ遷移。
+- **データベース管理（`product_widget.py` / `main_window.py`）**
+  - 初回表示時の商品DB・仕入DB読込中に、DB保存と同様の待機表示（くるくる＋砂時計カーソル）。
+- **ルート訪問DB**
+  - `route_visit_normalize.py`: 保存時にルート単位で **IN 時刻順**に並べ替え、滞在・**移動時間**を再計算。
+  - `route_visit_db.replace_route_visits` で自動正規化。`route_visit_widget` 初回表示・再読込で既存データも一括補正。
+- **ルートテンプレ読込（`route_template_time_validation.py` / `route_summary_widget.py`）**
+  - 全体の **出発時刻・帰宅時刻**、各店舗の **IN/OUT** がペアになっていない場合に警告（読込は継続、照合・移動時間が不正確になり得る旨を表示）。
+- **変更ファイル**:
+  - `python/desktop/ui/inventory_widget.py`
+  - `python/desktop/ui/route_summary_widget.py`
+  - `python/desktop/database/route_visit_db.py`
+  - `python/desktop/ui/route_visit_widget.py`
+  - `python/desktop/ui/antique_widget.py`
+  - `python/desktop/ui/product_widget.py`
+  - `python/desktop/ui/main_window.py`
+  - `python/desktop/services/route_visit_normalize.py`
+  - `python/desktop/services/route_template_time_validation.py`
+  - `docs/cursor_development_progress.md`
+- **Git**: （本コミット）
+
 ## 2026-05-19 仕入統計の見込み利益修正・画像管理の自動補正プリセット
 
 - **目的**: CSV取込後の「想定見込み利益」がExcel合計とずれる問題を解消する。画像リネーム時にAIなしの自動補正を追加し、弱／標準／強のプリセットでプレビュー確認できるようにする。
