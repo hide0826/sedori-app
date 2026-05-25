@@ -1,3 +1,26 @@
+## 2026-05-24 フリマ出品画像の文字入れ・1:1出力・大画面編集
+
+- **目的**: フリマ出品用に画像1枚へ上下テキスト帯を載せ、メルカリ等へドラッグできる正方形JPEGを作る。一覧表示で余白や文字切れが出ないよう1:1の入れ方を選べるようにする。
+- **画像テキスト合成**（`flea_market_image_overlay_service.py`）
+  - Pillowで上下別スタイル（`TextBandStyle` / `ImageOverlaySettings`）：フォント・自動/手動サイズ・太字・左中右・文字色・帯色・透過率。
+  - **1:1の入れ方**: **ズーム埋め（cover）**＝先に写真を正方形化してから帯を描画（文字が切れにくい・既定）／ **余白収め（letterbox）**＝帯付き全体を正方形に収める。
+  - 下部帯: 下からの余白（既定48px、最低約44pxまたは高さ4%）、帯内下パディング。
+  - 一時JPEGは `%TEMP%/hirio_flea_overlay/`（元画像は変更しない）。
+- **フリマ出品情報UI**（`flea_market_listing_dialog.py`）
+  - チェックした1枚のみ文字入れ。簡易反映＋ **大画面で編集**／サムネ **ダブルクリック**。
+  - 「フリマ用1:1で出力」＋「1:1の入れ方」コンボ。
+- **大画面編集**（`flea_market_image_editor_dialog.py`）
+  - 左右: プレビュー（出力そのもの）／ 上下別パネル・1:1設定・プレビュー自動更新（デバウンス）。
+- **テスト**: `python/tests/test_flea_market_image_overlay.py`（11件）
+- **変更ファイル**:
+  - `python/desktop/services/flea_market_image_overlay_service.py`（新規）
+  - `python/desktop/ui/flea_market_image_editor_dialog.py`（新規）
+  - `python/desktop/ui/flea_market_listing_dialog.py`
+  - `python/tests/test_flea_market_image_overlay.py`（新規）
+  - `docs/cursor_development_progress.md`
+- **Git**: feat(desktop): フリマ出品画像の文字入れ・1:1出力・大画面編集
+- **次回**: 手数料率と価格提案の連携、設定の保存（QSettings）検討
+
 ## 2026-05-23 フリマ出品情報生成・フリマ設定タブ・画像パス解決
 
 - **目的**: 仕入DB行編集からフリマ向け出品文案（Gemini）と画像ドラッグを提供する。手数料率・AI固定文は「設定 > フリマ設定」に集約。ファイル名のみ残った仕入画像も探索して表示できるようにする。
