@@ -1,6 +1,6 @@
 import pandas as pd
 from datetime import datetime
-from typing import List, Dict, Any, Tuple, NamedTuple
+from typing import List, Dict, Any, Tuple, NamedTuple, Optional
 import json
 import re
 import math
@@ -479,6 +479,239 @@ def _get_profile_rule_for_days(days_since_listed: int, profile_rules: List[Dict[
     return len(sorted_rules) - 1, sorted_rules[-1]
 
 
+def _parse_ladder_target_price(rule: Dict[str, Any]) -> Optional[float]:
+    v = rule.get("target_price")
+    if v is None or v == "":
+        return None
+    try:
+        f = float(v)
+        return f if f > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_ladder_map_from_purchase_db(sku_list: List[str]) -> Dict[str, Dict[str, Any]]:
+    """仕入DBから月別運用（個別ラダー）設定を読み込む。"""
+    result: Dict[str, Dict[str, Any]] = {}
+    if not sku_list:
+        return result
+    db_path = _resolve_purchase_db_path()
+    if not db_path.exists():
+        return result
+    unique_skus = []
+    seen = set()
+    for sku in sku_list:
+        s = str(sku or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        unique_skus.append(s)
+    if not unique_skus:
+        return result
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        chunk_size = 900
+        for i in range(0, len(unique_skus), chunk_size):
+            chunk = unique_skus[i:i + chunk_size]
+            placeholders = ",".join(["?"] * len(chunk))
+            cur.execute(
+                f"SELECT sku, ladder_enabled, ladder_rules FROM purchases WHERE sku IN ({placeholders})",
+                tuple(chunk),
+            )
+            for row in cur.fetchall():
+                sku = str(row["sku"] or "").strip()
+                if not sku:
+                    continue
+                enabled_raw = row["ladder_enabled"]
+                enabled = str(enabled_raw).strip().lower() in ("1", "true", "on", "yes")
+                rules_raw = row["ladder_rules"]
+                rules: List[Dict[str, Any]] = []
+                if rules_raw:
+                    try:
+                        parsed = json.loads(rules_raw) if isinstance(rules_raw, str) else rules_raw
+                        if isinstance(parsed, list):
+                            rules = parsed
+                    except (json.JSONDecodeError, TypeError):
+                        rules = []
+                result[sku] = {"enabled": enabled, "rules": rules}
+        conn.close()
+    except Exception as e:
+        print(f"[WARNING LADDER] 仕入DBの月別運用読込に失敗: {e}")
+    return result
+
+
+def _get_ladder_down_period_end(
+    current_idx: int, current_rule: Dict[str, Any], ladder_rules: List[Dict[str, Any]]
+) -> int:
+    """同一 tp_down かつ同一 target_price が連続する終端日。"""
+    if current_idx < 0 or not ladder_rules:
+        return int(current_rule.get("days_from", 999) or 999)
+    sorted_rules = sorted(ladder_rules, key=lambda r: int(r.get("days_from", 999)))
+    target = _parse_ladder_target_price(current_rule)
+    end_day = int(current_rule.get("days_from", 999) or 999)
+    for i in range(current_idx + 1, len(sorted_rules)):
+        rule = sorted_rules[i]
+        if str(rule.get("action", "maintain")) != "tp_down":
+            break
+        if _parse_ladder_target_price(rule) != target:
+            break
+        end_day = int(rule.get("days_from", end_day) or end_day)
+    return end_day
+
+
+def _apply_monthly_ladder_for_row(
+    row: Any,
+    days_since_listed: int,
+    ladder_rules: List[Dict[str, Any]],
+    config: Dict[str, Any],
+) -> Tuple[str, Dict[str, Any], Optional[Dict[str, Any]]]:
+    """
+    月別運用（個別ラダー）で1行分の改定を適用。
+    Returns: (kind, log_entry, row_dict_or_excluded)  kind in ('updated', 'excluded')
+    """
+    sku = row.get("SKU", "")
+    if isinstance(sku, str) and sku.startswith('="') and sku.endswith('"'):
+        sku = sku[2:-1]
+    asin = row.get("ASIN", "")
+    title = row.get("title", "")
+    price = float(row.get("price", 0) or 0)
+    akaji = float(row.get("akaji", 0) or 0)
+    price_trace = row.get("priceTrace", 0)
+
+    interval_days = max(1, int(config.get("interval_days", 7)))
+    alert_cfg = config.get("alerts", {}) or {}
+    alert_enabled = bool(alert_cfg.get("enabled", True))
+    alert_prefix = str(alert_cfg.get("reason_prefix", "ALERT")).strip() or "ALERT"
+
+    rule_idx, active_rule = _get_profile_rule_for_days(days_since_listed, ladder_rules)
+    raw_action = str(active_rule.get("action", "maintain"))
+    rule_trace_value = active_rule.get("value", 0)
+    target_price = _parse_ladder_target_price(active_rule)
+    period_end = int(active_rule.get("days_from", 999) or 999)
+    if raw_action == "tp_down":
+        period_end = _get_ladder_down_period_end(rule_idx, active_rule, ladder_rules)
+
+    akaji_drop_percent = int(active_rule.get("akaji_drop_percent", 1) or 1)
+    akaji_drop_percent = min(10, max(1, akaji_drop_percent))
+    takane_rise_percent = int(active_rule.get("takane_rise_percent", 0) or 0)
+    takane_rise_percent = min(10, max(0, takane_rise_percent))
+
+    action_jp = ACTION_NAMES_JP.get(raw_action, raw_action)
+    reason_tokens = [
+        f"{days_since_listed}日経過: 月別運用({action_jp})",
+    ]
+    if target_price is not None:
+        reason_tokens.append(f"LADDER_PRICE: 目標{round(target_price)}円(帯終端{period_end}日)")
+    else:
+        reason_tokens.append("LADDER_PRICE: 目標価格未設定")
+
+    keepa_min = _to_float_or_none(row.get("keepa_min_same_condition"))
+    new_price_trace = price_trace
+    tp_floor = round(target_price) if target_price is not None else 0
+    has_target = target_price is not None and target_price > 0
+
+    if raw_action == "maintain":
+        new_price = round(price)
+    elif raw_action == "priceTrace":
+        if has_target and price > tp_floor:
+            remaining_days = max(0, period_end - days_since_listed)
+            steps = max(1, math.ceil(remaining_days / interval_days))
+            delta = (price - tp_floor) / steps if steps > 0 else 0
+            new_price = max(tp_floor, round(price - delta))
+            reason_tokens.append(
+                f"LADDER_DAILY: {days_since_listed}日→{period_end}日で{tp_floor}へ段階調整"
+            )
+        else:
+            new_price = round(price)
+            if not has_target:
+                reason_tokens.append("目標価格未設定のため価格維持")
+        new_price_trace = rule_trace_value
+    elif raw_action == "tp_down":
+        if has_target:
+            if keepa_min is None:
+                start_price = price
+                reason_tokens.append("KEEPA_MISSING: keepa_min_same_condition 未入力")
+            elif keepa_min < tp_floor:
+                start_price = tp_floor
+                if alert_enabled:
+                    reason_tokens.append(
+                        f"{alert_prefix}: keepa_min({round(keepa_min)}) < 目標({tp_floor}) のため目標で固定"
+                    )
+            else:
+                start_price = min(price, keepa_min)
+            remaining_days = max(0, period_end - days_since_listed)
+            steps = max(1, math.ceil(remaining_days / interval_days))
+            delta = (start_price - tp_floor) / steps if steps > 0 else 0
+            new_price = max(tp_floor, round(start_price - delta))
+        else:
+            new_price = round(price)
+            reason_tokens.append("目標価格未設定のため価格維持")
+    elif raw_action in ("price_down_1", "price_down_2", "price_down_3", "price_down_4"):
+        down_percent = int(raw_action.replace("price_down_", ""))
+        new_price = round(price * (1.0 - down_percent / 100.0))
+    elif raw_action == "exclude":
+        log_entry = {
+            "sku": sku, "asin": asin, "title": title, "days": days_since_listed, "action": "除外",
+            "reason": f"{days_since_listed}日経過: 月別運用・除外", "price": price,
+            "new_price": price, "priceTrace": price_trace, "new_priceTrace": price_trace,
+            "priceTraceChange": 0, "priceTraceChangeDisplay": "無し",
+            "csv_profit": _csv_profit_from_inventory_row(row),
+            "rule_action": raw_action, "tp_target": "", "akaji": akaji,
+            "akaji_drop_percent": akaji_drop_percent, "keepa_min_same_condition": keepa_min,
+            "tp_floor": tp_floor if has_target else None,
+            "is_tp_floor_or_below": False, "tp_reach_status": "",
+        }
+        return "excluded", log_entry, row.to_dict()
+    elif raw_action in ("price_down_ignore", "profit_ignore_down"):
+        new_price = round(price * 0.99)
+        reason_tokens.append("（利益ガード無視）")
+    else:
+        new_price = round(price)
+
+    akaji_guard_from_price = round(new_price * (1.0 - akaji_drop_percent / 100.0))
+    final_akaji = max(0, akaji_guard_from_price)
+    if price > final_akaji and new_price <= final_akaji:
+        new_price = final_akaji
+        reason_tokens.append("akaji下限に到達（維持）")
+    elif price <= final_akaji:
+        new_price = round(price)
+        reason_tokens.append(f"現在価格{round(price)}がakaji下限以下のため維持")
+
+    final_takane = max(new_price, round(new_price * (1.0 + takane_rise_percent / 100.0)))
+    is_tp_floor_or_below = bool(has_target and (new_price <= tp_floor or price <= tp_floor))
+    tp_reach_status = ""
+    if is_tp_floor_or_below:
+        tp_reach_status = "期間外到達" if price <= tp_floor and days_since_listed < period_end else "期間到達"
+
+    reason = " / ".join(reason_tokens)
+    row_dict = row.to_dict()
+    row_dict["price"] = new_price
+    row_dict["priceTrace"] = new_price_trace
+    row_dict["akaji"] = final_akaji
+    row_dict["takane"] = final_takane
+    log_entry = {
+        "sku": sku, "asin": asin, "title": title, "days": days_since_listed, "action": action_jp,
+        "reason": reason, "price": price, "new_price": new_price,
+        "priceTrace": price_trace, "new_priceTrace": new_price_trace,
+        "priceTraceChange": (new_price_trace if raw_action == "priceTrace" else 0),
+        "priceTraceChangeDisplay": (format_trace_value(new_price_trace) if raw_action == "priceTrace" else "無し"),
+        "csv_profit": _csv_profit_from_inventory_row(row),
+        "rule_action": raw_action,
+        "tp_target": "ladder",
+        "akaji": final_akaji,
+        "akaji_drop_percent": akaji_drop_percent,
+        "takane": final_takane,
+        "takane_rise_percent": takane_rise_percent,
+        "keepa_min_same_condition": keepa_min,
+        "tp_floor": tp_floor if has_target else None,
+        "is_tp_floor_or_below": is_tp_floor_or_below,
+        "tp_reach_status": tp_reach_status,
+    }
+    return "updated", log_entry, row_dict
+
+
 def _get_tp_down_period_end(current_idx: int, current_rule: Dict[str, Any], profile_rules: List[Dict[str, Any]]) -> int:
     """同一アクション(tp_down)かつ同一TP指定が連続する終端日を返す。"""
     if current_idx < 0 or not profile_rules:
@@ -517,6 +750,7 @@ def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[s
         sku_candidates.append(str(_sku or "").strip())
     tp_map_by_sku = _load_tp_map_from_purchase_db(sku_candidates)
     repricing_enabled_map_by_sku = _load_repricing_enabled_map_from_purchase_db(sku_candidates)
+    ladder_map_by_sku = _load_ladder_map_from_purchase_db(sku_candidates)
 
     for _, row in df.iterrows():
         sku = row.get("SKU", "")
@@ -583,6 +817,19 @@ def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[s
                 "tp_reach_status": "",
             })
             excluded_inventory_data.append(row.to_dict())
+            continue
+
+        sku_key = str(sku).strip()
+        ladder_bundle = ladder_map_by_sku.get(sku_key) or {}
+        if ladder_bundle.get("enabled") and ladder_bundle.get("rules"):
+            kind, log_entry, row_payload = _apply_monthly_ladder_for_row(
+                row, days_since_listed, ladder_bundle["rules"], config
+            )
+            log_data.append(log_entry)
+            if kind == "excluded":
+                excluded_inventory_data.append(row_payload)
+            else:
+                updated_inventory_data.append(row_payload)
             continue
 
         profile, is_fallback = detect_369_profile_from_sku(str(sku), default_profile)

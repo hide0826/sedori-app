@@ -181,6 +181,8 @@ class RepricerWidget(QWidget):
                     continue
                 matched_count += 1
                 current_status = str(purchase.get("status") or "").strip().lower()
+                if current_status == "inventory_only":
+                    continue
                 if not current_status or current_status == "ready":
                     purchase_db.upsert({
                         "sku": sku,
@@ -255,7 +257,16 @@ class RepricerWidget(QWidget):
         self.preview_btn.setEnabled(False)
         self.preview_btn.setMaximumHeight(30)  # 高さを制限
         file_layout.addWidget(self.preview_btn)
-        
+
+        self.missing_skus_btn = QPushButton("仕入DB未登録SKU")
+        self.missing_skus_btn.setToolTip(
+            "読み込んだ在庫CSVのうち、仕入DBに無いSKUを一覧表示し、\n"
+            "「在庫専用」として登録して月別運用ルールを設定できます。"
+        )
+        self.missing_skus_btn.clicked.connect(self.show_missing_inventory_skus_dialog)
+        self.missing_skus_btn.setEnabled(False)
+        self.missing_skus_btn.setMaximumHeight(30)
+        file_layout.addWidget(self.missing_skus_btn)
         
         self.layout().addWidget(file_group)
         
@@ -631,6 +642,7 @@ class RepricerWidget(QWidget):
                     self.file_path_edit.setText(file_path)
                     self.csv_preview_btn.setEnabled(True)
                     self.preview_btn.setEnabled(True)
+                    self.missing_skus_btn.setEnabled(True)
                     self.execute_btn.setEnabled(True)
                     self.clear_file_btn.setEnabled(True)
                     
@@ -692,6 +704,7 @@ class RepricerWidget(QWidget):
         # ボタン状態を初期化
         self.csv_preview_btn.setEnabled(False)
         self.preview_btn.setEnabled(False)
+        self.missing_skus_btn.setEnabled(False)
         self.execute_btn.setEnabled(False)
         self.save_btn.setEnabled(False)
         self.keepa_fetch_btn.setEnabled(False)
@@ -840,127 +853,211 @@ class RepricerWidget(QWidget):
             return {"price": p, "profit": prof, "days": days_val}
         return None
 
-    def on_result_table_double_clicked(self, row: int, col: int):
-        """価格改定結果行のダブルクリックで仕入行編集ダイアログを開く"""
+    def _get_purchase_db(self):
+        pw = self.product_widget
+        if pw is not None and hasattr(pw, "purchase_history_db"):
+            return pw.purchase_history_db
         try:
-            sku_item = self.result_table.item(row, 0)  # SKU列
-            asin_item = self.result_table.item(row, 1)  # ASIN列
-            title_item = self.result_table.item(row, 2)  # Title列
-            current_price_item = self.result_table.item(row, 7)  # 現在価格列
-            new_price_item = self.result_table.item(row, 8)  # 改定価格列
-            sku = sku_item.text().strip() if sku_item else ""
-            asin = asin_item.text().strip() if asin_item else ""
-            title = title_item.text().strip() if title_item else ""
-            current_price = current_price_item.text().strip() if current_price_item else ""
-            new_price = new_price_item.text().strip() if new_price_item else ""
-            if not sku:
-                return
+            from database.purchase_db import PurchaseDatabase
+        except ImportError:
+            from desktop.database.purchase_db import PurchaseDatabase  # type: ignore
+        return PurchaseDatabase()
 
-            # ProductWidget はタブ初表示まで仕入スナップショットを読まない。
-            # データベース管理を開かないと purchase_all_records が空のままになり、
-            # 仕入行の編集で価格・利益が空振りするため、ここで先に読み込む。
-            pw = self.product_widget
-            if pw is not None and hasattr(pw, "ensure_initial_data_loaded"):
+    def _load_csv_dataframe_for_missing(self) -> Optional[pd.DataFrame]:
+        if self.preview_df is not None and not self.preview_df.empty:
+            return self.preview_df
+        if not self.csv_path:
+            return None
+        try:
+            from utils.csv_io import csv_io
+            return csv_io.read_csv(self.csv_path)
+        except Exception:
+            return None
+
+    def show_missing_inventory_skus_dialog(self) -> None:
+        """在庫CSVにあって仕入DBに無いSKUを一覧表示。"""
+        df = self._load_csv_dataframe_for_missing()
+        if df is None or df.empty:
+            QMessageBox.information(self, "仕入DB未登録SKU", "先に在庫CSVを読み込んでください。")
+            return
+        try:
+            from desktop.services.purchase_inventory_only import (
+                extract_rows_not_in_purchase_db,
+                save_pending_missing_list,
+            )
+        except ImportError:
+            from services.purchase_inventory_only import (  # type: ignore
+                extract_rows_not_in_purchase_db,
+                save_pending_missing_list,
+            )
+        purchase_db = self._get_purchase_db()
+        missing = extract_rows_not_in_purchase_db(df, purchase_db)
+        if not missing:
+            QMessageBox.information(self, "仕入DB未登録SKU", "仕入DBに無いSKUはありません。")
+            return
+        save_pending_missing_list(missing, csv_path=self.csv_path or "")
+        try:
+            from ui.inventory_only_skus_dialog import InventoryOnlySkusDialog
+        except ImportError:
+            from desktop.ui.inventory_only_skus_dialog import InventoryOnlySkusDialog  # type: ignore
+        dlg = InventoryOnlySkusDialog(
+            missing,
+            purchase_db=purchase_db,
+            product_widget=self.product_widget,
+            repricer_widget=self,
+            csv_path=self.csv_path or "",
+            parent=self,
+        )
+        dlg.exec()
+
+    def open_purchase_row_edit_for_sku(
+        self,
+        sku: str,
+        *,
+        asin: str = "",
+        title: str = "",
+        csv_price: Any = None,
+        new_price: str = "",
+    ) -> None:
+        """SKU指定で仕入行編集（Keepa）を開く。無ければ在庫専用登録を案内。"""
+        sku = str(sku or "").strip()
+        if not sku:
+            return
+        current_price = str(csv_price or "").strip()
+        pw = self.product_widget
+        if pw is not None and hasattr(pw, "ensure_initial_data_loaded"):
+            try:
+                pw.ensure_initial_data_loaded()
+            except Exception:
+                pass
+
+        record = None
+        if pw is not None:
+            records = getattr(pw, "purchase_all_records", None) or getattr(pw, "purchase_records", None) or []
+            for rec in records:
+                rec_sku = str(rec.get("SKU") or rec.get("sku") or "").strip()
+                rec_asin = str(rec.get("ASIN") or rec.get("asin") or "").strip()
+                if rec_sku == sku and (not asin or not rec_asin or rec_asin == asin):
+                    record = rec
+                    break
+            if record is None:
+                for rec in records:
+                    if str(rec.get("SKU") or rec.get("sku") or "").strip() == sku:
+                        record = rec
+                        break
+
+        if record is None and pw is not None and hasattr(pw, "purchase_history_db"):
+            db_rec = pw.purchase_history_db.get_by_sku(sku)
+            if db_rec:
                 try:
-                    pw.ensure_initial_data_loaded()
+                    from desktop.services.purchase_inventory_only import purchase_record_from_db_row
+                except ImportError:
+                    from services.purchase_inventory_only import purchase_record_from_db_row  # type: ignore
+                record = purchase_record_from_db_row(db_rec)
+                if asin:
+                    record["ASIN"] = asin
+                if title:
+                    record["商品名"] = title
+
+        if record is None and pw is not None and hasattr(pw, "db"):
+            try:
+                product_rec = pw.db.get_by_sku(sku)
+            except Exception:
+                product_rec = None
+            if product_rec:
+                record = {"SKU": sku, "sku": sku}
+                record["ASIN"] = asin or str(product_rec.get("asin") or "")
+                record["商品名"] = title or str(product_rec.get("product_name") or "")
+
+        if record is None:
+            reply = QMessageBox.question(
+                self,
+                "仕入行の編集",
+                f"SKU {sku} は仕入DBにありません。\n"
+                "「在庫専用」として登録してから月別運用を設定しますか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            try:
+                from desktop.services.purchase_inventory_only import build_inventory_only_upsert_payload
+            except ImportError:
+                from services.purchase_inventory_only import build_inventory_only_upsert_payload  # type: ignore
+            row = {"SKU": sku, "sku": sku, "ASIN": asin, "商品名": title, "price": current_price}
+            purchase_db = self._get_purchase_db()
+            purchase_db.upsert(build_inventory_only_upsert_payload(row))
+            db_rec = purchase_db.get_by_sku(sku)
+            if db_rec:
+                try:
+                    from desktop.services.purchase_inventory_only import purchase_record_from_db_row
+                except ImportError:
+                    from services.purchase_inventory_only import purchase_record_from_db_row  # type: ignore
+                record = purchase_record_from_db_row(db_rec)
+            if pw is not None and hasattr(pw, "load_purchase_data"):
+                try:
+                    pw.load_purchase_data(purchase_db.list_all())
                 except Exception:
                     pass
 
-            record = None
-            if pw is not None:
-                records = getattr(pw, "purchase_all_records", None) or getattr(pw, "purchase_records", None) or []
-                for rec in records:
-                    rec_sku = str(rec.get("SKU") or rec.get("sku") or "").strip()
-                    rec_asin = str(rec.get("ASIN") or rec.get("asin") or "").strip()
-                    if rec_sku == sku and (not asin or not rec_asin or rec_asin == asin):
-                        record = rec
-                        break
-                if record is None:
-                    for rec in records:
-                        rec_sku = str(rec.get("SKU") or rec.get("sku") or "").strip()
-                        if rec_sku == sku:
-                            record = rec
-                            break
+        if record is None:
+            QMessageBox.information(self, "仕入行の編集", f"SKU {sku} の登録に失敗しました。")
+            return
 
-            # ProductWidgetのキャッシュに無い場合は仕入DBから最低限取得して開く
-            if record is None and pw is not None and hasattr(pw, "purchase_history_db"):
-                db_rec = pw.purchase_history_db.get_by_sku(sku)
-                if db_rec:
-                    record = {
-                        "SKU": sku,
-                        "ASIN": asin or str(db_rec.get("asin") or ""),
-                        "商品名": title or str(db_rec.get("product_name") or db_rec.get("title") or ""),
-                        "コンディション": str(db_rec.get("condition_note") or db_rec.get("condition") or ""),
-                        "仕入れ価格": db_rec.get("purchase_price") or db_rec.get("仕入れ価格") or db_rec.get("仕入価格") or 0,
-                        "purchase_price": db_rec.get("purchase_price") or db_rec.get("仕入れ価格") or db_rec.get("仕入価格") or 0,
-                        "販売予定価格": db_rec.get("expected_price") or db_rec.get("planned_price") or current_price or new_price or 0,
-                        "見込み利益": db_rec.get("expected_profit") or db_rec.get("profit") or 0,
-                        "TP0": db_rec.get("tp0", ""),
-                        "TP1": db_rec.get("tp1", ""),
-                        "TP2": db_rec.get("tp2", ""),
-                        "TP3": db_rec.get("tp3", ""),
-                        "tp0": db_rec.get("tp0", ""),
-                        "tp1": db_rec.get("tp1", ""),
-                        "tp2": db_rec.get("tp2", ""),
-                        "tp3": db_rec.get("tp3", ""),
-                    }
+        record.setdefault("SKU", sku)
+        record.setdefault("ASIN", asin or record.get("ASIN") or "")
+        if not record.get("商品名"):
+            record["商品名"] = title
+        if not record.get("コンディション"):
+            record["コンディション"] = ""
+        if not record.get("販売予定価格"):
+            record["販売予定価格"] = current_price or new_price or 0
+        if "見込み利益" not in record or record.get("見込み利益") in (None, ""):
+            record["見込み利益"] = 0
+        record.setdefault("expected_price", record.get("販売予定価格", 0))
+        record.setdefault("expected_profit", record.get("見込み利益", 0))
 
-            # ProductDBも参照して、商品名/ASINなど不足情報を補完
-            if pw is not None and hasattr(pw, "db"):
-                try:
-                    product_rec = pw.db.get_by_sku(sku)
-                except Exception:
-                    product_rec = None
-                if product_rec:
-                    if record is None:
-                        record = {}
-                    record.setdefault("SKU", sku)
-                    if not record.get("ASIN"):
-                        record["ASIN"] = asin or str(product_rec.get("asin") or "")
-                    if not record.get("商品名"):
-                        record["商品名"] = title or str(product_rec.get("product_name") or "")
-                    if not record.get("販売予定価格"):
-                        record["販売予定価格"] = current_price or new_price or 0
-                    if "見込み利益" not in record or record.get("見込み利益") in (None, ""):
-                        record["見込み利益"] = 0
-
-            # 最終フォールバック: 結果テーブルの値で最低限の表示項目を埋める
-            if record is not None:
-                record.setdefault("SKU", sku)
-                record.setdefault("ASIN", asin)
-                if not record.get("商品名"):
-                    record["商品名"] = title
-                if not record.get("コンディション"):
-                    record["コンディション"] = ""
-                if not record.get("販売予定価格"):
-                    record["販売予定価格"] = current_price or new_price or 0
-                if "見込み利益" not in record or record.get("見込み利益") in (None, ""):
-                    record["見込み利益"] = 0
-                # ダイアログ側の互換キー
-                if "expected_price" not in record:
-                    record["expected_price"] = record.get("販売予定価格", 0)
-                if "expected_profit" not in record:
-                    record["expected_profit"] = record.get("見込み利益", 0)
-
-            if record is None:
-                QMessageBox.information(self, "仕入行の編集", f"SKU {sku} の仕入データが見つかりません。")
-                return
-
-            csv_snap = self._repricer_csv_snapshot_for_sku(sku, asin)
-
+        csv_snap = self._repricer_csv_snapshot_for_sku(sku, asin)
+        if csv_snap is None and current_price:
             try:
-                from ui.purchase_row_edit_dialog import PurchaseRowEditDialog
-            except ImportError:
-                from desktop.ui.purchase_row_edit_dialog import PurchaseRowEditDialog
-            dialog = PurchaseRowEditDialog(record, product_widget=pw, csv_inventory_snapshot=csv_snap)
-            dialog.setModal(False)
-            dialog.setWindowModality(Qt.NonModal)
-            dialog.setAttribute(Qt.WA_DeleteOnClose, True)
-            self._purchase_edit_dialogs.append(dialog)
-            dialog.destroyed.connect(lambda _=None, d=dialog: self._purchase_edit_dialogs.remove(d) if d in self._purchase_edit_dialogs else None)
-            dialog.show()
-            dialog.raise_()
-            dialog.activateWindow()
+                csv_snap = {"price": float(str(current_price).replace(",", "")), "profit": 0, "days": None}
+            except (TypeError, ValueError):
+                csv_snap = None
+
+        try:
+            from ui.purchase_row_edit_dialog import PurchaseRowEditDialog
+        except ImportError:
+            from desktop.ui.purchase_row_edit_dialog import PurchaseRowEditDialog
+        dialog = PurchaseRowEditDialog(record, product_widget=pw, csv_inventory_snapshot=csv_snap or {})
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.NonModal)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        self._purchase_edit_dialogs.append(dialog)
+        dialog.destroyed.connect(
+            lambda _=None, d=dialog: self._purchase_edit_dialogs.remove(d) if d in self._purchase_edit_dialogs else None
+        )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def on_result_table_double_clicked(self, row: int, col: int):
+        """価格改定結果行のダブルクリックで仕入行編集ダイアログを開く"""
+        try:
+            sku_item = self.result_table.item(row, 0)
+            asin_item = self.result_table.item(row, 1)
+            title_item = self.result_table.item(row, 2)
+            current_price_item = self.result_table.item(row, 7)
+            new_price_item = self.result_table.item(row, 8)
+            sku = sku_item.text().strip() if sku_item else ""
+            if not sku:
+                return
+            self.open_purchase_row_edit_for_sku(
+                sku,
+                asin=asin_item.text().strip() if asin_item else "",
+                title=title_item.text().strip() if title_item else "",
+                csv_price=current_price_item.text().strip() if current_price_item else "",
+                new_price=new_price_item.text().strip() if new_price_item else "",
+            )
         except Exception as e:
             QMessageBox.warning(self, "仕入行の編集", f"ダイアログ表示に失敗しました:\n{e}")
     

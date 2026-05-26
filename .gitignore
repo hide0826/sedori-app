@@ -217,6 +217,8 @@ python/desktop/data/credentials/
 python/desktop/data_dev/
 # Keepaテストタブのローカル検証用スナップショット（再起動後の一覧復元用・個人環境向け）
 python/desktop/data/keepa_test_snapshot*.json
+# 価格改定CSVから抽出した在庫専用SKU候補（ローカルパス・SKU一覧）
+python/desktop/data/inventory_only_skus_pending.json
 *credentials*.json
 *gcv*.json
 *google*.json

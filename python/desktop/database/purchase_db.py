@@ -107,6 +107,9 @@ class PurchaseDatabase:
             # 出品日（在庫DBとの連携用・視認用）
             ("listed_date", "TEXT"),
             ("repricing_enabled", "INTEGER DEFAULT 1"),
+            # 月別運用: 個別SKUの30日刻み改定ルール（JSON）とON/OFF
+            ("ladder_enabled", "INTEGER DEFAULT 0"),
+            ("ladder_rules", "TEXT"),
             ("sales_channel", "TEXT DEFAULT 'Amazon'"),
             # SP-API運用時に使う在庫保管手数料（現UIでは非表示運用可）
             ("storage_fee", "INTEGER DEFAULT 0"),
@@ -187,6 +190,8 @@ class PurchaseDatabase:
             "status_set_at",
             "listed_date",
             "repricing_enabled",
+            "ladder_enabled",
+            "ladder_rules",
         ]
         # purchase辞書に含まれるキーのみを対象とする
         

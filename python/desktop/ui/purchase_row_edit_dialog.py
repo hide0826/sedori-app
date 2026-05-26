@@ -30,12 +30,88 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
+try:
+    from utils.repricer_ladder_table import (
+        apply_ladder_rules_to_table,
+        collect_ladder_rules_from_table,
+        create_ladder_rules_table,
+        ladder_rules_to_json,
+        load_reprice_config_for_template,
+        parse_ladder_rules_json,
+        populate_ladder_table_rows,
+        template_rules_from_default_profile,
+    )
+except ImportError:
+    from desktop.utils.repricer_ladder_table import (  # type: ignore
+        apply_ladder_rules_to_table,
+        collect_ladder_rules_from_table,
+        create_ladder_rules_table,
+        ladder_rules_to_json,
+        load_reprice_config_for_template,
+        parse_ladder_rules_json,
+        populate_ladder_table_rows,
+        template_rules_from_default_profile,
+    )
+
 # ダークUI向け：TP0〜TP3 でラベル・入力・概算の色を分ける
 _TP_DIALOG_TIER_COLORS = ("#6ecff6", "#7ae495", "#f0c674", "#e8a0bf")
+# チェックボックス（OS標準の白ラベル背景で文字が消えるのを防ぐ）
+_CHECKBOX_INDICATOR_STYLE = (
+    "QCheckBox::indicator { width: 18px; height: 18px; border: 1px solid #888888; "
+    "background-color: #252525; border-radius: 3px; }"
+    "QCheckBox::indicator:checked { background-color: #3d7ec4; border-color: #5a9ee0; }"
+)
+_CHECKBOX_DARK_STYLE = (
+    "QCheckBox {"
+    "  background-color: #1a1a1a;"
+    "  color: #ffffff;"
+    "  border: 1px solid #555555;"
+    "  border-radius: 4px;"
+    "  padding: 6px 10px;"
+    "  spacing: 8px;"
+    "}"
+    + _CHECKBOX_INDICATOR_STYLE
+    + "QCheckBox:disabled { color: #888888; background-color: #2a2a2a; }"
+)
+_LADDER_ROW_WRAP_STYLE = "background-color: #1a1a1a; border: 1px solid #555555; border-radius: 4px;"
+_LADDER_LABEL_STYLE = "color: #ffffff; background-color: transparent; font-size: 13px;"
+
+
+def _apply_checkbox_dark_style(checkbox: QCheckBox) -> None:
+    checkbox.setStyleSheet(_CHECKBOX_DARK_STYLE)
+
+
+def _create_ladder_checkbox_row(
+    label_text: str,
+    *,
+    tooltip: str = "",
+) -> Tuple[QWidget, QCheckBox]:
+    """月別運用用: チェックとラベルを分離し、黒背景でラベルを必ず表示する。"""
+    wrap = QWidget()
+    wrap.setStyleSheet(_LADDER_ROW_WRAP_STYLE)
+    row = QHBoxLayout(wrap)
+    row.setContentsMargins(8, 6, 8, 6)
+    row.setSpacing(10)
+    cb = QCheckBox()
+    cb.setStyleSheet(_CHECKBOX_INDICATOR_STYLE)
+    lbl = QLabel(label_text)
+    lbl.setStyleSheet(_LADDER_LABEL_STYLE)
+    lbl.setWordWrap(True)
+    if tooltip:
+        cb.setToolTip(tooltip)
+        lbl.setToolTip(tooltip)
+        wrap.setToolTip(tooltip)
+    row.addWidget(cb, 0)
+    row.addWidget(lbl, 1)
+    return wrap, cb
+
+
 _SALES_CHANNEL_OPTIONS = ["Amazon", "メルカリ", "ヤフオク", "ラクマ", "その他"]
 _SHIPPING_METHOD_OPTIONS = ["FBA", "自己発送"]
 
@@ -230,14 +306,30 @@ class PurchaseRowEditDialog(QDialog):
         self._sku_suffix_rest: str = ""
         self._product_widget = product_widget if product_widget is not None else parent
         self._csv_inventory_snapshot = csv_inventory_snapshot or {}
-        # メイン画面を操作しても編集ダイアログが背面に回らないようにする
-        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-        self.setWindowTitle("仕入行の編集（Keepa）")
+        # 通常ウィンドウとして表示（最大化・最小化可）＋ Keepa 参照用に最前面
+        self.setWindowFlags(
+            Qt.Window
+            | Qt.WindowTitleHint
+            | Qt.WindowCloseButtonHint
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowStaysOnTopHint
+        )
+        self._update_window_title()
         self.setMinimumSize(380, 320)
-        self.setMaximumSize(420, 500)
+        self.resize(480, 560)
         self._positioned_at_topleft = False
         self._tp_field_sync_guard = False
+        self._merge_ladder_from_db()
         self._setup_ui()
+
+    def _update_window_title(self) -> None:
+        base = "仕入行の編集（Keepa）"
+        st = str(self.record.get("ステータス") or self.record.get("status") or "").strip().lower()
+        if st == "inventory_only":
+            self.setWindowTitle(f"[在庫専用] {base}")
+        else:
+            self.setWindowTitle(base)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -328,6 +420,7 @@ class PurchaseRowEditDialog(QDialog):
         )
         info_layout.addRow("見込み利益（利益率）:", profit_db_lbl)
         self._repricing_enabled_cb = QCheckBox("価格改定の対象にする（ON）")
+        _apply_checkbox_dark_style(self._repricing_enabled_cb)
         repricing_val = self.record.get("価格改定")
         if repricing_val in (None, ""):
             repricing_val = self.record.get("repricing_enabled")
@@ -429,8 +522,53 @@ class PurchaseRowEditDialog(QDialog):
         keepa_btn_row.addWidget(flea_btn, 1)
         layout.addLayout(keepa_btn_row)
 
+        _ladder_tip = (
+            "ON にすると、価格改定タブの改定ルールと同じ形式で、このSKU専用の\n"
+            "出品日数別ルール（アクション・priceTrace・目標価格）を使います。\n"
+            "OFF のときは従来の TP0〜TP3（4段）を使います。"
+        )
+        ladder_cb_row, self._ladder_enabled_cb = _create_ladder_checkbox_row(
+            "月別運用（30日刻みの個別改定ルール）",
+            tooltip=_ladder_tip,
+        )
+        ladder_on = self._record_ladder_enabled()
+        self._ladder_enabled_cb.setChecked(ladder_on)
+        self._ladder_enabled_cb.toggled.connect(self._on_ladder_mode_toggled)
+        layout.addWidget(ladder_cb_row)
+
+        # --- 月別運用: 改定ルール同型の表（TP列→価格）---
+        self._ladder_group = QGroupBox("月別運用ルール（このSKU専用）")
+        ladder_outer = QVBoxLayout(self._ladder_group)
+        ladder_btn_row = QHBoxLayout()
+        copy_tpl_btn = QPushButton("デフォルトプロファイルからコピー")
+        copy_tpl_btn.setToolTip(
+            "価格改定タブの「3-6-9共通設定」のデフォルトプロファイル（例: 6ルール）の\n"
+            "アクション・priceTrace をコピーし、価格列には TP0〜TP3 を帯ごとに当てはめます。"
+        )
+        copy_tpl_btn.clicked.connect(self._copy_ladder_from_default_profile)
+        ladder_btn_row.addWidget(copy_tpl_btn)
+        ladder_btn_row.addStretch()
+        ladder_outer.addLayout(ladder_btn_row)
+        self._ladder_table = create_ladder_rules_table()
+        self._ladder_table.setMinimumHeight(220)
+        ladder_scroll = QScrollArea()
+        ladder_scroll.setWidgetResizable(True)
+        ladder_scroll.setWidget(self._ladder_table)
+        ladder_scroll.setMinimumHeight(200)
+        ladder_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        ladder_outer.addWidget(ladder_scroll, 1)
+        self._ladder_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout.addWidget(self._ladder_group, 1)
+        populate_ladder_table_rows(self._ladder_table, connect_action_signals=True)
+        saved_rules = parse_ladder_rules_json(
+            self.record.get("ladder_rules") or self.record.get("LadderRules")
+        )
+        if saved_rules:
+            apply_ladder_rules_to_table(self._ladder_table, saved_rules)
+
         # --- TP0 / TP1 / TP2 / TP3 編集（各帯：価格 → 目標利益率 → 概算利益、色分け）---
-        ta_group = QGroupBox("TP 価格（Keepa で確認しながら入力）")
+        self._ta_group = QGroupBox("TP 価格（Keepa で確認しながら入力）")
+        ta_group = self._ta_group
         ta_layout = QFormLayout()
 
         def _add_tp_block(
@@ -488,6 +626,7 @@ class PurchaseRowEditDialog(QDialog):
         self._update_ta_labels()
         for tr in range(4):
             self._sync_rate_spin_from_price(tr)
+        self._on_ladder_mode_toggled(self._ladder_enabled_cb.isChecked())
 
         # --- ボタン（反映後もダイアログは開いたまま＝ブラウザを参照し続けられる）---
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
@@ -771,10 +910,79 @@ class PurchaseRowEditDialog(QDialog):
             self._tp_field_sync_guard = False
         self._update_ta_labels()
 
+    def _merge_ladder_from_db(self) -> None:
+        """レコードに無い月別運用設定を仕入DBから補完する。"""
+        if self.record.get("ladder_rules") or self.record.get("ladder_enabled") is not None:
+            return
+        sku = self._record_str("SKU") or self._record_str("sku")
+        if not sku:
+            return
+        try:
+            if self._product_widget and hasattr(self._product_widget, "purchase_history_db"):
+                db = self._product_widget.purchase_history_db
+            else:
+                try:
+                    from database.purchase_db import PurchaseDatabase
+                except ImportError:
+                    from desktop.database.purchase_db import PurchaseDatabase  # type: ignore
+                db = PurchaseDatabase()
+            row = db.get_by_sku(sku)
+            if not row:
+                return
+            if row.get("ladder_rules"):
+                self.record["ladder_rules"] = row.get("ladder_rules")
+            le = row.get("ladder_enabled")
+            if le is not None:
+                self.record["ladder_enabled"] = le
+        except Exception:
+            pass
+
+    def _record_ladder_enabled(self) -> bool:
+        raw = self.record.get("ladder_enabled")
+        if raw is None:
+            return False
+        return str(raw).strip().lower() in ("1", "true", "on", "yes")
+
+    def _on_ladder_mode_toggled(self, checked: bool) -> None:
+        self._ladder_group.setVisible(checked)
+        self._ta_group.setVisible(not checked)
+        if checked:
+            self.setMinimumSize(440, 480)
+            if not self.isMaximized():
+                self.resize(max(self.width(), 520), max(self.height(), 640))
+        else:
+            self.setMinimumSize(380, 320)
+
+    def _copy_ladder_from_default_profile(self) -> None:
+        config = load_reprice_config_for_template()
+        if not config:
+            QMessageBox.warning(self, "コピー", "改定ルール設定ファイルが見つかりません。")
+            return
+        tp_prices = {
+            "tp0": self._ta0_edit.text().strip() if hasattr(self, "_ta0_edit") else "",
+            "tp1": self._ta1_edit.text().strip() if hasattr(self, "_ta1_edit") else "",
+            "tp2": self._ta2_edit.text().strip() if hasattr(self, "_ta2_edit") else "",
+            "tp3": self._ta3_edit.text().strip() if hasattr(self, "_ta3_edit") else "",
+        }
+        rules = template_rules_from_default_profile(config, tp_prices=tp_prices)
+        if not rules:
+            QMessageBox.warning(self, "コピー", "デフォルトプロファイルのルールが空です。")
+            return
+        apply_ladder_rules_to_table(self._ladder_table, rules)
+        QMessageBox.information(
+            self,
+            "コピー",
+            "デフォルトプロファイルのルールを表に反映しました。\n価格列は TP0〜TP3 を帯に合わせて入れています。必要に応じて編集してください。",
+        )
+
     def _apply(self) -> None:
         """仕入DBに反映する（ダイアログは閉じない＝ブラウザを見たまま続けられる）"""
         if not self._apply_sku_date_change():
             return
+        ladder_on = self._ladder_enabled_cb.isChecked()
+        ladder_rules_json = ""
+        if ladder_on:
+            ladder_rules_json = ladder_rules_to_json(collect_ladder_rules_from_table(self._ladder_table))
         tp0 = self._ta0_edit.text().strip()
         tp1 = self._ta1_edit.text().strip()
         tp2 = self._ta2_edit.text().strip()
@@ -797,6 +1005,8 @@ class PurchaseRowEditDialog(QDialog):
         self.record["sales_channel"] = sales_channel
         self.record["価格改定"] = "ON" if repricing_enabled else "OFF"
         self.record["repricing_enabled"] = 1 if repricing_enabled else 0
+        self.record["ladder_enabled"] = 1 if ladder_on else 0
+        self.record["ladder_rules"] = ladder_rules_json if ladder_on else ""
         # 親が ProductWidget なら hirio.db とスナップショットにも保存
         if self._product_widget and hasattr(self._product_widget, "purchase_history_db"):
             sku = self._record_str("SKU") or self._record_str("sku")
@@ -804,17 +1014,22 @@ class PurchaseRowEditDialog(QDialog):
                 try:
                     status = self.record.get("ステータス") or self.record.get("status") or "ready"
                     reason = self.record.get("ステータス理由") or self.record.get("status_reason") or ""
-                    self._product_widget.purchase_history_db.upsert({
+                    upsert_payload = {
                         "sku": sku,
-                        "status": status,
-                        "status_reason": reason,
+                        "status": self.record.get("status") or self.record.get("ステータス") or status,
+                        "status_reason": self.record.get("status_reason")
+                        or self.record.get("ステータス理由")
+                        or reason,
                         "tp0": tp0,
                         "tp1": tp1,
                         "tp2": tp2,
                         "tp3": tp3,
                         "sales_channel": sales_channel,
                         "repricing_enabled": 1 if repricing_enabled else 0,
-                    })
+                        "ladder_enabled": 1 if ladder_on else 0,
+                        "ladder_rules": ladder_rules_json if ladder_on else "",
+                    }
+                    self._product_widget.purchase_history_db.upsert(upsert_payload)
                 except Exception as e:
                     QMessageBox.warning(self, "反映", f"DB 保存でエラー: {e}")
                     return
@@ -827,7 +1042,12 @@ class PurchaseRowEditDialog(QDialog):
             records = getattr(self._product_widget, "purchase_records", None) or getattr(self._product_widget, "purchase_all_records", [])
             if records:
                 self._product_widget.populate_purchase_table(records)
-        QMessageBox.information(self, "反映", "TP0/TP1/TP2/TP3 を仕入DBに反映しました。\nダイアログは開いたままです。閉じる場合は「閉じる」を押してください。")
+        self._update_window_title()
+        if ladder_on:
+            msg = "月別運用ルールを仕入DBに反映しました。\nダイアログは開いたままです。閉じる場合は「閉じる」を押してください。"
+        else:
+            msg = "TP0/TP1/TP2/TP3 を仕入DBに反映しました。\nダイアログは開いたままです。閉じる場合は「閉じる」を押してください。"
+        QMessageBox.information(self, "反映", msg)
 
     def accept(self) -> None:
         """閉じる時に Keepa ブラウザも最小化する（閉じた後に遅延実行）"""

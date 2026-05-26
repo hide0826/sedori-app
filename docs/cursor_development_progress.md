@@ -1,3 +1,35 @@
+## 2026-05-25 在庫専用SKU・月別運用改定・仕入DB再起動復元
+
+- **目的**: 仕入DBに無い在庫CSVのSKUにも個別の30日刻み改定（月別運用）を適用し、仕入商品と在庫専用SKUを区別して管理する。再起動後も「在庫専用」フィルタで一覧に出るようにする。
+- **在庫専用ステータス**（`status = inventory_only`）
+  - 仕入DBタブ: フィルタ「在庫専用」、行背景青灰、販売同期から除外。
+  - `purchase_inventory_only.py`: 抽出・一括登録・`hirio.db` マージ・`normalize_status_code`。
+  - `inventory_only_skus_dialog.py`: 価格改定CSVから未登録SKU一覧・一括登録・行編集。
+- **月別運用（個別ラダー）**
+  - `purchases` に `ladder_enabled`, `ladder_rules`（JSON）カラム追加（`purchase_db.py`）。
+  - `repricer_ladder_table.py`: 改定ルールと同型の13行表UIを共通化。
+  - `purchase_row_edit_dialog.py`: 月別運用ON/OFF・ルール表・在庫専用表示・最大化対応。
+  - `repricer_weekly.py`: 仕入DBからラダー読込、SKUループ先頭で月別運用を最優先適用。
+- **再起動後0件の修正**
+  - 起動時スナップショットのみだと `hirio.db` の在庫専用行がマスタに載らない問題を修正。
+  - `load_purchase_data` で `merge_purchase_history_db_into_display_records` を実行。
+  - `save_purchase_snapshot` はフィルタ後ではなく全件マスタを保存。一括登録後も自動保存。
+- **価格改定UI**（`repricer_widget.py`）: 「仕入DB未登録SKU」ボタン、在庫専用登録案内、SKUから仕入行編集を開く。
+- **ローカル補助データ**: `python/desktop/data/inventory_only_skus_pending.json` は `.gitignore` 対象（ユーザーCSV由来）。
+- **変更ファイル**:
+  - `python/desktop/database/purchase_db.py`
+  - `python/desktop/services/purchase_inventory_only.py`（新規）
+  - `python/desktop/utils/repricer_ladder_table.py`（新規）
+  - `python/desktop/ui/inventory_only_skus_dialog.py`（新規）
+  - `python/desktop/ui/product_widget.py`
+  - `python/desktop/ui/purchase_row_edit_dialog.py`
+  - `python/desktop/ui/repricer_widget.py`
+  - `python/services/repricer_weekly.py`
+  - `.gitignore`
+  - `docs/cursor_development_progress.md`
+- **Git**: feat(desktop): 在庫専用SKUと月別運用改定、仕入DB再起動時のhirio.dbマージ
+- **次回**: 月別運用のプレビュー理由表示の見直し、スナップショットとDBの定期整合確認
+
 ## 2026-05-24 フリマ出品画像の文字入れ・1:1出力・大画面編集
 
 - **目的**: フリマ出品用に画像1枚へ上下テキスト帯を載せ、メルカリ等へドラッグできる正方形JPEGを作る。一覧表示で余白や文字切れが出ないよう1:1の入れ方を選べるようにする。

@@ -63,6 +63,7 @@ _PURCHASE_STATUS_FILTER_OPTIONS: Tuple[Tuple[str, str], ...] = (
     ("販売中", "selling"),
     ("一部販売済み", "partially_sold"),
     ("販売済み", "sold"),
+    ("在庫専用", "inventory_only"),
 )
 
 from database.product_db import ProductDatabase
@@ -870,6 +871,9 @@ class ProductWidget(QWidget):
 
             purchase_qty = self._to_int_count(purchase.get("quantity"), default=1)
             current_status = self._normalize_text(purchase.get("status")).lower() or "ready"
+            if current_status == "inventory_only":
+                summary["unchanged"] += 1
+                continue
             next_status = None
             reason = ""
 
@@ -1891,7 +1895,20 @@ class ProductWidget(QWidget):
         """仕入DBデータを読み込み"""
         # 起動時はスナップショットから復元されるため、DB側の最新情報（ステータス/理由など）をマージしてから表示する
         try:
-            records = self._augment_purchase_records(records or [])
+            try:
+                from desktop.services.purchase_inventory_only import (
+                    merge_purchase_history_db_into_display_records,
+                )
+            except ImportError:
+                from services.purchase_inventory_only import (  # type: ignore
+                    merge_purchase_history_db_into_display_records,
+                )
+            merged = merge_purchase_history_db_into_display_records(
+                records or [],
+                self.purchase_history_db,
+                include_db_only_rows=True,
+            )
+            records = self._augment_purchase_records(merged)
         except Exception as e:
             print(f"仕入DBデータのaugmentエラー: {e}")
         # マスターを保持しておき、フィルタ時はそこから再計算する
@@ -1903,11 +1920,14 @@ class ProductWidget(QWidget):
 
     def save_purchase_snapshot(self):
         """現在の仕入データをスナップショットとして保存"""
-        if not hasattr(self, 'purchase_all_records') or not self.purchase_all_records:
+        master = getattr(self, "purchase_all_records_master", None) or getattr(
+            self, "purchase_all_records", None
+        )
+        if not master:
             return
         try:
             snapshot_name = f"Snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            self.purchase_db.save_snapshot(snapshot_name, self.purchase_all_records)
+            self.purchase_db.save_snapshot(snapshot_name, master)
         except Exception as e:
             print(f"スナップショット保存エラー: {e}")
 
@@ -2202,9 +2222,14 @@ class ProductWidget(QWidget):
 
         # ステータスフィルタ（複数チェック時はいずれかに一致）
         if status_selected:
+            try:
+                from desktop.services.purchase_inventory_only import normalize_status_code
+            except ImportError:
+                from services.purchase_inventory_only import normalize_status_code  # type: ignore
             filtered_records = [
                 r for r in filtered_records
-                if str(r.get("ステータス") or r.get("status") or "ready").lower() in status_selected
+                if normalize_status_code(r.get("ステータス") or r.get("status"))
+                in status_selected
             ]
 
         # 結果を反映
@@ -2219,7 +2244,10 @@ class ProductWidget(QWidget):
         self.purchase_search_asin.clear()
         self.purchase_search_jan.clear()
         self._reset_purchase_status_filter_checkboxes()
-        self.purchase_records = list(self.purchase_all_records) if hasattr(self, 'purchase_all_records') else []
+        master = getattr(self, "purchase_all_records_master", None) or getattr(
+            self, "purchase_all_records", []
+        )
+        self.purchase_records = copy.deepcopy(master) if master else []
         self.populate_purchase_table(self.purchase_records)
         self.update_purchase_count_label()
     
@@ -2356,13 +2384,18 @@ class ProductWidget(QWidget):
         if not hasattr(self, 'purchase_all_records'):
             self.purchase_all_records = []
             
-        total_count = len(self.purchase_all_records)
-        filtered_count = len(self.purchase_records)
-        
+        master = getattr(self, "purchase_all_records_master", None) or getattr(
+            self, "purchase_all_records", []
+        )
+        total_count = len(master) if master else 0
+        filtered_count = len(self.purchase_records) if hasattr(self, "purchase_records") else 0
+
         if total_count == filtered_count:
             self.purchase_count_label.setText(f"保存件数: {total_count}件（スナップショット: 最大10件まで）")
         else:
-            self.purchase_count_label.setText(f"表示: {filtered_count}件 / 全件: {total_count}件（スナップショット: 最大10件まで）")
+            self.purchase_count_label.setText(
+                f"表示: {filtered_count}件 / 全体: {total_count}件（スナップショット: 最大10件まで）"
+            )
     
     def _normalize_date_for_search(self, date_str: str) -> Optional[str]:
         """検索用に日付を正規化（yyyy-mm-dd形式）"""
@@ -2592,6 +2625,16 @@ class ProductWidget(QWidget):
                             row["listed_date"] = listed_date
                         repricing_enabled = purchase_info.get("repricing_enabled", 1)
                         row["価格改定"] = "OFF" if str(repricing_enabled).strip().lower() in ("0", "off", "false", "no") else "ON"
+                        le = purchase_info.get("ladder_enabled")
+                        if le is not None:
+                            row["ladder_enabled"] = le
+                        lr = purchase_info.get("ladder_rules")
+                        if lr:
+                            row["ladder_rules"] = lr
+                        st = str(purchase_info.get("status") or "").strip().lower()
+                        if st == "inventory_only":
+                            row["ステータス"] = "inventory_only"
+                            row["status"] = "inventory_only"
                 except Exception as e:
                     print(f"仕入DB情報取得エラー(SKU={sku}): {e}")
             # 既存データ互換: 未設定時は Amazon を既定値にする
@@ -3053,6 +3096,7 @@ class ProductWidget(QWidget):
                     status_combo.addItem("販売中", "selling")
                     status_combo.addItem("一部販売済み", "partially_sold")
                     status_combo.addItem("販売済み", "sold")
+                    status_combo.addItem("在庫専用", "inventory_only")
                     
                     # 現在の値を設定
                     current_index = 0
@@ -3473,6 +3517,7 @@ class ProductWidget(QWidget):
             "selling": QColor(20, 80, 40),  # 販売中：緑系
             "partially_sold": QColor(20, 70, 70),  # 一部販売済み：青緑系
             "sold": QColor(60, 60, 60),  # 販売済み：やや暗め
+            "inventory_only": QColor(42, 58, 72),  # 在庫専用：青灰（在庫CSV登録）
         }
         
         bg_color = color_map.get(status, QColor(50, 50, 50))
