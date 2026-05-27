@@ -220,6 +220,42 @@ class MainWindow(QMainWindow):
             product_widget = getattr(self, "product_widget", None)
             if product_widget is not None:
                 product_widget.ensure_initial_data_loaded()
+            try:
+                self._on_db_management_subtab_changed(db_tabs.currentIndex())
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    @staticmethod
+    def _build_db_placeholder(text: str) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(16, 16, 16, 16)
+        label = QLabel(text)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(label)
+        return w
+
+    def _on_db_management_subtab_changed(self, index: int) -> None:
+        """データベース管理サブタブの重い画面を表示時に遅延生成する。"""
+        try:
+            db_tabs = getattr(self, "_db_management_tabs", None)
+            if db_tabs is None or index < 0:
+                return
+            label = db_tabs.tabText(index)
+            if label == "店舗マスタ" and getattr(self, "store_master_widget", None) is None:
+                from ui.store_master_widget import StoreMasterWidget
+                self.store_master_widget = StoreMasterWidget()
+                db_tabs.removeTab(index)
+                db_tabs.insertTab(index, self.store_master_widget, "店舗マスタ")
+                db_tabs.setCurrentIndex(index)
+            elif label == "ルート訪問DB" and getattr(self, "route_visit_widget", None) is None:
+                from ui.route_visit_widget import RouteVisitLogWidget
+                self.route_visit_widget = RouteVisitLogWidget()
+                db_tabs.removeTab(index)
+                db_tabs.insertTab(index, self.route_visit_widget, "ルート訪問DB")
+                db_tabs.setCurrentIndex(index)
         except Exception:
             pass
 
@@ -293,11 +329,9 @@ class MainWindow(QMainWindow):
 
         if phase == 2:
             # データベース管理（コンディション説明は仕入管理タブに移動済み）
-            from ui.store_master_widget import StoreMasterWidget
             from ui.product_widget import ProductWidget
-            from ui.route_visit_widget import RouteVisitLogWidget
             from ui.data_acquisition_widget import DataAcquisitionWidget
-            self.store_master_widget = StoreMasterWidget()
+            self.store_master_widget = None
             self.product_widget = ProductWidget(
                 inventory_widget=self.inventory_widget,
                 api_client=self.api_client,
@@ -310,12 +344,15 @@ class MainWindow(QMainWindow):
             # 3-6-9仕入管理からDB保存したときも仕入DBタブに即反映するため参照を渡す
             if hasattr(self, "inventory_widget_dev") and self.inventory_widget_dev is not None:
                 self.inventory_widget_dev.set_product_widget(self.product_widget)
-            self.route_visit_widget = RouteVisitLogWidget()
+            self.route_visit_widget = None
             db_management_tabs = QTabWidget()
             db_management_tabs.addTab(self.product_widget, "商品DB")
-            db_management_tabs.addTab(self.store_master_widget, "店舗マスタ")
-            db_management_tabs.addTab(self.route_visit_widget, "ルート訪問DB")
+            db_management_tabs.addTab(self._build_db_placeholder("店舗マスタを開くと読み込みます"), "店舗マスタ")
+            db_management_tabs.addTab(self._build_db_placeholder("ルート訪問DBを開くと読み込みます"), "ルート訪問DB")
             self._db_management_tabs = db_management_tabs
+            if not getattr(self, "_db_mgmt_subtab_hook_connected", False):
+                self._db_management_tabs.currentChanged.connect(self._on_db_management_subtab_changed)
+                self._db_mgmt_subtab_hook_connected = True
             self.tab_widget.addTab(db_management_tabs, "データベース管理")
             if not getattr(self, "_db_mgmt_tab_hook_connected", False):
                 self.tab_widget.currentChanged.connect(self._on_main_tab_current_changed)

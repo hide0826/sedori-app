@@ -50,6 +50,27 @@ except ImportError:
         resolve_record_product_images,
     )
 
+try:
+    from desktop.services.purchase_cost_calc import (
+        COL_PLATFORM_FEE,
+        COL_SHIPPING,
+        COL_TOTAL_COST,
+        augment_purchase_cost_records,
+        fee_storage_value,
+        format_money_display,
+        is_fee_amount_column,
+    )
+except ImportError:
+    from services.purchase_cost_calc import (  # type: ignore
+        COL_PLATFORM_FEE,
+        COL_SHIPPING,
+        COL_TOTAL_COST,
+        augment_purchase_cost_records,
+        fee_storage_value,
+        format_money_display,
+        is_fee_amount_column,
+    )
+
 # 仕入DBでステータスが「販売中」のときの既定ステータス理由（在庫・価格改定CSV連動）
 _PURCHASE_STATUS_REASON_SELLING_INVENTORY_CSV = "在庫CSV連動:"
 
@@ -383,6 +404,9 @@ class ProductWidget(QWidget):
         # 重いデータ読み込みが完了しているかどうか
         self._initial_data_loaded: bool = False
         self._initial_load_in_progress: bool = False
+        self._purchase_loaded: bool = False
+        self._sales_loaded: bool = False
+        self._products_loaded: bool = False
 
         self.setup_ui()
         # テーブルの列幅を復元（データ件数に依存しない軽量処理）
@@ -429,7 +453,7 @@ class ProductWidget(QWidget):
 
     def ensure_initial_data_loaded(self) -> None:
         """
-        商品一覧・仕入/販売DBの初回読み込みを遅延実行する。
+        初回は仕入DBのみを読み込む（販売DBはタブ表示時に遅延読込）。
         - 起動直後には実行せず、タブが初めて表示されたタイミングなどで呼び出す。
         """
         if self._initial_data_loaded or self._initial_load_in_progress:
@@ -438,17 +462,13 @@ class ProductWidget(QWidget):
         self._initial_load_in_progress = True
         try:
             with self._initial_db_load_busy_scope():
-                # 商品一覧テーブル
-                self.load_products()
-                QApplication.processEvents()
                 # 仕入スナップショットから最新状態を復元
                 self.restore_latest_purchase_snapshot()
                 QApplication.processEvents()
-                # 仕入・販売テーブルに反映
+                # 仕入テーブルのみ先に反映
                 self.load_purchase_data(self.purchase_records)
                 QApplication.processEvents()
-                self.load_sales_data()
-                QApplication.processEvents()
+                self._purchase_loaded = True
 
             self._initial_data_loaded = True
         finally:
@@ -464,6 +484,18 @@ class ProductWidget(QWidget):
         except Exception as e:
             # 初期読み込みで例外が出てもアプリ全体が落ちないようにしておく
             logging.getLogger(__name__).warning(f"ProductWidget initial load error: {e}")
+
+    def _on_inner_tab_changed(self, index: int) -> None:
+        """商品DB内サブタブの遅延読込。"""
+        try:
+            if index < 0:
+                return
+            label = self.tab_widget.tabText(index)
+            if label == "販売DB" and not self._sales_loaded:
+                self.load_sales_data()
+                self._sales_loaded = True
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"ProductWidget tab lazy-load error: {e}")
 
     def _resolve_inventory_columns(self) -> List[str]:
         """仕入管理タブの列構成を取得（未設定時はデフォルト）"""
@@ -559,6 +591,8 @@ class ProductWidget(QWidget):
         self.sales_tab = QWidget()
         self.setup_sales_tab()
         self.tab_widget.addTab(self.sales_tab, "販売DB")
+        self.tab_widget.currentChanged.connect(self._on_inner_tab_changed)
+        self.tab_widget.setCurrentWidget(self.purchase_tab)
 
     # --- 商品タブ ---
     def setup_product_tab(self):
@@ -961,7 +995,10 @@ class ProductWidget(QWidget):
                 if sale_price <= 0:
                     sale_price = self._to_int_amount(row.get("出品価格"), default=0)
 
-                platform_fee = self._to_int_amount(row.get("Amazon手数料"), default=0)
+                platform_fee = self._to_int_amount(
+                    row.get(COL_PLATFORM_FEE) or row.get("Amazon手数料"),
+                    default=0,
+                )
                 shipping_fee = self._to_int_amount(row.get("配送料"), default=0)
                 quantity = self._to_int_count(row.get("売れた個数"), default=1)
 
@@ -1889,6 +1926,7 @@ class ProductWidget(QWidget):
                         cell.setBackground(refund_bg)
 
         self.sales_table.resizeColumnsToContents()
+        self._sales_loaded = True
 
     # --- 仕入DB関連 ---
     def load_purchase_data(self, records: List[Dict[str, Any]]):
@@ -2642,12 +2680,13 @@ class ProductWidget(QWidget):
                 row["販売チャネル"] = "Amazon"
 
             augmented.append(row)
-        return augmented
+        return augment_purchase_cost_records(augmented)
 
     def populate_purchase_table(self, records: List[Dict[str, Any]]):
         """仕入DBテーブルにレコードを反映"""
         from pathlib import Path
         records = records or []
+        augment_purchase_cost_records(records)
         
         base_columns = list(self.inventory_columns)
         if not base_columns:
@@ -2968,18 +3007,29 @@ class ProductWidget(QWidget):
                         item = QTableWidgetItem(f"{value_float:.2f}")
                     else:
                         item = QTableWidgetItem("")
-                elif header in ("仕入れ価格", "見込み利益"):
+                elif header in (
+                    "仕入れ価格", "見込み利益", COL_PLATFORM_FEE, COL_SHIPPING, COL_TOTAL_COST,
+                    "在庫保管手数料",
+                ):
                     try:
                         fv = float(str(value).replace(",", "").strip()) if value not in (None, "") else None
                     except (ValueError, TypeError):
                         fv = None
                     if fv is None:
                         item = QTableWidgetItem("")
+                        if is_fee_amount_column(header):
+                            record[header] = ""
                     else:
                         rounded_yen = int(round(fv))
-                        # 金額列は整数円で扱う（表示と内部値を揃える）
-                        record[header] = rounded_yen
-                        item = QTableWidgetItem(str(rounded_yen))
+                        if is_fee_amount_column(header):
+                            stored = fee_storage_value(rounded_yen)
+                            record[header] = stored
+                            item = QTableWidgetItem(
+                                format_money_display(rounded_yen, zero_as_empty=True)
+                            )
+                        else:
+                            record[header] = rounded_yen
+                            item = QTableWidgetItem(str(rounded_yen))
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 elif header == "損益分岐点":
                     purchase_v = None

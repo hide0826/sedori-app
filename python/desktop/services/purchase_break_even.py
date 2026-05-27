@@ -30,6 +30,7 @@ def implied_sale_deduction_at_planned_price(
     *,
     amazon_fee: Optional[float] = None,
     shipping_price: Optional[float] = None,
+    total_cost: Optional[float] = None,
 ) -> float:
     """
     販売予定価格における「売上から控除される額」（手数料+送料等の合算イメージ）。
@@ -52,6 +53,8 @@ def implied_sale_deduction_at_planned_price(
 
     if fee > 0 or ship > 0:
         implied = fee + ship
+    elif total_cost is not None and float(total_cost) > 0:
+        implied = max(0.0, float(total_cost))
     else:
         implied = planned_sale - purchase - other_cost - expected_profit
 
@@ -70,6 +73,7 @@ def compute_break_even_sale_price(
     *,
     amazon_fee: Optional[float] = None,
     shipping_price: Optional[float] = None,
+    total_cost: Optional[float] = None,
 ) -> Optional[float]:
     """
     利益ゼロとなる販売価格の目安（控除が販売価格に比例すると仮定）。
@@ -88,6 +92,7 @@ def compute_break_even_sale_price(
         other_cost,
         amazon_fee=amazon_fee,
         shipping_price=shipping_price,
+        total_cost=total_cost,
     )
     k = implied / float(planned_sale)
     if k >= 1.0 or k < 0:
@@ -125,7 +130,13 @@ def compute_break_even_for_record(record: Dict[str, Any]) -> Optional[float]:
     other_cost = _to_float(record.get("その他費用") or record.get("other_cost"))
 
     amz = None
-    for key in ("amazon-fee", "amazon_fee", "Amazon手数料"):
+    for key in (
+        "プラットフォーム手数料",
+        "amazon-fee",
+        "amazon_fee",
+        "Amazon手数料",
+        "platform_fee",
+    ):
         if key in record and record[key] not in (None, ""):
             amz = _to_float(record[key])
             break
@@ -136,6 +147,12 @@ def compute_break_even_for_record(record: Dict[str, Any]) -> Optional[float]:
             ship = _to_float(record[key])
             break
 
+    total = None
+    for key in ("費用合計", "total_cost"):
+        if key in record and record[key] not in (None, ""):
+            total = _to_float(record[key])
+            break
+
     return compute_break_even_sale_price(
         purchase,
         planned,
@@ -143,6 +160,7 @@ def compute_break_even_for_record(record: Dict[str, Any]) -> Optional[float]:
         other_cost,
         amazon_fee=amz,
         shipping_price=ship,
+        total_cost=total,
     )
 
 

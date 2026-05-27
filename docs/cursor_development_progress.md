@@ -1,3 +1,31 @@
+## 2026-05-27 仕入DB費用合計の再計算統一・DB管理タブ遅延読込
+
+- **目的**: 仕入DBの「費用合計」を運用実態（価格改定で `akaji` が変動）に合わせて再計算し、表示・保存の不整合をなくす。あわせてデータベース管理タブの初期表示を軽量化する。
+- **費用合計ロジック統一**（`purchase_cost_calc.py` / `inventory_widget.py` / `product_widget.py`）
+  - 列名を **`プラットフォーム手数料`** へ移行しつつ、旧キー `Amazon手数料` を互換読込。
+  - 費用合計は原則 **`販売予定価格 - 仕入れ価格 - 見込み利益`** で補完（手数料・出荷がある行は内訳合計を優先）。
+  - 価格改定で用途が変わる `akaji`（損益分岐点）は、費用合計の主計算から分離。
+  - 手数料系（プラットフォーム手数料・出荷費用・費用合計）の **0 は空欄表示/空欄保存** に統一。
+- **既存データ再計算**
+  - `hirio_product_purchase.db` の `product_purchase_snapshots`（保持10件）を全件再計算して保存。
+  - 空欄だった費用合計を補完し、旧式/不整合値を新ルールへ揃えた。
+- **DB管理タブの遅延読込**（`main_window.py` / `product_widget.py`）
+  - 「データベース管理」初回表示では **商品DB内の仕入DBのみ先読み**。
+  - 商品DB内の **販売DBはタブ表示時に初回読込**。
+  - DB管理サブタブの **店舗マスタ / ルート訪問DB** はプレースホルダ表示にし、開いた時点でウィジェットを生成・読込。
+- **テスト/確認**
+  - `python/desktop/services/test_purchase_cost_calc.py` を更新し、補完・空欄化・再計算ケースを追加。
+  - `py_compile` / lints で構文・静的エラーなしを確認。
+- **変更ファイル**:
+  - `python/desktop/services/purchase_cost_calc.py`（新規）
+  - `python/desktop/services/test_purchase_cost_calc.py`（新規）
+  - `python/desktop/services/purchase_break_even.py`
+  - `python/desktop/ui/inventory_widget.py`
+  - `python/desktop/ui/product_widget.py`
+  - `python/desktop/ui/main_window.py`
+  - `docs/cursor_development_progress.md`
+- **Git**: （本コミット）
+
 ## 2026-05-25 在庫専用SKU・月別運用改定・仕入DB再起動復元
 
 - **目的**: 仕入DBに無い在庫CSVのSKUにも個別の30日刻み改定（月別運用）を適用し、仕入商品と在庫専用SKUを区別して管理する。再起動後も「在庫専用」フィルタで一覧に出るようにする。

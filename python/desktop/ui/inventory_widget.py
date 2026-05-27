@@ -46,6 +46,23 @@ from utils.route_utils import mark_route_flags_from_folder
 from utils.settings_helper import is_pro_enabled
 from services.keepa_service import KeepaService
 from services.ocr_service import OCRService
+from services.purchase_cost_calc import (
+    COL_PLATFORM_FEE,
+    COL_SHIPPING,
+    COL_TOTAL_COST,
+    COL_LEGACY_AMAZON_FEE,
+    augment_purchase_cost_record,
+    backfill_total_cost_dataframe,
+    cell_has_numeric_value,
+    fee_storage_value,
+    format_money_display,
+    is_fee_amount_column,
+    migrate_dataframe_fee_columns,
+    read_fee_fields,
+    recalculate_profit_fields,
+    sync_total_cost_field,
+    to_float as purchase_cost_to_float,
+)
 
 # ファイル操作エリア直下の手順ラベル用（①〜⑧）。ハイライトは 1..8 / なしは None
 _WORKFLOW_PIPELINE_SEGMENTS = [
@@ -736,7 +753,7 @@ class SinglePurchaseInputDialog(QDialog):
         self.amazon_fee_spin = QSpinBox()
         self.amazon_fee_spin.setRange(0, 10_000_000)
         self.amazon_fee_spin.setSingleStep(10)
-        layout.addRow("Amazon手数料:", self.amazon_fee_spin)
+        layout.addRow("プラットフォーム手数料:", self.amazon_fee_spin)
 
         self.shipping_cost_spin = QSpinBox()
         self.shipping_cost_spin.setRange(0, 10_000_000)
@@ -1629,7 +1646,7 @@ class SinglePurchaseInputDialog(QDialog):
                 updated_items.append("販売予定価格")
             if amazon_fee is not None:
                 self.amazon_fee_spin.setValue(amazon_fee)
-                updated_items.append("Amazon手数料")
+                updated_items.append(COL_PLATFORM_FEE)
             if shipping_cost is not None:
                 self.shipping_cost_spin.setValue(shipping_cost)
                 updated_items.append("出荷費用")
@@ -1763,8 +1780,9 @@ class SinglePurchaseInputDialog(QDialog):
         amazon_fee = int(self.amazon_fee_spin.value())
         shipping_cost = int(self.shipping_cost_spin.value())
         storage_fee = int(self.storage_fee_spin.value())
-        # 仕入一覧と同式: 損益分岐点 = 仕入+Amazon手数料+出荷、見込み利益 = 販売予定-損益分岐点（保管手数料は含めない）
+        # 仕入一覧と同式: 損益分岐点 = 仕入+手数料+出荷、見込み利益 = 販売予定-損益分岐点（保管手数料は含めない）
         break_even_sum = purchase_price + amazon_fee + shipping_cost
+        total_cost = amazon_fee + shipping_cost
         expected_profit = planned_price - break_even_sum
         expected_margin = round((expected_profit / planned_price) * 100, 2) if planned_price > 0 else 0.0
         expected_roi = round((expected_profit / purchase_price) * 100, 2) if purchase_price > 0 else 0.0
@@ -1820,8 +1838,9 @@ class SinglePurchaseInputDialog(QDialog):
             "コメント": merged_comment,
             "発送方法": self.shipping_combo.currentText().strip() or "FBA",
             "販売チャネル": self.sales_channel_combo.currentText().strip() or "Amazon",
-            "Amazon手数料": amazon_fee,
-            "出荷費用": shipping_cost,
+            COL_PLATFORM_FEE: fee_storage_value(amazon_fee),
+            COL_SHIPPING: fee_storage_value(shipping_cost),
+            COL_TOTAL_COST: fee_storage_value(total_cost),
             "在庫保管手数料": storage_fee,
             "仕入先": store_code,
             "プラットフォーム": platform_val,
@@ -2383,7 +2402,8 @@ class InventoryWidget(QWidget):
         self.column_headers = [
             "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
             "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
-            "発送方法", "販売チャネル", "Amazon手数料", "出荷費用", "在庫保管手数料", "仕入先", "価格改定", "コンディション説明"
+            "発送方法", "販売チャネル", COL_PLATFORM_FEE, COL_SHIPPING, COL_TOTAL_COST,
+            "在庫保管手数料", "仕入先", "価格改定", "コンディション説明"
         ]
         # 開発用タブでは、店舗コードの右に「3-6-9」カラムを追加
         if self.dev_mode:
@@ -3273,7 +3293,8 @@ class InventoryWidget(QWidget):
             BASE_COLUMNS_FOR_PURCHASE_DB = [
                 "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
                 "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
-                "発送方法", "販売チャネル", "Amazon手数料", "出荷費用", "在庫保管手数料",
+                "発送方法", "販売チャネル", COL_PLATFORM_FEE, COL_SHIPPING, COL_TOTAL_COST,
+                "在庫保管手数料",
                 "仕入先", "価格改定", "コンディション説明"
             ]
             if self.filtered_data is not None and len(self.filtered_data) > 0:
@@ -4457,11 +4478,15 @@ class InventoryWidget(QWidget):
             "salesChannel": "販売チャネル",
             "sales_channel": "販売チャネル",
             "platform": "販売チャネル",
-            # 手数料
-            "Amazon手数料": "Amazon手数料",
-            "amazon_fee": "Amazon手数料",
-            "出荷費用": "出荷費用",
-            "shipping_cost": "出荷費用",
+            # 手数料・費用合計
+            COL_PLATFORM_FEE: COL_PLATFORM_FEE,
+            COL_LEGACY_AMAZON_FEE: COL_PLATFORM_FEE,
+            "amazon_fee": COL_PLATFORM_FEE,
+            "platform_fee": COL_PLATFORM_FEE,
+            COL_SHIPPING: COL_SHIPPING,
+            "shipping_cost": COL_SHIPPING,
+            COL_TOTAL_COST: COL_TOTAL_COST,
+            "total_cost": COL_TOTAL_COST,
             "在庫保管手数料": "在庫保管手数料",
             "storage_fee": "在庫保管手数料",
             # 仕入先
@@ -4552,7 +4577,7 @@ class InventoryWidget(QWidget):
                 return jan_str
             new_df["JAN"] = new_df["JAN"].apply(normalize_jan)
         
-        # 利益率とROIを計算
+        # 費用合計補完・利益率とROIを計算
         new_df = self._calculate_margin_and_roi(new_df)
         
         return new_df
@@ -4560,9 +4585,7 @@ class InventoryWidget(QWidget):
     @staticmethod
     def _cell_has_numeric_value(value) -> bool:
         """CSVセルなどに数値が入っているか（空欄・NaNは未入力）"""
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            return False
-        return str(value).strip() != ""
+        return cell_has_numeric_value(value)
 
     @staticmethod
     def _row_quantity_multiplier(row) -> float:
@@ -4582,62 +4605,59 @@ class InventoryWidget(QWidget):
 
     def _calculate_margin_and_roi(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        見込み利益・損益分岐点・利益率・ROIを反映する。
-        CSVに見込み利益／損益分岐点がある行は取込値を優先し、
-        未入力行のみ 販売予定 − (仕入 + Amazon手数料 + 出荷費用) で算出する。
+        費用合計を補完し、見込み利益・損益分岐点・利益率・ROIを反映する。
+        CSVに見込み利益／損益分岐点がある行は取込値を優先する。
+        損益分岐点 = 仕入 + 手数料内訳 or 費用合計（在庫保管手数料は含めない）。
         """
-        def safe_float(x):
-            try:
-                if pd.isna(x) or x == "" or str(x).strip() == "":
-                    return 0.0
-                x_str = str(x).replace(",", "").strip()
-                return float(x_str)
-            except (ValueError, TypeError):
-                return 0.0
+        if df is None or len(df) == 0:
+            return df
+        migrate_dataframe_fee_columns(df)
+        backfill_total_cost_dataframe(df)
 
         n = len(df)
-        purchase_price = df.get("仕入れ価格", pd.Series([0.0] * n)).apply(safe_float)
-        planned_price = df.get("販売予定価格", pd.Series([0.0] * n)).apply(safe_float)
-        amazon_fee = df.get("Amazon手数料", pd.Series([0.0] * n)).apply(safe_float)
-        shipping_cost = df.get("出荷費用", pd.Series([0.0] * n)).apply(safe_float)
-
+        purchase_price = df.get("仕入れ価格", pd.Series([0.0] * n)).apply(purchase_cost_to_float)
+        planned_price = df.get("販売予定価格", pd.Series([0.0] * n)).apply(purchase_cost_to_float)
         profit_col = df.get("見込み利益", pd.Series([""] * n))
         be_col = df.get("損益分岐点", pd.Series([""] * n))
         has_profit = profit_col.apply(self._cell_has_numeric_value)
         has_be = be_col.apply(self._cell_has_numeric_value)
 
-        calc_break_even = purchase_price + amazon_fee + shipping_cost
-        expected_profit = planned_price - calc_break_even
-        break_even = calc_break_even.copy()
+        break_even_vals = []
+        profit_vals = []
+        margin_vals = []
+        roi_vals = []
+        total_vals = []
 
-        if has_profit.any():
-            expected_profit = expected_profit.where(~has_profit, profit_col.apply(safe_float))
-        if has_be.any():
-            break_even = break_even.where(~has_be, be_col.apply(safe_float))
-
-        # 片方だけCSVにある場合はもう片方を販売予定から補完
-        only_profit = has_profit & ~has_be
-        if only_profit.any():
-            break_even = break_even.where(~only_profit, (planned_price - expected_profit))
-
-        only_be = has_be & ~has_profit
-        if only_be.any():
-            expected_profit = expected_profit.where(~only_be, (planned_price - break_even))
-
-        df["損益分岐点"] = break_even.round(0)
-        df["見込み利益"] = expected_profit.round(0)
-
-        margin = pd.Series([0.0] * n, dtype=float)
-        roi = pd.Series([0.0] * n, dtype=float)
         for i in range(n):
-            if planned_price.iloc[i] > 0:
-                margin.iloc[i] = (expected_profit.iloc[i] / planned_price.iloc[i]) * 100
-            if purchase_price.iloc[i] > 0:
-                roi.iloc[i] = (expected_profit.iloc[i] / purchase_price.iloc[i]) * 100
+            row = df.iloc[i]
+            platform, shipping, total = read_fee_fields(row.to_dict())
+            fields = recalculate_profit_fields(
+                purchase_price.iloc[i],
+                planned_price.iloc[i],
+                platform,
+                shipping,
+                total,
+                stored_profit=profit_col.iloc[i],
+                stored_break_even=be_col.iloc[i],
+                prefer_stored_profit=bool(has_profit.iloc[i]),
+                prefer_stored_break_even=bool(has_be.iloc[i]),
+            )
+            total_vals.append(fee_storage_value(fields[COL_TOTAL_COST]))
+            break_even_vals.append(fields["損益分岐点"])
+            profit_vals.append(fields["見込み利益"])
+            margin_vals.append(fields["想定利益率"])
+            roi_vals.append(fields["想定ROI"])
 
-        df["想定利益率"] = margin.round(2)
-        df["想定ROI"] = roi.round(2)
-
+        df[COL_TOTAL_COST] = total_vals
+        for col in (COL_PLATFORM_FEE, COL_SHIPPING):
+            if col in df.columns:
+                df[col] = df[col].apply(
+                    lambda x: fee_storage_value(x) if cell_has_numeric_value(x) else ""
+                )
+        df["損益分岐点"] = break_even_vals
+        df["見込み利益"] = profit_vals
+        df["想定利益率"] = margin_vals
+        df["想定ROI"] = roi_vals
         return df
                 
     def update_table(self):
@@ -4693,16 +4713,21 @@ class InventoryWidget(QWidget):
                         item = QTableWidgetItem(value)
                     
                     # 価格列の数値フォーマット
-                    if column in ["仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "Amazon手数料", "出荷費用", "在庫保管手数料"]:
+                    if column in [
+                        "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点",
+                        COL_PLATFORM_FEE, COL_SHIPPING, COL_TOTAL_COST, "在庫保管手数料",
+                    ]:
                         try:
-                            # 数値に変換できるかチェック
+                            zero_empty = is_fee_amount_column(column)
                             if value and str(value).replace(".", "").replace("-", "").replace(",", "").isdigit():
                                 num_value = float(str(value).replace(",", ""))
-                                item.setText(f"{num_value:,.0f}")
+                                item.setText(
+                                    format_money_display(num_value, zero_as_empty=zero_empty)
+                                )
                             else:
-                                item.setText(str(value))
-                        except:
-                            item.setText(str(value))
+                                item.setText("" if zero_empty else str(value))
+                        except Exception:
+                            item.setText("" if is_fee_amount_column(column) else str(value))
                     # 利益率とROIの数値フォーマット（小数点第2位まで表示）
                     elif column in ["想定利益率", "想定ROI"]:
                         try:
@@ -4770,7 +4795,9 @@ class InventoryWidget(QWidget):
         if not item:
             item = QTableWidgetItem()
             self.data_table.setItem(table_row, j, item)
-        item.setText(f"{int(value):,.0f}")
+        item.setText(
+            format_money_display(value, zero_as_empty=is_fee_amount_column(col_name))
+        )
 
     def _write_table_rate_cell(self, table_row: int, col_name: str, value: float) -> None:
         j = self.column_headers.index(col_name)
@@ -4782,22 +4809,39 @@ class InventoryWidget(QWidget):
 
     def _recalculate_profit_for_table_row(self, table_row: int) -> None:
         """
-        仕入れ価格・販売予定価格・Amazon手数料・出荷費用から
+        仕入れ価格・販売予定・手数料・出荷・費用合計から
         見込み利益・損益分岐点・想定利益率・想定ROIを再計算してテーブルとDataFrameに反映。
         """
         if self.filtered_data is None or table_row < 0 or table_row >= len(self.filtered_data):
             return
         purchase = self._parse_table_int_cell(table_row, "仕入れ価格")
         planned = self._parse_table_int_cell(table_row, "販売予定価格")
-        amazon = self._parse_table_int_cell(table_row, "Amazon手数料")
-        ship = self._parse_table_int_cell(table_row, "出荷費用")
-        break_even = purchase + amazon + ship
-        profit = planned - break_even
-        margin = round((profit / planned) * 100, 2) if planned > 0 else 0.0
-        roi = round((profit / purchase) * 100, 2) if purchase > 0 else 0.0
+        platform = self._parse_table_int_cell(table_row, COL_PLATFORM_FEE)
+        ship = self._parse_table_int_cell(table_row, COL_SHIPPING)
+        total = self._parse_table_int_cell(table_row, COL_TOTAL_COST)
+        stored_profit = None
+        if self.filtered_data is not None and table_row < len(self.filtered_data):
+            row = self.filtered_data.iloc[table_row]
+            if "見込み利益" in row.index:
+                stored_profit = row.get("見込み利益")
+        fields = recalculate_profit_fields(
+            purchase,
+            planned,
+            platform,
+            ship,
+            total,
+            stored_profit=stored_profit,
+            prefer_stored_profit=cell_has_numeric_value(stored_profit),
+        )
+        break_even = int(fields["損益分岐点"])
+        profit = int(fields["見込み利益"])
+        total = int(fields[COL_TOTAL_COST])
+        margin = fields["想定利益率"]
+        roi = fields["想定ROI"]
 
         self._profit_recalc_block = True
         try:
+            self._write_table_money_cell(table_row, COL_TOTAL_COST, total)
             self._write_table_money_cell(table_row, "損益分岐点", break_even)
             self._write_table_money_cell(table_row, "見込み利益", profit)
             self._write_table_rate_cell(table_row, "想定利益率", margin)
@@ -4810,8 +4854,9 @@ class InventoryWidget(QWidget):
             for col, val in (
                 ("仕入れ価格", purchase),
                 ("販売予定価格", planned),
-                ("Amazon手数料", amazon),
-                ("出荷費用", ship),
+                (COL_PLATFORM_FEE, fee_storage_value(platform)),
+                (COL_SHIPPING, fee_storage_value(ship)),
+                (COL_TOTAL_COST, fee_storage_value(total)),
                 ("損益分岐点", break_even),
                 ("見込み利益", profit),
             ):
@@ -4842,7 +4887,9 @@ class InventoryWidget(QWidget):
         if col < 0 or col >= len(self.column_headers):
             return
         col_name = self.column_headers[col]
-        if col_name not in ("仕入れ価格", "販売予定価格", "Amazon手数料", "出荷費用"):
+        if col_name not in (
+            "仕入れ価格", "販売予定価格", COL_PLATFORM_FEE, COL_SHIPPING, COL_TOTAL_COST,
+        ):
             return
         if row < 0 or row >= len(self.filtered_data):
             return
@@ -6012,7 +6059,10 @@ class InventoryWidget(QWidget):
                             pass
                     
                     # 数値列の特別処理（カンマ区切りを除去）
-                    if column in ["仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "仕入れ個数"]:
+                    if column in [
+                        "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "仕入れ個数",
+                        COL_PLATFORM_FEE, COL_SHIPPING, COL_TOTAL_COST, "在庫保管手数料",
+                    ]:
                         try:
                             # カンマを除去して数値に変換
                             value_str = str(value).replace(",", "").strip()
