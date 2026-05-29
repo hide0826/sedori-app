@@ -129,6 +129,17 @@ class AnalysisWidget(QWidget):
             error_label = QLabel(f"店舗スコアの読み込みに失敗しました:\n{e}")
             error_label.setAlignment(Qt.AlignCenter)
             self.tab_widget.addTab(error_label, "店舗スコア")
+
+        # ランキング（カンバン）タブ
+        try:
+            from ui.ranking_kanban_widget import RankingKanbanWidget
+            self.ranking_kanban_widget = RankingKanbanWidget()
+            self.tab_widget.addTab(self.ranking_kanban_widget, "ランキング")
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"RankingKanbanWidget load error: {e}")
+            error_label = QLabel(f"ランキングの読み込みに失敗しました:\n{e}")
+            error_label.setAlignment(Qt.AlignCenter)
+            self.tab_widget.addTab(error_label, "ランキング")
         
         parent_layout.addWidget(self.tab_widget)
     
@@ -276,6 +287,10 @@ class AnalysisWidget(QWidget):
             # グラフも更新
             if MATPLOTLIB_AVAILABLE:
                 self.update_charts(routes)
+
+            # ランキング（カンバン）更新
+            if hasattr(self, "ranking_kanban_widget"):
+                self.ranking_kanban_widget.load_rankings(start_date, end_date)
             
         except Exception as e:
             self.stats_label.setText(f"データ読み込みエラー: {str(e)}")

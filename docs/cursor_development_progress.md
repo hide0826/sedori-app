@@ -1,3 +1,21 @@
+## 2026-05-29 分析タブ・ランキング（カンバン）
+
+- **目的**: 分析タブで店舗・ルートの実績を一目で比較できるランキングをカンバン形式で表示する。
+- **ランキングカンバン**（`ranking_kanban_widget.py` / `ranking_service.py` / `analysis_widget.py`）
+  - 分析サブタブ「ランキング」を追加。横5列: 高想定利益額店舗・訪問回数・店舗スコア・高想定利益率ルート・高想定利益額ルート。
+  - 店舗の訪問回数・累計想定粗利・スコアは **店舗スコアタブと同じ** `get_merged_store_aggregates` で集計（全期間）。
+  - ルートは期間指定の `route_summaries` をルートコード単位で合算。上部「更新」で他分析タブと連動。
+  - 表示件数 3〜30（既定10）。高想定利益率店舗列は削除（仕入DB連携が薄かったため）。
+- **DB**（`route_visit_db.py`）
+  - `get_store_visit_aggregates(start_date, end_date)` に期間フィルタ引数を追加。
+- **変更ファイル**:
+  - `python/desktop/ui/ranking_kanban_widget.py`（新規）
+  - `python/desktop/services/ranking_service.py`（新規）
+  - `python/desktop/ui/analysis_widget.py`
+  - `python/desktop/database/route_visit_db.py`
+  - `docs/cursor_development_progress.md`
+- **Git**: feat(desktop): 分析タブにランキングカンバン（店舗スコア連動）を追加
+
 ## 2026-05-29 画像登録タブ・Amazon Lファイルテンプレート書き込み位置の改善
 
 - **目的**: Amazon出品ファイル(L)のテンプレート更新に追従しやすくする。確定処理の進捗表示と実処理のタイミングを揃える。

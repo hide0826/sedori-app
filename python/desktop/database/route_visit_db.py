@@ -194,15 +194,28 @@ class RouteVisitDatabase:
         )
         return [dict(row) for row in cur.fetchall()]
 
-    def get_store_visit_aggregates(self) -> List[Dict[str, Any]]:
+    def get_store_visit_aggregates(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """店舗コードごとに想定粗利・仕入点数・評価を集計（route_visit_logs のみ）。
         店舗名は同一店舗のうち1件を代表で取得（MAX）。
         IN時刻・OUT時刻のどちらか一方でも空の行は未訪問として集計から除外する。"""
         conn = self._get_connection()
         cur = conn.cursor()
+        params: List[Any] = []
+        date_clause = ""
+        if start_date:
+            date_clause += " AND route_date >= ?"
+            params.append(start_date)
+        if end_date:
+            date_clause += " AND route_date <= ?"
+            params.append(end_date)
         # 出発時刻・帰宅時刻・往路高速代・復路高速代は店舗ではないため集計から除外
         # IN・OUT 両方に入力がある行のみ実訪問として集計
-        cur.execute(f"""
+        cur.execute(
+            f"""
             SELECT store_code,
                    COALESCE(SUM(store_gross_profit), 0) AS total_gross_profit,
                    COALESCE(SUM(store_item_count), 0) AS total_item_count,
@@ -213,8 +226,11 @@ class RouteVisitDatabase:
             WHERE store_code IS NOT NULL AND store_code != ''
               AND store_code NOT IN ('出発時刻', '帰宅時刻', '往路高速代', '復路高速代')
               AND ({_SQL_ACTUAL_VISIT})
+              {date_clause}
             GROUP BY store_code
-        """)
+            """,
+            params,
+        )
         rows = cur.fetchall()
         return [dict(row) for row in rows]
 
