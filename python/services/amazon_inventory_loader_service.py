@@ -10,10 +10,28 @@ from __future__ import annotations
 
 import pandas as pd
 import io
-from typing import List, Dict, Any, Optional
+import re
+from typing import List, Dict, Any, Optional, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Amazon出品ファイル(L) テンプレート「テンプレート」シートの列名検索用キーワード
+_MAIN_IMAGE_HEADER_KEYWORDS = (
+    "メイン画像の場所",
+    "main-offer-image-url",
+    "main-offer-image",
+)
+_SKU_HEADER_KEYWORDS = (
+    "sku",
+    "出品者sku",
+    "seller-sku",
+    "商品管理番号",
+)
+_OTHER_IMAGE_HEADER_PATTERN = re.compile(
+    r"^(?:その他の画像\s*(\d+)|offer-image\s*(\d+)|offer-image(\d+))$",
+    re.IGNORECASE,
+)
 
 # コンディションマッピング（Amazonコンディション番号）
 CONDITION_MAP = {
@@ -33,6 +51,195 @@ CONDITION_MAP = {
 
 class AmazonInventoryLoaderService:
     """Amazon Inventory Loader (Lファイル) 生成サービス"""
+
+    @staticmethod
+    def _normalize_header_text(value: Any) -> str:
+        if value is None:
+            return ""
+        text = str(value).strip().lower()
+        text = text.replace("　", " ").replace("_", "-")
+        text = re.sub(r"\s+", " ", text)
+        return text
+
+    @staticmethod
+    def _column_letter(col_idx: int) -> str:
+        from openpyxl.utils import get_column_letter
+        return get_column_letter(col_idx)
+
+    @staticmethod
+    def _parse_column_letter(value: str) -> Optional[int]:
+        from openpyxl.utils import column_index_from_string
+        text = (value or "").strip().upper()
+        if not text:
+            return None
+        try:
+            return column_index_from_string(text)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _is_main_image_header(normalized: str) -> bool:
+        if not normalized:
+            return False
+        for keyword in _MAIN_IMAGE_HEADER_KEYWORDS:
+            if normalized == AmazonInventoryLoaderService._normalize_header_text(keyword):
+                return True
+        return normalized in {
+            AmazonInventoryLoaderService._normalize_header_text(k) for k in _MAIN_IMAGE_HEADER_KEYWORDS
+        }
+
+    @staticmethod
+    def _is_sku_header(normalized: str) -> bool:
+        if not normalized:
+            return False
+        for keyword in _SKU_HEADER_KEYWORDS:
+            if normalized == AmazonInventoryLoaderService._normalize_header_text(keyword):
+                return True
+        if normalized.endswith("-sku") or normalized.endswith(" sku"):
+            return True
+        return False
+
+    @staticmethod
+    def _is_other_image_header(normalized: str) -> bool:
+        if not normalized:
+            return False
+        compact = normalized.replace(" ", "")
+        if _OTHER_IMAGE_HEADER_PATTERN.match(normalized) or _OTHER_IMAGE_HEADER_PATTERN.match(compact):
+            return True
+        return compact.startswith("その他の画像") or compact.startswith("offer-image")
+
+    @staticmethod
+    def detect_template_layout(
+        template_path: str,
+        max_scan_rows: int = 40,
+        max_image_columns: int = 6,
+    ) -> Dict[str, Any]:
+        """
+        AmazonテンプレートExcelの「テンプレート」シートから書き込み位置を自動検出する。
+
+        - メイン画像ヘッダー（例: メイン画像の場所）から右方向に画像列を展開
+        - 入力開始行は運用固定で 7 行目
+        - 同一ヘッダー行から SKU 列も検出（見つからなければ A列=1）
+        """
+        try:
+            import openpyxl
+            from pathlib import Path
+
+            file_path = Path(template_path)
+            if not file_path.exists():
+                raise FileNotFoundError(f"Template file not found: {template_path}")
+
+            wb = openpyxl.load_workbook(file_path, keep_vba=True, data_only=True)
+            if "テンプレート" not in wb.sheetnames:
+                wb.close()
+                raise ValueError(
+                    f"'テンプレート' sheet not found in {template_path}. "
+                    f"Available sheets: {wb.sheetnames}"
+                )
+
+            ws = wb["テンプレート"]
+            max_row = min(max_scan_rows, ws.max_row or max_scan_rows)
+            max_col = max(ws.max_column or 1, 60)
+
+            main_header_row: Optional[int] = None
+            main_col: Optional[int] = None
+            sku_col: Optional[int] = None
+            warnings: List[str] = []
+
+            for row_idx in range(1, max_row + 1):
+                for col_idx in range(1, max_col + 1):
+                    normalized = AmazonInventoryLoaderService._normalize_header_text(
+                        ws.cell(row=row_idx, column=col_idx).value
+                    )
+                    if main_col is None and AmazonInventoryLoaderService._is_main_image_header(normalized):
+                        main_header_row = row_idx
+                        main_col = col_idx
+                    if sku_col is None and AmazonInventoryLoaderService._is_sku_header(normalized):
+                        sku_col = col_idx
+
+            if main_col is None or main_header_row is None:
+                wb.close()
+                return {
+                    "success": False,
+                    "message": "「メイン画像の場所」などの画像ヘッダーが見つかりませんでした。",
+                    "header_row": None,
+                    "start_row": 7,
+                    "sku_col": 1,
+                    "image_cols": [16, 17, 18, 19, 20, 21],
+                    "image_start_col": 16,
+                    "image_end_col": 21,
+                    "warnings": warnings,
+                }
+
+            sheet_title = ws.title
+            image_cols = [main_col]
+            for col_idx in range(main_col + 1, main_col + max_image_columns + 4):
+                if len(image_cols) >= max_image_columns:
+                    break
+                normalized = AmazonInventoryLoaderService._normalize_header_text(
+                    ws.cell(row=main_header_row, column=col_idx).value
+                )
+                if AmazonInventoryLoaderService._is_other_image_header(normalized):
+                    image_cols.append(col_idx)
+                elif not normalized:
+                    continue
+                else:
+                    break
+
+            if len(image_cols) < max_image_columns:
+                warnings.append(
+                    f"画像列は {len(image_cols)} 列まで検出しました（最大 {max_image_columns} 列）。"
+                )
+
+            if sku_col is None:
+                sku_col = 1
+                warnings.append("SKU列を自動検出できなかったため、A列(1)を使用します。")
+
+            # 運用上、入力開始行は固定で7行目を使用する
+            start_row = 7
+            if main_header_row + 1 != 7:
+                warnings.append(
+                    f"ヘッダー直下は {main_header_row + 1} 行目ですが、入力開始行は固定で 7 行目を使用します。"
+                )
+            wb.close()
+
+            layout = {
+                "success": True,
+                "message": (
+                    f"「{sheet_title}」{main_header_row}行目の "
+                    f"{AmazonInventoryLoaderService._column_letter(main_col)}列から画像列を検出しました。"
+                ),
+                "header_row": main_header_row,
+                "start_row": start_row,
+                "sku_col": sku_col,
+                "image_cols": image_cols,
+                "image_start_col": image_cols[0],
+                "image_end_col": image_cols[-1],
+                "warnings": warnings,
+            }
+            logger.info(
+                "Detected Amazon template layout: sku_col=%s image_cols=%s start_row=%s",
+                sku_col,
+                image_cols,
+                start_row,
+            )
+            return layout
+
+        except ImportError:
+            raise ImportError("openpyxl is required. Please install it with: pip install openpyxl")
+        except Exception as e:
+            logger.error(f"Failed to detect Amazon template layout: {e}")
+            return {
+                "success": False,
+                "message": f"テンプレート解析に失敗しました: {e}",
+                "header_row": None,
+                "start_row": 7,
+                "sku_col": 1,
+                "image_cols": [16, 17, 18, 19, 20, 21],
+                "image_start_col": 16,
+                "image_end_col": 21,
+                "warnings": [],
+            }
     
     @staticmethod
     def generate_inventory_loader_tsv(products: List[dict]) -> bytes:
@@ -431,8 +638,11 @@ class AmazonInventoryLoaderService:
         template_path: str,
         products: List[dict],
         output_path: Optional[str] = None,
-        start_row: int = 7
-    ) -> str:
+        start_row: Optional[int] = None,
+        sku_col: Optional[int] = None,
+        image_cols: Optional[List[int]] = None,
+        auto_detect: bool = True,
+    ) -> Tuple[str, Dict[str, Any]]:
         """
         AmazonテンプレートExcelファイルに商品データを書き込む
         
@@ -446,19 +656,46 @@ class AmazonInventoryLoaderService:
                   または image_url_1 ～ image_url_6: 個別の画像URLキー
                 - asin: ASIN（必要に応じて）
             output_path: 出力先ファイルパス（Noneの場合はテンプレートファイルを上書き）
-            start_row: データ書き込み開始行（デフォルト: 7）
+            start_row: データ書き込み開始行（未指定時は自動検出または7）
+            sku_col: SKU列番号（未指定時は自動検出またはA列）
+            image_cols: 画像URL列番号リスト（未指定時は自動検出またはP〜U列）
+            auto_detect: True のときテンプレートから書き込み位置を自動検出
             
         Returns:
-            出力先ファイルパス
+            (出力先ファイルパス, 使用したレイアウト情報)
         """
         try:
             import openpyxl
             from pathlib import Path
-            from openpyxl.utils import get_column_letter
             
             file_path = Path(template_path)
             if not file_path.exists():
                 raise FileNotFoundError(f"Template file not found: {template_path}")
+
+            layout_used: Dict[str, Any] = {}
+            if auto_detect and (start_row is None or sku_col is None or image_cols is None):
+                detected = AmazonInventoryLoaderService.detect_template_layout(str(template_path))
+                layout_used.update(detected)
+                if start_row is None:
+                    start_row = detected.get("start_row", 7)
+                if sku_col is None:
+                    sku_col = detected.get("sku_col", 1)
+                if image_cols is None:
+                    image_cols = detected.get("image_cols", [16, 17, 18, 19, 20, 21])
+            else:
+                start_row = start_row if start_row is not None else 7
+                sku_col = sku_col if sku_col is not None else 1
+                image_cols = image_cols if image_cols is not None else [16, 17, 18, 19, 20, 21]
+                layout_used = {
+                    "success": True,
+                    "start_row": start_row,
+                    "sku_col": sku_col,
+                    "image_cols": image_cols,
+                    "image_start_col": image_cols[0] if image_cols else 16,
+                    "image_end_col": image_cols[-1] if image_cols else 21,
+                    "message": "手動指定の書き込み位置を使用しました。",
+                    "warnings": [],
+                }
             
             # テンプレートファイルを読み込む
             wb = openpyxl.load_workbook(file_path, keep_vba=True)
@@ -468,12 +705,6 @@ class AmazonInventoryLoaderService:
                 raise ValueError(f"'テンプレート' sheet not found in {template_path}. Available sheets: {wb.sheetnames}")
             
             ws = wb["テンプレート"]
-            
-            # データ書き込み位置の定義
-            # SKU: A列 (column=1)
-            # 画像URL: P列(16)からU列(21)まで
-            sku_col = 1  # A列
-            image_cols = [16, 17, 18, 19, 20, 21]  # P, Q, R, S, T, U列
             
             # 商品データを書き込む
             for idx, product in enumerate(products):
@@ -515,8 +746,11 @@ class AmazonInventoryLoaderService:
             # ファイルを保存
             wb.save(output_path)
             logger.info(f"Written {len(products)} products to Amazon template Excel: {output_path}")
+            layout_used["start_row"] = start_row
+            layout_used["sku_col"] = sku_col
+            layout_used["image_cols"] = image_cols
             
-            return output_path
+            return output_path, layout_used
             
         except ImportError:
             raise ImportError("openpyxl is required. Please install it with: pip install openpyxl")

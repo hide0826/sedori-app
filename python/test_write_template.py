@@ -51,15 +51,17 @@ if not template_path.exists():
 
 try:
     print("\n書き込み中...")
-    result_path = AmazonInventoryLoaderService.write_to_amazon_template_excel(
+    result_path, layout_used = AmazonInventoryLoaderService.write_to_amazon_template_excel(
         template_path=str(template_path),
         products=test_products,
         output_path=str(output_path),
-        start_row=7
+        start_row=7,
+        auto_detect=True,
     )
     
     print(f"\n✓ 書き込み成功！")
     print(f"  出力ファイル: {result_path}")
+    print(f"  使用レイアウト: {layout_used}")
     print(f"\n書き込まれたデータ:")
     print(f"  - SKU: A7列から")
     print(f"  - 画像URL: O7列から（1枚目）")

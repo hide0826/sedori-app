@@ -2152,7 +2152,10 @@ class ImageManagerWidget(QWidget):
         all_records = self.product_widget.get_all_purchase_records()
 
         # プログレスダイアログを表示
-        progress = QProgressDialog("確定処理中...", "キャンセル", 0, len(valid_groups), self)
+        # 最後の「仕入DB表示更新/スナップ保存」も1ステップとして含め、
+        # 進捗バー完了と完了メッセージ表示タイミングを揃える。
+        total_steps = len(valid_groups) + 1
+        progress = QProgressDialog("確定処理中...", "キャンセル", 0, total_steps, self)
         progress.setWindowModality(Qt.WindowModal)
         progress.show()
 
@@ -2227,7 +2230,10 @@ class ImageManagerWidget(QWidget):
                     logger.error(f"JAN '{jan}' の確定処理中にエラー: {e}")
                     failed_groups.append(jan)
 
-            progress.close()
+            # JANグループ処理が完了した段階（最終ステップの直前）
+            progress.setValue(len(valid_groups))
+            progress.setLabelText("確定処理中... 仕入DB表示を更新しています")
+            QApplication.processEvents()
 
             # 各JANごとにテーブル全再描画・スナップショット保存していたため極端に遅かった。一括で1回だけ行う。
             try:
@@ -2238,6 +2244,10 @@ class ImageManagerWidget(QWidget):
                 pw.save_purchase_snapshot()
             except Exception as e:
                 logger.warning(f"確定処理後の仕入DB表示更新に失敗しました: {e}")
+            finally:
+                progress.setValue(total_steps)
+                QApplication.processEvents()
+                progress.close()
 
             # 結果メッセージを表示
             message_parts = []
@@ -2332,17 +2342,85 @@ class ImageManagerWidget(QWidget):
         self.registration_table.customContextMenuRequested.connect(self.on_registration_table_context_menu)
         layout.addWidget(self.registration_table)
 
-        preview_group = QGroupBox("プレビュー")
-        preview_layout = QVBoxLayout(preview_group)
+        preview_group = QGroupBox("プレビュー / テンプレート書き込み位置")
+        preview_group_layout = QHBoxLayout(preview_group)
+
+        preview_left = QWidget()
+        preview_left_layout = QVBoxLayout(preview_left)
+        preview_left_layout.setContentsMargins(0, 0, 0, 0)
         self.registration_preview_label = QLabel("画像を選択してください")
         self.registration_preview_label.setAlignment(Qt.AlignCenter)
         self.registration_preview_label.setMinimumHeight(200)
-        # ダークテーマ時でもメッセージが見えるように文字色を固定（背景は白）
         self.registration_preview_label.setStyleSheet(
             "border: 1px solid gray; background-color: #f8f8f8; color: #111;"
         )
         self.registration_preview_label.setScaledContents(False)
-        preview_layout.addWidget(self.registration_preview_label)
+        preview_left_layout.addWidget(self.registration_preview_label)
+
+        preview_right = QWidget()
+        preview_right_layout = QVBoxLayout(preview_right)
+        preview_right_layout.setContentsMargins(8, 0, 0, 0)
+
+        template_notice = QLabel(
+            "Amazonの出品ファイル(L)は更新が頻繁に行われています。\n"
+            "アップロード時に「最新のファイルに変更してください」と表示された場合は、\n"
+            "セラーセントラルから新しいテンプレートをダウンロードし、\n"
+            "下の「テンプレート」欄でファイルを差し替えてから「テンプレート再解析」を実行してください。"
+        )
+        template_notice.setWordWrap(True)
+        template_notice.setStyleSheet(
+            "color: #ffb74d; background-color: #2a2418; border: 1px solid #665530;"
+            "padding: 8px; border-radius: 4px;"
+        )
+        preview_right_layout.addWidget(template_notice)
+
+        layout_mode_row = QHBoxLayout()
+        layout_mode_row.addWidget(QLabel("検出モード:"))
+        self.template_layout_mode_combo = QComboBox()
+        self.template_layout_mode_combo.addItems(["自動（列名検索）", "手動"])
+        self.template_layout_mode_combo.currentIndexChanged.connect(self._on_template_layout_mode_changed)
+        layout_mode_row.addWidget(self.template_layout_mode_combo)
+        self.template_analyze_btn = QPushButton("テンプレート再解析")
+        self.template_analyze_btn.setToolTip("選択中のAmazonテンプレートから書き込み位置を自動検出します")
+        self.template_analyze_btn.clicked.connect(self.analyze_amazon_template_layout)
+        layout_mode_row.addWidget(self.template_analyze_btn)
+        layout_mode_row.addStretch()
+        preview_right_layout.addLayout(layout_mode_row)
+
+        layout_form = QFormLayout()
+        self.template_sku_col_edit = QLineEdit("A")
+        self.template_sku_col_edit.setMaximumWidth(80)
+        self.template_image_start_col_edit = QLineEdit("P")
+        self.template_image_start_col_edit.setMaximumWidth(80)
+        self.template_image_end_col_edit = QLineEdit("U")
+        self.template_image_end_col_edit.setMaximumWidth(80)
+        self.template_start_row_spin = QSpinBox()
+        self.template_start_row_spin.setRange(1, 200)
+        self.template_start_row_spin.setValue(7)
+        layout_form.addRow("SKU列:", self.template_sku_col_edit)
+        layout_form.addRow("画像開始列:", self.template_image_start_col_edit)
+        layout_form.addRow("画像終了列:", self.template_image_end_col_edit)
+        layout_form.addRow("入力開始行:", self.template_start_row_spin)
+        preview_right_layout.addLayout(layout_form)
+
+        self.template_sku_col_edit.editingFinished.connect(self._save_template_layout_settings)
+        self.template_image_start_col_edit.editingFinished.connect(self._save_template_layout_settings)
+        self.template_image_end_col_edit.editingFinished.connect(self._save_template_layout_settings)
+        self.template_start_row_spin.valueChanged.connect(lambda _v: self._save_template_layout_settings())
+
+        self.template_layout_status_label = QLabel("テンプレート未解析")
+        self.template_layout_status_label.setWordWrap(True)
+        self.template_layout_status_label.setStyleSheet("color: #ccc;")
+        preview_right_layout.addWidget(self.template_layout_status_label)
+        preview_right_layout.addStretch()
+
+        preview_splitter = QSplitter(Qt.Horizontal)
+        preview_splitter.addWidget(preview_left)
+        preview_splitter.addWidget(preview_right)
+        preview_splitter.setStretchFactor(0, 1)
+        preview_splitter.setStretchFactor(1, 1)
+        preview_splitter.setSizes([500, 500])
+        preview_group_layout.addWidget(preview_splitter)
         layout.addWidget(preview_group)
 
         # URL画像プレビュー用（非同期・urllibで取得して確実に表示）
@@ -4155,6 +4233,158 @@ class ImageManagerWidget(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "エラー", f"画像の取得に失敗しました:\n{url}\n\n{e}")
     
+    def _load_amazon_inventory_loader_service(self):
+        """amazon_inventory_loader_service をファイルパスから読み込む"""
+        import importlib.util
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        python_dir = os.path.abspath(os.path.join(current_dir, '..', '..'))
+        service_file = os.path.join(python_dir, 'services', 'amazon_inventory_loader_service.py')
+        if not os.path.exists(service_file):
+            raise FileNotFoundError(f"amazon_inventory_loader_service が見つかりません: {service_file}")
+        spec = importlib.util.spec_from_file_location("amazon_inventory_loader_service", service_file)
+        loader_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loader_module)
+        return loader_module.AmazonInventoryLoaderService
+
+    def _is_template_layout_manual_mode(self) -> bool:
+        return self.template_layout_mode_combo.currentIndex() == 1
+
+    def _on_template_layout_mode_changed(self, _index: int = 0):
+        manual = self._is_template_layout_manual_mode()
+        self._set_template_layout_fields_enabled(manual)
+        self._save_template_layout_settings()
+        if not manual:
+            self.analyze_amazon_template_layout(show_errors=False)
+
+    def _set_template_layout_fields_enabled(self, manual: bool):
+        for widget in (
+            self.template_sku_col_edit,
+            self.template_image_start_col_edit,
+            self.template_image_end_col_edit,
+            self.template_start_row_spin,
+        ):
+            widget.setEnabled(manual)
+
+    def _column_index_from_ui_letter(self, letter_edit: QLineEdit) -> Optional[int]:
+        AmazonInventoryLoaderService = self._load_amazon_inventory_loader_service()
+        return AmazonInventoryLoaderService._parse_column_letter(letter_edit.text())
+
+    def _apply_detected_layout_to_ui(self, layout: Dict[str, Any]):
+        AmazonInventoryLoaderService = self._load_amazon_inventory_loader_service()
+        sku_col = int(layout.get("sku_col") or 1)
+        image_start = int(layout.get("image_start_col") or 16)
+        image_end = int(layout.get("image_end_col") or image_start)
+        start_row = int(layout.get("start_row") or 7)
+
+        self.template_sku_col_edit.setText(AmazonInventoryLoaderService._column_letter(sku_col))
+        self.template_image_start_col_edit.setText(AmazonInventoryLoaderService._column_letter(image_start))
+        self.template_image_end_col_edit.setText(AmazonInventoryLoaderService._column_letter(image_end))
+        self.template_start_row_spin.setValue(start_row)
+
+        status = layout.get("message") or "テンプレートを解析しました。"
+        if layout.get("warnings"):
+            status += "\n" + "\n".join(f"・{w}" for w in layout["warnings"])
+        if not layout.get("success", True):
+            status = f"⚠ {status}\n（フォールバック: P〜U列、7行目を使用します）"
+        self.template_layout_status_label.setText(status)
+
+    def analyze_amazon_template_layout(self, show_errors: bool = True):
+        """選択中テンプレートから書き込み位置を自動検出してUIに反映"""
+        template_path_str = self.template_file_edit.text().strip()
+        if not template_path_str:
+            self.template_layout_status_label.setText("テンプレートファイルが未選択です。")
+            if show_errors:
+                QMessageBox.warning(self, "警告", "先にテンプレートファイルを選択してください。")
+            return
+
+        template_path = Path(template_path_str)
+        if not template_path.exists():
+            self.template_layout_status_label.setText("テンプレートファイルが見つかりません。")
+            if show_errors:
+                QMessageBox.warning(self, "警告", f"テンプレートファイルが見つかりません:\n{template_path}")
+            return
+
+        try:
+            AmazonInventoryLoaderService = self._load_amazon_inventory_loader_service()
+            layout = AmazonInventoryLoaderService.detect_template_layout(str(template_path))
+            if not self._is_template_layout_manual_mode():
+                self._apply_detected_layout_to_ui(layout)
+            else:
+                message = layout.get("message") or "テンプレートを解析しました。"
+                if layout.get("warnings"):
+                    message += "\n" + "\n".join(f"・{w}" for w in layout["warnings"])
+                self.template_layout_status_label.setText(
+                    f"{message}\n（手動モードのため、右側の値は変更していません）"
+                )
+            self._save_template_layout_settings()
+        except Exception as e:
+            logger.error(f"Amazon template layout analyze failed: {e}", exc_info=True)
+            self.template_layout_status_label.setText(f"テンプレート解析エラー: {e}")
+            if show_errors:
+                QMessageBox.warning(self, "警告", f"テンプレート解析に失敗しました:\n{e}")
+
+    def _build_image_cols_from_ui(self) -> Optional[List[int]]:
+        start_col = self._column_index_from_ui_letter(self.template_image_start_col_edit)
+        end_col = self._column_index_from_ui_letter(self.template_image_end_col_edit)
+        if start_col is None or end_col is None:
+            return None
+        if end_col < start_col:
+            start_col, end_col = end_col, start_col
+        return list(range(start_col, end_col + 1))[:6]
+
+    def _get_template_write_params(self) -> Dict[str, Any]:
+        sku_col = self._column_index_from_ui_letter(self.template_sku_col_edit)
+        image_cols = self._build_image_cols_from_ui()
+        start_row = self.template_start_row_spin.value()
+        manual = self._is_template_layout_manual_mode()
+        return {
+            "start_row": start_row,
+            "sku_col": sku_col,
+            "image_cols": image_cols,
+            "auto_detect": not manual,
+        }
+
+    def _save_template_layout_settings(self):
+        settings = QSettings("HIRIO", "SedoriApp")
+        settings.setValue("image_manager/template_layout_mode", self.template_layout_mode_combo.currentIndex())
+        settings.setValue("image_manager/template_sku_col", self.template_sku_col_edit.text().strip().upper())
+        settings.setValue("image_manager/template_image_start_col", self.template_image_start_col_edit.text().strip().upper())
+        settings.setValue("image_manager/template_image_end_col", self.template_image_end_col_edit.text().strip().upper())
+        settings.setValue("image_manager/template_start_row", self.template_start_row_spin.value())
+
+    def _load_template_layout_settings(self):
+        settings = QSettings("HIRIO", "SedoriApp")
+        mode_index = int(settings.value("image_manager/template_layout_mode", 0))
+        self.template_layout_mode_combo.setCurrentIndex(mode_index)
+        self.template_sku_col_edit.setText(str(settings.value("image_manager/template_sku_col", "A")))
+        self.template_image_start_col_edit.setText(str(settings.value("image_manager/template_image_start_col", "P")))
+        self.template_image_end_col_edit.setText(str(settings.value("image_manager/template_image_end_col", "U")))
+        self.template_start_row_spin.setValue(int(settings.value("image_manager/template_start_row", 7)))
+        self._set_template_layout_fields_enabled(mode_index == 1)
+
+    def _format_template_layout_message(self, layout: Dict[str, Any], product_count: int, output_path: str) -> str:
+        AmazonInventoryLoaderService = self._load_amazon_inventory_loader_service()
+        sku_col = int(layout.get("sku_col") or 1)
+        image_cols = layout.get("image_cols") or [16, 17, 18, 19, 20, 21]
+        start_row = int(layout.get("start_row") or 7)
+        sku_letter = AmazonInventoryLoaderService._column_letter(sku_col)
+
+        lines = [
+            f"AmazonテンプレートExcelファイルを保存しました:\n{output_path}",
+            f"\n商品数: {product_count}件",
+            "\n書き込まれたデータ:",
+            f"  - SKU: {sku_letter}列 {start_row}行目から",
+        ]
+        for idx, col in enumerate(image_cols[:6]):
+            letter = AmazonInventoryLoaderService._column_letter(col)
+            lines.append(f"  - 画像URL: {letter}列 {start_row}行目から（{idx + 1}枚目）")
+        lines.append("\n👉 このファイルをAmazon Seller Centralにアップロードしてください。")
+        lines.append(
+            "\n※ アップロード時に「最新のファイルに変更してください」と表示された場合は、"
+            "新しいテンプレートをダウンロードして差し替えてください。"
+        )
+        return "\n".join(lines)
+
     def write_to_amazon_template(self):
         """AmazonテンプレートExcelファイルに商品データを書き込む"""
         if not self.registration_records:
@@ -4212,25 +4442,19 @@ class ImageManagerWidget(QWidget):
         if not products:
             QMessageBox.warning(self, "警告", "有効な商品データがありません。")
             return
+
+        write_params = self._get_template_write_params()
+        if write_params["auto_detect"] is False:
+            if write_params["sku_col"] is None:
+                QMessageBox.warning(self, "警告", "SKU列の指定が不正です。例: A")
+                return
+            if not write_params["image_cols"]:
+                QMessageBox.warning(self, "警告", "画像列の指定が不正です。例: P 〜 U")
+                return
         
         # テンプレートファイルのパスを取得
         try:
-            import sys
-            import os
-            import importlib.util
-            from pathlib import Path
-            
-            # amazon_inventory_loader_service は python/services/ にある。sys.path に依存せずファイルパスから直接読み込む。
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            python_dir = os.path.abspath(os.path.join(current_dir, '..', '..'))
-            service_file = os.path.join(python_dir, 'services', 'amazon_inventory_loader_service.py')
-            if not os.path.exists(service_file):
-                raise FileNotFoundError(f"amazon_inventory_loader_service が見つかりません: {service_file}")
-            spec = importlib.util.spec_from_file_location("amazon_inventory_loader_service", service_file)
-            loader_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(loader_module)
-            AmazonInventoryLoaderService = loader_module.AmazonInventoryLoaderService
-            
+            AmazonInventoryLoaderService = self._load_amazon_inventory_loader_service()
             # テンプレートファイルのパス（設定から読み込む）
             template_path_str = self.template_file_edit.text().strip()
             if not template_path_str:
@@ -4274,26 +4498,19 @@ class ImageManagerWidget(QWidget):
                 return  # ユーザーがキャンセル
             
             # テンプレートに書き込み
-            output_path = AmazonInventoryLoaderService.write_to_amazon_template_excel(
+            output_path, layout_used = AmazonInventoryLoaderService.write_to_amazon_template_excel(
                 template_path=str(template_path),
                 products=products,
                 output_path=file_path,
-                start_row=7
+                start_row=write_params["start_row"] if not write_params["auto_detect"] else None,
+                sku_col=write_params["sku_col"] if not write_params["auto_detect"] else None,
+                image_cols=write_params["image_cols"] if not write_params["auto_detect"] else None,
+                auto_detect=write_params["auto_detect"],
             )
             
             QMessageBox.information(
                 self, "完了",
-                f"AmazonテンプレートExcelファイルを保存しました:\n{output_path}\n\n"
-                f"商品数: {len(products)}件\n\n"
-                f"書き込まれたデータ:\n"
-                f"  - SKU: A7列から\n"
-                f"  - 画像URL: P7列から（1枚目）\n"
-                f"  - 画像URL: Q7列から（2枚目）\n"
-                f"  - 画像URL: R7列から（3枚目）\n"
-                f"  - 画像URL: S7列から（4枚目）\n"
-                f"  - 画像URL: T7列から（5枚目）\n"
-                f"  - 画像URL: U7列から（6枚目）\n\n"
-                f"👉 このファイルをAmazon Seller Centralにアップロードしてください。"
+                self._format_template_layout_message(layout_used, len(products), output_path)
             )
 
             # ルートタブ側の「画像」チェックをONにする（対応するルートサマリーが判定できた場合）
@@ -4332,6 +4549,7 @@ class ImageManagerWidget(QWidget):
                 self.save_template_file_setting(str(template_path))
                 # 最後に開いたディレクトリを保存
                 settings.setValue("amazon_template_last_dir", str(template_path.parent))
+                self.analyze_amazon_template_layout(show_errors=False)
             else:
                 QMessageBox.warning(
                     self, "警告",
@@ -4357,6 +4575,10 @@ class ImageManagerWidget(QWidget):
             if default_path.exists():
                 self.template_file_edit.setText(str(default_path))
                 self.save_template_file_setting(str(default_path))
+
+        self._load_template_layout_settings()
+        if self.template_file_edit.text().strip():
+            QTimer.singleShot(0, lambda: self.analyze_amazon_template_layout(show_errors=False))
     
     def save_template_file_setting(self, template_path: str):
         """テンプレートファイルパスを設定に保存する"""

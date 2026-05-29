@@ -1,3 +1,23 @@
+## 2026-05-29 画像登録タブ・Amazon Lファイルテンプレート書き込み位置の改善
+
+- **目的**: Amazon出品ファイル(L)のテンプレート更新に追従しやすくする。確定処理の進捗表示と実処理のタイミングを揃える。
+- **確定処理の進捗バー同期**（`image_manager_widget.py`）
+  - JANグループ処理後の「仕入DB表示更新・スナップ保存」も進捗ステップに含め、バー完了と完了メッセージの体感を一致。
+- **Amazonテンプレート書き込み位置**（`amazon_inventory_loader_service.py` / `image_manager_widget.py`）
+  - `detect_template_layout()`: 「メイン画像の場所」等の列名検索で画像列（右方向に展開）・SKU列を自動検出。
+  - **入力開始行は運用固定で7行目**（ヘッダー直下の自動判定は使わない）。
+  - `write_to_amazon_template_excel()`: 自動検出レイアウトまたは手動指定に対応。戻り値に使用レイアウト情報を追加。
+- **画像登録タブUI**
+  - プレビューエリアを左右分割: 左=画像プレビュー、右=テンプレート書き込み位置設定。
+  - Amazon Lファイル更新の案内文（最新テンプレートのダウンロード・差し替え・再解析）。
+  - 検出モード「自動（列名検索）」/「手動」、テンプレート再解析、設定のQSettings保存。
+- **変更ファイル**:
+  - `python/services/amazon_inventory_loader_service.py`
+  - `python/desktop/ui/image_manager_widget.py`
+  - `python/test_write_template.py`
+  - `docs/cursor_development_progress.md`
+- **Git**: （本コミット）
+
 ## 2026-05-27 仕入DB費用合計の再計算統一・DB管理タブ遅延読込
 
 - **目的**: 仕入DBの「費用合計」を運用実態（価格改定で `akaji` が変動）に合わせて再計算し、表示・保存の不整合をなくす。あわせてデータベース管理タブの初期表示を軽量化する。
