@@ -20,7 +20,7 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from utils.error_handler import ErrorHandler, validate_csv_file, safe_execute
 try:
     from desktop.services.keepa_service import KeepaService
@@ -260,8 +260,9 @@ class RepricerWidget(QWidget):
 
         self.missing_skus_btn = QPushButton("仕入DB未登録SKU")
         self.missing_skus_btn.setToolTip(
-            "読み込んだ在庫CSVのうち、仕入DBに無いSKUを一覧表示し、\n"
-            "「在庫専用」として登録して月別運用ルールを設定できます。"
+            "読み込んだ在庫CSVのうち、仕入DBに無いSKU、\n"
+            "または ASIN が未入力の SKU を一覧表示し、\n"
+            "在庫CSVの内容で登録・上書きできます。"
         )
         self.missing_skus_btn.clicked.connect(self.show_missing_inventory_skus_dialog)
         self.missing_skus_btn.setEnabled(False)
@@ -874,8 +875,47 @@ class RepricerWidget(QWidget):
         except Exception:
             return None
 
+    def _get_purchase_display_records(self) -> List[Dict[str, Any]]:
+        """仕入DBタブの表示用レコード（スナップショット）を取得。"""
+        pw = self.product_widget
+        if pw is not None:
+            try:
+                if hasattr(pw, "ensure_initial_data_loaded"):
+                    pw.ensure_initial_data_loaded()
+            except Exception:
+                pass
+            master = getattr(pw, "purchase_all_records_master", None) or getattr(
+                pw, "purchase_all_records", None
+            )
+            if master:
+                return list(master)
+            purchase_snapshot_db = getattr(pw, "purchase_db", None)
+            if purchase_snapshot_db is not None:
+                try:
+                    snapshots = purchase_snapshot_db.list_snapshots()
+                    if snapshots:
+                        snap = purchase_snapshot_db.get_snapshot(snapshots[0]["id"])
+                        if snap and snap.get("data"):
+                            return list(snap["data"])
+                except Exception:
+                    pass
+        try:
+            from desktop.database.product_purchase_db import ProductPurchaseDatabase
+        except ImportError:
+            from database.product_purchase_db import ProductPurchaseDatabase  # type: ignore
+        try:
+            pdb = ProductPurchaseDatabase()
+            snapshots = pdb.list_snapshots()
+            if snapshots:
+                snap = pdb.get_snapshot(snapshots[0]["id"])
+                if snap and snap.get("data"):
+                    return list(snap["data"])
+        except Exception:
+            pass
+        return []
+
     def show_missing_inventory_skus_dialog(self) -> None:
-        """在庫CSVにあって仕入DBに無いSKUを一覧表示。"""
+        """在庫CSVにあって仕入DBに無い、または ASIN 未入力の SKU を一覧表示。"""
         df = self._load_csv_dataframe_for_missing()
         if df is None or df.empty:
             QMessageBox.information(self, "仕入DB未登録SKU", "先に在庫CSVを読み込んでください。")
@@ -891,9 +931,17 @@ class RepricerWidget(QWidget):
                 save_pending_missing_list,
             )
         purchase_db = self._get_purchase_db()
-        missing = extract_rows_not_in_purchase_db(df, purchase_db)
+        display_records = self._get_purchase_display_records()
+        missing = extract_rows_not_in_purchase_db(
+            df, purchase_db, display_records=display_records
+        )
         if not missing:
-            QMessageBox.information(self, "仕入DB未登録SKU", "仕入DBに無いSKUはありません。")
+            QMessageBox.information(
+                self,
+                "仕入DB未登録SKU",
+                "登録・上書き対象のSKUはありません。\n"
+                "（仕入DBに SKU があり ASIN も入力済みの行は対象外です）",
+            )
             return
         save_pending_missing_list(missing, csv_path=self.csv_path or "")
         try:
@@ -981,22 +1029,16 @@ class RepricerWidget(QWidget):
             if reply != QMessageBox.Yes:
                 return
             try:
-                from desktop.services.purchase_inventory_only import build_inventory_only_upsert_payload
+                from desktop.services.purchase_inventory_only import register_inventory_only_row
             except ImportError:
-                from services.purchase_inventory_only import build_inventory_only_upsert_payload  # type: ignore
+                from services.purchase_inventory_only import register_inventory_only_row  # type: ignore
             row = {"SKU": sku, "sku": sku, "ASIN": asin, "商品名": title, "price": current_price}
             purchase_db = self._get_purchase_db()
-            purchase_db.upsert(build_inventory_only_upsert_payload(row))
-            db_rec = purchase_db.get_by_sku(sku)
-            if db_rec:
+            display = register_inventory_only_row(row, purchase_db, product_widget=pw)
+            record = display
+            if pw is not None and hasattr(pw, "save_purchase_snapshot"):
                 try:
-                    from desktop.services.purchase_inventory_only import purchase_record_from_db_row
-                except ImportError:
-                    from services.purchase_inventory_only import purchase_record_from_db_row  # type: ignore
-                record = purchase_record_from_db_row(db_rec)
-            if pw is not None and hasattr(pw, "load_purchase_data"):
-                try:
-                    pw.load_purchase_data(purchase_db.list_all())
+                    pw.save_purchase_snapshot()
                 except Exception:
                     pass
 

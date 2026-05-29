@@ -1,3 +1,27 @@
+## 2026-05-29 在庫専用SKU・仕入DBステータスフィルタ高速化
+
+- **目的**: 改定実行タブの在庫CSVから仕入DBへ未登録SKUを自動入力し、仕入DBの「在庫専用」フィルタを実用的な速度で使えるようにする。
+- **在庫CSV→仕入DBマッピング**（`purchase_inventory_only.py` / `inventory_only_skus_dialog.py` / `repricer_widget.py`）
+  - SKU先頭から仕入日（8桁YYYYMMDD / 6桁YYMMDD）、ASIN、商品名、仕入個数・価格、販売予定価格、見込み利益、費用合計、損益分岐点を抽出。
+  - 想定利益率・想定ROIを自動計算。ASIN未入力の既存SKU行も在庫CSVで上書き対象。
+  - コンディション番号→ラベル変換（`condition_labels.py`）。
+- **仕入DB表示**（`product_widget.py`）
+  - 在庫専用行: 背景青灰＋文字色黄色。
+  - ステータス複数選択フィルタ（折りたたみUI、120msデバウンス）。
+  - フィルタ高速化: 初回のみ全件テーブル構築、以降は **SKUセット + setRowHidden** で表示切替（チェックOFFも一瞬）。
+  - レシート/保証書画像のDBルックアップをキャッシュ化（2回目以降の再描画を軽量化）。
+  - `repaint()` + `processEvents()` でチェック解除後の画面フリーズを解消。
+- **テスト**: `test_purchase_inventory_only.py`
+- **変更ファイル**:
+  - `python/desktop/services/purchase_inventory_only.py`
+  - `python/desktop/services/condition_labels.py`（新規）
+  - `python/desktop/services/test_purchase_inventory_only.py`（新規）
+  - `python/desktop/ui/product_widget.py`
+  - `python/desktop/ui/inventory_only_skus_dialog.py`
+  - `python/desktop/ui/repricer_widget.py`
+  - `docs/cursor_development_progress.md`
+- **Git**: feat(desktop): 在庫専用SKUのCSVマッピング拡張と仕入DBステータスフィルタ高速化
+
 ## 2026-05-29 分析タブ・ランキング（カンバン）
 
 - **目的**: 分析タブで店舗・ルートの実績を一目で比較できるランキングをカンバン形式で表示する。

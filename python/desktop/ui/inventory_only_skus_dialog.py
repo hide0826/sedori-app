@@ -22,13 +22,13 @@ from PySide6.QtWidgets import (
 try:
     from desktop.services.purchase_inventory_only import (
         PURCHASE_STATUS_INVENTORY_ONLY_LABEL,
-        build_inventory_only_upsert_payload,
+        register_inventory_only_row,
         save_pending_missing_list,
     )
 except ImportError:
     from services.purchase_inventory_only import (  # type: ignore
         PURCHASE_STATUS_INVENTORY_ONLY_LABEL,
-        build_inventory_only_upsert_payload,
+        register_inventory_only_row,
         save_pending_missing_list,
     )
 
@@ -57,15 +57,18 @@ class InventoryOnlySkusDialog(QDialog):
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
         hint = QLabel(
-            "在庫CSVにあって仕入DBに無いSKUです。\n"
-            f"「{PURCHASE_STATUS_INVENTORY_ONLY_LABEL}」として登録すると、月別運用・個別改定ルールを設定できます。"
+            "在庫CSVにあって仕入DBに無い SKU、または ASIN が未入力の SKU です。\n"
+            f"「{PURCHASE_STATUS_INVENTORY_ONLY_LABEL}」として登録すると、在庫CSVの内容で上書きされます。\n"
+            "月別運用・個別改定ルールもあとから設定できます。"
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
         self._table = QTableWidget()
-        self._table.setColumnCount(4)
-        self._table.setHorizontalHeaderLabels(["SKU", "ASIN", "商品名", "価格"])
+        self._table.setColumnCount(6)
+        self._table.setHorizontalHeaderLabels(
+            ["SKU", "ASIN", "商品名", "仕入れ価格", "販売予定価格", "見込み利益"]
+        )
         self._table.setRowCount(len(self._rows))
         self._table.setSelectionBehavior(QTableWidget.SelectRows)
         self._table.setSelectionMode(QTableWidget.SingleSelection)
@@ -76,12 +79,14 @@ class InventoryOnlySkusDialog(QDialog):
             if len(title) > 60:
                 title = title[:60] + "..."
             self._table.setItem(i, 2, QTableWidgetItem(title))
-            self._table.setItem(i, 3, QTableWidgetItem(str(row.get("price") or "")))
+            self._table.setItem(i, 3, QTableWidgetItem(str(row.get("cost") or row.get("仕入れ価格") or "")))
+            self._table.setItem(i, 4, QTableWidgetItem(str(row.get("price") or row.get("販売予定価格") or "")))
+            self._table.setItem(i, 5, QTableWidgetItem(str(row.get("profit") or row.get("見込み利益") or "")))
         self._table.resizeColumnsToContents()
         layout.addWidget(self._table)
 
         btn_row = QHBoxLayout()
-        register_all_btn = QPushButton("すべて在庫専用として登録")
+        register_all_btn = QPushButton("すべて在庫専用として登録・上書き")
         register_all_btn.clicked.connect(self._register_all)
         btn_row.addWidget(register_all_btn)
         edit_btn = QPushButton("選択行を編集（月別運用）")
@@ -109,7 +114,8 @@ class InventoryOnlySkusDialog(QDialog):
         reply = QMessageBox.question(
             self,
             "一括登録",
-            f"{len(self._rows)} 件を「{PURCHASE_STATUS_INVENTORY_ONLY_LABEL}」として仕入DBに登録しますか？\n"
+            f"{len(self._rows)} 件を「{PURCHASE_STATUS_INVENTORY_ONLY_LABEL}」として仕入DBに登録・上書きしますか？\n"
+            "（ASIN 未入力の既存行は在庫CSVの内容で置き換わります）\n"
             "（月別運用はオフ。あとから仕入行の編集で設定できます）",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -119,8 +125,11 @@ class InventoryOnlySkusDialog(QDialog):
         ok = 0
         for row in self._rows:
             try:
-                payload = build_inventory_only_upsert_payload(row)
-                self._purchase_db.upsert(payload)
+                register_inventory_only_row(
+                    row,
+                    self._purchase_db,
+                    product_widget=self._product_widget,
+                )
                 ok += 1
             except Exception as e:
                 print(f"[inventory_only] register failed: {e}")
@@ -137,8 +146,11 @@ class InventoryOnlySkusDialog(QDialog):
         if not sku:
             return
         try:
-            payload = build_inventory_only_upsert_payload(row)
-            self._purchase_db.upsert(payload)
+            register_inventory_only_row(
+                row,
+                self._purchase_db,
+                product_widget=self._product_widget,
+            )
         except Exception as e:
             QMessageBox.warning(self, "登録", f"登録に失敗しました:\n{e}")
             return

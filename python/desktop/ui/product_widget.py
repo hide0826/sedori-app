@@ -401,6 +401,11 @@ class ProductWidget(QWidget):
         self._purchase_edit_dialogs: List[QDialog] = []
         # 仕入DB行の一意IDカウンタ（ソートしても行を特定できるようにする）
         self._purchase_row_id_counter: int = 1
+        # 仕入DBテーブルがマスター全件で構築済みなら、フィルタは行の表示/非表示のみ（全再描画を避ける）
+        self._purchase_table_full_master_built: bool = False
+        # レシート/保証書 DBルックアップキャッシュ（ファイル名→解決パス）
+        self._receipt_file_path_cache: Dict[str, Optional[str]] = {}
+        self._warranty_sku_path_cache: Dict[str, Optional[str]] = {}
         # 重いデータ読み込みが完了しているかどうか
         self._initial_data_loaded: bool = False
         self._initial_load_in_progress: bool = False
@@ -1953,8 +1958,13 @@ class ProductWidget(QWidget):
         self.purchase_all_records_master = copy.deepcopy(records)
         self.purchase_all_records = copy.deepcopy(records)
         self.purchase_records = copy.deepcopy(records)
+        self._invalidate_purchase_table_full_master()
         self.populate_purchase_table(self.purchase_records)
-        self.update_purchase_count_label()
+        self._purchase_table_full_master_built = bool(self.purchase_records)
+        if self._purchase_search_filters_active():
+            self.filter_purchase_records()
+        else:
+            self.update_purchase_count_label()
 
     def save_purchase_snapshot(self):
         """現在の仕入データをスナップショットとして保存"""
@@ -2017,7 +2027,10 @@ class ProductWidget(QWidget):
                     new_count += 1
             
             self.purchase_records = list(self.purchase_all_records)
+            self._invalidate_purchase_table_full_master()
             self.populate_purchase_table(self.purchase_records)
+            self._purchase_table_full_master_built = bool(self.purchase_records)
+            self.filter_purchase_records()
             self.update_purchase_count_label()
             self.save_purchase_snapshot()
             
@@ -2076,7 +2089,11 @@ class ProductWidget(QWidget):
             if hasattr(self, attr_name):
                 setattr(self, attr_name, _filter_by_row_id(getattr(self, attr_name, [])))
 
-        self.populate_purchase_table(self.purchase_records)
+        master = self._purchase_master_records()
+        self._invalidate_purchase_table_full_master()
+        self.populate_purchase_table(master)
+        self._purchase_table_full_master_built = bool(master)
+        self.filter_purchase_records()
         self.update_purchase_count_label()
         self.save_purchase_snapshot()
 
@@ -2090,6 +2107,7 @@ class ProductWidget(QWidget):
             
         self.purchase_records = []
         self.purchase_all_records = []
+        self._invalidate_purchase_table_full_master()
         self.populate_purchase_table(self.purchase_records)
         self.update_purchase_count_label()
         self.save_purchase_snapshot()
@@ -2211,70 +2229,232 @@ class ProductWidget(QWidget):
         if t is None:
             self.filter_purchase_records()
             return
-        t.start(80)
+        t.start(120)
 
-    def filter_purchase_records(self):
-        """検索条件でフィルタリング"""
+    def _invalidate_purchase_table_full_master(self) -> None:
+        self._purchase_table_full_master_built = False
+
+    def _sync_purchase_status_norm(self, record: Dict[str, Any]) -> str:
+        """ステータスフィルタ用コードをレコードに反映（常に最新のステータスから計算）。"""
+        try:
+            from desktop.services.purchase_inventory_only import normalize_status_code
+        except ImportError:
+            from services.purchase_inventory_only import normalize_status_code  # type: ignore
+        code = normalize_status_code(record.get("ステータス") or record.get("status"))
+        record["_status_norm"] = code
+        return code
+
+    def _purchase_search_filters_active(self) -> bool:
+        if self.purchase_search_date.text().strip():
+            return True
+        if self.purchase_search_sku.text().strip():
+            return True
+        if self.purchase_search_asin.text().strip():
+            return True
+        if self.purchase_search_jan.text().strip():
+            return True
+        if self._purchase_status_filter_selected_codes():
+            return True
+        return False
+
+    def _purchase_master_records(self) -> List[Dict[str, Any]]:
+        master = getattr(self, "purchase_all_records_master", None)
+        if master:
+            return list(master)
+        fallback = getattr(self, "purchase_all_records", None)
+        return list(fallback) if fallback else []
+
+    def _purchase_table_has_full_master_rows(self) -> bool:
+        master = self._purchase_master_records()
+        return bool(master) and self.purchase_table.rowCount() == len(master)
+
+    def _compute_filtered_purchase_records(self) -> List[Dict[str, Any]]:
+        """マスターから検索条件で絞り込み（ディープコピーしない）。"""
         date_query = self.purchase_search_date.text().strip()
         sku_query = self.purchase_search_sku.text().strip().lower()
         asin_query = self.purchase_search_asin.text().strip().lower()
         jan_query = self.purchase_search_jan.text().strip().lower()
         status_selected = self._purchase_status_filter_selected_codes()
-        # マスターがなければ空で初期化
-        if not hasattr(self, 'purchase_all_records_master') or self.purchase_all_records_master is None:
-            self.purchase_all_records_master = []
-        if not hasattr(self, 'purchase_all_records') or self.purchase_all_records is None:
-            self.purchase_all_records = []
 
-        # マスターから都度フィルタ（前回の結果に依存しない）
-        source_records = self.purchase_all_records_master if self.purchase_all_records_master else self.purchase_all_records
-        filtered_records = copy.deepcopy(source_records)
+        filtered_records = self._purchase_master_records()
 
-        # 日付フィルタ
         if date_query:
             filtered_records = [
                 r for r in filtered_records
                 if self._date_matches(str(r.get("仕入れ日") or ""), date_query)
             ]
 
-        # SKUフィルタ
         if sku_query:
             filtered_records = [
                 r for r in filtered_records
                 if sku_query in str(r.get("SKU") or r.get("sku") or "").lower()
             ]
 
-        # ASINフィルタ
         if asin_query:
             filtered_records = [
                 r for r in filtered_records
                 if asin_query in str(r.get("ASIN") or r.get("asin") or "").lower()
             ]
 
-        # JANフィルタ
         if jan_query:
             filtered_records = [
                 r for r in filtered_records
                 if jan_query in str(r.get("JAN") or r.get("jan") or "").lower()
             ]
 
-        # ステータスフィルタ（複数チェック時はいずれかに一致）
         if status_selected:
-            try:
-                from desktop.services.purchase_inventory_only import normalize_status_code
-            except ImportError:
-                from services.purchase_inventory_only import normalize_status_code  # type: ignore
             filtered_records = [
                 r for r in filtered_records
-                if normalize_status_code(r.get("ステータス") or r.get("status"))
-                in status_selected
+                if self._sync_purchase_status_norm(r) in status_selected
             ]
 
-        # 結果を反映
+        return filtered_records
+
+    def _purchase_table_row_sku(self, row: int) -> str:
+        """テーブル行から SKU を取得（ソート後も UserRole を優先）。"""
+        if not hasattr(self, "purchase_columns"):
+            return ""
+        sku_col = None
+        for i, col in enumerate(self.purchase_columns):
+            if col == "SKU":
+                sku_col = i
+                break
+        if sku_col is None:
+            return ""
+        it = self.purchase_table.item(row, sku_col)
+        if it is None:
+            return ""
+        stored = it.data(Qt.UserRole)
+        if stored is not None and str(stored).strip():
+            return str(stored).strip()
+        return str(it.text() or "").strip()
+
+    def _purchase_table_row_id(self, row: int) -> Optional[int]:
+        preferred_cols: List[int] = []
+        if hasattr(self, "purchase_columns"):
+            for name in ("SKU", "仕入れ日", "ASIN", "JAN"):
+                try:
+                    preferred_cols.append(self.purchase_columns.index(name))
+                except ValueError:
+                    pass
+        scan_cols = preferred_cols + [
+            c for c in range(self.purchase_table.columnCount()) if c not in preferred_cols
+        ]
+        for c in scan_cols:
+            it = self.purchase_table.item(row, c)
+            if it is None:
+                continue
+            v = it.data(Qt.UserRole + 1)
+            if v is None:
+                continue
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _sync_purchase_table_row_order_index(self) -> None:
+        """sortItems 後の論理行 → _row_id 対応を更新（ソート後もフィルタが効くようにする）。"""
+        self._purchase_table_row_ids_by_index = [
+            self._purchase_table_row_id(row)
+            for row in range(self.purchase_table.rowCount())
+        ]
+
+    def _sync_purchase_row_ids_to_master(
+        self, source_records: Optional[List[Dict[str, Any]]] = None
+    ) -> None:
+        """populate で付与した _row_id / _status_norm をマスター側へ同期。"""
+        sources = source_records
+        if sources is None:
+            sources = getattr(self, "purchase_records", None) or []
+        id_by_sku: Dict[str, int] = {}
+        norm_by_sku: Dict[str, str] = {}
+        for rec in sources:
+            sku = str(rec.get("SKU") or rec.get("sku") or "").strip()
+            if not sku:
+                continue
+            try:
+                rid = rec.get("_row_id")
+                if rid is not None:
+                    id_by_sku[sku] = int(rid)
+            except (TypeError, ValueError):
+                pass
+            norm = rec.get("_status_norm")
+            if norm is not None and str(norm).strip():
+                norm_by_sku[sku] = str(norm).strip().lower()
+        if not id_by_sku and not norm_by_sku:
+            return
+        for lst_name in ("purchase_all_records_master", "purchase_all_records"):
+            lst = getattr(self, lst_name, None)
+            if not isinstance(lst, list):
+                continue
+            for rec in lst:
+                sku = str(rec.get("SKU") or rec.get("sku") or "").strip()
+                if not sku:
+                    continue
+                if sku in id_by_sku:
+                    rec["_row_id"] = id_by_sku[sku]
+                if sku in norm_by_sku:
+                    rec["_status_norm"] = norm_by_sku[sku]
+
+    def _fast_set_row_visibility(self, visible_skus: set, show_all: bool) -> None:
+        """テーブル行を SKU セットに基づいて即時表示/非表示切り替え（repopulate なし）。"""
+        row_count = self.purchase_table.rowCount()
+        self.purchase_table.setUpdatesEnabled(False)
+        try:
+            for row in range(row_count):
+                if show_all:
+                    self.purchase_table.setRowHidden(row, False)
+                else:
+                    sku = self._purchase_table_row_sku(row)
+                    self.purchase_table.setRowHidden(row, sku not in visible_skus)
+        finally:
+            self.purchase_table.setUpdatesEnabled(True)
+            self.purchase_table.viewport().repaint()
+            QApplication.processEvents()
+
+    def filter_purchase_records(self):
+        """検索条件でフィルタリング"""
+        if not hasattr(self, "purchase_all_records_master") or self.purchase_all_records_master is None:
+            self.purchase_all_records_master = []
+        if not hasattr(self, "purchase_all_records") or self.purchase_all_records is None:
+            self.purchase_all_records = []
+
+        master = self._purchase_master_records()
+        filters_active = self._purchase_search_filters_active()
+
+        # 全件テーブルが未構築（行数が合わない）場合のみ repopulate
+        if not master or self.purchase_table.rowCount() != len(master):
+            filtered_records = self._compute_filtered_purchase_records()
+            self.purchase_records = filtered_records
+            self.populate_purchase_table(master if master else filtered_records)
+            # repopulate 後にフィルタがアクティブなら行の表示/非表示を適用
+            if filters_active and master:
+                visible_skus = {
+                    str(r.get("SKU") or r.get("sku") or "").strip()
+                    for r in self.purchase_records
+                    if str(r.get("SKU") or r.get("sku") or "").strip()
+                }
+                self._fast_set_row_visibility(visible_skus, show_all=False)
+            self.update_purchase_count_label()
+            return
+
+        # テーブルが全件構築済み → setRowHidden のみで切り替え（高速）
+        filtered_records = self._compute_filtered_purchase_records()
         self.purchase_records = filtered_records
-        self.populate_purchase_table(self.purchase_records)
+
+        if filters_active:
+            visible_skus = {
+                str(r.get("SKU") or r.get("sku") or "").strip()
+                for r in filtered_records
+                if str(r.get("SKU") or r.get("sku") or "").strip()
+            }
+            self._fast_set_row_visibility(visible_skus, show_all=False)
+        else:
+            self._fast_set_row_visibility(set(), show_all=True)
+
         self.update_purchase_count_label()
-    
+
     def clear_purchase_search(self):
         """検索条件をクリアして全件表示"""
         self.purchase_search_date.clear()
@@ -2282,11 +2462,15 @@ class ProductWidget(QWidget):
         self.purchase_search_asin.clear()
         self.purchase_search_jan.clear()
         self._reset_purchase_status_filter_checkboxes()
-        master = getattr(self, "purchase_all_records_master", None) or getattr(
-            self, "purchase_all_records", []
-        )
-        self.purchase_records = copy.deepcopy(master) if master else []
-        self.populate_purchase_table(self.purchase_records)
+        master = self._purchase_master_records()
+        self.purchase_records = list(master) if master else []
+
+        if master and self.purchase_table.rowCount() == len(master):
+            # テーブルが全件構築済み → 全行表示のみ（高速）
+            self._fast_set_row_visibility(set(), show_all=True)
+        else:
+            self.populate_purchase_table(self.purchase_records)
+
         self.update_purchase_count_label()
     
     def toggle_view_mode(self, mode: str):
@@ -2508,8 +2692,19 @@ class ProductWidget(QWidget):
         for record in records:
             row = dict(record)
             sku = row.get("SKU") or row.get("sku")
-            
-            # 画像URLをrecordから取得（既に設定されている場合はスキップ）
+            try:
+                from desktop.services.purchase_inventory_only import backfill_purchase_date_from_sku
+            except ImportError:
+                from services.purchase_inventory_only import backfill_purchase_date_from_sku  # type: ignore
+            backfill_purchase_date_from_sku(row)
+            try:
+                from desktop.services.condition_labels import backfill_condition_label_in_record
+            except ImportError:
+                try:
+                    from services.condition_labels import backfill_condition_label_in_record  # type: ignore
+                except ImportError:
+                    from condition_labels import backfill_condition_label_in_record  # type: ignore
+            backfill_condition_label_in_record(row)
             for i in range(1, 7):
                 image_url_key = f"image_url_{i}"
                 image_url_col = f"画像URL{i}"
@@ -2679,6 +2874,7 @@ class ProductWidget(QWidget):
             if not str(row.get("販売チャネル") or "").strip():
                 row["販売チャネル"] = "Amazon"
 
+            self._sync_purchase_status_norm(row)
             augmented.append(row)
         return augment_purchase_cost_records(augmented)
 
@@ -2687,7 +2883,20 @@ class ProductWidget(QWidget):
         from pathlib import Path
         records = records or []
         augment_purchase_cost_records(records)
-        
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.purchase_table.setUpdatesEnabled(False)
+        try:
+            self._populate_purchase_table_impl(records)
+        finally:
+            self.purchase_table.setUpdatesEnabled(True)
+            QApplication.restoreOverrideCursor()
+            # repaint() は同期描画なのでクリック不要で即時反映される
+            self.purchase_table.viewport().repaint()
+            QApplication.processEvents()
+
+    def _populate_purchase_table_impl(self, records: List[Dict[str, Any]]):
+        from pathlib import Path
         base_columns = list(self.inventory_columns)
         if not base_columns:
             base_columns = self._resolve_inventory_columns()
@@ -2730,6 +2939,7 @@ class ProductWidget(QWidget):
         # _row_id は下のループ内で欠けている行に採番する。採番前にマップを作るとキーが欠落し、
         # 編集時に row_map ミス→SKU先頭一致で別商品が開く不具合になるため、ここでは空にしてループ内で登録する。
         self._purchase_row_map = {}
+        self._purchase_table_row_ids_by_index: List[Optional[int]] = []
 
         # テーブル内容をクリアし、更新中はソート/シグナルを止める（穴あき防止）
         self.purchase_table.blockSignals(True)
@@ -2764,6 +2974,7 @@ class ProductWidget(QWidget):
                 row_id = int(record["_row_id"])
             record["_row_id"] = row_id
             self._purchase_row_map[row_id] = record
+            self._purchase_table_row_ids_by_index.append(row_id)
 
             for col, header in enumerate(columns):
                 value = self._get_record_value(record, [header])
@@ -2791,49 +3002,32 @@ class ProductWidget(QWidget):
                     item = QTableWidgetItem(receipt_image_str)
                     if receipt_image_str:
                         item.setFlags(item.flags() | Qt.ItemIsEnabled)
-                        # レコードにファイルパス情報が保存されている場合は優先的に使用
-                        file_path = record.get('レシート画像パス') or record.get('receipt_image_path')
-                        if file_path:
-                            # ファイルパスがレコードに保存されている場合
-                            file_path_obj = Path(file_path)
-                            if file_path_obj.exists():
-                                item.setToolTip(f"クリックで画像を開く\n{file_path}")
-                                item.setData(Qt.UserRole, str(file_path_obj.resolve()))
-                            else:
-                                # ファイルが存在しない場合は、file_pathをそのまま保存（後で検索できるように）
-                                item.setToolTip(f"レシート画像: {receipt_image_str}\n（ファイルが見つかりません: {file_path}）")
-                                item.setData(Qt.UserRole, file_path)
-                        else:
-                            # レコードにファイルパスがない場合は、レシートDBから検索
+                        # レコードまたはキャッシュにパスがあればDBルックアップ不要
+                        file_path = (
+                            record.get('レシート画像パス')
+                            or record.get('receipt_image_path')
+                            or self._receipt_file_path_cache.get(receipt_image_str)
+                        )
+                        if file_path is None:
+                            # キャッシュにない場合のみDBを検索（1回だけ）
                             receipt_info = self.receipt_db.find_by_file_name(receipt_image_str)
                             if receipt_info:
-                                # original_file_pathを優先、なければfile_path
                                 file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path')
-                                if file_path:
-                                    # ファイルが存在するか確認
-                                    file_path_obj = Path(file_path)
-                                    if file_path_obj.exists():
-                                        item.setToolTip(f"クリックで画像を開く\n{file_path}")
-                                        resolved_path = str(file_path_obj.resolve())
-                                        item.setData(Qt.UserRole, resolved_path)
-                                        # レコードにレシート画像パスを保存して、次回から使えるようにする
-                                        record['レシート画像パス'] = resolved_path
-                                    else:
-                                        # ファイルが存在しない場合は、file_pathをそのまま保存（後で検索できるように）
-                                        item.setToolTip(f"レシート画像: {receipt_image_str}\n（ファイルが見つかりません: {file_path}）")
-                                        item.setData(Qt.UserRole, file_path)
-                                        # レコードにレシート画像パスを保存（ファイルが存在しなくても、パス情報は保存）
-                                        record['レシート画像パス'] = file_path
-                                else:
-                                    # デバッグ: レシート情報は見つかったが、file_pathがない
-                                    item.setToolTip("レシート画像: " + receipt_image_str + "\n（レシートDBにfile_pathがありません）")
-                                    # UserRoleにはreceipt_idを保存して、後で検索できるようにする
-                                    item.setData(Qt.UserRole, receipt_image_str)
+                            self._receipt_file_path_cache[receipt_image_str] = file_path  # None でもキャッシュ
+                        if file_path:
+                            file_path_obj = Path(file_path)
+                            if file_path_obj.exists():
+                                resolved_path = str(file_path_obj.resolve())
+                                item.setToolTip(f"クリックで画像を開く\n{file_path}")
+                                item.setData(Qt.UserRole, resolved_path)
+                                record['レシート画像パス'] = resolved_path
                             else:
-                                # レシートが見つからない場合
-                                item.setToolTip("レシート画像: " + receipt_image_str + "\n（レシートDBに見つかりません）")
-                                # UserRoleにはファイル名を保存して、後で検索できるようにする
-                                item.setData(Qt.UserRole, receipt_image_str)
+                                item.setToolTip(f"レシート画像: {receipt_image_str}\n（ファイルが見つかりません: {file_path}）")
+                                item.setData(Qt.UserRole, file_path)
+                                record['レシート画像パス'] = file_path
+                        else:
+                            item.setToolTip("レシート画像: " + receipt_image_str + "\n（レシートDBに見つかりません）")
+                            item.setData(Qt.UserRole, receipt_image_str)
                         item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
                 elif header == "レシート画像URL":
                     receipt_image_url_str = "" if value is None else str(value)
@@ -2850,28 +3044,27 @@ class ProductWidget(QWidget):
                     item = QTableWidgetItem(warranty_image_str)
                     if warranty_image_str:
                         item.setFlags(item.flags() | Qt.ItemIsEnabled)
-                        # レシートDBからファイルパスを取得（保証書もレシートDBに保存されている）
-                        warranty_file_path = None
-                        try:
-                            # まずレシートDBから検索（ファイル名で検索）
-                            receipt_info = self.receipt_db.find_by_file_name(warranty_image_str)
-                            if receipt_info:
-                                # original_file_pathを優先、なければfile_path
-                                warranty_file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path', '')
-                        except Exception:
-                            pass
-                        
-                        # レシートDBで見つからない場合は、保証書DBから検索
-                        if not warranty_file_path:
+                        sku_for_warranty = str(record.get('SKU') or record.get('sku') or '')
+                        # キャッシュ優先（ファイル名キー→レシートDB、SKUキー→保証書DB）
+                        warranty_file_path = self._receipt_file_path_cache.get(warranty_image_str)
+                        if warranty_file_path is None and warranty_image_str not in self._receipt_file_path_cache:
                             try:
-                                warranties = self.warranty_db.list_by_sku(record.get('SKU') or record.get('sku') or '')
-                                if warranties:
-                                    # 最新の保証書を取得
-                                    warranty = warranties[0]
-                                    warranty_file_path = warranty.get('file_path', '')
+                                receipt_info = self.receipt_db.find_by_file_name(warranty_image_str)
+                                if receipt_info:
+                                    warranty_file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path', '')
                             except Exception:
                                 pass
-                        
+                            self._receipt_file_path_cache[warranty_image_str] = warranty_file_path
+                        if not warranty_file_path:
+                            warranty_file_path = self._warranty_sku_path_cache.get(sku_for_warranty)
+                            if warranty_file_path is None and sku_for_warranty not in self._warranty_sku_path_cache:
+                                try:
+                                    warranties = self.warranty_db.list_by_sku(sku_for_warranty)
+                                    if warranties:
+                                        warranty_file_path = warranties[0].get('file_path', '')
+                                except Exception:
+                                    pass
+                                self._warranty_sku_path_cache[sku_for_warranty] = warranty_file_path
                         if warranty_file_path:
                             file_path_obj = Path(warranty_file_path)
                             if file_path_obj.exists():
@@ -3161,6 +3354,7 @@ class ProductWidget(QWidget):
                         new_status = status_combo.itemData(idx)
                         rec["ステータス"] = new_status
                         rec["status"] = new_status
+                        rec["_status_norm"] = str(new_status or "").strip().lower()
                         # ステータス設定日時を更新
                         rec["status_set_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         if new_status == "selling":
@@ -3482,12 +3676,16 @@ class ProductWidget(QWidget):
         if purchase_date_col_idx is not None:
             # 仕入れ日列で降順ソート
             self.purchase_table.sortItems(purchase_date_col_idx, Qt.DescendingOrder)
+
+        self._sync_purchase_table_row_order_index()
         
         # 表示モードに応じた列の表示/非表示を設定（必ず実行）
         if not hasattr(self, 'purchase_view_mode'):
             # デフォルトで全表示
             self.purchase_view_mode = "all"
         self._update_column_visibility()
+
+        self._sync_purchase_row_ids_to_master(records)
 
         # 再描画のためソートを有効化し、シグナルを戻す
         self.purchase_table.setSortingEnabled(True)
@@ -3552,7 +3750,7 @@ class ProductWidget(QWidget):
         return text[:limit] + "..."
     
     def _update_row_color_by_status(self, row: int, status: str):
-        """ステータスに応じて行の背景色を設定"""
+        """ステータスに応じて行の背景色・文字色を設定"""
         from PySide6.QtGui import QColor
         
         status = str(status).lower() if status else "ready"
@@ -3571,17 +3769,28 @@ class ProductWidget(QWidget):
         }
         
         bg_color = color_map.get(status, QColor(50, 50, 50))
+        fg_color = QColor(255, 220, 80) if status == "inventory_only" else None
         
         # 行全体の背景色を設定
         for col in range(self.purchase_table.columnCount()):
             item = self.purchase_table.item(row, col)
             if item:
                 item.setBackground(bg_color)
+                if fg_color is not None:
+                    item.setForeground(fg_color)
             else:
                 # セルウィジェットがある場合（ステータス列など）
                 widget = self.purchase_table.cellWidget(row, col)
                 if widget:
-                    widget.setStyleSheet(f"background-color: rgb({bg_color.red()}, {bg_color.green()}, {bg_color.blue()});")
+                    fg_style = ""
+                    if fg_color is not None:
+                        fg_style = (
+                            f"color: rgb({fg_color.red()}, {fg_color.green()}, {fg_color.blue()});"
+                        )
+                    widget.setStyleSheet(
+                        f"background-color: rgb({bg_color.red()}, {bg_color.green()}, {bg_color.blue()});"
+                        f"{fg_style}"
+                    )
 
     def _show_purchase_context_menu(self, position):
         """コンテキストメニューを表示"""
