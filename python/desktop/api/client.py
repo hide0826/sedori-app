@@ -673,27 +673,92 @@ class APIClient:
             }
     
     # 価格改定ルール設定API
+    def _repricer_config_path(self) -> Path:
+        try:
+            from core.config import CONFIG_PATH
+            return Path(CONFIG_PATH)
+        except ImportError:
+            return Path(__file__).resolve().parents[2] / "config" / "reprice_rules.json"
+
+    @staticmethod
+    def _normalize_repricer_config_payload(data: Any, mode: str = "standard") -> Dict[str, Any]:
+        """API/ファイル双方の形式を RepricerSettingsWidget 向けに揃える。"""
+        if not isinstance(data, dict):
+            return {}
+        if isinstance(data.get("config"), dict):
+            cfg: Dict[str, Any] = dict(data["config"])
+        else:
+            cfg = dict(data)
+
+        rules = cfg.get("reprice_rules")
+        if isinstance(rules, dict):
+            normalized_rules: List[Dict[str, Any]] = []
+            for key, rule in rules.items():
+                if not isinstance(rule, dict):
+                    continue
+                try:
+                    days_from = int(rule.get("days_from", key))
+                except (TypeError, ValueError):
+                    continue
+                item = dict(rule)
+                item["days_from"] = days_from
+                if "value" not in item and "priceTrace" in item:
+                    item["value"] = item.get("priceTrace", 0)
+                normalized_rules.append(item)
+            cfg["reprice_rules"] = normalized_rules
+
+        if mode == "369":
+            cfg.setdefault(
+                "rule_profiles",
+                {
+                    "3": {"tp_rates": {"tp0": 95, "tp1": 75, "tp2": 60, "tp3": 0}},
+                    "6": {"tp_rates": {"tp0": 90, "tp1": 70, "tp2": 55, "tp3": 0}},
+                    "9": {"tp_rates": {"tp0": 85, "tp1": 65, "tp2": 50, "tp3": 0}},
+                },
+            )
+            cfg.setdefault("default_profile", "6")
+            cfg.setdefault("interval_days", 7)
+            cfg.setdefault("alerts", {"enabled": True, "reason_prefix": "ALERT"})
+        return cfg
+
+    def _load_repricer_config_from_disk(self, mode: str = "standard") -> Dict[str, Any]:
+        path = self._repricer_config_path()
+        if not path.is_file():
+            raise FileNotFoundError(f"設定ファイルが見つかりません: {path}")
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        return self._normalize_repricer_config_payload(raw, mode=mode)
+
     def get_repricer_config(self, mode: str = "standard") -> Dict[str, Any]:
-        """価格改定ルール設定の取得"""
+        """価格改定ルール設定の取得（デスクトップはローカル JSON を優先）"""
+        disk_err: Optional[Exception] = None
+        try:
+            cfg = self._load_repricer_config_from_disk(mode=mode)
+            self.logger.info(
+                "ローカル設定ファイルから価格改定設定を読み込みました: %s",
+                self._repricer_config_path(),
+            )
+            return cfg
+        except Exception as e:
+            disk_err = e
+            self.logger.warning("ローカル設定の読み込みに失敗: %s", disk_err)
+
         try:
             response = self.session.get(
                 f"{self.base_url}/repricer/config",
                 params={"mode": mode},
-                timeout=30  # タイムアウトを10秒から30秒に延長
+                timeout=5,
             )
-            
             if response.status_code == 200:
-                self.logger.info("価格改定設定API正常動作、実際の設定を取得しました")
-                return response.json()
-            else:
-                # APIエラーの場合はエラーを返す
-                self.logger.error(f"価格改定設定取得APIエラー: {response.status_code} - {response.text}")
-                raise Exception(f"設定取得APIエラー: {response.status_code} - {response.text}")
-                
+                self.logger.info("価格改定設定APIから設定を取得しました")
+                return self._normalize_repricer_config_payload(response.json(), mode=mode)
+            self.logger.warning(
+                "価格改定設定APIエラー %s",
+                response.status_code,
+            )
         except Exception as e:
-            self.logger.error(f"価格改定設定取得失敗: {e}")
-            # エラーをそのまま伝播（ダミー設定は返さない）
-            raise Exception(f"設定取得に失敗しました: {str(e)}")
+            self.logger.warning("価格改定設定APIに接続できません: %s", e)
+        raise Exception(f"設定取得に失敗しました: {disk_err}")
     
     def _get_dummy_repricer_config(self) -> Dict[str, Any]:
         """ダミーの価格改定設定"""
@@ -717,28 +782,55 @@ class APIClient:
             ]
         }
     
+    def _save_repricer_config_to_disk(self, config_data: Dict[str, Any]) -> Path:
+        path = self._repricer_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=2, ensure_ascii=False)
+        return path
+
+    def _repricer_api_reachable(self) -> bool:
+        """FastAPI が応答するか（1秒以内）。応答なしなら同期をスキップする。"""
+        try:
+            response = self.session.get(f"{self.base_url}/health", timeout=1)
+            return response.status_code == 200
+        except Exception:
+            return False
+
     def update_repricer_config(self, config_data: Dict[str, Any], mode: str = "standard") -> bool:
-        """価格改定ルール設定の更新"""
+        """価格改定ルール設定の更新（デスクトップはローカル JSON を正とする）"""
+        try:
+            saved_path = self._save_repricer_config_to_disk(config_data)
+            self.logger.info("ローカルに価格改定設定を保存しました: %s", saved_path)
+        except Exception as e:
+            self.logger.error(f"ローカル設定ファイルの保存失敗: {e}")
+            raise Exception(f"設定ファイルへの保存に失敗しました: {str(e)}")
+
+        if not self._repricer_api_reachable():
+            self.logger.info("FastAPI 未応答のため、価格改定設定の API 同期をスキップしました")
+            return True
+
         try:
             response = self.session.put(
                 f"{self.base_url}/repricer/config",
                 json=config_data,
                 params={"mode": mode},
-                timeout=30  # タイムアウトを10秒から30秒に延長
+                timeout=5,
             )
-            
             if response.status_code == 200:
-                self.logger.info("設定更新API正常動作、実際の設定を更新しました")
+                self.logger.info("価格改定設定を API にも同期しました")
                 return True
-            else:
-                # APIエラーの場合はエラーを返す
-                self.logger.error(f"設定更新APIエラー: {response.status_code} - {response.text}")
-                raise Exception(f"設定更新APIエラー: {response.status_code} - {response.text}")
-                
+            self.logger.warning(
+                "APIへの設定同期は失敗しましたが、ローカルファイルには保存済みです (%s)",
+                response.status_code,
+            )
+            return True
         except Exception as e:
-            self.logger.error(f"価格改定設定更新失敗: {e}")
-            # エラーをそのまま伝播（ダミー成功は返さない）
-            raise Exception(f"設定更新に失敗しました: {str(e)}")
+            self.logger.warning(
+                "APIへの設定同期に失敗しましたが、ローカルファイルには保存済みです: %s",
+                e,
+            )
+            return True
     
     def close(self):
         """セッションのクローズ"""

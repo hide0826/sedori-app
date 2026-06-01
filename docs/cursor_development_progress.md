@@ -1,3 +1,23 @@
+## 2026-05-31 月別運用改定拡張・価格改定設定のローカル優先化
+
+- **目的**: 月別運用表の改定表現を明確化し、FastAPI 未起動・応答遅延時にデスクトップ全体で「設定更新」タイムアウトが出ないようにする。
+- **月別運用**（`repricer_ladder_table.py`, `purchase_row_edit_dialog.py`, `repricer_weekly.py`）
+  - 「目標到達価格」列名、概算利益（利益率）列、即時改定アクション（`instant_reprice`）。
+  - priceTrace 以外は追従無し固定。同一目標の連続帯をマージして段階下げ（priceTrace / TP値下げ）。
+- **価格改定設定**（`client.py`, `repricer_settings_widget.py`, `main_window.py`）
+  - ローカル `config/reprice_rules.json` 優先。API 同期は health 確認後のみ。
+  - 改定ルールタブの遅延読込・サブタブの遅延生成。エラーダイアログの誤表示抑制。
+- **変更ファイル**:
+  - `python/desktop/api/client.py`
+  - `python/desktop/ui/main_window.py`
+  - `python/desktop/ui/repricer_settings_widget.py`
+  - `python/desktop/ui/purchase_row_edit_dialog.py`
+  - `python/desktop/utils/repricer_ladder_table.py`
+  - `python/services/repricer_weekly.py`
+  - `python/desktop/services/purchase_tp_autofill_369.py`
+  - `docs/cursor_development_progress.md`
+- **Git**: feat(desktop): 月別運用の即時改定・概算利益列と価格改定設定のローカル優先化
+
 ## 2026-05-29 在庫専用SKU・仕入DBステータスフィルタ高速化
 
 - **目的**: 改定実行タブの在庫CSVから仕入DBへ未登録SKUを自動入力し、仕入DBの「在庫専用」フィルタを実用的な速度で使えるようにする。

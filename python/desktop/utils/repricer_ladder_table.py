@@ -13,6 +13,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QComboBox,
+    QLabel,
     QLineEdit,
     QTableWidget,
     QTableWidgetItem,
@@ -24,6 +25,14 @@ REPRICER_DAY_RANGES: List[tuple[int, int]] = [
     (151, 180), (181, 210), (211, 240), (241, 270),
     (271, 300), (301, 330), (331, 360), (361, 999),
 ]
+
+
+def band_start_day_for_period_end(period_end: int) -> int:
+    """ルールの days_from（帯の終端日）から、その帯の開始日を返す。"""
+    for start, end in REPRICER_DAY_RANGES:
+        if end == period_end:
+            return start
+    return 361 if period_end >= 999 else 1
 
 # 帯終端(days_from) → TP0〜TP3 へのざっくり対応（テンプレコピー時の価格初期値用）
 _DAYS_FROM_TO_TP_KEY: Dict[int, str] = {}
@@ -37,6 +46,82 @@ for _end in (300, 330, 360, 999):
     _DAYS_FROM_TO_TP_KEY[_end] = "tp3"
 
 
+# 月別運用テーブル列インデックス
+COL_LADDER_DAYS = 0
+COL_LADDER_ACTION = 1
+COL_LADDER_TRACE = 2
+COL_LADDER_TARGET_PRICE = 3
+COL_LADDER_AKAJI = 4
+COL_LADDER_TAKANE = 5
+COL_LADDER_PROFIT_EST = 6
+
+_LADDER_PROFIT_CTX_SALE = "ladder_sale_price"
+_LADDER_PROFIT_CTX_BASE = "ladder_base_profit"
+
+
+def set_ladder_table_profit_context(
+    table: QTableWidget,
+    sale_price: float,
+    base_profit: float,
+) -> None:
+    """TP概算と同じ基準（販売予定・見込み利益）を月別運用表に渡す。"""
+    table.setProperty(_LADDER_PROFIT_CTX_SALE, float(sale_price or 0))
+    table.setProperty(_LADDER_PROFIT_CTX_BASE, float(base_profit or 0))
+
+
+def _ladder_profit_context(table: QTableWidget) -> tuple[float, float]:
+    sale = table.property(_LADDER_PROFIT_CTX_SALE)
+    base = table.property(_LADDER_PROFIT_CTX_BASE)
+    try:
+        sale_f = float(sale) if sale is not None else 0.0
+    except (TypeError, ValueError):
+        sale_f = 0.0
+    try:
+        base_f = float(base) if base is not None else 0.0
+    except (TypeError, ValueError):
+        base_f = 0.0
+    return sale_f, base_f
+
+
+def _parse_ladder_price_text(text: str) -> float:
+    if not text or not str(text).strip():
+        return 0.0
+    try:
+        return float(str(text).replace(",", "").strip())
+    except ValueError:
+        return 0.0
+
+
+def format_ladder_estimated_profit(
+    sale_price: float,
+    base_profit: float,
+    target_price: float,
+) -> str:
+    """TP価格欄と同式: 概算利益 = 見込み利益 - 0.89 × (販売予定 - 目標到達価格)。"""
+    if target_price <= 0 or sale_price <= 0:
+        return "-"
+    profit = base_profit - 0.89 * (sale_price - target_price)
+    rate = (profit / target_price * 100.0) if target_price else None
+    if rate is None:
+        return "-"
+    return f"{int(round(profit)):,}（{rate:.1f}%）"
+
+
+def update_ladder_profit_labels(table: QTableWidget, row: Optional[int] = None) -> None:
+    sale_price, base_profit = _ladder_profit_context(table)
+    rows = [row] if row is not None else range(table.rowCount())
+    for i in rows:
+        lbl = table.cellWidget(i, COL_LADDER_PROFIT_EST)
+        if not isinstance(lbl, QLabel):
+            continue
+        price_edit = table.cellWidget(i, COL_LADDER_TARGET_PRICE)
+        target = _parse_ladder_price_text(price_edit.text()) if price_edit else 0.0
+        lbl.setText(format_ladder_estimated_profit(sale_price, base_profit, target))
+        lbl.setToolTip(
+            "販売予定価格・見込み利益を基準に、目標到達価格での概算利益（TP価格欄と同じ計算式）"
+        )
+
+
 class NoWheelComboBox(QComboBox):
     def wheelEvent(self, event):
         event.ignore()
@@ -46,6 +131,7 @@ def get_action_options(include_tp_down: bool = True) -> List[tuple[str, str]]:
     actions = [
         ("maintain", "維持"),
         ("priceTrace", "priceTrace"),
+        ("instant_reprice", "即時改定"),
         ("price_down_1", "1%値下げ"),
         ("price_down_2", "2%値下げ"),
         ("price_down_3", "3%値下げ"),
@@ -74,7 +160,10 @@ def get_price_trace_options() -> List[tuple[int, str]]:
 
 def create_ladder_rules_table(parent: Optional[QWidget] = None) -> QTableWidget:
     table = QTableWidget(parent)
-    columns = ["出品日数", "アクション", "priceTrace設定", "目標到達価格", "akaji下限(%)", "takane上限(%)"]
+    columns = [
+        "出品日数", "アクション", "priceTrace設定", "目標到達価格",
+        "akaji下限(%)", "takane上限(%)", "概算利益（利益率）",
+    ]
     table.setColumnCount(len(columns))
     table.setHorizontalHeaderLabels(columns)
     table.setAlternatingRowColors(True)
@@ -109,30 +198,39 @@ def populate_ladder_table_rows(table: QTableWidget, *, connect_action_signals: b
             action_combo.currentTextChanged.connect(
                 lambda _t, row=i, tbl=table: update_price_trace_visibility(tbl, row)
             )
-        table.setCellWidget(i, 1, action_combo)
+        table.setCellWidget(i, COL_LADDER_ACTION, action_combo)
 
         trace_combo = NoWheelComboBox()
         for val, label in price_trace_options:
             trace_combo.addItem(label, val)
         trace_combo.setEditable(False)
-        table.setCellWidget(i, 2, trace_combo)
+        table.setCellWidget(i, COL_LADDER_TRACE, trace_combo)
 
         price_edit = QLineEdit()
         price_edit.setPlaceholderText("例: 6400")
-        table.setCellWidget(i, 3, price_edit)
+        price_edit.textChanged.connect(
+            lambda _t, tbl=table, row=i: update_ladder_profit_labels(tbl, row)
+        )
+        table.setCellWidget(i, COL_LADDER_TARGET_PRICE, price_edit)
 
         akaji_combo = NoWheelComboBox()
         for val, label in akaji_options:
             akaji_combo.addItem(label, val)
         akaji_combo.setCurrentIndex(1)  # 2%
-        table.setCellWidget(i, 4, akaji_combo)
+        table.setCellWidget(i, COL_LADDER_AKAJI, akaji_combo)
 
         takane_combo = NoWheelComboBox()
         for val, label in takane_options:
             takane_combo.addItem(label, val)
-        table.setCellWidget(i, 5, takane_combo)
+        table.setCellWidget(i, COL_LADDER_TAKANE, takane_combo)
+
+        profit_lbl = QLabel("-")
+        profit_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        profit_lbl.setStyleSheet("color: #e0e0e0; padding-right: 4px;")
+        table.setCellWidget(i, COL_LADDER_PROFIT_EST, profit_lbl)
 
     update_price_trace_visibility(table)
+    update_ladder_profit_labels(table)
 
 
 _LADDER_PAST_ROW_BG = QColor(38, 38, 38)
@@ -164,6 +262,8 @@ def apply_ladder_row_elapsed_lock(table: QTableWidget, elapsed_days: Optional[in
                 days_item.setToolTip("")
 
         for col in range(1, table.columnCount()):
+            if col == COL_LADDER_PROFIT_EST:
+                continue
             widget = table.cellWidget(i, col)
             if widget is None:
                 continue
@@ -176,6 +276,7 @@ def apply_ladder_row_elapsed_lock(table: QTableWidget, elapsed_days: Optional[in
                     widget.setStyleSheet("")
 
     update_price_trace_visibility(table)
+    update_ladder_profit_labels(table)
 
 
 def _set_trace_combo_to_no_follow(trace_combo: QComboBox) -> None:
@@ -221,11 +322,11 @@ def _end_day_from_row(table: QTableWidget, row: int) -> int:
 def collect_ladder_rules_from_table(table: QTableWidget) -> List[Dict[str, Any]]:
     rules: List[Dict[str, Any]] = []
     for i in range(table.rowCount()):
-        action_combo = table.cellWidget(i, 1)
-        trace_combo = table.cellWidget(i, 2)
-        price_edit = table.cellWidget(i, 3)
-        akaji_combo = table.cellWidget(i, 4)
-        takane_combo = table.cellWidget(i, 5)
+        action_combo = table.cellWidget(i, COL_LADDER_ACTION)
+        trace_combo = table.cellWidget(i, COL_LADDER_TRACE)
+        price_edit = table.cellWidget(i, COL_LADDER_TARGET_PRICE)
+        akaji_combo = table.cellWidget(i, COL_LADDER_AKAJI)
+        takane_combo = table.cellWidget(i, COL_LADDER_TAKANE)
         if not action_combo or not trace_combo:
             continue
         action = action_combo.currentData()
@@ -262,11 +363,11 @@ def apply_ladder_rules_to_table(table: QTableWidget, rules: List[Dict[str, Any]]
         rule = rules_by_end.get(end_key)
         if not rule:
             continue
-        action_combo = table.cellWidget(i, 1)
-        trace_combo = table.cellWidget(i, 2)
-        price_edit = table.cellWidget(i, 3)
-        akaji_combo = table.cellWidget(i, 4)
-        takane_combo = table.cellWidget(i, 5)
+        action_combo = table.cellWidget(i, COL_LADDER_ACTION)
+        trace_combo = table.cellWidget(i, COL_LADDER_TRACE)
+        price_edit = table.cellWidget(i, COL_LADDER_TARGET_PRICE)
+        akaji_combo = table.cellWidget(i, COL_LADDER_AKAJI)
+        takane_combo = table.cellWidget(i, COL_LADDER_TAKANE)
 
         if action_combo:
             action = rule.get("action", "maintain")
@@ -302,6 +403,7 @@ def apply_ladder_rules_to_table(table: QTableWidget, rules: List[Dict[str, Any]]
                 takane_combo.setCurrentIndex(idx)
 
     update_price_trace_visibility(table)
+    update_ladder_profit_labels(table)
 
 
 def parse_ladder_rules_json(raw: Any) -> List[Dict[str, Any]]:

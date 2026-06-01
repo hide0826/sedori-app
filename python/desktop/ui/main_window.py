@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QMenuBar, QMenu, QStatusBar, QLabel,
     QMessageBox, QSplitter, QPushButton, QApplication,
 )
+from typing import Literal
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings
 from PySide6.QtGui import QAction, QKeySequence
 import subprocess
@@ -259,26 +260,54 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _attach_repricer_settings_lazy(
+        self,
+        tab_widget: QTabWidget,
+        mode: Literal["standard", "369"],
+    ) -> None:
+        """改定ルールタブは初回表示時だけ生成（起動時の不要な API 読込を防ぐ）。"""
+        attr = "repricer_settings_widget" if mode == "standard" else "repricer_settings_widget_369"
+        setattr(self, attr, None)
+
+        placeholder = QWidget()
+        ph_layout = QVBoxLayout(placeholder)
+        ph_label = QLabel("このタブを開くと改定ルール設定を読み込みます。")
+        ph_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ph_layout.addWidget(ph_label)
+        tab_widget.addTab(placeholder, "改定ルール")
+
+        def _on_tab_changed(index: int) -> None:
+            if index != 1 or getattr(self, attr) is not None:
+                return
+            from ui.repricer_settings_widget import RepricerSettingsWidget
+
+            widget = RepricerSettingsWidget(self.api_client, mode=mode)
+            setattr(self, attr, widget)
+            tab_widget.blockSignals(True)
+            tab_widget.removeTab(1)
+            tab_widget.insertTab(1, widget, "改定ルール")
+            tab_widget.setCurrentIndex(1)
+            tab_widget.blockSignals(False)
+
+        tab_widget.currentChanged.connect(_on_tab_changed)
+
     def _setup_tabs_phase(self, phase: int) -> bool:
         """タブを1フェーズずつ構築。True を返すと全タブ完了。"""
         if phase == 0:
             # 価格改定・仕入管理（まずここが使えるようにする）
             from ui.repricer_widget import RepricerWidget
-            from ui.repricer_settings_widget import RepricerSettingsWidget
             self.repricer_widget = RepricerWidget(self.api_client, mode="standard")
-            self.repricer_settings_widget = RepricerSettingsWidget(self.api_client, mode="standard")
             repricer_tabs = QTabWidget()
             repricer_tabs.addTab(self.repricer_widget, "改定実行")
-            repricer_tabs.addTab(self.repricer_settings_widget, "改定ルール")
+            self._attach_repricer_settings_lazy(repricer_tabs, "standard")
             old_reprice_tab_index = self.tab_widget.addTab(repricer_tabs, "旧価格改定")
             self.tab_widget.setTabVisible(old_reprice_tab_index, False)
 
             # 既存の価格改定タブを複製した「3-6-9価格改定」タブ
             self.repricer_widget_369 = RepricerWidget(self.api_client, mode="369")
-            self.repricer_settings_widget_369 = RepricerSettingsWidget(self.api_client, mode="369")
             repricer_tabs_369 = QTabWidget()
             repricer_tabs_369.addTab(self.repricer_widget_369, "改定実行")
-            repricer_tabs_369.addTab(self.repricer_settings_widget_369, "改定ルール")
+            self._attach_repricer_settings_lazy(repricer_tabs_369, "369")
             self.tab_widget.addTab(repricer_tabs_369, "価格改定")
 
             from ui.inventory_widget import InventoryWidget

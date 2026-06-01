@@ -133,7 +133,7 @@ def break_even_price_int_for_record(record: Dict[str, Any]) -> Optional[int]:
 
 
 def load_369_repricer_config(api_client: Any = None) -> Dict[str, Any]:
-    """3-6-9 用の repricer 設定。API が使えなければ config/reprice_rules.json を読む。"""
+    """3-6-9 用の repricer 設定（config/reprice_rules.json を優先）。"""
     if api_client is not None:
         try:
             cfg = api_client.get_repricer_config("369")
@@ -141,13 +141,13 @@ def load_369_repricer_config(api_client: Any = None) -> Dict[str, Any]:
                 return cfg
         except Exception:
             pass
+    from pathlib import Path
+
     try:
         from core.config import CONFIG_PATH
 
         path = CONFIG_PATH
     except ImportError:
-        from pathlib import Path
-
         path = Path(__file__).resolve().parents[3] / "config" / "reprice_rules.json"
     try:
         with open(path, "r", encoding="utf-8") as f:

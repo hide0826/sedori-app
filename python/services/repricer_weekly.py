@@ -9,10 +9,16 @@ from pathlib import Path
 from core.config import CONFIG_PATH
 from core.csv_utils import normalize_dataframe_for_cp932
 
+try:
+    from desktop.utils.repricer_ladder_table import band_start_day_for_period_end
+except ImportError:
+    from utils.repricer_ladder_table import band_start_day_for_period_end  # type: ignore
+
 # アクション名の日本語マッピング
 ACTION_NAMES_JP = {
     "maintain": "維持",
     "priceTrace": "Trace変更",
+    "instant_reprice": "即時改定",
     "tp_down": "TP値下げ",
     "price_down_1": "1%値下げ",
     "price_down_2": "2%値下げ",
@@ -542,10 +548,13 @@ def _load_ladder_map_from_purchase_db(sku_list: List[str]) -> Dict[str, Dict[str
     return result
 
 
-def _get_ladder_down_period_end(
-    current_idx: int, current_rule: Dict[str, Any], ladder_rules: List[Dict[str, Any]]
+def _get_ladder_merged_period_end(
+    current_idx: int,
+    current_rule: Dict[str, Any],
+    ladder_rules: List[Dict[str, Any]],
+    action: str,
 ) -> int:
-    """同一 tp_down かつ同一 target_price が連続する終端日。"""
+    """同一アクションかつ同一 target_price が連続する帯の終端日（days_from）。"""
     if current_idx < 0 or not ladder_rules:
         return int(current_rule.get("days_from", 999) or 999)
     sorted_rules = sorted(ladder_rules, key=lambda r: int(r.get("days_from", 999)))
@@ -553,12 +562,19 @@ def _get_ladder_down_period_end(
     end_day = int(current_rule.get("days_from", 999) or 999)
     for i in range(current_idx + 1, len(sorted_rules)):
         rule = sorted_rules[i]
-        if str(rule.get("action", "maintain")) != "tp_down":
+        if str(rule.get("action", "maintain")) != action:
             break
         if _parse_ladder_target_price(rule) != target:
             break
         end_day = int(rule.get("days_from", end_day) or end_day)
     return end_day
+
+
+def _get_ladder_down_period_end(
+    current_idx: int, current_rule: Dict[str, Any], ladder_rules: List[Dict[str, Any]]
+) -> int:
+    """同一 tp_down かつ同一 target_price が連続する終端日。"""
+    return _get_ladder_merged_period_end(current_idx, current_rule, ladder_rules, "tp_down")
 
 
 def _apply_monthly_ladder_for_row(
@@ -590,8 +606,10 @@ def _apply_monthly_ladder_for_row(
     rule_trace_value = active_rule.get("value", 0)
     target_price = _parse_ladder_target_price(active_rule)
     period_end = int(active_rule.get("days_from", 999) or 999)
-    if raw_action == "tp_down":
-        period_end = _get_ladder_down_period_end(rule_idx, active_rule, ladder_rules)
+    if raw_action in ("tp_down", "priceTrace"):
+        period_end = _get_ladder_merged_period_end(
+            rule_idx, active_rule, ladder_rules, raw_action
+        )
 
     akaji_drop_percent = int(active_rule.get("akaji_drop_percent", 1) or 1)
     akaji_drop_percent = min(10, max(1, akaji_drop_percent))
@@ -614,6 +632,20 @@ def _apply_monthly_ladder_for_row(
 
     if raw_action == "maintain":
         new_price = round(price)
+    elif raw_action == "instant_reprice":
+        band_start = band_start_day_for_period_end(period_end)
+        if has_target and days_since_listed >= band_start:
+            new_price = tp_floor
+            reason_tokens.append(
+                f"INSTANT: {band_start}日〜帯で目標{tp_floor}円へ即時改定"
+            )
+        else:
+            new_price = round(price)
+            if not has_target:
+                reason_tokens.append("目標価格未設定のため価格維持")
+            elif days_since_listed < band_start:
+                reason_tokens.append(f"帯開始前({band_start}日未満)のため価格維持")
+        new_price_trace = 0
     elif raw_action == "priceTrace":
         if has_target and price > tp_floor:
             remaining_days = max(0, period_end - days_since_listed)

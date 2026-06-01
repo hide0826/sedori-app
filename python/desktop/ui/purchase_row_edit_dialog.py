@@ -46,7 +46,9 @@ try:
         load_reprice_config_for_template,
         parse_ladder_rules_json,
         populate_ladder_table_rows,
+        set_ladder_table_profit_context,
         template_rules_from_default_profile,
+        update_ladder_profit_labels,
     )
 except ImportError:
     from desktop.utils.repricer_ladder_table import (  # type: ignore
@@ -58,7 +60,9 @@ except ImportError:
         load_reprice_config_for_template,
         parse_ladder_rules_json,
         populate_ladder_table_rows,
+        set_ladder_table_profit_context,
         template_rules_from_default_profile,
+        update_ladder_profit_labels,
     )
 
 try:
@@ -583,6 +587,12 @@ class PurchaseRowEditDialog(QDialog):
         )
         if saved_rules:
             apply_ladder_rules_to_table(self._ladder_table, saved_rules)
+        set_ladder_table_profit_context(
+            self._ladder_table,
+            self._sale_price_value,
+            self._current_profit_value,
+        )
+        update_ladder_profit_labels(self._ladder_table)
         self._apply_ladder_elapsed_row_lock()
 
         # --- TP0 / TP1 / TP2 / TP3 編集（各帯：価格 → 目標利益率 → 概算利益、色分け）---
@@ -993,6 +1003,7 @@ class PurchaseRowEditDialog(QDialog):
             QMessageBox.warning(self, "コピー", "デフォルトプロファイルのルールが空です。")
             return
         apply_ladder_rules_to_table(self._ladder_table, rules)
+        update_ladder_profit_labels(self._ladder_table)
         self._apply_ladder_elapsed_row_lock()
         QMessageBox.information(
             self,

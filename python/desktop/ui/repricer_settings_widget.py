@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QFrame, QSplitter
 )
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtGui import QFont, QColor, QShowEvent
 import json
 from typing import Dict, List, Any, Optional
 
@@ -75,12 +75,21 @@ class RepricerSettingsWidget(QWidget):
         self.mode = mode if mode in ("standard", "369") else "standard"
         self.config_data = None
         self.rules_table = None
+        self._config_load_started = False
+        self._worker_generation = 0
+        self._worker_action = ""
+        self.worker = None
         
         # UIの初期化
         self.setup_ui()
         
-        # 設定の読み込み
-        self.load_config()
+        # 設定の読み込みはタブ表示時（起動直後のAPI待ちで他タブをブロックしない）
+        
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if not self._config_load_started:
+            self._config_load_started = True
+            self.load_config()
         
     def setup_ui(self):
         """UIの設定"""
@@ -438,10 +447,23 @@ class RepricerSettingsWidget(QWidget):
     def load_config(self):
         """設定の読み込み"""
         try:
-            # ワーカースレッドの作成と実行
+            self._worker_generation += 1
+            gen = self._worker_generation
+            self._worker_action = "load"
             self.worker = RepricerSettingsWorker(self.api_client, "load", mode=self.mode)
-            self.worker.config_loaded.connect(self.on_config_loaded)
-            self.worker.error_occurred.connect(self.on_error)
+
+            def _on_loaded(cfg, g=gen):
+                if g != self._worker_generation:
+                    return
+                self.on_config_loaded(cfg)
+
+            def _on_err(msg, g=gen):
+                if g != self._worker_generation:
+                    return
+                self.on_error(msg, action="load")
+
+            self.worker.config_loaded.connect(_on_loaded)
+            self.worker.error_occurred.connect(_on_err)
             self.worker.start()
             
         except Exception as e:
@@ -450,13 +472,26 @@ class RepricerSettingsWidget(QWidget):
     def save_config(self):
         """設定の保存"""
         try:
-            # 現在の設定を収集
             config_data = self.collect_current_config()
-            
-            # ワーカースレッドの作成と実行
-            self.worker = RepricerSettingsWorker(self.api_client, "save", config_data, mode=self.mode)
-            self.worker.config_saved.connect(self.on_config_saved)
-            self.worker.error_occurred.connect(self.on_error)
+            self._worker_generation += 1
+            gen = self._worker_generation
+            self._worker_action = "save"
+            self.worker = RepricerSettingsWorker(
+                self.api_client, "save", config_data, mode=self.mode
+            )
+
+            def _on_saved(ok, g=gen):
+                if g != self._worker_generation:
+                    return
+                self.on_config_saved(ok)
+
+            def _on_err(msg, g=gen):
+                if g != self._worker_generation:
+                    return
+                self.on_error(msg, action="save")
+
+            self.worker.config_saved.connect(_on_saved)
+            self.worker.error_occurred.connect(_on_err)
             self.worker.start()
             
         except Exception as e:
@@ -589,7 +624,12 @@ class RepricerSettingsWidget(QWidget):
     def on_config_saved(self, success):
         """設定保存完了時の処理"""
         if success:
-            QMessageBox.information(self, "設定保存完了", "設定を正常に保存しました")
+            QMessageBox.information(
+                self,
+                "設定保存完了",
+                "設定を config/reprice_rules.json に保存しました。\n"
+                "（FastAPI が起動していれば API にも同期します）",
+            )
         else:
             QMessageBox.warning(self, "設定保存失敗", "設定の保存に失敗しました")
 
@@ -663,9 +703,17 @@ class RepricerSettingsWidget(QWidget):
         self.alert_enabled_check.setChecked(bool(alerts.get("enabled", True)))
         self.alert_prefix_edit.setText(str(alerts.get("reason_prefix", "ALERT")))
     
-    def on_error(self, error_message):
-        """エラー時の処理"""
-        QMessageBox.critical(self, "エラー", f"処理中にエラーが発生しました:\n{error_message}")
+    def on_error(self, error_message, action: str = ""):
+        """エラー時の処理（古いワーカー結果は無視）"""
+        act = action or self._worker_action or ""
+        if act == "save":
+            QMessageBox.critical(
+                self,
+                "エラー",
+                f"設定ファイルへの保存に失敗しました:\n{error_message}",
+            )
+            return
+        QMessageBox.critical(self, "エラー", f"設定の読み込みに失敗しました:\n{error_message}")
     
     def update_rules_table(self, rules_dict, table=None):
         """ルールテーブルの更新"""
