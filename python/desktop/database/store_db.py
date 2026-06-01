@@ -1694,6 +1694,77 @@ class StoreDatabase:
             pass
 
         return None
+
+    def find_all_chain_codes_by_store_name(self, store_name: str) -> List[Dict[str, Any]]:
+        """店舗名に含まれるパターンへ一致するチェーンコードをすべて返す（優先度順・重複なし）。"""
+        name = (store_name or "").strip()
+        if not name:
+            return []
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT chain_code, chain_name_patterns, priority
+            FROM chain_store_code_mappings
+            WHERE is_active = 1
+            ORDER BY priority DESC, chain_code ASC
+            """
+        )
+
+        store_name_upper = name.upper()
+        results: List[Dict[str, Any]] = []
+        seen_codes: set[str] = set()
+
+        for row in cursor.fetchall():
+            chain_code = row[0]
+            if chain_code in seen_codes:
+                continue
+            patterns_json = row[1]
+            priority = row[2] if len(row) > 2 else 0
+            matched_pattern: Optional[str] = None
+            try:
+                patterns = json.loads(patterns_json)
+                for pattern in patterns:
+                    if pattern and str(pattern).upper() in store_name_upper:
+                        matched_pattern = str(pattern)
+                        break
+            except json.JSONDecodeError:
+                continue
+            if not matched_pattern:
+                continue
+            seen_codes.add(chain_code)
+            results.append(
+                {
+                    "chain_code": chain_code,
+                    "matched_pattern": matched_pattern,
+                    "priority": priority,
+                }
+            )
+        return results
+
+    def get_store_code_suggestions_for_store_name(
+        self, store_name: str
+    ) -> List[Dict[str, Any]]:
+        """店舗名に一致する各チェーンの「最大番号+1」店舗コード候補を返す。"""
+        suggestions: List[Dict[str, Any]] = []
+        for match in self.find_all_chain_codes_by_store_name(store_name):
+            chain_code = match["chain_code"]
+            next_code = self.get_next_store_code_for_prefix(chain_code)
+            if not next_code:
+                continue
+            pattern = (match.get("matched_pattern") or "").strip()
+            label = f"{next_code} ({pattern})" if pattern else next_code
+            suggestions.append(
+                {
+                    "chain_code": chain_code,
+                    "store_code": next_code,
+                    "label": label,
+                    "matched_pattern": pattern,
+                    "priority": match.get("priority", 0),
+                }
+            )
+        return suggestions
     
     def get_max_supplier_code_for_prefix(self, prefix: str) -> Optional[str]:
         """指定プレフィックスの最大仕入れ先コードを取得"""

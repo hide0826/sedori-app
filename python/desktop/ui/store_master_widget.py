@@ -35,17 +35,26 @@ from utils.excel_importer import ExcelImporter
 from ui.company_master_widget import CompanyMasterWidget
 # デスクトップ側servicesを優先して読み込む
 try:
-    from services.google_maps_service import get_store_info_from_google, recover_store_info_with_japanese  # python/desktop/services
+    from services.google_maps_service import (
+        get_store_info_from_google,
+        recover_store_info_with_japanese,
+        normalize_stored_japanese_address,
+    )
 except Exception:
     # 明示的パス指定のフォールバック
     try:
         service_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'services'))
         if service_path not in sys.path:
             sys.path.insert(0, service_path)
-        from google_maps_service import get_store_info_from_google, recover_store_info_with_japanese
+        from google_maps_service import (
+            get_store_info_from_google,
+            recover_store_info_with_japanese,
+            normalize_stored_japanese_address,
+        )
     except Exception:
         get_store_info_from_google = None
         recover_store_info_with_japanese = None
+        normalize_stored_japanese_address = None
 
 
 class StoreEditDialog(QDialog):
@@ -101,9 +110,18 @@ class StoreEditDialog(QDialog):
         self.route_code_edit.setReadOnly(True)  # 自動挿入なので読み取り専用
         form_layout.addRow("ルートコード:", self.route_code_edit)
         
-        self.store_code_edit = QLineEdit()
-        self.store_code_edit.setPlaceholderText("例: HA 入力後、別の欄へ移ると次の空き番号（HA-12）")
-        self.store_code_edit.editingFinished.connect(self._on_store_code_editing_finished)
+        self.store_code_edit = QComboBox()
+        self.store_code_edit.setEditable(True)
+        self.store_code_edit.setInsertPolicy(QComboBox.NoInsert)
+        self.store_code_edit.setToolTip(
+            "店舗名入力で候補を表示します。複数チェーンが一致する場合はプルダウンから選択してください。"
+        )
+        le = self.store_code_edit.lineEdit()
+        if le is not None:
+            le.setPlaceholderText(
+                "例: HA（確定で次番号）／店舗名入力で候補（KO-03 (コーナン) 等）"
+            )
+            le.editingFinished.connect(self._on_store_code_editing_finished)
         form_layout.addRow("店舗コード:", self.store_code_edit)
         
         self.store_name_edit = QLineEdit()
@@ -210,13 +228,10 @@ class StoreEditDialog(QDialog):
             )
             return
         
-        # 情報を反映（取得できた項目のみ）
+        # 情報を反映（取得できた項目のみ・住所は日本式に統一済み）
         address = info.get("address") or ""
-        # 先頭の「日本、」や「日本,」が付いていたら削除してから反映
-        for prefix in ("日本、", "日本,"):
-            if address.startswith(prefix):
-                address = address[len(prefix):].strip()
-                break
+        if normalize_stored_japanese_address and address:
+            address = normalize_stored_japanese_address(address)
         phone = info.get("phone") or ""
         if address:
             self.address_edit.setText(address)
@@ -235,7 +250,7 @@ class StoreEditDialog(QDialog):
             self.route_code_edit.clear()
             # 店舗コードは店舗名が入力されるまで空のままにする
             if not self.store_name_edit.text().strip():
-                self.store_code_edit.clear()
+                self._clear_store_code_suggestions()
             return
         
         # ルートコードを自動挿入
@@ -245,12 +260,13 @@ class StoreEditDialog(QDialog):
         else:
             self.route_code_edit.clear()
         
-        # 店舗名から店舗コードを自動生成（店舗名が入力されている場合のみ）
+        # 店舗名から店舗コード候補を更新（店舗名が入力されている場合のみ）
         store_name = self.store_name_edit.text().strip()
         if store_name:
-            next_store_code = self.db.get_next_store_code_from_store_name(store_name)
-            if next_store_code:
-                self.store_code_edit.setText(next_store_code)
+            self._refresh_store_code_suggestions(
+                store_name,
+                auto_pick_first=not bool(self._get_store_code_text()),
+            )
         # 店舗名がない場合は店舗コードを空のままにする
         # （店舗名入力時にon_store_name_changedで自動生成される）
     
@@ -263,23 +279,73 @@ class StoreEditDialog(QDialog):
             self.affiliated_route_name_combo.setCurrentIndex(current_index)
     
     def on_store_name_changed(self, store_name: str):
-        """店舗名が変更された時に店舗コードを自動生成（新規追加時のみ）"""
-        # 既存データの編集時は自動生成しない
+        """店舗名が変更された時に店舗コード候補を更新（新規追加時のみ）"""
         if self.store_data:
             return
-        
-        # 店舗名が入力されている場合のみ自動生成
-        if store_name and store_name.strip():
-            next_store_code = self.db.get_next_store_code_from_store_name(store_name.strip())
-            if next_store_code:
-                # 店舗コードが既に入力されている場合は上書きしない
-                current_code = self.store_code_edit.text().strip()
-                if not current_code:
-                    self.store_code_edit.setText(next_store_code)
-    
+        name = (store_name or "").strip()
+        if not name:
+            self._clear_store_code_suggestions()
+            return
+        self._refresh_store_code_suggestions(name, auto_pick_first=True)
+
+    def _get_store_code_text(self) -> str:
+        """店舗コード欄の値（プルダウン選択時は実コード、手入力時はそのまま）"""
+        le = self.store_code_edit.lineEdit()
+        text = (le.text() if le else "").strip() or (
+            self.store_code_edit.currentText() or ""
+        ).strip()
+        idx = self.store_code_edit.currentIndex()
+        if idx >= 0:
+            data = self.store_code_edit.itemData(idx)
+            item_text = (self.store_code_edit.itemText(idx) or "").strip()
+            code = str(data).strip() if data else ""
+            if code and (text == item_text or text == code):
+                return code
+        return text
+
+    def _set_store_code_text(self, code: str) -> None:
+        text = (code or "").strip()
+        if not text:
+            self.store_code_edit.setCurrentText("")
+            return
+        idx = self.store_code_edit.findData(text)
+        if idx >= 0:
+            self.store_code_edit.setCurrentIndex(idx)
+        else:
+            self.store_code_edit.setCurrentText(text)
+
+    def _clear_store_code_suggestions(self) -> None:
+        self.store_code_edit.blockSignals(True)
+        self.store_code_edit.clear()
+        self.store_code_edit.setCurrentText("")
+        self.store_code_edit.blockSignals(False)
+
+    def _refresh_store_code_suggestions(
+        self, store_name: str, *, auto_pick_first: bool = False
+    ) -> None:
+        """店舗名に一致するチェーンごとの次番号をプルダウン候補に反映する。"""
+        suggestions = self.db.get_store_code_suggestions_for_store_name(store_name)
+        current_code = self._get_store_code_text()
+        valid_codes = {s["store_code"] for s in suggestions}
+
+        self.store_code_edit.blockSignals(True)
+        self.store_code_edit.clear()
+        for s in suggestions:
+            self.store_code_edit.addItem(s["label"], s["store_code"])
+
+        if current_code and current_code in valid_codes:
+            self._set_store_code_text(current_code)
+        elif auto_pick_first and suggestions and not current_code:
+            self._set_store_code_text(suggestions[0]["store_code"])
+        elif current_code:
+            self._set_store_code_text(current_code)
+        elif not suggestions:
+            self.store_code_edit.setCurrentText("")
+        self.store_code_edit.blockSignals(False)
+
     def _on_store_code_editing_finished(self):
         """プレフィックスのみ（例: HA, HA-）のとき、確定で次の空き番号を付与する"""
-        raw = (self.store_code_edit.text() or "").strip().upper()
+        raw = self._get_store_code_text().upper()
         if not raw:
             return
         # すでに PREFIX-数字 の完全形なら変更しない
@@ -293,7 +359,7 @@ class StoreEditDialog(QDialog):
         if not next_code or next_code == raw:
             return
         self.store_code_edit.blockSignals(True)
-        self.store_code_edit.setText(next_code)
+        self._set_store_code_text(next_code)
         self.store_code_edit.blockSignals(False)
     
     def load_data(self):
@@ -316,7 +382,7 @@ class StoreEditDialog(QDialog):
         self.route_code_edit.setText(self.store_data.get('route_code', ''))
         # store_codeを優先し、なければsupplier_codeをフォールバック（互換性のため）
         store_code = self.store_data.get('store_code', '') or self.store_data.get('supplier_code', '')
-        self.store_code_edit.setText(store_code)
+        self._set_store_code_text(store_code)
         self.store_name_edit.setText(self.store_data.get('store_name', ''))
         self.address_edit.setText(self.store_data.get('address', ''))
         self.phone_edit.setText(self.store_data.get('phone', ''))
@@ -334,7 +400,7 @@ class StoreEditDialog(QDialog):
         # 所属ルート名はQComboBoxから取得（編集可能なので現在のテキスト）
         route_name = self.affiliated_route_name_combo.currentText().strip()
         
-        store_code = self.store_code_edit.text().strip()
+        store_code = self._get_store_code_text()
         data = {
             'affiliated_route_name': route_name,
             'route_code': self.route_code_edit.text().strip(),
@@ -1482,7 +1548,7 @@ class StoreListWidget(QWidget):
         self.load_stores(self.search_edit.text())
     
     def recover_japanese_store_info(self):
-        """住所に'Japan'が含まれている店舗の情報を日本語で再取得して更新、および住所から「日本、」を削除"""
+        """非標準の住所形式（逆順・Japan/日本付き等）を日本式に再取得・整形して更新"""
         # モジュールがインポートできていない場合
         if recover_store_info_with_japanese is None:
             QMessageBox.warning(
@@ -1497,9 +1563,9 @@ class StoreListWidget(QWidget):
         reply = QMessageBox.question(
             self,
             "確認",
-            "住所に'Japan'が含まれている店舗の情報を日本語で再取得し、\n"
-            "住所から「日本、」を削除しますか？\n"
-            "（Google Maps APIを使用します）",
+            "住所が 〒郵便番号 都道府県… 形式でない店舗を修正します。\n"
+            "（Google Maps APIで再取得し、必要時はローカル整形します）\n"
+            "実行しますか？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
@@ -1520,25 +1586,6 @@ class StoreListWidget(QWidget):
         try:
             result = recover_store_info_with_japanese(self.db)
             
-            # 住所から「日本、」を削除する処理
-            stores = self.db.list_stores()
-            removed_count = 0
-            
-            for store in stores:
-                address = store.get('address', '')
-                if address and address.startswith('日本、'):
-                    # 「日本、」を削除
-                    new_address = address.replace('日本、', '', 1).strip()
-                    if new_address != address:
-                        try:
-                            store_data = self.db.get_store(store['id'])
-                            if store_data:
-                                store_data['address'] = new_address
-                                self.db.update_store(store['id'], store_data)
-                                removed_count += 1
-                        except Exception as e:
-                            print(f"住所更新エラー (ID: {store['id']}): {e}")
-            
             progress.close()
             
             # 結果を表示
@@ -1546,8 +1593,6 @@ class StoreListWidget(QWidget):
             message += f"対象: {result['total']}件\n"
             message += f"更新成功: {result['updated']}件\n"
             message += f"失敗: {result['failed']}件"
-            if removed_count > 0:
-                message += f"\n\n住所から「日本、」を削除: {removed_count}件"
             
             QMessageBox.information(
                 self,

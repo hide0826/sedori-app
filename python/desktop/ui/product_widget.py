@@ -71,6 +71,15 @@ except ImportError:
         is_fee_amount_column,
     )
 
+try:
+    from desktop.utils.purchase_elapsed_days import (
+        calc_elapsed_days_for_purchase_record as _calc_elapsed_days_for_purchase_record,
+    )
+except ImportError:
+    from utils.purchase_elapsed_days import (  # type: ignore
+        calc_elapsed_days_for_purchase_record as _calc_elapsed_days_for_purchase_record,
+    )
+
 # 仕入DBでステータスが「販売中」のときの既定ステータス理由（在庫・価格改定CSV連動）
 _PURCHASE_STATUS_REASON_SELLING_INVENTORY_CSV = "在庫CSV連動:"
 
@@ -1500,6 +1509,8 @@ class ProductWidget(QWidget):
                 header = self.purchase_columns[col] if col < len(self.purchase_columns) else None
                 if not header:
                     continue
+                if header == "経過日数":
+                    continue
                 cell_item = self.purchase_table.item(row, col)
                 value = cell_item.text() if cell_item else ""
                 # SKU・商品名はUserRoleにフル値を保持している場合はそれを優先（表示が...で切れていても保存はフルで）
@@ -2901,12 +2912,15 @@ class ProductWidget(QWidget):
         if not base_columns:
             base_columns = self._resolve_inventory_columns()
 
-        # 仕入DBテーブルでは「仕入れ日」の右に「出品日」カラムを追加しておく
+        # 仕入DBテーブルでは「仕入れ日」の右に「出品日」「経過日数」カラムを追加しておく
         columns = list(base_columns)
         try:
             if "出品日" not in columns:
                 purchase_date_idx = columns.index("仕入れ日")
                 columns.insert(purchase_date_idx + 1, "出品日")
+            if "経過日数" not in columns:
+                listed_date_idx = columns.index("出品日")
+                columns.insert(listed_date_idx + 1, "経過日数")
         except ValueError:
             # 「仕入れ日」列が存在しない場合はそのまま（開発用などの特殊レイアウト想定）
             pass
@@ -2917,6 +2931,8 @@ class ProductWidget(QWidget):
             "品目", "品名", "氏名(個人)", "本人確認書類", "確認番号", "確認日", "確認者", "台帳登録済",
             "person_name", "person_address", "id_type", "id_number", "id_checked_on", "id_checked_by", "id_proof_ref",
             "kobutsu_kind", "hinmoku", "hinmei",
+            # 表示専用の計算列
+            "経過日数",
             # TA0/TA1/TA2/TA3 系の古い列は今後は表示しない
             "TA0", "TA1", "TA2", "TA3", "ta0", "ta1", "ta2", "ta3",
         })
@@ -3327,6 +3343,15 @@ class ProductWidget(QWidget):
                                 sort_value = 0.0
                     # SortableDateItemを使用してソート可能にする
                     item = SortableDateItem(date_str, sort_value)
+                elif header == "経過日数":
+                    elapsed_days = _calc_elapsed_days_for_purchase_record(record)
+                    if elapsed_days is not None:
+                        item = SortableDateItem(str(elapsed_days), float(elapsed_days))
+                    else:
+                        item = SortableDateItem("", 0.0)
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                    item.setToolTip("出品日（未設定時は仕入れ日）から今日までの経過日数")
                 elif header == "ステータス":
                     # ステータス列の処理：プルダウンで選択可能
                     status_value = str(value) if value else "ready"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-個別SKUの月別（30日刻み）改定ルール表 — 改定ルールUIと同型で TP列のみ「価格(円)」に差し替え。
+個別SKUの月別（30日刻み）改定ルール表 — 改定ルールUIと同型で TP列のみ「目標到達価格」に差し替え。
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QComboBox,
     QLineEdit,
@@ -73,7 +74,7 @@ def get_price_trace_options() -> List[tuple[int, str]]:
 
 def create_ladder_rules_table(parent: Optional[QWidget] = None) -> QTableWidget:
     table = QTableWidget(parent)
-    columns = ["出品日数", "アクション", "priceTrace設定", "価格(円)", "akaji下限(%)", "takane上限(%)"]
+    columns = ["出品日数", "アクション", "priceTrace設定", "目標到達価格", "akaji下限(%)", "takane上限(%)"]
     table.setColumnCount(len(columns))
     table.setHorizontalHeaderLabels(columns)
     table.setAlternatingRowColors(True)
@@ -134,16 +135,77 @@ def populate_ladder_table_rows(table: QTableWidget, *, connect_action_signals: b
     update_price_trace_visibility(table)
 
 
+_LADDER_PAST_ROW_BG = QColor(38, 38, 38)
+_LADDER_PAST_ROW_FG = QColor(105, 105, 105)
+_LADDER_PAST_ROW_MARKER = "elapsed_past"
+
+
+def _is_ladder_row_elapsed_past(elapsed_days: Optional[int], end_day: int) -> bool:
+    """経過日数が帯の終了日を超えていれば、その帯は編集不可（経過済み）。"""
+    if elapsed_days is None:
+        return False
+    return elapsed_days > end_day
+
+
+def apply_ladder_row_elapsed_lock(table: QTableWidget, elapsed_days: Optional[int]) -> None:
+    """経過済みの出品日数帯の行をグレー表示・編集不可にする。"""
+    for i, (_start_day, end_day) in enumerate(REPRICER_DAY_RANGES):
+        is_past = _is_ladder_row_elapsed_past(elapsed_days, end_day)
+        days_item = table.item(i, 0)
+        if days_item:
+            days_item.setData(Qt.UserRole, _LADDER_PAST_ROW_MARKER if is_past else None)
+            if is_past:
+                days_item.setBackground(QBrush(_LADDER_PAST_ROW_BG))
+                days_item.setForeground(QBrush(_LADDER_PAST_ROW_FG))
+                days_item.setToolTip(f"経過日数 {elapsed_days} 日のため、この期間（{days_item.text()}）は編集できません。")
+            else:
+                days_item.setBackground(QBrush())
+                days_item.setForeground(QBrush())
+                days_item.setToolTip("")
+
+        for col in range(1, table.columnCount()):
+            widget = table.cellWidget(i, col)
+            if widget is None:
+                continue
+            widget.setEnabled(not is_past)
+            if isinstance(widget, QLineEdit):
+                widget.setReadOnly(is_past)
+                if is_past:
+                    widget.setStyleSheet("color: #696969; background-color: #262626;")
+                else:
+                    widget.setStyleSheet("")
+
+    update_price_trace_visibility(table)
+
+
+def _set_trace_combo_to_no_follow(trace_combo: QComboBox) -> None:
+    """priceTrace設定を「追従無し」(0) にリセットする。"""
+    idx = trace_combo.findData(0)
+    if idx >= 0:
+        trace_combo.setCurrentIndex(idx)
+
+
 def update_price_trace_visibility(table: QTableWidget, row: Optional[int] = None) -> None:
     rows = [row] if row is not None else range(table.rowCount())
     for i in rows:
+        days_item = table.item(i, 0)
+        if days_item and days_item.data(Qt.UserRole) == _LADDER_PAST_ROW_MARKER:
+            trace_combo = table.cellWidget(i, 2)
+            if trace_combo:
+                trace_combo.setEnabled(False)
+            continue
         action_combo = table.cellWidget(i, 1)
         trace_combo = table.cellWidget(i, 2)
         if not action_combo or not trace_combo:
             continue
         action = action_combo.currentData()
-        enabled = action in ("priceTrace", "tp_down")
-        trace_combo.setEnabled(enabled)
+        if action == "priceTrace":
+            trace_combo.setEnabled(True)
+            trace_combo.setStyleSheet("")
+        else:
+            _set_trace_combo_to_no_follow(trace_combo)
+            trace_combo.setEnabled(False)
+            trace_combo.setStyleSheet("background-color: #262626; color: #696969;")
 
 
 def _end_day_from_row(table: QTableWidget, row: int) -> int:

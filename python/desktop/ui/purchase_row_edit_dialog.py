@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 try:
     from utils.repricer_ladder_table import (
         apply_ladder_rules_to_table,
+        apply_ladder_row_elapsed_lock,
         collect_ladder_rules_from_table,
         create_ladder_rules_table,
         ladder_rules_to_json,
@@ -50,6 +51,7 @@ try:
 except ImportError:
     from desktop.utils.repricer_ladder_table import (  # type: ignore
         apply_ladder_rules_to_table,
+        apply_ladder_row_elapsed_lock,
         collect_ladder_rules_from_table,
         create_ladder_rules_table,
         ladder_rules_to_json,
@@ -57,6 +59,17 @@ except ImportError:
         parse_ladder_rules_json,
         populate_ladder_table_rows,
         template_rules_from_default_profile,
+    )
+
+try:
+    from utils.purchase_elapsed_days import (
+        calc_elapsed_days_for_purchase_record,
+        format_elapsed_days_for_purchase_record,
+    )
+except ImportError:
+    from desktop.utils.purchase_elapsed_days import (  # type: ignore
+        calc_elapsed_days_for_purchase_record,
+        format_elapsed_days_for_purchase_record,
     )
 
 # ダークUI向け：TP0〜TP3 でラベル・入力・概算の色を分ける
@@ -394,6 +407,11 @@ class PurchaseRowEditDialog(QDialog):
         self._condition_label.setMaximumWidth(340)
         info_layout.addRow("コンディション:", self._condition_label)
 
+        elapsed_text, elapsed_tip = format_elapsed_days_for_purchase_record(self.record)
+        elapsed_lbl = QLabel(elapsed_text)
+        elapsed_lbl.setToolTip(elapsed_tip)
+        info_layout.addRow("経過日数:", elapsed_lbl)
+
         sale_price = _parse_number(self.record.get("販売予定価格") or self.record.get("expected_price"))
         self._sale_price_value = sale_price
         purchase_price = _parse_number(self.record.get("仕入れ価格") or self.record.get("purchase_price") or self.record.get("仕入価格"))
@@ -536,14 +554,14 @@ class PurchaseRowEditDialog(QDialog):
         self._ladder_enabled_cb.toggled.connect(self._on_ladder_mode_toggled)
         layout.addWidget(ladder_cb_row)
 
-        # --- 月別運用: 改定ルール同型の表（TP列→価格）---
+        # --- 月別運用: 改定ルール同型の表（TP列→目標到達価格）---
         self._ladder_group = QGroupBox("月別運用ルール（このSKU専用）")
         ladder_outer = QVBoxLayout(self._ladder_group)
         ladder_btn_row = QHBoxLayout()
         copy_tpl_btn = QPushButton("デフォルトプロファイルからコピー")
         copy_tpl_btn.setToolTip(
             "価格改定タブの「3-6-9共通設定」のデフォルトプロファイル（例: 6ルール）の\n"
-            "アクション・priceTrace をコピーし、価格列には TP0〜TP3 を帯ごとに当てはめます。"
+            "アクション・priceTrace をコピーし、目標到達価格列には TP0〜TP3 を帯ごとに当てはめます。"
         )
         copy_tpl_btn.clicked.connect(self._copy_ladder_from_default_profile)
         ladder_btn_row.addWidget(copy_tpl_btn)
@@ -565,6 +583,7 @@ class PurchaseRowEditDialog(QDialog):
         )
         if saved_rules:
             apply_ladder_rules_to_table(self._ladder_table, saved_rules)
+        self._apply_ladder_elapsed_row_lock()
 
         # --- TP0 / TP1 / TP2 / TP3 編集（各帯：価格 → 目標利益率 → 概算利益、色分け）---
         self._ta_group = QGroupBox("TP 価格（Keepa で確認しながら入力）")
@@ -943,6 +962,11 @@ class PurchaseRowEditDialog(QDialog):
             return False
         return str(raw).strip().lower() in ("1", "true", "on", "yes")
 
+    def _apply_ladder_elapsed_row_lock(self) -> None:
+        """月別運用表で、経過済みの出品日数帯をグレー表示・編集不可にする。"""
+        elapsed = calc_elapsed_days_for_purchase_record(self.record)
+        apply_ladder_row_elapsed_lock(self._ladder_table, elapsed)
+
     def _on_ladder_mode_toggled(self, checked: bool) -> None:
         self._ladder_group.setVisible(checked)
         self._ta_group.setVisible(not checked)
@@ -969,10 +993,11 @@ class PurchaseRowEditDialog(QDialog):
             QMessageBox.warning(self, "コピー", "デフォルトプロファイルのルールが空です。")
             return
         apply_ladder_rules_to_table(self._ladder_table, rules)
+        self._apply_ladder_elapsed_row_lock()
         QMessageBox.information(
             self,
             "コピー",
-            "デフォルトプロファイルのルールを表に反映しました。\n価格列は TP0〜TP3 を帯に合わせて入れています。必要に応じて編集してください。",
+            "デフォルトプロファイルのルールを表に反映しました。\n目標到達価格列は TP0〜TP3 を帯に合わせて入れています。必要に応じて編集してください。",
         )
 
     def _apply(self) -> None:
