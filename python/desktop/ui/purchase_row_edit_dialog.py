@@ -38,12 +38,14 @@ from PySide6.QtWidgets import (
 
 try:
     from utils.repricer_ladder_table import (
+        apply_even_margin_descent_to_ladder_table,
         apply_ladder_rules_to_table,
         apply_ladder_row_elapsed_lock,
         collect_ladder_rules_from_table,
         create_ladder_rules_table,
         ladder_rules_to_json,
         load_reprice_config_for_template,
+        margin_percent_from_target_price,
         parse_ladder_rules_json,
         populate_ladder_table_rows,
         set_ladder_table_profit_context,
@@ -52,12 +54,14 @@ try:
     )
 except ImportError:
     from desktop.utils.repricer_ladder_table import (  # type: ignore
+        apply_even_margin_descent_to_ladder_table,
         apply_ladder_rules_to_table,
         apply_ladder_row_elapsed_lock,
         collect_ladder_rules_from_table,
         create_ladder_rules_table,
         ladder_rules_to_json,
         load_reprice_config_for_template,
+        margin_percent_from_target_price,
         parse_ladder_rules_json,
         populate_ladder_table_rows,
         set_ladder_table_profit_context,
@@ -569,6 +573,27 @@ class PurchaseRowEditDialog(QDialog):
         )
         copy_tpl_btn.clicked.connect(self._copy_ladder_from_default_profile)
         ladder_btn_row.addWidget(copy_tpl_btn)
+
+        even_desc_btn = QPushButton("等間隔値下げ")
+        even_desc_btn.setToolTip(
+            "現在以降の最初の出品日数帯から12行目（331-360日）まで、\n"
+            "概算利益率を等間隔で下げながら目標到達価格を自動入力します。\n"
+            "開始利益率: 開始帯に価格があればその利益率、なければ販売予定価格時の利益率。"
+        )
+        even_desc_btn.clicked.connect(self._on_ladder_even_margin_descent)
+        ladder_btn_row.addWidget(even_desc_btn)
+
+        ladder_btn_row.addWidget(QLabel("最終利益率:"))
+        self._ladder_even_final_margin_spin = QDoubleSpinBox()
+        self._ladder_even_final_margin_spin.setRange(-99.0, 200.0)
+        self._ladder_even_final_margin_spin.setDecimals(1)
+        self._ladder_even_final_margin_spin.setSuffix(" %")
+        self._ladder_even_final_margin_spin.setToolTip(
+            "331-360日帯で到達させたい概算利益率(%)（TP価格欄と同じ計算式）。"
+        )
+        self._ladder_even_final_margin_spin.setFixedWidth(100)
+        ladder_btn_row.addWidget(self._ladder_even_final_margin_spin)
+
         ladder_btn_row.addStretch()
         ladder_outer.addLayout(ladder_btn_row)
         self._ladder_table = create_ladder_rules_table()
@@ -594,6 +619,7 @@ class PurchaseRowEditDialog(QDialog):
         )
         update_ladder_profit_labels(self._ladder_table)
         self._apply_ladder_elapsed_row_lock()
+        self._init_ladder_even_final_margin_default()
 
         # --- TP0 / TP1 / TP2 / TP3 編集（各帯：価格 → 目標利益率 → 概算利益、色分け）---
         self._ta_group = QGroupBox("TP 価格（Keepa で確認しながら入力）")
@@ -977,6 +1003,36 @@ class PurchaseRowEditDialog(QDialog):
         elapsed = calc_elapsed_days_for_purchase_record(self.record)
         apply_ladder_row_elapsed_lock(self._ladder_table, elapsed)
 
+    def _init_ladder_even_final_margin_default(self) -> None:
+        """等間隔値下げの最終利益率の初期値（0%台）。"""
+        spin = getattr(self, "_ladder_even_final_margin_spin", None)
+        if spin is None:
+            return
+        spin.setValue(0.0)
+
+    def _on_ladder_even_margin_descent(self) -> None:
+        """現在以降の帯から331-360日帯まで、利益率を等間隔で下げて目標到達価格を埋める。"""
+        if not getattr(self, "_ladder_enabled_cb", None) or not self._ladder_enabled_cb.isChecked():
+            QMessageBox.information(
+                self,
+                "等間隔値下げ",
+                "月別運用がOFFです。ONにしてから実行してください。",
+            )
+            return
+        final_margin = self._ladder_even_final_margin_spin.value()
+        elapsed = calc_elapsed_days_for_purchase_record(self.record)
+        ok, msg, _filled = apply_even_margin_descent_to_ladder_table(
+            self._ladder_table,
+            elapsed_days=elapsed,
+            final_margin_percent=final_margin,
+            sale_price=self._sale_price_value,
+            base_profit=self._current_profit_value,
+        )
+        if not ok:
+            QMessageBox.warning(self, "等間隔値下げ", msg)
+            return
+        QMessageBox.information(self, "等間隔値下げ", msg)
+
     def _on_ladder_mode_toggled(self, checked: bool) -> None:
         self._ladder_group.setVisible(checked)
         self._ta_group.setVisible(not checked)
@@ -1013,6 +1069,7 @@ class PurchaseRowEditDialog(QDialog):
 
     def _apply(self) -> None:
         """仕入DBに反映する（ダイアログは閉じない＝ブラウザを見たまま続けられる）"""
+        old_sku = self._last_committed_sku
         if not self._apply_sku_date_change():
             return
         ladder_on = self._ladder_enabled_cb.isChecked()
@@ -1069,15 +1126,23 @@ class PurchaseRowEditDialog(QDialog):
                 except Exception as e:
                     QMessageBox.warning(self, "反映", f"DB 保存でエラー: {e}")
                     return
-        if self._product_widget and hasattr(self._product_widget, "save_purchase_snapshot"):
-            try:
-                self._product_widget.save_purchase_snapshot()
-            except Exception:
-                pass
-        if self._product_widget and hasattr(self._product_widget, "populate_purchase_table"):
-            records = getattr(self._product_widget, "purchase_records", None) or getattr(self._product_widget, "purchase_all_records", [])
-            if records:
-                self._product_widget.populate_purchase_table(records)
+        pw = self._product_widget
+        if pw is not None:
+            if hasattr(pw, "apply_purchase_row_edit_to_memory"):
+                try:
+                    pw.apply_purchase_row_edit_to_memory(self.record, old_sku=old_sku)
+                except Exception:
+                    pass
+            if hasattr(pw, "save_purchase_snapshot"):
+                try:
+                    pw.save_purchase_snapshot()
+                except Exception:
+                    pass
+            if hasattr(pw, "refresh_purchase_display_after_row_edit"):
+                try:
+                    pw.refresh_purchase_display_after_row_edit(self.record)
+                except Exception:
+                    pass
         self._update_window_title()
         if ladder_on:
             msg = "月別運用ルールを仕入DBに反映しました。\nダイアログは開いたままです。閉じる場合は「閉じる」を押してください。"

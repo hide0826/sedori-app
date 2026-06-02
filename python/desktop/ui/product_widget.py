@@ -551,6 +551,9 @@ class ProductWidget(QWidget):
             "画像1", "画像2", "画像3", "画像4", "画像5", "画像6",
             # 画像URL列
             "画像URL1", "画像URL2", "画像URL3", "画像URL4", "画像URL5", "画像URL6",
+            # 改定サマリ（価格改定の直前に表示）
+            "月別",
+            "改定価格",
             # 価格改定ON/OFF（右端）
             "価格改定",
         ]
@@ -687,6 +690,26 @@ class ProductWidget(QWidget):
         # ステータスフィルタ（複数チェック・折りたたみ可能）
         status_filter_panel = self._build_purchase_status_collapsible_filter()
         search_layout.addWidget(status_filter_panel, 1, 0, 1, 10)
+
+        repricing_filter_row = QHBoxLayout()
+        repricing_filter_row.setContentsMargins(0, 0, 0, 0)
+        repricing_filter_row.setSpacing(12)
+        self.purchase_filter_ladder_only = QCheckBox("月別ONのみ")
+        self.purchase_filter_ladder_only.setToolTip("月別運用（30日刻みルール）がONの行だけ表示します。")
+        self.purchase_filter_ladder_only.stateChanged.connect(self._on_purchase_repricing_filter_changed)
+        repricing_filter_row.addWidget(self.purchase_filter_ladder_only)
+        self.purchase_filter_repricing_incomplete = QCheckBox("改定価格 未完了のみ")
+        self.purchase_filter_repricing_incomplete.setToolTip(
+            "価格改定ONの行のうち、入力が足りない行だけ表示します。\n"
+            "月別運用: 経過済み帯を除いた現在以降の帯で目標到達価格が未入力。\n"
+            "4段モード: TP0〜TP3 のいずれかが空欄。"
+        )
+        self.purchase_filter_repricing_incomplete.stateChanged.connect(
+            self._on_purchase_repricing_filter_changed
+        )
+        repricing_filter_row.addWidget(self.purchase_filter_repricing_incomplete)
+        repricing_filter_row.addStretch(1)
+        search_layout.addLayout(repricing_filter_row, 2, 0, 1, 10)
         
         # 検索ボタン
         search_btn = QPushButton("検索")
@@ -766,6 +789,18 @@ class ProductWidget(QWidget):
         self.update_store_codes_button.setToolTip("仕入DBの『仕入先』カラムを店舗マスタの新店舗コードに置き換えます")
         self.update_store_codes_button.clicked.connect(self.batch_update_store_codes_from_master)
         controls_layout.addWidget(self.update_store_codes_button)
+
+        self.autofill_monthly_ladder_button = QPushButton("月別自動")
+        self.autofill_monthly_ladder_button.setToolTip(
+            "TP0〜TP3 がすべて空で、月別運用がOFFの行に対し、一括で次を設定します。\n"
+            "・月別運用 ON\n"
+            "・全帯: アクション priceTrace / priceTrace設定 FBA状態合わせ\n"
+            "・akaji下限 2% / takane上限 1%\n"
+            "・現在以降〜331-360日帯まで等間隔値下げ（最終利益率 0%）\n"
+            "既に月別ONまたはTP入力済みの行はスキップします。"
+        )
+        self.autofill_monthly_ladder_button.clicked.connect(self.autofill_purchase_monthly_ladder_batch)
+        controls_layout.addWidget(self.autofill_monthly_ladder_button)
 
         # 仕入DB保存ボタン（手動変更を含めて確実にスナップショット保存）
         self.save_purchase_button = QPushButton("仕入DB保存")
@@ -1356,6 +1391,171 @@ class ProductWidget(QWidget):
             if len(db_errors) > 5:
                 msg += f"\n…他 {len(db_errors) - 5} 件"
         QMessageBox.information(self, "TP自動(369)", msg)
+
+    def autofill_purchase_monthly_ladder_batch(self) -> None:
+        """TP未入力・月別OFFの行へ月別運用ルールを一括設定する。"""
+        if not getattr(self, "purchase_all_records", None):
+            QMessageBox.information(self, "情報", "仕入DBにデータがありません。")
+            return
+
+        try:
+            from desktop.services.purchase_ladder_autofill_batch import (
+                apply_monthly_auto_ladder_to_record,
+                is_eligible_for_monthly_auto,
+            )
+        except ImportError:
+            from services.purchase_ladder_autofill_batch import (  # type: ignore
+                apply_monthly_auto_ladder_to_record,
+                is_eligible_for_monthly_auto,
+            )
+
+        eligible = sum(1 for r in self.purchase_all_records if is_eligible_for_monthly_auto(r))
+        if eligible == 0:
+            QMessageBox.information(
+                self,
+                "月別自動",
+                "対象行がありません。\n"
+                "（TP0〜TP3 がすべて空・月別OFF・価格改定ON・販売予定価格>0 の行のみ対象）",
+            )
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "月別自動",
+            f"対象行: {eligible} 件\n\n"
+            "priceTrace / FBA状態合わせ / 等間隔値下げ（最終0%）を一括設定し、\n"
+            "hirio.db にも保存します。実行しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        total = len(self.purchase_all_records)
+        prog = self._tp_batch_progress_open(
+            "月別自動",
+            f"0 / {total} 行を処理中…",
+            total,
+        )
+        changed_rows = 0
+        skipped_rows = 0
+        failed_rows = 0
+        db_errors: List[str] = []
+        fail_samples: List[str] = []
+        changed_records: List[Dict[str, Any]] = []
+        canceled = False
+        update_every = max(1, min(50, total // 100 or 1))
+        ui_refresh_every = max(1, min(20, update_every))
+
+        for i, record in enumerate(self.purchase_all_records):
+            if prog.wasCanceled():
+                canceled = True
+                break
+            if not is_eligible_for_monthly_auto(record):
+                skipped_rows += 1
+                if (i + 1) % update_every == 0 or i + 1 == total:
+                    prog.setValue(i + 1)
+                    prog.setLabelText(f"{i + 1} / {total} 行を処理中…")
+                    QApplication.processEvents()
+                continue
+
+            ok, err = apply_monthly_auto_ladder_to_record(record, final_margin_percent=0.0)
+            sku = str(record.get("SKU") or record.get("sku") or "").strip()
+            if not ok:
+                failed_rows += 1
+                if err and err != "対象外" and len(fail_samples) < 5:
+                    fail_samples.append(f"{sku or '(SKUなし)'}: {err}")
+                if (i + 1) % update_every == 0 or i + 1 == total:
+                    prog.setValue(i + 1)
+                    QApplication.processEvents()
+                continue
+
+            changed_rows += 1
+            try:
+                self.apply_purchase_row_edit_to_memory(record)
+            except Exception:
+                pass
+            if sku and hasattr(self, "purchase_history_db"):
+                try:
+                    status = record.get("ステータス") or record.get("status") or "ready"
+                    reason = record.get("ステータス理由") or record.get("status_reason") or ""
+                    self.purchase_history_db.upsert({
+                        "sku": sku,
+                        "status": status,
+                        "status_reason": reason,
+                        "repricing_enabled": 1,
+                        "ladder_enabled": 1,
+                        "ladder_rules": record.get("ladder_rules") or "",
+                        "tp0": "",
+                        "tp1": "",
+                        "tp2": "",
+                        "tp3": "",
+                        "sales_channel": record.get("sales_channel")
+                        or record.get("販売チャネル")
+                        or "Amazon",
+                    })
+                except Exception as e:
+                    db_errors.append(f"{sku}: {e}")
+
+            changed_records.append(record)
+            if changed_rows % ui_refresh_every == 0:
+                self._refresh_purchase_repricing_table_cells_for_record(record)
+                QApplication.processEvents()
+
+            if (i + 1) % update_every == 0 or i + 1 == total:
+                prog.setValue(i + 1)
+                prog.setLabelText(
+                    f"{i + 1} / {total} 行を処理中…（月別・改定価格を反映: {changed_rows} 件）"
+                )
+                QApplication.processEvents()
+
+        if not canceled:
+            prog.setValue(total)
+        self._tp_batch_progress_set_save_phase(prog)
+
+        try:
+            self.purchase_all_records_master = copy.deepcopy(self.purchase_all_records)
+        except Exception:
+            pass
+
+        for rec in changed_records:
+            try:
+                self._refresh_purchase_repricing_table_cells_for_record(rec)
+            except Exception:
+                pass
+        if changed_records:
+            self.purchase_table.viewport().update()
+            QApplication.processEvents()
+
+        self.filter_purchase_records()
+        QApplication.processEvents()
+
+        try:
+            self.save_purchase_snapshot()
+        except Exception as e:
+            print(f"月別自動 後のスナップショット保存エラー: {e}")
+
+        prog.close()
+
+        msg = (
+            f"処理が完了しました。\n\n"
+            f"月別運用を設定した行: {changed_rows} 件\n"
+            f"スキップ（対象外）: {skipped_rows} 件\n"
+            f"失敗: {failed_rows} 件"
+        )
+        if canceled:
+            msg = (
+                "キャンセルしました。\n"
+                f"その時点まで設定した行: {changed_rows} 件\n"
+                f"スキップ: {skipped_rows} 件 / 失敗: {failed_rows} 件"
+            )
+        if fail_samples:
+            msg += "\n\n失敗例:\n" + "\n".join(fail_samples)
+        if db_errors:
+            msg += "\n\nhirio.db 反映でエラー:\n" + "\n".join(db_errors[:5])
+            if len(db_errors) > 5:
+                msg += f"\n…他 {len(db_errors) - 5} 件"
+        QMessageBox.information(self, "月別自動", msg)
 
     def clear_all_purchase_tp_for_dev(self) -> None:
         """【開発用】全仕入レコードの TP0〜TP3 を空にする。"""
@@ -2242,6 +2442,144 @@ class ProductWidget(QWidget):
             return
         t.start(120)
 
+    def _on_purchase_repricing_filter_changed(self, _state: int) -> None:
+        t = getattr(self, "_purchase_status_filter_apply_timer", None)
+        if t is None:
+            self.filter_purchase_records()
+            return
+        t.start(120)
+
+    def _purchase_repricing_filters_active(self) -> bool:
+        if getattr(self, "purchase_filter_ladder_only", None) and self.purchase_filter_ladder_only.isChecked():
+            return True
+        if (
+            getattr(self, "purchase_filter_repricing_incomplete", None)
+            and self.purchase_filter_repricing_incomplete.isChecked()
+        ):
+            return True
+        return False
+
+    def _reset_purchase_repricing_filter_checkboxes(self) -> None:
+        for attr in ("purchase_filter_ladder_only", "purchase_filter_repricing_incomplete"):
+            cb = getattr(self, attr, None)
+            if cb is None:
+                continue
+            cb.blockSignals(True)
+            cb.setChecked(False)
+            cb.blockSignals(False)
+
+    def _summarize_repricing_for_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from desktop.utils.purchase_repricing_summary import summarize_repricing_row
+        except ImportError:
+            from utils.purchase_repricing_summary import summarize_repricing_row  # type: ignore
+        return summarize_repricing_row(record)
+
+    def _purchase_record_by_sku(self, sku: str) -> Optional[Dict[str, Any]]:
+        sku = str(sku or "").strip()
+        if not sku:
+            return None
+        for lst_name in (
+            "purchase_all_records_master",
+            "purchase_all_records",
+            "purchase_records",
+        ):
+            lst = getattr(self, lst_name, None)
+            if not isinstance(lst, list):
+                continue
+            for rec in lst:
+                s = str(rec.get("SKU") or rec.get("sku") or "").strip()
+                if s == sku:
+                    return rec
+        return None
+
+    def _make_purchase_repricing_column_item(
+        self, record: Dict[str, Any], header: str
+    ) -> QTableWidgetItem:
+        """月別・改定価格・価格改定列のセルを生成（一覧の再描画・部分更新で共用）。"""
+        if header == "月別":
+            summary = self._summarize_repricing_for_record(record)
+            text = str(summary.get("monthly_label") or "—")
+            item = QTableWidgetItem(text)
+            item.setTextAlignment(Qt.AlignCenter)
+            if summary.get("ladder_on"):
+                item.setForeground(QColor("#7ec8ff"))
+            else:
+                item.setForeground(QColor("#888888"))
+            item.setToolTip(
+                "月別運用ON: 30日刻みの個別改定ルールを使用。\n"
+                "OFF: TP0〜TP3（4段）を使用。"
+            )
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            return item
+
+        if header == "改定価格":
+            summary = self._summarize_repricing_for_record(record)
+            text = str(summary.get("price_label") or "—")
+            item = QTableWidgetItem(text)
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setToolTip(str(summary.get("price_tooltip") or ""))
+            if not summary.get("repricing_on"):
+                item.setForeground(QColor("#888888"))
+            elif summary.get("price_complete"):
+                item.setForeground(QColor("#7dcea0"))
+            elif summary.get("filter_incomplete"):
+                item.setForeground(QColor("#f5b041"))
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+            else:
+                item.setForeground(QColor("#f0f0f0"))
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            return item
+
+        if header == "価格改定":
+            raw = record.get("価格改定")
+            if raw is None:
+                raw = record.get("repricing_enabled", 1)
+            flag = str(raw).strip().lower() if raw is not None else ""
+            text = "OFF" if flag in ("0", "off", "false", "無効", "no") else "ON"
+            item = QTableWidgetItem(text)
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            return item
+
+        item = QTableWidgetItem("")
+        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        return item
+
+    def _refresh_purchase_repricing_table_cells_for_record(
+        self, record: Dict[str, Any]
+    ) -> None:
+        """仕入行編集反映後、該当SKUの月別・改定価格・価格改定セルのみ即時更新する。"""
+        if not hasattr(self, "purchase_columns") or not hasattr(self, "purchase_table"):
+            return
+        sku = str(record.get("SKU") or record.get("sku") or "").strip()
+        if not sku:
+            return
+        master_rec = self._purchase_record_by_sku(sku) or record
+
+        target_headers = ("月別", "改定価格", "価格改定")
+        col_indices: Dict[str, int] = {}
+        for h in target_headers:
+            try:
+                col_indices[h] = self.purchase_columns.index(h)
+            except ValueError:
+                return
+
+        self.purchase_table.setUpdatesEnabled(False)
+        try:
+            for row in range(self.purchase_table.rowCount()):
+                if self._purchase_table_row_sku(row) != sku:
+                    continue
+                for h in target_headers:
+                    col = col_indices[h]
+                    item = self._make_purchase_repricing_column_item(master_rec, h)
+                    self.purchase_table.setItem(row, col, item)
+        finally:
+            self.purchase_table.setUpdatesEnabled(True)
+            self.purchase_table.viewport().update()
+
     def _invalidate_purchase_table_full_master(self) -> None:
         self._purchase_table_full_master_built = False
 
@@ -2265,6 +2603,8 @@ class ProductWidget(QWidget):
         if self.purchase_search_jan.text().strip():
             return True
         if self._purchase_status_filter_selected_codes():
+            return True
+        if self._purchase_repricing_filters_active():
             return True
         return False
 
@@ -2317,6 +2657,23 @@ class ProductWidget(QWidget):
             filtered_records = [
                 r for r in filtered_records
                 if self._sync_purchase_status_norm(r) in status_selected
+            ]
+
+        if getattr(self, "purchase_filter_ladder_only", None) and self.purchase_filter_ladder_only.isChecked():
+            filtered_records = [
+                r
+                for r in filtered_records
+                if self._summarize_repricing_for_record(r).get("filter_ladder_match")
+            ]
+
+        if (
+            getattr(self, "purchase_filter_repricing_incomplete", None)
+            and self.purchase_filter_repricing_incomplete.isChecked()
+        ):
+            filtered_records = [
+                r
+                for r in filtered_records
+                if self._summarize_repricing_for_record(r).get("filter_incomplete")
             ]
 
         return filtered_records
@@ -2473,6 +2830,7 @@ class ProductWidget(QWidget):
         self.purchase_search_asin.clear()
         self.purchase_search_jan.clear()
         self._reset_purchase_status_filter_checkboxes()
+        self._reset_purchase_repricing_filter_checkboxes()
         master = self._purchase_master_records()
         self.purchase_records = list(master) if master else []
 
@@ -2483,6 +2841,71 @@ class ProductWidget(QWidget):
             self.populate_purchase_table(self.purchase_records)
 
         self.update_purchase_count_label()
+
+    _PURCHASE_ROW_EDIT_SYNC_KEYS = (
+        "TP0",
+        "tp0",
+        "TP1",
+        "tp1",
+        "TP2",
+        "tp2",
+        "TP3",
+        "tp3",
+        "ladder_enabled",
+        "ladder_rules",
+        "repricing_enabled",
+        "価格改定",
+        "販売チャネル",
+        "sales_channel",
+        "発送方法",
+        "shippingMethod",
+        "shipping_method",
+    )
+
+    def apply_purchase_row_edit_to_memory(
+        self, record: Dict[str, Any], *, old_sku: Optional[str] = None
+    ) -> None:
+        """仕入行編集の反映内容をマスター／表示リストへ同期（SKU 単位）。"""
+        new_sku = str(record.get("SKU") or record.get("sku") or "").strip()
+        match_sku = str(old_sku or new_sku or "").strip()
+        if not match_sku and not new_sku:
+            return
+
+        def _row_matches(rec: Dict[str, Any]) -> bool:
+            s = str(rec.get("SKU") or rec.get("sku") or "").strip()
+            if not s:
+                return False
+            if match_sku and s == match_sku:
+                return True
+            return bool(new_sku and s == new_sku)
+
+        def _merge_into(rec: Dict[str, Any]) -> None:
+            for key in self._PURCHASE_ROW_EDIT_SYNC_KEYS:
+                if key in record:
+                    rec[key] = record[key]
+            if new_sku:
+                rec["SKU"] = new_sku
+                rec["sku"] = new_sku
+
+        for lst_name in (
+            "purchase_all_records_master",
+            "purchase_all_records",
+            "purchase_records",
+        ):
+            lst = getattr(self, lst_name, None)
+            if not isinstance(lst, list):
+                continue
+            for rec in lst:
+                if _row_matches(rec):
+                    _merge_into(rec)
+
+    def refresh_purchase_display_after_row_edit(
+        self, edited_record: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """仕入行編集反映後: 月別・改定価格列を即時更新し、フィルタ状態を維持する。"""
+        if edited_record:
+            self._refresh_purchase_repricing_table_cells_for_record(edited_record)
+        self.filter_purchase_records()
     
     def toggle_view_mode(self, mode: str):
         """表示モードを切り替え"""
@@ -2524,6 +2947,10 @@ class ProductWidget(QWidget):
         # 表示する列の範囲を定義
         tp_columns = {"TP0", "TP1", "TP2", "TP3"}
         tp_indices = {i for i, col_name in enumerate(self.purchase_columns) if col_name in tp_columns}
+        repricing_summary_columns = {"月別", "改定価格"}
+        repricing_summary_indices = {
+            i for i, col_name in enumerate(self.purchase_columns) if col_name in repricing_summary_columns
+        }
 
         if self.purchase_view_mode == "all":
             # 通常表示（TP0〜TP3は非表示）
@@ -2603,7 +3030,10 @@ class ProductWidget(QWidget):
                             break
                 # TP列は「TP」モード時のみ表示
                 if col_idx in tp_indices:
-                    is_visible = (self.purchase_view_mode == "tp")
+                    is_visible = self.purchase_view_mode == "tp"
+                # 月別・改定価格は通常表示とTP表示で見える
+                if col_idx in repricing_summary_indices:
+                    is_visible = self.purchase_view_mode in ("all", "tp")
                 self.purchase_table.setColumnHidden(col_idx, not is_visible)
         # 在庫保管手数料はSP-API運用時まで非表示
         if "在庫保管手数料" in self.purchase_columns:
@@ -2949,8 +3379,11 @@ class ProductWidget(QWidget):
                 if upper_key not in seen:
                     seen.add(upper_key)
                     columns.append(key)
-        if "価格改定" in columns:
-            columns = [c for c in columns if c != "価格改定"] + ["価格改定"]
+        for tail_col in ("月別", "改定価格", "価格改定"):
+            while tail_col in columns:
+                columns.remove(tail_col)
+        for tail_col in ("月別", "改定価格", "価格改定"):
+            columns.append(tail_col)
         self.purchase_columns = columns
         # _row_id は下のループ内で欠けている行に採番する。採番前にマップを作るとキーが欠落し、
         # 編集時に row_map ミス→SKU先頭一致で別商品が開く不具合になるため、ここでは空にしてループ内で登録する。
@@ -3125,11 +3558,8 @@ class ProductWidget(QWidget):
                     else:
                         item = QTableWidgetItem("")
                         item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                elif header == "価格改定":
-                    flag = str(value).strip().lower() if value is not None else ""
-                    text = "OFF" if flag in ("0", "off", "false", "無効", "no") else "ON"
-                    item = QTableWidgetItem(text)
-                    item.setTextAlignment(Qt.AlignCenter)
+                elif header in ("月別", "改定価格", "価格改定"):
+                    item = self._make_purchase_repricing_column_item(record, header)
                 elif header == "想定利益率" or header == "想定ROI":
                     # 想定利益率・想定ROI列の処理：空欄の場合は再計算
                     value_str = str(value) if value else ""

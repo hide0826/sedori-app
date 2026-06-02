@@ -26,6 +26,9 @@ REPRICER_DAY_RANGES: List[tuple[int, int]] = [
     (271, 300), (301, 330), (331, 360), (361, 999),
 ]
 
+# 月別運用表の12行目（1始まり）= 331-360日帯（0始まり index 11）
+LADDER_ROW_INDEX_331_360 = 11
+
 
 def band_start_day_for_period_end(period_end: int) -> int:
     """ルールの days_from（帯の終端日）から、その帯の開始日を返す。"""
@@ -422,6 +425,232 @@ def parse_ladder_rules_json(raw: Any) -> List[Dict[str, Any]]:
 
 def ladder_rules_to_json(rules: List[Dict[str, Any]]) -> str:
     return json.dumps(rules, ensure_ascii=False)
+
+
+def margin_percent_from_target_price(
+    sale_price: float,
+    base_profit: float,
+    target_price: float,
+) -> Optional[float]:
+    """目標到達価格での概算利益率(%)（TP欄・月別表と同式）。"""
+    if target_price <= 0 or sale_price <= 0:
+        return None
+    profit = base_profit - 0.89 * (sale_price - target_price)
+    return (profit / target_price) * 100.0
+
+
+def target_price_from_margin_percent(
+    sale_price: float,
+    base_profit: float,
+    margin_percent: float,
+) -> Optional[float]:
+    """概算利益率(%)から目標到達価格を逆算（TP欄・月別表と同式）。"""
+    m = float(margin_percent) / 100.0
+    denom = m - 0.89
+    if abs(denom) < 1e-9:
+        return None
+    price = (base_profit - 0.89 * sale_price) / denom
+    if price <= 0:
+        return None
+    return price
+
+
+def compute_ladder_even_margin_prices(
+    *,
+    elapsed_days: Optional[int],
+    sale_price: float,
+    base_profit: float,
+    final_margin_percent: float = 0.0,
+    end_row_index: int = LADDER_ROW_INDEX_331_360,
+    start_price_hint: Optional[float] = None,
+) -> tuple[Dict[int, Optional[float]], str, int]:
+    """
+    現在以降の最初の帯から end_row_index まで等間隔で利益率を下げ、
+    各帯の終了日(days_from) → 目標到達価格 の辞書を返す。
+    """
+    prices_by_end: Dict[int, Optional[float]] = {}
+    if sale_price <= 0:
+        return prices_by_end, "販売予定価格が0以下のため計算できません。", 0
+
+    row_count = len(REPRICER_DAY_RANGES)
+    end_row = min(max(0, end_row_index), row_count - 1)
+
+    start_row: Optional[int] = None
+    for i in range(row_count):
+        _start, end_day = REPRICER_DAY_RANGES[i]
+        if not _is_ladder_row_elapsed_past(elapsed_days, end_day):
+            start_row = i
+            break
+
+    if start_row is None:
+        return prices_by_end, "経過済みの帯のみで、入力できる帯がありません。", 0
+
+    if start_row > end_row:
+        return prices_by_end, "現在以降の帯が331-360日帯より後になっています。", 0
+
+    if start_price_hint and start_price_hint > 0:
+        start_margin = margin_percent_from_target_price(sale_price, base_profit, start_price_hint)
+    else:
+        start_margin = margin_percent_from_target_price(sale_price, base_profit, sale_price)
+
+    if start_margin is None:
+        return prices_by_end, "開始帯の利益率を計算できません。", 0
+
+    final_margin = float(final_margin_percent)
+    n_steps = end_row - start_row
+    filled = 0
+
+    for i in range(row_count):
+        _start, end_day = REPRICER_DAY_RANGES[i]
+        if _is_ladder_row_elapsed_past(elapsed_days, end_day):
+            prices_by_end[end_day] = None
+            continue
+        if i < start_row or i > end_row:
+            prices_by_end[end_day] = None
+            continue
+
+        if n_steps <= 0:
+            margin = final_margin
+        else:
+            k = i - start_row
+            t = k / n_steps
+            margin = start_margin + (final_margin - start_margin) * t
+
+        price = target_price_from_margin_percent(sale_price, base_profit, margin)
+        if price is None:
+            prices_by_end[end_day] = None
+            continue
+        if sale_price > 0 and price > sale_price:
+            price = sale_price
+        prices_by_end[end_day] = float(int(round(price)))
+        filled += 1
+
+    return prices_by_end, "", filled
+
+
+def build_ladder_rules_with_standard_trace(
+    *,
+    elapsed_days: Optional[int],
+    sale_price: float,
+    base_profit: float,
+    final_margin_percent: float = 0.0,
+    end_row_index: int = LADDER_ROW_INDEX_331_360,
+    action: str = "priceTrace",
+    trace_value: int = 1,
+    akaji_drop_percent: int = 2,
+    takane_rise_percent: int = 1,
+) -> tuple[List[Dict[str, Any]], str, int]:
+    """月別運用ルール JSON 用のルール配列を生成（一括・UIなし）。"""
+    prices_by_end, err, filled = compute_ladder_even_margin_prices(
+        elapsed_days=elapsed_days,
+        sale_price=sale_price,
+        base_profit=base_profit,
+        final_margin_percent=final_margin_percent,
+        end_row_index=end_row_index,
+    )
+    if err and filled == 0:
+        return [], err, 0
+
+    rules: List[Dict[str, Any]] = []
+    for _start, end_day in REPRICER_DAY_RANGES:
+        tp = prices_by_end.get(end_day)
+        rules.append(
+            {
+                "days_from": end_day,
+                "action": action,
+                "value": trace_value,
+                "target_price": tp,
+                "akaji_drop_percent": akaji_drop_percent,
+                "takane_rise_percent": takane_rise_percent,
+            }
+        )
+    return rules, err, filled
+
+
+def apply_even_margin_descent_to_ladder_table(
+    table: QTableWidget,
+    *,
+    elapsed_days: Optional[int],
+    final_margin_percent: float,
+    sale_price: float,
+    base_profit: float,
+    end_row_index: int = LADDER_ROW_INDEX_331_360,
+) -> tuple[bool, str, int]:
+    """
+    現在以降の最初の帯から end_row_index（既定: 331-360日）まで、
+    概算利益率を等間隔で下げながら目標到達価格を埋める。
+    """
+    if sale_price <= 0:
+        return False, "販売予定価格が0以下のため計算できません。", 0
+
+    row_count = table.rowCount()
+    if row_count == 0:
+        return False, "月別運用ルール表が空です。", 0
+
+    end_row = min(max(0, end_row_index), row_count - 1)
+
+    start_row: Optional[int] = None
+    for i in range(row_count):
+        if i >= len(REPRICER_DAY_RANGES):
+            break
+        _start, end_day = REPRICER_DAY_RANGES[i]
+        if not _is_ladder_row_elapsed_past(elapsed_days, end_day):
+            start_row = i
+            break
+
+    if start_row is None:
+        return False, "経過済みの帯のみで、入力できる帯がありません。", 0
+
+    if start_row > end_row:
+        return False, "現在以降の帯が331-360日帯より後になっています。", 0
+
+    price_edit0 = table.cellWidget(start_row, COL_LADDER_TARGET_PRICE)
+    start_price = _parse_ladder_price_text(price_edit0.text()) if price_edit0 else 0.0
+
+    prices_by_end, err, filled = compute_ladder_even_margin_prices(
+        elapsed_days=elapsed_days,
+        sale_price=sale_price,
+        base_profit=base_profit,
+        final_margin_percent=final_margin_percent,
+        end_row_index=end_row_index,
+        start_price_hint=start_price if start_price > 0 else None,
+    )
+    if filled == 0:
+        return False, err or "価格を設定できた帯がありません。", 0
+
+    skipped: List[str] = []
+    applied = 0
+    for i in range(start_row, end_row + 1):
+        if i >= len(REPRICER_DAY_RANGES):
+            break
+        _start, end_day = REPRICER_DAY_RANGES[i]
+        price = prices_by_end.get(end_day)
+        if price is None:
+            continue
+        price_edit = table.cellWidget(i, COL_LADDER_TARGET_PRICE)
+        if not isinstance(price_edit, QLineEdit):
+            skipped.append(f"行{i + 1}")
+            continue
+        price_edit.setText(str(int(round(price))))
+        applied += 1
+
+    filled = applied
+    update_ladder_profit_labels(table, row=None)
+
+    start_label = table.item(start_row, 0)
+    end_label = table.item(end_row, 0)
+    start_txt = start_label.text() if start_label else str(start_row + 1)
+    end_txt = end_label.text() if end_label else str(end_row + 1)
+
+    msg = (
+        f"{start_txt}〜{end_txt} の {filled} 帯に目標到達価格を設定しました。\n"
+        f"最終利益率 {float(final_margin_percent):.1f}% まで等間隔で配分しました。"
+    )
+    if skipped:
+        msg += f"\n（スキップ: {', '.join(skipped)}）"
+    if filled == 0:
+        return False, "価格を設定できた帯がありません。", 0
+    return True, msg, filled
 
 
 def load_reprice_config_for_template() -> Dict[str, Any]:
