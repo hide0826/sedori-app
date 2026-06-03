@@ -808,6 +808,14 @@ class ProductWidget(QWidget):
         self.save_purchase_button.clicked.connect(self.save_purchase_from_table)
         controls_layout.addWidget(self.save_purchase_button)
 
+        self.reload_purchase_button = QPushButton("仕入DB再読込")
+        self.reload_purchase_button.setToolTip(
+            "最新のスナップショットから仕入DBを読み直します。\n"
+            "表示が1件だけ・空行が多いときの復旧用です。"
+        )
+        self.reload_purchase_button.clicked.connect(self.reload_purchase_from_latest_snapshot)
+        controls_layout.addWidget(self.reload_purchase_button)
+
         self.purchase_count_label = QLabel("保存件数: 0件")
         controls_layout.addWidget(self.purchase_count_label)
 
@@ -1699,8 +1707,16 @@ class ProductWidget(QWidget):
                     existing_index[key] = rec
 
         new_all_records: List[Dict[str, Any]] = []
+        row_ids_by_index = getattr(self, "_purchase_table_row_ids_by_index", None) or []
+        row_map = getattr(self, "_purchase_row_map", None) or {}
 
         for row in range(row_count):
+            # 行IDマップがあればフルレコードをベースにする（表示が空のセルでもデータを失わない）
+            base_rec: Dict[str, Any] = {}
+            row_id = row_ids_by_index[row] if row < len(row_ids_by_index) else None
+            if row_id is not None and row_id in row_map:
+                base_rec = copy.deepcopy(row_map[row_id])
+
             # テーブルの1行分の値を辞書にまとめる
             row_data: Dict[str, Any] = {}
             receipt_image_path = None  # レシート画像パスを保持
@@ -1733,8 +1749,9 @@ class ProductWidget(QWidget):
                         if file_path_obj.exists() or file_path:
                             receipt_image_path = str(file_path) if isinstance(file_path, str) else str(file_path_obj.resolve())
 
-            key = _make_key(row_data)
-            base_rec = existing_index.get(key, {}).copy() if key in existing_index else {}
+            if not base_rec:
+                key = _make_key(row_data)
+                base_rec = existing_index.get(key, {}).copy() if key in existing_index else {}
 
             # 既存レコードにテーブルの値を上書き
             for k, v in row_data.items():
@@ -1742,6 +1759,10 @@ class ProductWidget(QWidget):
 
             if receipt_image_path:
                 base_rec["レシート画像パス"] = receipt_image_path
+
+            sku_val = str(base_rec.get("SKU") or base_rec.get("sku") or "").strip()
+            if not sku_val:
+                continue
 
             new_all_records.append(base_rec)
 
@@ -2147,7 +2168,17 @@ class ProductWidget(QWidget):
     # --- 仕入DB関連 ---
     def load_purchase_data(self, records: List[Dict[str, Any]]):
         """仕入DBデータを読み込み"""
+        if not records:
+            self.purchase_all_records_master = []
+            self.purchase_all_records = []
+            self.purchase_records = []
+            self._invalidate_purchase_table_full_master()
+            self.populate_purchase_table([])
+            self.update_purchase_count_label()
+            return
+
         # 起動時はスナップショットから復元されるため、DB側の最新情報（ステータス/理由など）をマージしてから表示する
+        merged = list(records or [])
         try:
             try:
                 from desktop.services.purchase_inventory_only import (
@@ -2165,6 +2196,7 @@ class ProductWidget(QWidget):
             records = self._augment_purchase_records(merged)
         except Exception as e:
             print(f"仕入DBデータのaugmentエラー: {e}")
+            records = merged
         # マスターを保持しておき、フィルタ時はそこから再計算する
         self.purchase_all_records_master = copy.deepcopy(records)
         self.purchase_all_records = copy.deepcopy(records)
@@ -2185,6 +2217,23 @@ class ProductWidget(QWidget):
         if not master:
             return
         try:
+            latest_non_empty = next(
+                (
+                    int(s.get("item_count") or 0)
+                    for s in self.purchase_db.list_snapshots()
+                    if int(s.get("item_count") or 0) > 0
+                ),
+                0,
+            )
+            if latest_non_empty >= 100 and len(master) < max(10, latest_non_empty // 2):
+                print(
+                    "スナップショット保存スキップ: "
+                    f"現在件数が少なすぎます ({len(master)} / 直近 {latest_non_empty})"
+                )
+                return
+        except Exception as e:
+            print(f"スナップショット保存前チェックエラー: {e}")
+        try:
             snapshot_name = f"Snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             self.purchase_db.save_snapshot(snapshot_name, master)
         except Exception as e:
@@ -2194,18 +2243,70 @@ class ProductWidget(QWidget):
         """最新のスナップショットを復元"""
         try:
             snapshots = self.purchase_db.list_snapshots()
-            if snapshots:
-                latest_id = snapshots[0]["id"]
-                snapshot = self.purchase_db.get_snapshot(latest_id)
+            # 空スナップショットが最新になっても、直近の非空データから復元する。
+            # 表示不具合時に「保存件数: 0件」の状態を拾い続けないための保険。
+            for row in snapshots:
+                if int(row.get("item_count") or 0) <= 0:
+                    continue
+                snapshot = self.purchase_db.get_snapshot(row["id"])
                 if snapshot:
-                    self.purchase_all_records = snapshot["data"]
+                    data = snapshot.get("data") or []
+                    if not data:
+                        continue
+                    self.purchase_all_records_master = list(data)
+                    self.purchase_all_records = list(data)
                     self.purchase_records = list(self.purchase_all_records)
                     return
         except Exception as e:
             print(f"スナップショット復元エラー: {e}")
         
+        self.purchase_all_records_master = []
         self.purchase_all_records = []
         self.purchase_records = []
+
+    def reload_purchase_from_latest_snapshot(self):
+        """最新スナップショットから仕入DBを再読み込み（表示不具合の復旧用）"""
+        reply = QMessageBox.question(
+            self,
+            "仕入DB再読込",
+            "最新のスナップショットから仕入DBを読み直します。\n"
+            "テーブル上の未保存の編集は失われます。よろしいですか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._initial_data_loaded = False
+        self._purchase_loaded = False
+        self.clear_purchase_search()
+
+        try:
+            with self._initial_db_load_busy_scope():
+                self.restore_latest_purchase_snapshot()
+                count = len(self.purchase_records or [])
+                if count == 0:
+                    QMessageBox.warning(
+                        self,
+                        "仕入DB再読込",
+                        "スナップショットにデータがありません。\n"
+                        "仕入管理タブから取り込むか、バックアップを確認してください。",
+                    )
+                    return
+                self.load_purchase_data(self.purchase_records)
+                self._purchase_loaded = True
+                self._initial_data_loaded = True
+        except Exception as e:
+            QMessageBox.critical(self, "仕入DB再読込", f"読み込みに失敗しました:\n{e}")
+            return
+
+        master_n = len(getattr(self, "purchase_all_records_master", []) or [])
+        shown_n = len(getattr(self, "purchase_records", []) or [])
+        QMessageBox.information(
+            self,
+            "仕入DB再読込",
+            f"読み込み完了しました。\n全体: {master_n} 件 / 表示: {shown_n} 件",
+        )
 
     def on_import_inventory(self):
         """仕入管理タブからデータを取り込み"""
@@ -3329,6 +3430,8 @@ class ProductWidget(QWidget):
         self.purchase_table.setUpdatesEnabled(False)
         try:
             self._populate_purchase_table_impl(records)
+        except Exception as e:
+            raise
         finally:
             self.purchase_table.setUpdatesEnabled(True)
             QApplication.restoreOverrideCursor()

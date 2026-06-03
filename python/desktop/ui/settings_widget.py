@@ -77,8 +77,12 @@ class SettingsWidget(QWidget):
         # タイムアウト設定
         api_layout.addWidget(QLabel("タイムアウト(秒):"), 1, 0)
         self.timeout_spin = QSpinBox()
-        self.timeout_spin.setRange(5, 300)
-        self.timeout_spin.setValue(30)
+        self.timeout_spin.setRange(30, 900)
+        self.timeout_spin.setValue(120)
+        self.timeout_spin.setToolTip(
+            "価格改定プレビューは行数が多いと時間がかかります。\n"
+            "タイムアウトが出る場合は 300〜600 秒に増やしてください。"
+        )
         api_layout.addWidget(self.timeout_spin, 1, 1)
         
         # 接続テストボタン
@@ -788,7 +792,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         """設定の読み込み"""
         # API設定
         self.api_url_edit.setText(self.settings.value("api/url", "http://localhost:8000"))
-        self.timeout_spin.setValue(int(self.settings.value("api/timeout", 30)))
+        self.timeout_spin.setValue(int(self.settings.value("api/timeout", 120)))
         
         # ディレクトリ設定
         self.csv_dir_edit.setText(self.settings.value("directories/csv", ""))
@@ -917,7 +921,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         """デフォルト設定の読み込み"""
         # デフォルト値を設定
         self.api_url_edit.setText("http://localhost:8000")
-        self.timeout_spin.setValue(30)
+        self.timeout_spin.setValue(120)
         self.csv_dir_edit.setText("")
         self.result_dir_edit.setText("")
         self.row_height_spin.setValue(25)

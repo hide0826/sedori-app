@@ -11,18 +11,14 @@ from typing import Any, Dict, List, Optional
 
 try:
     from desktop.utils.purchase_elapsed_days import calc_elapsed_days_for_purchase_record
-    from desktop.utils.repricer_ladder_table import (
-        REPRICER_DAY_RANGES,
-        _is_ladder_row_elapsed_past,
-        parse_ladder_rules_json,
-    )
 except ImportError:
     from utils.purchase_elapsed_days import calc_elapsed_days_for_purchase_record  # type: ignore
-    from utils.repricer_ladder_table import (  # type: ignore
-        REPRICER_DAY_RANGES,
-        _is_ladder_row_elapsed_past,
-        parse_ladder_rules_json,
-    )
+
+from utils.repricer_ladder_core import (
+    REPRICER_DAY_RANGES,
+    _is_ladder_row_elapsed_past,
+    parse_ladder_rules_json,
+)
 
 
 def is_repricing_enabled(record: Dict[str, Any]) -> bool:

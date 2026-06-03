@@ -1,6 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, Body, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import Dict, Optional, Literal, Any
+import asyncio
 import pandas as pd
 from datetime import datetime
 import json
@@ -139,6 +140,20 @@ class RepriceConfig(BaseModel):
 
 def _normalize_mode(mode: Optional[str]) -> str:
     return "369" if str(mode or "").strip() == "369" else "standard"
+
+
+def _apply_repricing_from_csv_bytes(content: bytes, mode: Optional[str]):
+    """
+    CSV読込〜前処理〜ルール適用（同期処理）。
+    asyncio.to_thread から呼び、イベントループを塞がない。
+    """
+    df = read_csv_with_fallback(content)
+    if df is None or df.empty:
+        raise ValueError("CSV_EMPTY")
+    df = preprocess_dataframe(df)
+    return apply_repricing_rules(df, today=datetime.now(), mode=_normalize_mode(mode))
+
+
 # --- Config Endpoints ---
 @router.get("/config")
 def get_config(mode: Optional[str] = Query(default="standard")):
@@ -230,21 +245,19 @@ async def preview(file: UploadFile = File(...), mode: Optional[str] = Query(defa
         
         if not content:
             raise HTTPException(status_code=400, detail="CSVファイルが空です")
-        
-        print("[DEBUG] CSV読み込み開始...")
-        df = read_csv_with_fallback(content)
-        if df is None or df.empty:
-            raise HTTPException(status_code=400, detail="CSVファイルの読み込みに失敗しました、またはデータが空です")
-        print(f"[DEBUG] CSV読み込み完了: 行数={len(df)}, 列数={len(df.columns)}")
-        print(f"[DEBUG] 列名: {list(df.columns)}")
-        
-        print("[DEBUG] 前処理開始...")
-        df = preprocess_dataframe(df) # ここで前処理を実行
-        print(f"[DEBUG] 前処理完了: 行数={len(df)}")
 
-        print("[DEBUG] 価格改定ルール適用開始...")
-        outputs = apply_repricing_rules(df, today=datetime.now(), mode=_normalize_mode(mode))
-        print(f"[DEBUG] 価格改定ルール適用完了")
+        print("[DEBUG] 価格改定ルール適用開始（バックグラウンドスレッド）...")
+        try:
+            outputs = await asyncio.to_thread(_apply_repricing_from_csv_bytes, content, mode)
+        except ValueError as ve:
+            if str(ve) == "CSV_EMPTY":
+                raise HTTPException(
+                    status_code=400,
+                    detail="CSVファイルの読み込みに失敗しました、またはデータが空です",
+                )
+            raise
+        row_count = _get_len(outputs, "updated_df") + _get_len(outputs, "excluded_df")
+        print(f"[DEBUG] 価格改定ルール適用完了（概算行数={row_count}）")
 
         # ---- safe summary (no-attr errors) ----
         print("[DEBUG] サマリー生成開始...")
@@ -320,20 +333,18 @@ async def apply(file: UploadFile = File(...), mode: Optional[str] = Query(defaul
         content = await file.read()
         if not content:
             raise HTTPException(status_code=400, detail="CSVファイルが空です")
-        
-        print("[DEBUG] apply: CSV読み込み開始...")
-        df = read_csv_with_fallback(content)
-        if df is None or df.empty:
-            raise HTTPException(status_code=400, detail="CSVファイルの読み込みに失敗しました、またはデータが空です")
-        print(f"[DEBUG] apply: CSV読み込み完了: 行数={len(df)}, 列数={len(df.columns)}")
 
-        print("[DEBUG] apply: 前処理開始...")
-        df = preprocess_dataframe(df)
-        print(f"[DEBUG] apply: 前処理完了: 行数={len(df)}")
-
-        print("[DEBUG] apply: 価格改定ルール適用開始...")
-        outputs = apply_repricing_rules(df, today=datetime.now(), mode=_normalize_mode(mode))
-        print(f"[DEBUG] apply: 価格改定ルール適用完了")
+        print("[DEBUG] apply: 価格改定ルール適用開始（バックグラウンドスレッド）...")
+        try:
+            outputs = await asyncio.to_thread(_apply_repricing_from_csv_bytes, content, mode)
+        except ValueError as ve:
+            if str(ve) == "CSV_EMPTY":
+                raise HTTPException(
+                    status_code=400,
+                    detail="CSVファイルの読み込みに失敗しました、またはデータが空です",
+                )
+            raise
+        print("[DEBUG] apply: 価格改定ルール適用完了")
         _fill_price_trace_change_on_items(outputs, trace_label="FBA譛螳牙､")
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")

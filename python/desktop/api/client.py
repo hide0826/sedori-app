@@ -20,9 +20,13 @@ import math
 
 class APIClient:
     """FastAPIクライアント"""
-    
-    def __init__(self, base_url: str = "http://localhost:8000"):
+
+    DEFAULT_REQUEST_TIMEOUT = 120
+    REPRICER_MIN_TIMEOUT = 300
+
+    def __init__(self, base_url: str = "http://127.0.0.1:8000", request_timeout: Optional[int] = None):
         self.base_url = base_url
+        self.request_timeout = request_timeout if request_timeout is not None else self._load_timeout_from_settings()
         self.session = requests.Session()
         self.session.headers.update({
             'Accept': 'application/json'
@@ -30,15 +34,43 @@ class APIClient:
         
         # ログ設定
         self.logger = logging.getLogger(__name__)
+
+    @classmethod
+    def _load_timeout_from_settings(cls) -> int:
+        try:
+            from PySide6.QtCore import QSettings
+            raw = QSettings("HIRIO", "SedoriDesktopApp").value("api/timeout", cls.DEFAULT_REQUEST_TIMEOUT)
+            return max(5, int(raw))
+        except (TypeError, ValueError):
+            return cls.DEFAULT_REQUEST_TIMEOUT
+
+    def _http_timeout(self, *, repricer: bool = False) -> int:
+        """通常API用タイムアウト。価格改定は行数が多いと長くかかるため下限を長めにする。"""
+        t = max(5, int(self.request_timeout or self.DEFAULT_REQUEST_TIMEOUT))
+        if repricer:
+            return max(t, self.REPRICER_MIN_TIMEOUT)
+        return t
         
     def test_connection(self) -> bool:
-        """API接続テスト"""
-        try:
-            response = self.session.get(f"{self.base_url}/health", timeout=5)
-            return response.status_code == 200
-        except Exception as e:
-            self.logger.error(f"API接続テスト失敗: {e}")
-            return False
+        """API接続テスト（localhost は 127.0.0.1 にフォールバック）"""
+        bases = [self.base_url.rstrip("/")]
+        alt = bases[0].replace("://localhost", "://127.0.0.1")
+        if alt not in bases:
+            bases.append(alt)
+        last_error: Optional[Exception] = None
+        for base in bases:
+            try:
+                response = self.session.get(f"{base}/health", timeout=5)
+                if response.status_code == 200:
+                    if base != bases[0]:
+                        self.base_url = base
+                    return True
+            except Exception as e:
+                last_error = e
+                self.logger.error(f"API接続テスト失敗 ({base}): {e}")
+        if last_error:
+            self.logger.error(f"API接続テスト失敗: {last_error}")
+        return False
     
     # 価格改定API
     def repricer_preview(self, csv_file_path: str, mode: str = "standard") -> Dict[str, Any]:
@@ -53,7 +85,7 @@ class APIClient:
                     f"{self.base_url}/repricer/preview",
                     files=files,
                     params={"mode": mode},
-                    timeout=30
+                    timeout=self._http_timeout(repricer=True),
                 )
             
             if response.status_code == 200:
@@ -66,8 +98,15 @@ class APIClient:
                 
         except Exception as e:
             self.logger.error(f"価格改定プレビュー失敗: {e}")
-            # エラーをそのまま伝播（ダミーデータは返さない）
-            raise Exception(f"価格改定プレビューに失敗しました: {str(e)}")
+            msg = str(e)
+            if "timed out" in msg.lower() or "timeout" in msg.lower():
+                sec = self._http_timeout(repricer=True)
+                msg += (
+                    f"\n\n（処理が{sec}秒以内に終わりませんでした。"
+                    "設定タブの「タイムアウト(秒)」を大きくするか、"
+                    "CSVの行数を減らして再試行してください。）"
+                )
+            raise Exception(f"価格改定プレビューに失敗しました: {msg}")
     
     def repricer_apply(self, csv_file_path: str, mode: str = "standard") -> Dict[str, Any]:
         """価格改定実行"""
@@ -81,7 +120,7 @@ class APIClient:
                     f"{self.base_url}/repricer/apply",
                     files=files,
                     params={"mode": mode},
-                    timeout=60
+                    timeout=self._http_timeout(repricer=True),
                 )
             
             if response.status_code == 200:
@@ -94,8 +133,14 @@ class APIClient:
                 
         except Exception as e:
             self.logger.error(f"価格改定実行失敗: {e}")
-            # エラーをそのまま伝播（ダミーデータは返さない）
-            raise Exception(f"価格改定実行に失敗しました: {str(e)}")
+            msg = str(e)
+            if "timed out" in msg.lower() or "timeout" in msg.lower():
+                sec = self._http_timeout(repricer=True)
+                msg += (
+                    f"\n\n（処理が{sec}秒以内に終わりませんでした。"
+                    "設定タブの「タイムアウト(秒)」を大きくして再試行してください。）"
+                )
+            raise Exception(f"価格改定実行に失敗しました: {msg}")
     
     def _simulate_repricer_preview(self, csv_data: pd.DataFrame) -> Dict[str, Any]:
         """価格改定プレビューのシミュレーション"""

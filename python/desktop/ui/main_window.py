@@ -19,6 +19,7 @@ from typing import Literal
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSettings
 from PySide6.QtGui import QAction, QKeySequence
 import subprocess
+import sys
 import threading
 import time
 
@@ -37,26 +38,57 @@ class APIServerThread(QThread):
         self.process = None
         
     def run(self):
-        """FastAPIサーバーの起動"""
+        """FastAPIサーバーの起動（python/app.py を正しい cwd で実行）"""
         try:
-            # FastAPIサーバーを起動
-            # pythonディレクトリに移動してから起動
             import os
+            import requests
+
             project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
             python_dir = os.path.join(project_root, "python")
-            
-            self.process = subprocess.Popen([
-                "python", "-m", "uvicorn", 
-                "app:app", 
-                "--host", "localhost", 
-                "--port", "8000",
-                "--reload"
-            ], cwd=python_dir)  # pythonディレクトリに移動
-            
-            # サーバー起動待機
-            time.sleep(3)
-            self.server_started.emit()
-            
+            app_py = os.path.join(python_dir, "app.py")
+            if not os.path.isfile(app_py):
+                self.server_error.emit(f"app.py が見つかりません:\n{app_py}")
+                return
+
+            self.process = subprocess.Popen(
+                [sys.executable, app_py],
+                cwd=python_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+
+            health_url = "http://127.0.0.1:8000/health"
+            for _ in range(60):
+                if self.process.poll() is not None:
+                    tail = ""
+                    if self.process.stdout:
+                        try:
+                            tail = self.process.stdout.read() or ""
+                        except Exception:
+                            pass
+                    tail = tail[-2000:] if tail else "(ログなし)"
+                    self.server_error.emit(
+                        "FastAPIプロセスがすぐ終了しました。\n"
+                        "・別の黒い画面で API を起動していないか確認\n"
+                        "・8000番ポートが他アプリで使われていないか確認\n\n"
+                        f"ログ末尾:\n{tail}"
+                    )
+                    return
+                try:
+                    if requests.get(health_url, timeout=1).status_code == 200:
+                        self.server_started.emit()
+                        return
+                except Exception:
+                    pass
+                time.sleep(0.5)
+
+            self.server_error.emit(
+                "起動後30秒以内に API に接続できませんでした。\n"
+                f"確認: ブラウザで {health_url} を開いてください。"
+            )
         except Exception as e:
             self.server_error.emit(str(e))
     
@@ -550,17 +582,28 @@ class MainWindow(QMainWindow):
         self.move(x, y)
         
     def check_api_connection(self):
-        """API接続状況のチェック"""
+        """API接続状況のチェック（/health へ実際に問い合わせ）"""
+        if not getattr(self, "api_status_label", None):
+            return
+        self.api_status_label.setText("API: 確認中…")
+        self.api_status_label.setStyleSheet("color: gray;")
+        QTimer.singleShot(0, self._refresh_api_status_label)
+
+    def _refresh_api_status_label(self):
+        """FastAPI /health の応答でステータスバーを更新"""
         try:
-            # API接続テスト（ダミー実装）
-            if self.api_client:
+            if not self.api_client:
+                self.api_status_label.setText("API: 未接続")
+                self.api_status_label.setStyleSheet("color: red;")
+                return
+            if self.api_client.test_connection():
                 self.api_status_label.setText("API: 接続済み")
                 self.api_status_label.setStyleSheet("color: green;")
             else:
                 self.api_status_label.setText("API: 未接続")
                 self.api_status_label.setStyleSheet("color: red;")
-        except Exception as e:
-            self.api_status_label.setText(f"API: エラー ({str(e)})")
+        except Exception:
+            self.api_status_label.setText("API: エラー")
             self.api_status_label.setStyleSheet("color: red;")
     
     # メニューアクションの実装
@@ -655,9 +698,25 @@ class MainWindow(QMainWindow):
                 self.status_label.setText("API接続テスト失敗")
                 self.api_status_label.setText("API: 接続失敗")
                 self.api_status_label.setStyleSheet("color: red;")
-                QMessageBox.warning(self, "API接続テスト", "FastAPIサーバーに接続できませんでした")
+                base = getattr(self.api_client, "base_url", "http://127.0.0.1:8000")
+                QMessageBox.warning(
+                    self,
+                    "API接続テスト",
+                    "FastAPIサーバーに接続できませんでした。\n\n"
+                    f"接続先: {base}/health\n\n"
+                    "確認:\n"
+                    "1) ツール → FastAPIサーバー起動（または python フォルダで python app.py）\n"
+                    "2) 黒い画面を2つ開いていないか（8000番の取り合い）\n"
+                    "3) 設定の API URL が http://127.0.0.1:8000 か\n"
+                    "4) 価格改定プレビュー処理中は数十秒かかることがあります（完了まで待つ）",
+                )
         except Exception as e:
-            QMessageBox.warning(self, "API接続エラー", f"API接続に失敗しました:\n{str(e)}")
+            base = getattr(self.api_client, "base_url", "http://127.0.0.1:8000")
+            QMessageBox.warning(
+                self,
+                "API接続エラー",
+                f"API接続に失敗しました:\n{str(e)}\n\n接続先: {base}/health",
+            )
             
     def api_test_completed(self):
         """API接続テスト完了"""
@@ -673,8 +732,11 @@ class MainWindow(QMainWindow):
                 if 'url' in api_settings:
                     self.api_client.base_url = api_settings['url']
                 if 'timeout' in api_settings:
-                    # タイムアウト設定の適用（必要に応じて実装）
-                    pass
+                    try:
+                        self.api_client.request_timeout = max(5, int(api_settings['timeout']))
+                    except (TypeError, ValueError):
+                        pass
+                self.check_api_connection()
             
             # その他の設定変更処理
             self.status_label.setText("設定が更新されました")

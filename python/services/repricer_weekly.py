@@ -9,10 +9,7 @@ from pathlib import Path
 from core.config import CONFIG_PATH
 from core.csv_utils import normalize_dataframe_for_cp932
 
-try:
-    from desktop.utils.repricer_ladder_table import band_start_day_for_period_end
-except ImportError:
-    from utils.repricer_ladder_table import band_start_day_for_period_end  # type: ignore
+from utils.repricer_ladder_core import band_start_day_for_period_end
 
 # アクション名の日本語マッピング
 ACTION_NAMES_JP = {
