@@ -2593,3 +2593,25 @@
 
 **最終更新**: 2026-05-15
 **更新者**: Agentモード（実装）
+
+### 2026-06-04（ルート選択タブ名変更・テンプレ生成時の店舗備考同期の安定化）
+- **チャット**: Agentモード（実装）
+- **内容**:
+  1. **ルートタブ UI**  
+     - サブタブ名「ルート登録」→「ルート選択」（`main_window.py` / `route_management_widget.py`）。
+  2. **ルート選択＞テンプレート生成と店舗マスタ備考**  
+     - 生成前に店舗訪問テーブルの備考列を店舗コードで特定し、`stores.notes`（データベース管理＞店舗マスタ＞店舗一覧の備考列）へ**上書き**保存。旧データ用 `custom_fields.notes` も同一文字列へ同期（`store_db.set_store_notes_by_code`）。  
+     - Excel 出力はテーブル備考を優先（空欄時はマスタ備考）。マスタ＋テーブルのマージ結合は廃止し重複・不整合を防止。  
+     - 「選択ルート読み込み」「店舗マスタから追加」で備考列をマスタから表示。保存済みルート読込時もマスタ備考を優先反映。
+- **変更ファイル**:
+  - `python/desktop/ui/main_window.py`
+  - `python/desktop/ui/route_management_widget.py`
+  - `python/desktop/ui/route_summary_widget.py`
+  - `python/desktop/database/store_db.py`
+  - `docs/cursor_development_progress.md`
+- **次回**:
+  - 店舗マスタタブを開いたままテンプレ生成した場合の一覧即時更新（必要なら `load_stores` 連携）。
+  - 店舗コード未登録行の備考保存 UX（警告ダイアログ等）の検討。
+
+**最終更新**: 2026-06-04
+**更新者**: Agentモード（実装）

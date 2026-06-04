@@ -484,6 +484,27 @@ class StoreDatabase:
         
         conn.commit()
         return cursor.rowcount > 0
+
+    def set_store_notes_overwrite(self, store_id: int, notes: str) -> bool:
+        """店舗備考を上書き（stores.notes と custom_fields.notes を同一内容に揃える）"""
+        notes_text = notes if notes is not None else ""
+        if not self.update_store_notes(store_id, notes_text):
+            return False
+        store = self.get_store(store_id)
+        if not store:
+            return True
+        custom_fields = dict(store.get("custom_fields") or {})
+        if str(custom_fields.get("notes", "") or "") == notes_text:
+            return True
+        custom_fields["notes"] = notes_text
+        return self.update_store(store_id, {"custom_fields": custom_fields})
+
+    def set_store_notes_by_code(self, code: str, notes: str) -> bool:
+        """店舗コード／仕入れ先コードで店舗を特定し備考を上書き"""
+        store = self.get_store_by_code((code or "").strip())
+        if not store:
+            return False
+        return self.set_store_notes_overwrite(int(store["id"]), notes)
     
     def update_registration_number(self, store_id: int, registration_number: str) -> bool:
         """店舗の登録番号のみを更新"""

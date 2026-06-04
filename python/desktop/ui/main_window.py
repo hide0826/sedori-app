@@ -369,7 +369,7 @@ class MainWindow(QMainWindow):
             from ui.route_list_widget import RouteListWidget
             route_tabs = QTabWidget()
             self.route_summary_widget = RouteSummaryWidget(self.api_client, inventory_widget=self.inventory_widget)
-            route_tabs.addTab(self.route_summary_widget, "ルート登録")
+            route_tabs.addTab(self.route_summary_widget, "ルート選択")
             self.route_list_widget = RouteListWidget()
             route_tabs.addTab(self.route_list_widget, "ルートサマリー")
             self.route_summary_widget.data_saved.connect(self.route_list_widget.load_routes)

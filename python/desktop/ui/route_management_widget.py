@@ -31,7 +31,7 @@ class RouteManagementWidget(QWidget):
 
         # ルート登録
         self.route_summary_widget = RouteSummaryWidget(api_client, inventory_widget=inventory_widget)
-        self.inner_tabs.addTab(self.route_summary_widget, "ルート登録")
+        self.inner_tabs.addTab(self.route_summary_widget, "ルート選択")
 
         # ルートサマリー一覧
         self.route_list_widget = RouteListWidget()

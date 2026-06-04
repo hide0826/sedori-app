@@ -477,6 +477,11 @@ class RouteSummaryWidget(QWidget):
                     star_widget = StarRatingWidget(self.store_visits_table, rating=0, star_size=14)
                     star_widget.rating_changed.connect(lambda rating, r=row: self.on_star_rating_changed(r, rating))
                     self.store_visits_table.setCellWidget(row, 9, star_widget)
+                    notes_text = self._resolve_store_master_notes(store)
+                    notes_item = QTableWidgetItem(notes_text)
+                    if notes_text:
+                        notes_item.setToolTip(notes_text)
+                    self.store_visits_table.setItem(row, 10, notes_item)
                 self.update_visit_order()
                 self.save_store_order()
                 self.recalc_travel_times()
@@ -768,6 +773,46 @@ class RouteSummaryWidget(QWidget):
                     seen.append(s)
         return ", ".join(seen)
 
+    @staticmethod
+    def _resolve_store_master_notes(store_info: Optional[Dict[str, Any]]) -> str:
+        """stores.notes と custom_fields.notes を読み取り用に1つにまとめる（旧データ互換）。"""
+        if not store_info:
+            return ""
+        sql_notes = str(store_info.get("notes", "") or "").strip()
+        cf_notes = str((store_info.get("custom_fields") or {}).get("notes", "") or "").strip()
+        return RouteSummaryWidget._merge_notes_for_template_export(sql_notes, cf_notes)
+
+    @staticmethod
+    def _visit_store_code_from_dict(store: Dict[str, Any]) -> str:
+        code = (store.get("store_code") or "").strip()
+        if code:
+            return code
+        return (store.get("supplier_code") or "").strip()
+
+    def _table_notes_at_row(self, row: int) -> str:
+        notes_item = self.store_visits_table.item(row, 10)
+        if not notes_item:
+            return ""
+        return notes_item.text().strip()
+
+    def _persist_visit_table_notes_to_store_master(self) -> tuple[int, int]:
+        """店舗訪問テーブルの備考列を店舗マスタ（stores.notes）へ上書き保存する。"""
+        updated = 0
+        skipped = 0
+        for row in range(self.store_visits_table.rowCount()):
+            code_item = self.store_visits_table.item(row, 1)
+            store_code = code_item.text().strip() if code_item else ""
+            if not store_code:
+                skipped += 1
+                continue
+            table_notes = self._table_notes_at_row(row)
+            if self.store_db.set_store_notes_by_code(store_code, table_notes):
+                updated += 1
+            else:
+                skipped += 1
+                print(f"店舗マスタ備考の上書きをスキップ（店舗未登録）: {store_code}")
+        return updated, skipped
+
     def get_stores_from_table(self) -> List[Dict[str, Any]]:
         """テーブルから訪問順序に基づいて店舗一覧を取得"""
         try:
@@ -816,8 +861,7 @@ class RouteSummaryWidget(QWidget):
             for data in table_data:
                 store_code = data['store_code']
                 row = data['row']
-                notes_item = table.item(row, 10)
-                table_notes = notes_item.text().strip() if notes_item else ''
+                table_notes = self._table_notes_at_row(row)
                 store_info = self.store_db.get_store_by_code(store_code)
                 if store_info:
                     # 店舗マスタの情報をコピー
@@ -825,11 +869,11 @@ class RouteSummaryWidget(QWidget):
                     # テーブルの店舗名を優先（ユーザーが変更している可能性があるため）
                     if data['store_name']:
                         store['store_name'] = data['store_name']
-                    # 店舗マスタ備考（stores.notes と custom_fields.notes）とテーブル備考列をマージ
-                    sql_notes = str(store.get("notes", "") or "").strip()
-                    cf_notes = str((store.get("custom_fields") or {}).get("notes", "") or "").strip()
-                    master_notes = self._merge_notes_for_template_export(sql_notes, cf_notes)
-                    store["notes"] = self._merge_notes_for_template_export(master_notes, table_notes)
+                    # テーブル備考を正とする（空のときはマスタ備考をExcelへ）
+                    if table_notes:
+                        store["notes"] = table_notes
+                    else:
+                        store["notes"] = self._resolve_store_master_notes(store_info)
                     stores.append(store)
                 else:
                     # 店舗マスタにない場合はテーブルの情報のみで作成
@@ -837,7 +881,7 @@ class RouteSummaryWidget(QWidget):
                         'store_code': store_code,
                         'supplier_code': store_code,  # 互換性のため
                         'store_name': data['store_name'],
-                        'notes': self._merge_notes_for_template_export(table_notes),
+                        'notes': table_notes,
                     }
                     stores.append(store)
             
@@ -1657,6 +1701,13 @@ class RouteSummaryWidget(QWidget):
             stores = []
             store_codes = []
             if route_name:
+                # テーブル備考を店舗マスタへ上書き（次回読み込み・店舗一覧タブと同期）
+                if self.store_visits_table.rowCount() > 0:
+                    notes_updated, notes_skipped = self._persist_visit_table_notes_to_store_master()
+                    print(
+                        f"店舗マスタ備考を上書き: {notes_updated}件"
+                        + (f"（スキップ {notes_skipped}件）" if notes_skipped else "")
+                    )
                 # テーブルから訪問順序を取得（テーブルにデータがある場合）
                 table_stores = self.get_stores_from_table()
                 if table_stores:
@@ -1672,17 +1723,11 @@ class RouteSummaryWidget(QWidget):
                     stores = self.get_stores_for_route(route_name)
                     # 店舗マスタの備考欄を取得してstoresに追加
                     for store in stores:
-                        # 店舗コード(store_code)を優先し、互換性のため仕入れ先コードも許容
-                        any_code = store.get('store_code') or store.get('supplier_code')
+                        any_code = self._visit_store_code_from_dict(store)
                         if any_code:
                             store_info = self.store_db.get_store_by_code(any_code)
                             if store_info:
-                                custom_fields = store_info.get('custom_fields', {})
-                                sql_notes = str(store_info.get('notes', '') or '').strip()
-                                cf_notes = str(custom_fields.get('notes', '') or '').strip()
-                                store['notes'] = self._merge_notes_for_template_export(
-                                    sql_notes, cf_notes
-                                )
+                                store['notes'] = self._resolve_store_master_notes(store_info)
                     store_codes = [
                         (store.get('store_code') or store.get('supplier_code'))
                         for store in stores
@@ -2072,7 +2117,19 @@ class RouteSummaryWidget(QWidget):
                     star_widget = StarRatingWidget(self.store_visits_table, rating=rating_value, star_size=14)
                     star_widget.rating_changed.connect(lambda rating, r=i: self.on_star_rating_changed(r, rating))
                     self.store_visits_table.setCellWidget(i, 9, star_widget)
-                    self.store_visits_table.setItem(i, 10, QTableWidgetItem(v.get('store_notes','') or ''))
+                    code_for_notes = v.get('store_code', '') or ''
+                    store_notes = v.get('store_notes', '') or ''
+                    if code_for_notes:
+                        try:
+                            master_row = self.store_db.get_store_by_code(code_for_notes)
+                            if master_row:
+                                store_notes = self._resolve_store_master_notes(master_row) or store_notes
+                        except Exception:
+                            pass
+                    notes_item = QTableWidgetItem(store_notes)
+                    if store_notes:
+                        notes_item.setToolTip(store_notes)
+                    self.store_visits_table.setItem(i, 10, notes_item)
             finally:
                 self.store_visits_table.blockSignals(False)
             
@@ -2193,10 +2250,15 @@ class RouteSummaryWidget(QWidget):
                 star_widget.rating_changed.connect(lambda rating, r=row: self.on_star_rating_changed(r, rating))
                 self.store_visits_table.setCellWidget(row, 9, star_widget)
                 
-                # 備考（店舗マスタの備考欄から取得）
-                notes = store.get('notes', '') or ''
+                # 備考（店舗マスタの備考欄から取得。旧 custom_fields.notes も統合）
+                any_code = _get_visit_store_code(store)
+                store_info = self.store_db.get_store_by_code(any_code) if any_code else None
+                notes = self._resolve_store_master_notes(store_info) if store_info else (
+                    store.get('notes', '') or ''
+                )
                 notes_item = QTableWidgetItem(notes)
-                notes_item.setToolTip(notes)  # ツールチップで全文表示
+                if notes:
+                    notes_item.setToolTip(notes)
                 self.store_visits_table.setItem(row, 10, notes_item)
             
             # 訪問順序を再設定
