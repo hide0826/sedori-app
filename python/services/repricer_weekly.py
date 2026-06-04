@@ -334,8 +334,8 @@ def _to_float_or_none_strict(value: Any) -> float:
     try:
         if value is None:
             return None
-        s = str(value).strip()
-        if s == "":
+        s = str(value).strip().replace(",", "")
+        if s == "" or s.lower() in ("nan", "none"):
             return None
         return float(s)
     except (TypeError, ValueError):
@@ -343,15 +343,25 @@ def _to_float_or_none_strict(value: Any) -> float:
 
 
 def _csv_profit_from_inventory_row(row: Any) -> float:
-    """在庫CSVの profit 列（見込み利益）を数値化。欠損・不正は0。"""
+    """在庫CSVの現在見込み利益を取得。profit 欠損時は price/cost/手数料から補完する。"""
     try:
         if row is None:
             return 0.0
-        v = row.get("profit") if hasattr(row, "get") else None
-        if v is None:
-            return 0.0
-        return float(v)
-    except (TypeError, ValueError):
+        get_value = row.get if hasattr(row, "get") else (lambda _key, _default=None: _default)
+
+        profit = _to_float_or_none_strict(get_value("profit"))
+        if profit not in (None, 0):
+            return float(profit)
+
+        price = _to_float_or_none_strict(get_value("price"))
+        cost = _to_float_or_none_strict(get_value("cost"))
+        if price is None or cost is None:
+            return float(profit or 0.0)
+
+        amazon_fee = _to_float_or_none_strict(get_value("amazon-fee")) or 0.0
+        shipping_price = _to_float_or_none_strict(get_value("shipping-price")) or 0.0
+        return float(price - cost - amazon_fee - shipping_price)
+    except Exception:
         return 0.0
 
 

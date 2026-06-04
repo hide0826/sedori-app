@@ -57,7 +57,6 @@ try:
         COL_TOTAL_COST,
         augment_purchase_cost_records,
         fee_storage_value,
-        format_money_display,
         is_fee_amount_column,
     )
 except ImportError:
@@ -67,7 +66,6 @@ except ImportError:
         COL_TOTAL_COST,
         augment_purchase_cost_records,
         fee_storage_value,
-        format_money_display,
         is_fee_amount_column,
     )
 
@@ -80,8 +78,64 @@ except ImportError:
         calc_elapsed_days_for_purchase_record as _calc_elapsed_days_for_purchase_record,
     )
 
+try:
+    from desktop.services.purchase_channel_cost import is_amazon_sales_channel
+except ImportError:
+    from services.purchase_channel_cost import is_amazon_sales_channel  # type: ignore
+
 # 仕入DBでステータスが「販売中」のときの既定ステータス理由（在庫・価格改定CSV連動）
 _PURCHASE_STATUS_REASON_SELLING_INVENTORY_CSV = "在庫CSV連動:"
+
+# 仕入DBテーブルで右寄せ・カンマなし表示にする数値列
+_PURCHASE_RIGHT_ALIGN_NUMERIC_HEADERS = frozenset({
+    "仕入れ個数",
+    "仕入れ価格",
+    "販売予定価格",
+    "見込み利益",
+    "損益分岐点",
+    "想定利益率",
+    "想定ROI",
+    "経過日数",
+    "TP0",
+    "TP1",
+    "TP2",
+    "TP3",
+    "プラットフォーム手数料",
+    "Amazon手数料",
+    "出荷費用",
+    "費用合計",
+    "在庫保管手数料",
+})
+
+
+def _purchase_numeric_cell_text(header: str, value: Any) -> str:
+    """仕入DBテーブル用の数値表示（カンマ区切りなし）。"""
+    if value is None:
+        return ""
+    raw = str(value).strip()
+    if not raw:
+        return ""
+    text = raw.replace(",", "")
+    if header in ("想定利益率", "想定ROI"):
+        try:
+            return f"{float(text):.2f}"
+        except (ValueError, TypeError):
+            return ""
+    if header == "仕入れ個数":
+        try:
+            return str(int(round(float(text))))
+        except (ValueError, TypeError):
+            return raw
+    try:
+        return str(int(round(float(text))))
+    except (ValueError, TypeError):
+        return raw
+
+
+def _make_purchase_numeric_table_item(header: str, value: Any) -> QTableWidgetItem:
+    item = QTableWidgetItem(_purchase_numeric_cell_text(header, value))
+    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    return item
 
 # 仕入DB検索：ステータス複数選択（表示ラベル, 内部コード）— テーブル内コンボと同一順
 _PURCHASE_STATUS_FILTER_OPTIONS: Tuple[Tuple[str, str], ...] = (
@@ -95,6 +149,45 @@ _PURCHASE_STATUS_FILTER_OPTIONS: Tuple[Tuple[str, str], ...] = (
     ("販売済み", "sold"),
     ("在庫専用", "inventory_only"),
 )
+
+# 仕入DB検索：販売チャネル・発送方法（表示ラベル, 内部コード）
+_PURCHASE_CHANNEL_FILTER_OPTIONS: Tuple[Tuple[str, str], ...] = (
+    ("Amazon自己発送", "amazon_mfn"),
+    ("フリマ等", "non_amazon"),
+)
+
+
+def _purchase_record_sales_channel(record: Dict[str, Any]) -> str:
+    return str(
+        record.get("販売チャネル")
+        or record.get("sales_channel")
+        or ""
+    ).strip()
+
+
+def _purchase_record_shipping_method(record: Dict[str, Any]) -> str:
+    return str(
+        record.get("発送方法")
+        or record.get("shippingMethod")
+        or record.get("shipping_method")
+        or ""
+    ).strip()
+
+
+def purchase_record_matches_amazon_mfn_filter(record: Dict[str, Any]) -> bool:
+    """販売チャネルが Amazon かつ発送方法が自己発送。"""
+    if not is_amazon_sales_channel(_purchase_record_sales_channel(record)):
+        return False
+    return _purchase_record_shipping_method(record) == "自己発送"
+
+
+def purchase_record_matches_non_amazon_channel_filter(record: Dict[str, Any]) -> bool:
+    """販売チャネルが Amazon 以外（メルカリ・ヤフオク等）。"""
+    channel = _purchase_record_sales_channel(record)
+    if not channel:
+        return False
+    return not is_amazon_sales_channel(channel)
+
 
 from database.product_db import ProductDatabase
 from database.warranty_db import WarrantyDatabase
@@ -522,10 +615,25 @@ class ProductWidget(QWidget):
         
         # デフォルトのベース列（inventory_widgetがない場合）
         if not base:
+            try:
+                from services.purchase_cost_calc import (
+                    COL_PLATFORM_FEE,
+                    COL_SHIPPING,
+                    COL_TOTAL_COST,
+                )
+            except ImportError:
+                from desktop.services.purchase_cost_calc import (  # type: ignore
+                    COL_PLATFORM_FEE,
+                    COL_SHIPPING,
+                    COL_TOTAL_COST,
+                )
             base = [
                 "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
-                "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "コメント",
-                "発送方法", "販売チャネル", "仕入先", "コンディション説明"
+                "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点",
+                "想定利益率", "想定ROI", "コメント",
+                "発送方法", "販売チャネル",
+                COL_PLATFORM_FEE, COL_SHIPPING, COL_TOTAL_COST,
+                "仕入先", "コンディション説明",
             ]
 
         # TP0〜TP3 は末尾に配置（3-6-9価格改定専用のため通常業務列から分離）
@@ -2427,6 +2535,7 @@ class ProductWidget(QWidget):
     def _build_purchase_status_collapsible_filter(self) -> QWidget:
         """仕入DB検索：ステータスを複数選択でき、パネルは折りたたみ可能。"""
         self._purchase_status_checkboxes: List[Tuple[str, QCheckBox]] = []
+        self._purchase_channel_filter_checkboxes: List[Tuple[str, QCheckBox]] = []
         self._purchase_status_filter_apply_timer = QTimer(self)
         self._purchase_status_filter_apply_timer.setSingleShot(True)
         self._purchase_status_filter_apply_timer.timeout.connect(self.filter_purchase_records)
@@ -2447,7 +2556,10 @@ class ProductWidget(QWidget):
         self._purchase_status_filter_toggle.setArrowType(Qt.DownArrow)
         self._purchase_status_filter_toggle.toggled.connect(self._on_purchase_status_filter_section_toggled)
         head.addWidget(self._purchase_status_filter_toggle, 0)
-        hint = QLabel("チェックしたものだけ表示（未選択＝全ステータス）")
+        hint = QLabel(
+            "チェックした条件だけ表示（ステータス未選択＝全ステータス、"
+            "チャネル未選択＝チャネル条件なし）"
+        )
         hint.setStyleSheet("color: #b0b0b0; font-size: 11px;")
         hint.setWordWrap(False)
         head.addWidget(hint, 0)
@@ -2490,8 +2602,23 @@ class ProductWidget(QWidget):
             cb.stateChanged.connect(self._on_purchase_status_filter_checkbox_changed)
             self._purchase_status_checkboxes.append((code, cb))
             row.addWidget(cb, 0)
+        sep = QLabel("｜")
+        sep.setStyleSheet("color: #666666; padding: 0 4px;")
+        row.addWidget(sep, 0)
+        for label, code in _PURCHASE_CHANNEL_FILTER_OPTIONS:
+            cb = QCheckBox(label)
+            cb.setToolTip(
+                "Amazon自己発送: 販売チャネルが Amazon かつ発送方法が自己発送。\n"
+                "フリマ等: 販売チャネルが Amazon 以外（メルカリ・ヤフオク等）。"
+            )
+            cb.stateChanged.connect(self._on_purchase_status_filter_checkbox_changed)
+            self._purchase_channel_filter_checkboxes.append((code, cb))
+            row.addWidget(cb, 0)
         clear_btn = QPushButton("クリア")
-        clear_btn.setToolTip("ステータスのチェックだけ外します（他の検索条件はそのまま）")
+        clear_btn.setToolTip(
+            "ステータス・チャネル（Amazon自己発送／フリマ等）のチェックだけ外します"
+            "（日付・SKU等の検索欄はそのまま）"
+        )
         clear_btn.setFixedSize(72, 22)
         clear_btn.setStyleSheet("font-size: 11px; padding: 0 4px;")
         clear_btn.clicked.connect(self._on_purchase_status_filter_clear_clicked)
@@ -2522,8 +2649,32 @@ class ProductWidget(QWidget):
                 codes.add(str(code).lower())
         return codes
 
+    def _purchase_channel_filter_selected_codes(self) -> set:
+        codes: set = set()
+        for code, cb in getattr(self, "_purchase_channel_filter_checkboxes", []):
+            if cb.isChecked():
+                codes.add(str(code).lower())
+        return codes
+
+    def _purchase_record_matches_channel_filters(
+        self, record: Dict[str, Any], selected: set
+    ) -> bool:
+        if not selected:
+            return True
+        if "amazon_mfn" in selected and purchase_record_matches_amazon_mfn_filter(record):
+            return True
+        if "non_amazon" in selected and purchase_record_matches_non_amazon_channel_filter(
+            record
+        ):
+            return True
+        return False
+
     def _reset_purchase_status_filter_checkboxes(self) -> None:
         for _, cb in getattr(self, "_purchase_status_checkboxes", []):
+            cb.blockSignals(True)
+            cb.setChecked(False)
+            cb.blockSignals(False)
+        for _, cb in getattr(self, "_purchase_channel_filter_checkboxes", []):
             cb.blockSignals(True)
             cb.setChecked(False)
             cb.blockSignals(False)
@@ -2652,7 +2803,7 @@ class ProductWidget(QWidget):
     def _refresh_purchase_repricing_table_cells_for_record(
         self, record: Dict[str, Any]
     ) -> None:
-        """仕入行編集反映後、該当SKUの月別・改定価格・価格改定セルのみ即時更新する。"""
+        """仕入行編集反映後、該当SKUの改定・手数料・利益系セルを即時更新する。"""
         if not hasattr(self, "purchase_columns") or not hasattr(self, "purchase_table"):
             return
         sku = str(record.get("SKU") or record.get("sku") or "").strip()
@@ -2660,23 +2811,44 @@ class ProductWidget(QWidget):
             return
         master_rec = self._purchase_record_by_sku(sku) or record
 
-        target_headers = ("月別", "改定価格", "価格改定")
-        col_indices: Dict[str, int] = {}
-        for h in target_headers:
-            try:
-                col_indices[h] = self.purchase_columns.index(h)
-            except ValueError:
-                return
+        repricing_headers = ("月別", "改定価格", "価格改定")
+        field_headers = (
+            "発送方法",
+            "販売チャネル",
+            "プラットフォーム手数料",
+            "Amazon手数料",
+            "出荷費用",
+            "費用合計",
+            "見込み利益",
+            "損益分岐点",
+            "想定利益率",
+            "想定ROI",
+        )
 
         self.purchase_table.setUpdatesEnabled(False)
         try:
             for row in range(self.purchase_table.rowCount()):
                 if self._purchase_table_row_sku(row) != sku:
                     continue
-                for h in target_headers:
-                    col = col_indices[h]
-                    item = self._make_purchase_repricing_column_item(master_rec, h)
-                    self.purchase_table.setItem(row, col, item)
+                for h in repricing_headers:
+                    if h not in self.purchase_columns:
+                        continue
+                    col = self.purchase_columns.index(h)
+                    self.purchase_table.setItem(
+                        row, col, self._make_purchase_repricing_column_item(master_rec, h)
+                    )
+                for h in field_headers:
+                    if h not in self.purchase_columns:
+                        continue
+                    col = self.purchase_columns.index(h)
+                    value = self._get_record_value(master_rec, [h])
+                    if h in _PURCHASE_RIGHT_ALIGN_NUMERIC_HEADERS:
+                        self.purchase_table.setItem(
+                            row, col, _make_purchase_numeric_table_item(h, value)
+                        )
+                    else:
+                        text = "" if value is None else str(value).strip()
+                        self.purchase_table.setItem(row, col, QTableWidgetItem(text))
         finally:
             self.purchase_table.setUpdatesEnabled(True)
             self.purchase_table.viewport().update()
@@ -2705,6 +2877,8 @@ class ProductWidget(QWidget):
             return True
         if self._purchase_status_filter_selected_codes():
             return True
+        if self._purchase_channel_filter_selected_codes():
+            return True
         if self._purchase_repricing_filters_active():
             return True
         return False
@@ -2727,6 +2901,7 @@ class ProductWidget(QWidget):
         asin_query = self.purchase_search_asin.text().strip().lower()
         jan_query = self.purchase_search_jan.text().strip().lower()
         status_selected = self._purchase_status_filter_selected_codes()
+        channel_selected = self._purchase_channel_filter_selected_codes()
 
         filtered_records = self._purchase_master_records()
 
@@ -2758,6 +2933,13 @@ class ProductWidget(QWidget):
             filtered_records = [
                 r for r in filtered_records
                 if self._sync_purchase_status_norm(r) in status_selected
+            ]
+
+        if channel_selected:
+            filtered_records = [
+                r
+                for r in filtered_records
+                if self._purchase_record_matches_channel_filters(r, channel_selected)
             ]
 
         if getattr(self, "purchase_filter_ladder_only", None) and self.purchase_filter_ladder_only.isChecked():
@@ -2961,6 +3143,17 @@ class ProductWidget(QWidget):
         "発送方法",
         "shippingMethod",
         "shipping_method",
+        "プラットフォーム手数料",
+        "Amazon手数料",
+        "出荷費用",
+        "費用合計",
+        "見込み利益",
+        "expected_profit",
+        "損益分岐点",
+        "想定利益率",
+        "想定ROI",
+        "expected_margin",
+        "expected_roi",
     )
 
     def apply_purchase_row_edit_to_memory(
@@ -3749,6 +3942,7 @@ class ProductWidget(QWidget):
                         item = QTableWidgetItem(f"{value_float:.2f}")
                     else:
                         item = QTableWidgetItem("")
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 elif header in (
                     "仕入れ価格", "見込み利益", COL_PLATFORM_FEE, COL_SHIPPING, COL_TOTAL_COST,
                     "在庫保管手数料",
@@ -3767,7 +3961,7 @@ class ProductWidget(QWidget):
                             stored = fee_storage_value(rounded_yen)
                             record[header] = stored
                             item = QTableWidgetItem(
-                                format_money_display(rounded_yen, zero_as_empty=True)
+                                str(rounded_yen) if rounded_yen else ""
                             )
                         else:
                             record[header] = rounded_yen
@@ -4004,7 +4198,10 @@ class ProductWidget(QWidget):
                     item.setFlags(item.flags() | Qt.ItemIsEditable)
                     # 編集時の処理は、itemChangedシグナルで処理（後で接続）
                 else:
-                    item = QTableWidgetItem(str(value))
+                    if header in _PURCHASE_RIGHT_ALIGN_NUMERIC_HEADERS:
+                        item = _make_purchase_numeric_table_item(header, value)
+                    else:
+                        item = QTableWidgetItem(str(value))
                     # SKUはUserRoleにフル値を保持（表示幅で...になっても保存時はフルで使う）
                     if header == "SKU" and value is not None and str(value).strip():
                         item.setData(Qt.UserRole, str(value).strip())

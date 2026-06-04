@@ -1,3 +1,26 @@
+## 2026-06-03 仕入DB手数料・利益編集・価格改定手動上書き・検索フィルタ
+
+- **目的**: 仕入行編集から手数料・チャネル・利益を仕入DBへ反映し、価格改定プレビュー連携とプライスター手動価格を安定化。一覧の数値表示とチャネル絞り込みを整備。
+- **仕入行編集**（`purchase_row_edit_dialog.py`, `purchase_channel_cost.py` 新規）
+  - プラットフォーム手数料・出荷費用・費用合計（自動）の編集。Amazon以外は発送方法を自己発送に自動、フリマは設定の手数料率×販売予定で手数料計算。
+  - 販売チャネル・発送方法変更で見込み利益・想定利益率/ROIを再計算。「仕入DBに反映」でマスター・スナップショット・SQLite（TP・channel・margin/roi）へ保存。
+  - 価格改定プレビュー連携（現在TPフェーズ・改定予定価格・Trace表示）。FBA料金シミュレーター（`settings_helper.get_amazon_fba_simulator_url`）ボタン追加。
+- **価格改定・手動上書き**（`repricer_widget.py`, `repricer_weekly.py`）
+  - プライスター送付価格の手動上書き（SKU→円）。CSV保存時 `price` に優先。プレビュー再実行後も `new_price`・赤値/高値・reason を維持（TP以下は週次ロジックで自動値上げしない仕様は維持）。
+- **仕入DB一覧**（`product_widget.py`）
+  - 反映後の即時更新で見込み利益・損益分岐点がカンマ付き左寄せになる不具合を修正（数値列はカンマなし・右寄せで統一）。
+  - 検索「ステータスで絞り込み」に **Amazon自己発送**（Amazon＋自己発送）・**フリマ等**（Amazon以外チャネル）を追加。ステータス・チャネル条件は AND、チャネル2種は OR。
+- **変更ファイル**:
+  - `python/desktop/services/purchase_channel_cost.py`（新規）
+  - `python/desktop/ui/purchase_row_edit_dialog.py`
+  - `python/desktop/ui/product_widget.py`
+  - `python/desktop/ui/repricer_widget.py`
+  - `python/desktop/utils/settings_helper.py`
+  - `python/services/repricer_weekly.py`
+  - `docs/cursor_development_progress.md`
+- **リポジトリ**: sedori-app.github
+- **Git**: feat(desktop): 仕入DBの手数料・利益反映と価格改定手動上書き、チャネル絞り込み
+
 ## 2026-06-03 価格改定API接続安定化・仕入DB表示復旧
 
 - **目的**: 価格改定プレビュー時のAPI接続失敗・タイムアウト、仕入DBが1件だけ表示される問題を復旧する。

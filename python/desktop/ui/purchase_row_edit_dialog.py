@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -74,14 +75,31 @@ try:
         calc_elapsed_days_for_purchase_record,
         format_elapsed_days_for_purchase_record,
     )
+    from utils.settings_helper import get_amazon_fba_simulator_url
 except ImportError:
     from desktop.utils.purchase_elapsed_days import (  # type: ignore
         calc_elapsed_days_for_purchase_record,
         format_elapsed_days_for_purchase_record,
     )
+    from desktop.utils.settings_helper import get_amazon_fba_simulator_url  # type: ignore
 
 # ダークUI向け：TP0〜TP3 でラベル・入力・概算の色を分ける
 _TP_DIALOG_TIER_COLORS = ("#6ecff6", "#7ae495", "#f0c674", "#e8a0bf")
+_TP_BAND_END_DAYS = (90, 180, 270, 365)
+_TP_BAND_LABELS = {
+    "tp0": "TP0（〜90日帯）",
+    "tp1": "TP1（91〜180日帯）",
+    "tp2": "TP2（181〜270日帯）",
+    "tp3": "TP3（271日〜）",
+}
+_TRACE_LABELS_JP = {
+    0: "維持",
+    1: "FBA状態合わせ",
+    2: "状態合わせ",
+    3: "FBA最安値",
+    4: "最安値",
+    5: "カート価格",
+}
 # チェックボックス（OS標準の白ラベル背景で文字が消えるのを防ぐ）
 _CHECKBOX_INDICATOR_STYLE = (
     "QCheckBox::indicator { width: 18px; height: 18px; border: 1px solid #888888; "
@@ -181,6 +199,46 @@ def _style_tp_tier_text(color: str, *widgets: QWidget) -> None:
     for w in widgets:
         w.setStyleSheet(f"color: {color};")
 
+
+def _tp_band_from_days(days: int) -> Tuple[str, int, str]:
+    """経過日数から TP 帯キー・帯終端日・表示ラベルを返す。"""
+    if days <= 0 or days == -1:
+        return "tp0", 90, _TP_BAND_LABELS["tp0"]
+    if days <= 90:
+        return "tp0", 90, _TP_BAND_LABELS["tp0"]
+    if days <= 180:
+        return "tp1", 180, _TP_BAND_LABELS["tp1"]
+    if days <= 270:
+        return "tp2", 270, _TP_BAND_LABELS["tp2"]
+    return "tp3", 365, _TP_BAND_LABELS["tp3"]
+
+
+def _tp_tier_index_from_key(tp_key: str) -> Optional[int]:
+    mapping = {"tp0": 0, "tp1": 1, "tp2": 2, "tp3": 3}
+    return mapping.get(str(tp_key or "").strip().lower())
+
+
+def _format_trace_change_label(raw: Any) -> str:
+    if raw is None or str(raw).strip() == "":
+        return "-"
+    text = str(raw).strip()
+    if text in ("無し", "なし", "-"):
+        return "無し"
+    try:
+        trace_int = int(float(text))
+        return _TRACE_LABELS_JP.get(trace_int, text)
+    except (TypeError, ValueError):
+        return text
+
+
+def _has_repricer_preview_fields(snap: Dict[str, Any]) -> bool:
+    if not snap:
+        return False
+    for key in ("new_price", "action", "tp_target", "reason", "rule_action"):
+        if snap.get(key) not in (None, ""):
+            return True
+    return False
+
 try:
     from desktop.services.purchase_tp_autofill_369 import (
         ta_price_from_target_margin_percent,
@@ -198,6 +256,28 @@ try:
 except ImportError:
     from services.keepa_service import KeepaService  # type: ignore
     from ui.keepa_offer_detail_dialog import KeepaOfferDetailDialog  # type: ignore
+
+try:
+    from services.purchase_cost_calc import COL_PLATFORM_FEE, COL_SHIPPING, COL_TOTAL_COST, read_fee_fields
+    from services.purchase_channel_cost import (
+        apply_fee_values_to_record,
+        flea_fee_rate_percent_for_channel,
+        is_amazon_sales_channel,
+        platform_fee_from_sale_price,
+    )
+except ImportError:
+    from desktop.services.purchase_cost_calc import (  # type: ignore
+        COL_PLATFORM_FEE,
+        COL_SHIPPING,
+        COL_TOTAL_COST,
+        read_fee_fields,
+    )
+    from desktop.services.purchase_channel_cost import (  # type: ignore
+        apply_fee_values_to_record,
+        flea_fee_rate_percent_for_channel,
+        is_amazon_sales_channel,
+        platform_fee_from_sale_price,
+    )
 
 
 def _parse_number(val: Any) -> float:
@@ -318,6 +398,7 @@ class PurchaseRowEditDialog(QDialog):
         *,
         product_widget: Optional[QWidget] = None,
         csv_inventory_snapshot: Optional[Dict[str, Any]] = None,
+        repricer_widget: Optional[QWidget] = None,
     ):
         # parent=None で作成し、メイン画面を前面に出さない（編集時もブラウザが隠れないようにする）
         super().__init__(None)
@@ -327,6 +408,15 @@ class PurchaseRowEditDialog(QDialog):
         self._sku_suffix_rest: str = ""
         self._product_widget = product_widget if product_widget is not None else parent
         self._csv_inventory_snapshot = csv_inventory_snapshot or {}
+        self._repricer_widget = repricer_widget
+        self._manual_export_price_edit: Optional[QLineEdit] = None
+        self._fee_recalc_guard = False
+        self._platform_fee_spin: Optional[QSpinBox] = None
+        self._shipping_cost_spin: Optional[QSpinBox] = None
+        self._total_cost_lbl: Optional[QLabel] = None
+        self._profit_summary_lbl: Optional[QLabel] = None
+        self._margin_lbl: Optional[QLabel] = None
+        self._roi_lbl: Optional[QLabel] = None
         # 通常ウィンドウとして表示（最大化・最小化可）＋ Keepa 参照用に最前面
         self.setWindowFlags(
             Qt.Window
@@ -341,6 +431,7 @@ class PurchaseRowEditDialog(QDialog):
         self.resize(480, 560)
         self._positioned_at_topleft = False
         self._tp_field_sync_guard = False
+        self._tp_tier_widgets: Dict[int, List[QWidget]] = {}
         self._merge_ladder_from_db()
         self._setup_ui()
 
@@ -440,11 +531,6 @@ class PurchaseRowEditDialog(QDialog):
             "仕入スナップショット／仕入データに保存されている販売予定価格（仕入時点の見込み）です。"
         )
         info_layout.addRow("販売予定価格（仕入時）:", planned_lbl)
-        profit_db_lbl = QLabel(profit_text)
-        profit_db_lbl.setToolTip(
-            "仕入スナップショット／仕入データの見込み利益と、販売予定価格に対する利益率です。"
-        )
-        info_layout.addRow("見込み利益（利益率）:", profit_db_lbl)
         self._repricing_enabled_cb = QCheckBox("価格改定の対象にする（ON）")
         _apply_checkbox_dark_style(self._repricing_enabled_cb)
         repricing_val = self.record.get("価格改定")
@@ -480,7 +566,48 @@ class PurchaseRowEditDialog(QDialog):
             self._sales_channel_combo.addItem(sales_channel)
             idx = self._sales_channel_combo.findText(sales_channel)
         self._sales_channel_combo.setCurrentIndex(max(0, idx))
+        self._sales_channel_combo.currentTextChanged.connect(self._on_sales_channel_changed)
         info_layout.addRow("販売チャネル:", self._sales_channel_combo)
+
+        platform_init, shipping_init, _total_init = read_fee_fields(self.record)
+        self._platform_fee_spin = QSpinBox()
+        self._platform_fee_spin.setRange(0, 10_000_000)
+        self._platform_fee_spin.setSingleStep(10)
+        self._platform_fee_spin.setValue(int(round(platform_init)))
+        self._platform_fee_spin.setToolTip(
+            "Amazon: FBA料金シミュ等で確認した手数料。\n"
+            "メルカリ等: フリマ設定の手数料率×販売予定で自動入力（チャネル変更時）。"
+        )
+        self._platform_fee_spin.valueChanged.connect(self._on_fee_spin_changed)
+        info_layout.addRow("プラットフォーム手数料:", self._platform_fee_spin)
+
+        self._shipping_cost_spin = QSpinBox()
+        self._shipping_cost_spin.setRange(0, 10_000_000)
+        self._shipping_cost_spin.setSingleStep(10)
+        self._shipping_cost_spin.setValue(int(round(shipping_init)))
+        self._shipping_cost_spin.setToolTip("自己発送時の梱包・配送などの出荷費用。入力すると費用合計に加算されます。")
+        self._shipping_cost_spin.valueChanged.connect(self._on_fee_spin_changed)
+        info_layout.addRow("出荷費用:", self._shipping_cost_spin)
+
+        self._total_cost_lbl = QLabel("-")
+        self._total_cost_lbl.setToolTip("プラットフォーム手数料 + 出荷費用 の合計（自動計算）。")
+        info_layout.addRow("費用合計:", self._total_cost_lbl)
+
+        self._profit_summary_lbl = QLabel(profit_text)
+        self._profit_summary_lbl.setToolTip(
+            "販売予定 − (仕入れ + 費用合計) に基づく見込み利益。手数料・出荷を変えると自動更新します。"
+        )
+        info_layout.addRow("見込み利益:", self._profit_summary_lbl)
+
+        self._margin_lbl = QLabel("-")
+        self._margin_lbl.setToolTip("見込み利益 ÷ 販売予定価格 × 100（%）")
+        info_layout.addRow("想定利益率:", self._margin_lbl)
+
+        self._roi_lbl = QLabel("-")
+        self._roi_lbl.setToolTip("見込み利益 ÷ 仕入れ価格 × 100（%）")
+        info_layout.addRow("想定ROI:", self._roi_lbl)
+
+        self._refresh_cost_summary()
 
         snap = self._csv_inventory_snapshot
         if snap:
@@ -510,6 +637,34 @@ class PurchaseRowEditDialog(QDialog):
                 "価格改定で読み込んだ在庫CSVの price 列（改定前の現在価格）です。仕入DBの販売予定価格とは別の値です。"
             )
             info_layout.addRow("現在価格（CSV・price）:", csv_price_lbl)
+            if self._repricer_widget is not None:
+                self._manual_export_price_edit = QLineEdit()
+                manual_val = snap.get("manual_export_price")
+                if manual_val is not None:
+                    try:
+                        self._manual_export_price_edit.setText(
+                            str(int(round(float(manual_val))))
+                        )
+                    except (TypeError, ValueError):
+                        pass
+                preview_np = _parse_number(snap.get("new_price"))
+                if preview_np > 0 and not self._manual_export_price_edit.text().strip():
+                    self._manual_export_price_edit.setPlaceholderText(
+                        f"空欄＝改定プレビューどおり（{int(round(preview_np)):,}円）"
+                    )
+                else:
+                    self._manual_export_price_edit.setPlaceholderText(
+                        "空欄＝改定プレビューどおり（手動上書きなし）"
+                    )
+                self._manual_export_price_edit.setToolTip(
+                    "プライスターに返す在庫CSVの price 列に書く価格です。\n"
+                    "反映後に「価格改定プレビュー」を再実行すると、改定価格・akaji・takane が\n"
+                    "この価格とルール%で更新され、理由は「ユーザー手動変更」になります。\n"
+                    "空欄のまま反映すると手動上書きを解除します。"
+                )
+                info_layout.addRow("プライスター送付価格（手動）:", self._manual_export_price_edit)
+            if csv_profit == 0 and csv_price > 0 and sale_price > 0:
+                csv_profit = profit - 0.89 * (sale_price - csv_price)
             if csv_price > 0:
                 rate = csv_profit / csv_price * 100.0
                 prof_text = f"{int(round(csv_profit)):,}（{rate:.1f}%）"
@@ -522,6 +677,9 @@ class PurchaseRowEditDialog(QDialog):
                 "在庫CSVの profit 列と、現在価格に対する利益率（profit ÷ price）です。"
             )
             info_layout.addRow("現在見込み利益（CSV・利益率）:", csv_profit_lbl)
+            self._append_repricer_preview_rows(info_layout, snap)
+        elif not self._record_ladder_enabled():
+            self._append_repricer_preview_rows(info_layout, {})
 
         info_group.setLayout(info_layout)
         layout.addWidget(info_group)
@@ -546,6 +704,12 @@ class PurchaseRowEditDialog(QDialog):
         )
         flea_btn.clicked.connect(self._open_flea_market_listing)
         keepa_btn_row.addWidget(flea_btn, 1)
+        fba_sim_btn = QPushButton("FBA料金シミュレーター")
+        fba_sim_btn.setToolTip(
+            "設定タブ → 詳細設定 → Amazon の「FBA料金シミュレーターURL」をブラウザで開きます。"
+        )
+        fba_sim_btn.clicked.connect(self._open_fba_simulator_in_browser)
+        keepa_btn_row.addWidget(fba_sim_btn, 1)
         layout.addLayout(keepa_btn_row)
 
         _ladder_tip = (
@@ -667,6 +831,14 @@ class PurchaseRowEditDialog(QDialog):
             ta_layout.addRow(lbl_rate, rate_spin)
             ta_layout.addRow(lbl_profit, profit_lbl)
 
+            self._tp_tier_widgets[tier] = [
+                lbl_price,
+                edit,
+                lbl_rate,
+                rate_spin,
+                lbl_profit,
+                profit_lbl,
+            ]
             setattr(self, f"_ta{tier}_edit", edit)
             setattr(self, f"_ta{tier}_rate_spin", rate_spin)
             setattr(self, f"_ta{tier}_profit_label", profit_lbl)
@@ -682,13 +854,28 @@ class PurchaseRowEditDialog(QDialog):
         for tr in range(4):
             self._sync_rate_spin_from_price(tr)
         self._on_ladder_mode_toggled(self._ladder_enabled_cb.isChecked())
+        if not self._ladder_enabled_cb.isChecked():
+            self._apply_tp_phase_highlight(
+                self._resolve_active_tp_tier(self._csv_inventory_snapshot)
+            )
 
         # --- ボタン（反映後もダイアログは開いたまま＝ブラウザを参照し続けられる）---
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
         buttons.rejected.connect(self.reject)
+        if self._repricer_widget is not None and self._manual_export_price_edit is not None:
+            self._manual_export_btn = QPushButton("プライスター送付価格を反映")
+            self._manual_export_btn.setToolTip(
+                "入力した価格を保存します（空欄で反映すると上書き解除）。\n"
+                "プレビュー済みなら結果表を即更新し、再プレビュー時も同じ価格が反映されます。"
+            )
+            self._manual_export_btn.clicked.connect(self._apply_manual_export_price)
+            buttons.addButton(self._manual_export_btn, QDialogButtonBox.ActionRole)
         self._apply_btn = QPushButton("仕入DBに反映")
         self._apply_btn.setDefault(True)
-        self._apply_btn.setToolTip("保存します。ダイアログは開いたままなので、ブラウザを見ながら続けて入力できます。")
+        self._apply_btn.setToolTip(
+            "TP・月別運用・価格改定ON/OFF・販売チャネル・発送方法・\n"
+            "プラットフォーム手数料・出荷費用・見込み利益・想定利益率/ROI を仕入DBに保存します。"
+        )
         self._apply_btn.clicked.connect(self._apply)
         buttons.addButton(self._apply_btn, QDialogButtonBox.ActionRole)
         close_btn = QPushButton("閉じる")
@@ -713,6 +900,19 @@ class PurchaseRowEditDialog(QDialog):
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
+
+    def _open_fba_simulator_in_browser(self) -> None:
+        """設定タブ（詳細設定 → Amazon）の FBA料金シミュレーターURL を開く。"""
+        url = get_amazon_fba_simulator_url()
+        if not re.match(r"^https?://", url, flags=re.IGNORECASE):
+            QMessageBox.warning(
+                self,
+                "URL確認",
+                "FBA料金シミュレーターURLが不正です。\n"
+                "設定タブ → 詳細設定 → Amazon で確認してください。",
+            )
+            return
+        QDesktopServices.openUrl(QUrl(url))
 
     def _open_keepa_in_browser(self) -> None:
         """選択行の ASIN で Keepa を既定ブラウザで開き、Windows の場合はブラウザを前面・左半分にリサイズ"""
@@ -852,6 +1052,24 @@ class PurchaseRowEditDialog(QDialog):
 
     def _ta_price_edit(self, which: int) -> QLineEdit:
         return (self._ta0_edit, self._ta1_edit, self._ta2_edit, self._ta3_edit)[which]
+
+    def _tp_price_for_tier(self, tier: int) -> float:
+        """仕入DB（または作成済みの TP 入力欄）から TP 価格を取得。"""
+        key_map = {
+            0: ("TP0", "tp0"),
+            1: ("TP1", "tp1", "TA1", "ta1"),
+            2: ("TP2", "tp2", "TA2", "ta2"),
+            3: ("TP3", "tp3"),
+        }
+        for k in key_map.get(tier, ()):
+            v = self._record_str(k)
+            if v:
+                p = _parse_number(v)
+                if p > 0:
+                    return p
+        if hasattr(self, "_ta0_edit"):
+            return _parse_number(self._ta_price_edit(tier).text())
+        return 0.0
 
     def _ta_rate_spin(self, which: int) -> QDoubleSpinBox:
         return (self._ta0_rate_spin, self._ta1_rate_spin, self._ta2_rate_spin, self._ta3_rate_spin)[which]
@@ -1040,8 +1258,160 @@ class PurchaseRowEditDialog(QDialog):
             self.setMinimumSize(440, 480)
             if not self.isMaximized():
                 self.resize(max(self.width(), 520), max(self.height(), 640))
+            self._apply_tp_phase_highlight(None)
         else:
             self.setMinimumSize(380, 320)
+            self._apply_tp_phase_highlight(
+                self._resolve_active_tp_tier(self._csv_inventory_snapshot)
+            )
+
+    def _resolve_active_tp_tier(self, snap: Dict[str, Any]) -> Optional[int]:
+        """価格改定プレビューまたは経過日数から、いま編集すべき TP 段（0〜3）を返す。"""
+        if self._record_ladder_enabled():
+            return None
+        tp_target = str(snap.get("tp_target") or "").strip().lower()
+        if tp_target == "ladder":
+            return None
+        tier = _tp_tier_index_from_key(tp_target)
+        if tier is not None:
+            return tier
+        days_raw = snap.get("days")
+        if days_raw is None:
+            days_raw = calc_elapsed_days_for_purchase_record(self.record)
+        try:
+            days_int = int(float(days_raw)) if days_raw is not None else -1
+        except (TypeError, ValueError):
+            days_int = -1
+        if days_int >= 0:
+            band_key, _, _ = _tp_band_from_days(days_int)
+            return _tp_tier_index_from_key(band_key)
+        return None
+
+    def _append_repricer_preview_rows(
+        self, info_layout: QFormLayout, snap: Dict[str, Any]
+    ) -> None:
+        """現在TPフェーズ（常時）と、プレビュー時の改定予定価格などを表示。"""
+        snap = snap or {}
+
+        if self._record_ladder_enabled() or str(snap.get("tp_target") or "").lower() == "ladder":
+            if not _has_repricer_preview_fields(snap):
+                return
+            phase_text = "月別運用（個別ルール）"
+            phase_tip = "月別運用ONのため、TP0〜TP3 ではなく月別運用表のルールが改定に使われます。"
+        else:
+            active_tier = self._resolve_active_tp_tier(snap)
+            if active_tier is not None:
+                band_key = f"tp{active_tier}"
+                phase_text = _TP_BAND_LABELS.get(band_key, band_key.upper())
+                db_tp = self._tp_price_for_tier(active_tier)
+                if db_tp > 0:
+                    phase_text += f" ／ 仕入DBのTP{active_tier}={_format_price(db_tp)}"
+            else:
+                days_raw = snap.get("days")
+                try:
+                    days_int = int(float(days_raw)) if days_raw is not None else -1
+                except (TypeError, ValueError):
+                    days_int = -1
+                if days_int >= 0:
+                    _, _, phase_text = _tp_band_from_days(days_int)
+                else:
+                    phase_text = "-"
+            phase_tip = (
+                "価格改定プレビューの tp_target と日数から判定した、いまの改定フェーズです。\n"
+                "下の TP 価格欄の該当段がハイライトされます。"
+            )
+            if not _has_repricer_preview_fields(snap):
+                phase_tip = (
+                    "仕入DBの経過日数から推定した TP 帯です。\n"
+                    "下の TP 価格欄の該当段がハイライトされます。"
+                )
+
+        phase_lbl = QLabel(phase_text)
+        phase_lbl.setWordWrap(True)
+        phase_lbl.setStyleSheet("color: #7ae495; font-weight: bold;")
+        phase_lbl.setToolTip(phase_tip)
+        info_layout.addRow("現在TPフェーズ:", phase_lbl)
+
+        if not _has_repricer_preview_fields(snap):
+            return
+
+        action_text = str(snap.get("action") or "-").strip() or "-"
+        action_lbl = QLabel(action_text)
+        action_lbl.setToolTip("直近の価格改定プレビューで決まったアクション（日本語表示）です。")
+        info_layout.addRow("適用アクション:", action_lbl)
+
+        tp_floor = _parse_number(snap.get("tp_floor"))
+        if tp_floor > 0:
+            floor_lbl = QLabel(_format_price(tp_floor))
+            floor_lbl.setToolTip(
+                "改定ロジックが参照した TP 下限（仕入DBの TP 価格を優先）です。\n"
+                "この画面で TP を下げて「仕入DBに反映」→ プレビュー再実行すると反映されます。"
+            )
+            info_layout.addRow("TP下限（プレビュー）:", floor_lbl)
+
+        new_price = _parse_number(snap.get("new_price"))
+        new_price_lbl = QLabel(_format_price(new_price) if new_price > 0 else "-")
+        reason = str(snap.get("reason") or "").strip()
+        new_price_lbl.setToolTip(
+            "直近プレビューの改定後価格（new_price）です。"
+            + (f"\n理由: {reason}" if reason else "")
+        )
+        info_layout.addRow("改定予定価格（プレビュー）:", new_price_lbl)
+
+        manual_ep = snap.get("manual_export_price")
+        if manual_ep not in (None, ""):
+            try:
+                manual_int = int(round(float(manual_ep)))
+            except (TypeError, ValueError):
+                manual_int = 0
+            if manual_int > 0:
+                manual_lbl = QLabel(_format_price(manual_int))
+                manual_lbl.setStyleSheet("color: #f0c674; font-weight: bold;")
+                manual_lbl.setToolTip(
+                    "プライスター返却CSVに書く手動上書き価格です。CSV保存時はこちらが優先されます。"
+                )
+                info_layout.addRow("プライスター送付（手動）:", manual_lbl)
+
+        trace_text = _format_trace_change_label(
+            snap.get("priceTraceChangeDisplay") or snap.get("priceTraceChange")
+        )
+        if trace_text != "無し" and trace_text != "-":
+            trace_lbl = QLabel(trace_text)
+            trace_lbl.setToolTip("Trace（priceTrace）の変更内容です。")
+            info_layout.addRow("Trace変更:", trace_lbl)
+
+        reach = str(snap.get("tp_reach_status") or "").strip()
+        if reach:
+            reach_lbl = QLabel(reach)
+            reach_lbl.setToolTip("TP下限への到達状況（期間到達・期間外到達など）です。")
+            info_layout.addRow("TP到達状態:", reach_lbl)
+
+        keepa_ref = snap.get("keepa_ref_price")
+        if keepa_ref not in (None, ""):
+            keepa_lbl = QLabel(str(keepa_ref))
+            keepa_lbl.setToolTip(
+                "価格改定結果の Keepa価格(参考) 列です。改定計算には使われません（参考表示のみ）。"
+            )
+            info_layout.addRow("Keepa参考価格:", keepa_lbl)
+
+    def _apply_tp_phase_highlight(self, active_tier: Optional[int]) -> None:
+        """現在の TP フェーズに対応する入力欄をハイライトする。"""
+        for tier, widgets in self._tp_tier_widgets.items():
+            color = _TP_DIALOG_TIER_COLORS[tier]
+            if tier == active_tier:
+                for w in widgets:
+                    if isinstance(w, QLineEdit):
+                        w.setStyleSheet(
+                            f"color: {color}; background-color: #1a2f22;"
+                            f" border: 2px solid {color}; padding: 2px;"
+                        )
+                    else:
+                        w.setStyleSheet(
+                            f"color: {color}; font-weight: bold;"
+                            f" background-color: #152218;"
+                        )
+            else:
+                _style_tp_tier_text(color, *widgets)
 
     def _copy_ladder_from_default_profile(self) -> None:
         config = load_reprice_config_for_template()
@@ -1065,6 +1435,111 @@ class PurchaseRowEditDialog(QDialog):
             self,
             "コピー",
             "デフォルトプロファイルのルールを表に反映しました。\n目標到達価格列は TP0〜TP3 を帯に合わせて入れています。必要に応じて編集してください。",
+        )
+
+    def _store_db(self) -> Any:
+        pw = self._product_widget
+        if pw is not None and hasattr(pw, "store_db"):
+            return pw.store_db
+        return None
+
+    def _on_sales_channel_changed(self, _channel_text: str = "") -> None:
+        if self._fee_recalc_guard:
+            return
+        channel = self._sales_channel_combo.currentText().strip() if self._sales_channel_combo else ""
+        if not is_amazon_sales_channel(channel):
+            if self._shipping_method_combo is not None:
+                idx = self._shipping_method_combo.findText("自己発送")
+                if idx >= 0:
+                    self._shipping_method_combo.setCurrentIndex(idx)
+            rate = flea_fee_rate_percent_for_channel(channel, self._store_db())
+            if rate is not None and self._platform_fee_spin is not None and self._sale_price_value > 0:
+                fee = platform_fee_from_sale_price(self._sale_price_value, rate)
+                self._fee_recalc_guard = True
+                try:
+                    self._platform_fee_spin.setValue(fee)
+                finally:
+                    self._fee_recalc_guard = False
+        self._refresh_cost_summary()
+
+    def _on_fee_spin_changed(self, _value: int = 0) -> None:
+        if self._fee_recalc_guard:
+            return
+        self._refresh_cost_summary()
+
+    def _refresh_cost_summary(self) -> None:
+        if self._platform_fee_spin is None or self._shipping_cost_spin is None:
+            return
+        platform = float(self._platform_fee_spin.value())
+        shipping = float(self._shipping_cost_spin.value())
+        total = int(round(platform + shipping))
+        if self._total_cost_lbl is not None:
+            self._total_cost_lbl.setText(_format_price(total) if total > 0 else "-")
+
+        fields = apply_fee_values_to_record(
+            self.record,
+            purchase_price=self._purchase_price_value,
+            planned_price=self._sale_price_value,
+            platform_fee=platform,
+            shipping_cost=shipping,
+        )
+        profit = float(fields.get("見込み利益", 0))
+        self._current_profit_value = profit
+        margin = float(fields.get("想定利益率", 0))
+        roi = float(fields.get("想定ROI", 0))
+
+        if self._profit_summary_lbl is not None:
+            prof_text = _format_price(profit)
+            if self._sale_price_value > 0:
+                prof_text += f"（{margin:.1f}%）"
+            self._profit_summary_lbl.setText(prof_text)
+        if self._margin_lbl is not None:
+            self._margin_lbl.setText(f"{margin:.2f} %" if self._sale_price_value > 0 else "-")
+        if self._roi_lbl is not None:
+            self._roi_lbl.setText(f"{roi:.2f} %" if self._purchase_price_value > 0 else "-")
+
+    def _apply_manual_export_price(self) -> None:
+        """プライスター返却CSV用の手動 price を価格改定タブに保存する。"""
+        rw = self._repricer_widget
+        edit = self._manual_export_price_edit
+        if rw is None or edit is None:
+            return
+        sku = self._record_str("SKU") or self._record_str("sku")
+        if not sku:
+            QMessageBox.warning(self, "手動価格", "SKU がありません。")
+            return
+        raw = edit.text().strip().replace(",", "")
+        if not raw:
+            if hasattr(rw, "clear_manual_export_price"):
+                rw.clear_manual_export_price(sku)
+            if hasattr(rw, "refresh_manual_override_display"):
+                rw.refresh_manual_override_display()
+            self._csv_inventory_snapshot.pop("manual_export_price", None)
+            QMessageBox.information(
+                self,
+                "手動価格",
+                "手動上書きを解除しました。\n"
+                "価格改定プレビューを再実行すると、通常の改定結果に戻ります。",
+            )
+            return
+        price = _parse_number(raw)
+        if price <= 0:
+            QMessageBox.warning(self, "手動価格", "1円以上の整数で入力してください。")
+            return
+        price_int = int(round(price))
+        if hasattr(rw, "set_manual_export_price"):
+            rw.set_manual_export_price(sku, price_int)
+        if hasattr(rw, "refresh_manual_override_display"):
+            rw.refresh_manual_override_display()
+        self._csv_inventory_snapshot["manual_export_price"] = price_int
+        self._csv_inventory_snapshot["new_price"] = price_int
+        QMessageBox.information(
+            self,
+            "手動価格",
+            f"プライスター送付価格を {price_int:,} 円に設定しました。\n\n"
+            "価格改定タブの結果表を更新しました（プレビュー済みの場合）。\n"
+            "改定価格・akaji・takane はルール%で再計算され、理由は「ユーザー手動変更」です。\n"
+            "CSV保存でもこの価格が price 列に書かれます。",
         )
 
     def _apply(self) -> None:
@@ -1100,6 +1575,7 @@ class PurchaseRowEditDialog(QDialog):
         self.record["repricing_enabled"] = 1 if repricing_enabled else 0
         self.record["ladder_enabled"] = 1 if ladder_on else 0
         self.record["ladder_rules"] = ladder_rules_json if ladder_on else ""
+        self._refresh_cost_summary()
         # 親が ProductWidget なら hirio.db とスナップショットにも保存
         if self._product_widget and hasattr(self._product_widget, "purchase_history_db"):
             sku = self._record_str("SKU") or self._record_str("sku")
@@ -1121,6 +1597,8 @@ class PurchaseRowEditDialog(QDialog):
                         "repricing_enabled": 1 if repricing_enabled else 0,
                         "ladder_enabled": 1 if ladder_on else 0,
                         "ladder_rules": ladder_rules_json if ladder_on else "",
+                        "expected_margin": self.record.get("expected_margin"),
+                        "expected_roi": self.record.get("expected_roi"),
                     }
                     self._product_widget.purchase_history_db.upsert(upsert_payload)
                 except Exception as e:
@@ -1144,10 +1622,27 @@ class PurchaseRowEditDialog(QDialog):
                 except Exception:
                     pass
         self._update_window_title()
+        fee_parts = []
+        if self._platform_fee_spin is not None:
+            pf = int(self._platform_fee_spin.value())
+            if pf > 0:
+                fee_parts.append(f"手数料 {pf:,}円")
+        if self._shipping_cost_spin is not None:
+            sh = int(self._shipping_cost_spin.value())
+            if sh > 0:
+                fee_parts.append(f"出荷 {sh:,}円")
+        profit = int(round(self._current_profit_value or 0))
+        fee_line = " / ".join(fee_parts) if fee_parts else "手数料・出荷は未入力"
+        msg = (
+            "仕入DB（一覧・スナップショット）に反映しました。\n"
+            f"販売チャネル: {sales_channel} ／ 発送: {shipping_method}\n"
+            f"{fee_line} ／ 見込み利益: {profit:,}円\n"
+        )
         if ladder_on:
-            msg = "月別運用ルールを仕入DBに反映しました。\nダイアログは開いたままです。閉じる場合は「閉じる」を押してください。"
+            msg += "月別運用ルール・"
         else:
-            msg = "TP0/TP1/TP2/TP3 を仕入DBに反映しました。\nダイアログは開いたままです。閉じる場合は「閉じる」を押してください。"
+            msg += "TP0〜TP3・"
+        msg += "価格改定設定を保存しました。\nダイアログは開いたままです。閉じる場合は「閉じる」を押してください。"
         QMessageBox.information(self, "反映", msg)
 
     def accept(self) -> None:

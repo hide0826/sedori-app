@@ -22,6 +22,16 @@ def get_amazon_seller_id() -> str:
     return str(v).strip()
 
 
+def get_amazon_fba_simulator_url() -> str:
+    """
+    設定タブ（詳細設定 → Amazon）の FBA料金シミュレーターURL を返します。
+    未設定時は Seller Central の既定URLです。
+    """
+    default_url = "https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP"
+    url = str(_settings().value("amazon/fba_simulator_url", default_url) or default_url).strip()
+    return url or default_url
+
+
 def is_pro_enabled() -> bool:
     """
     PRO版が有効かどうかを返します。

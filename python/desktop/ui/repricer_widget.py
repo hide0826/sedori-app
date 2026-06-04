@@ -105,6 +105,8 @@ class RepricerWidget(QWidget):
         self.active_result_days_filter = None
         self.keepa_cache = {}
         self._purchase_edit_dialogs = []
+        # SKU → プライスター返却CSVの price に書く手動上書き（自動値上げはしない）
+        self._manual_export_prices: Dict[str, int] = {}
         
         # UIの初期化
         self.setup_ui()
@@ -699,6 +701,7 @@ class RepricerWidget(QWidget):
         self.repricing_result = None
         self.preview_df = None
         self.preview_days = None
+        self._manual_export_prices = {}
         self.active_days_filter = None
         self.file_path_edit.clear()
 
@@ -765,6 +768,7 @@ class RepricerWidget(QWidget):
             # プレビュー元データとSKU日数を保持
             self.preview_df = df
             self.preview_days = self._compute_days_from_sku(df)
+            self._manual_export_prices = {}
 
             # テーブル描画
             self._populate_preview_table(df)
@@ -824,6 +828,76 @@ class RepricerWidget(QWidget):
         except Exception as e:
             print(f"結果選択変更処理エラー: {e}")
 
+    def get_manual_export_price(self, sku: str) -> Optional[int]:
+        """プライスター返却CSV用の手動 price 上書き（未設定なら None）。"""
+        key = self.clean_excel_formula(str(sku or "")).strip()
+        if not key:
+            return None
+        val = self._manual_export_prices.get(key)
+        return int(val) if val is not None else None
+
+    def set_manual_export_price(self, sku: str, price: int) -> None:
+        key = self.clean_excel_formula(str(sku or "")).strip()
+        if not key:
+            return
+        self._manual_export_prices[key] = int(price)
+
+    def clear_manual_export_price(self, sku: str) -> None:
+        key = self.clean_excel_formula(str(sku or "")).strip()
+        if key:
+            self._manual_export_prices.pop(key, None)
+
+    _MANUAL_OVERRIDE_REASON = "ユーザー手動変更"
+
+    def _akaji_takane_from_rule_percents(
+        self, price: int, akaji_drop_percent: Any, takane_rise_percent: Any
+    ) -> tuple[int, int]:
+        try:
+            akaji_pct = int(akaji_drop_percent if akaji_drop_percent is not None else 1)
+        except (TypeError, ValueError):
+            akaji_pct = 1
+        akaji_pct = min(10, max(1, akaji_pct))
+        try:
+            takane_pct = int(takane_rise_percent if takane_rise_percent is not None else 0)
+        except (TypeError, ValueError):
+            takane_pct = 0
+        takane_pct = min(10, max(0, takane_pct))
+        akaji = max(0, round(price * (1.0 - akaji_pct / 100.0)))
+        takane = max(price, round(price * (1.0 + takane_pct / 100.0)))
+        return akaji, takane
+
+    def _apply_manual_overrides_to_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """手動送付価格をプレビュー/実行結果に反映（改定価格・akaji・takane・理由）。"""
+        if not result or not self._manual_export_prices:
+            return result
+        items = result.get("items")
+        if not items:
+            return result
+        for it in items:
+            sku = self.clean_excel_formula(str(it.get("sku", ""))).strip()
+            if not sku or sku not in self._manual_export_prices:
+                continue
+            mp = int(self._manual_export_prices[sku])
+            it["new_price"] = mp
+            akaji, takane = self._akaji_takane_from_rule_percents(
+                mp,
+                it.get("akaji_drop_percent"),
+                it.get("takane_rise_percent"),
+            )
+            it["akaji"] = akaji
+            it["takane"] = takane
+            it["reason"] = self._MANUAL_OVERRIDE_REASON
+            it["is_tp_floor_or_below"] = False
+            it["tp_reach_status"] = ""
+        return result
+
+    def refresh_manual_override_display(self) -> None:
+        """プレビュー済みの結果表に手動上書きを即時反映する。"""
+        if not self.repricing_result:
+            return
+        self._apply_manual_overrides_to_result(self.repricing_result)
+        self.update_result_table(self.repricing_result)
+
     def _repricer_csv_snapshot_for_sku(self, sku: str, asin: str) -> Optional[Dict[str, Any]]:
         """3-6-9モードのプレビュー/実行結果から、日数・在庫CSV由来の現在価格・profit を取得。"""
         if str(self.mode) != "369" or not self.repricing_result:
@@ -851,8 +925,81 @@ class RepricerWidget(QWidget):
                     days_val = int(float(raw_days))
                 except (TypeError, ValueError):
                     days_val = None
-            return {"price": p, "profit": prof, "days": days_val}
+            csv_fallback = self._preview_csv_snapshot_for_sku(sku, asin)
+            if csv_fallback:
+                if p <= 0:
+                    p = float(csv_fallback.get("price") or 0)
+                if prof == 0:
+                    prof = float(csv_fallback.get("profit") or 0)
+                if days_val is None:
+                    days_val = csv_fallback.get("days")
+            manual_p = self.get_manual_export_price(sku)
+            return {
+                "price": p,
+                "profit": prof,
+                "days": days_val,
+                "manual_export_price": manual_p,
+                "new_price": manual_p if manual_p is not None else it.get("new_price"),
+                "action": it.get("action"),
+                "reason": (
+                    self._MANUAL_OVERRIDE_REASON
+                    if manual_p is not None
+                    else it.get("reason")
+                ),
+                "tp_target": it.get("tp_target"),
+                "tp_floor": it.get("tp_floor"),
+                "rule_action": it.get("rule_action"),
+                "priceTraceChangeDisplay": it.get("priceTraceChangeDisplay")
+                or it.get("priceTraceChange"),
+                "tp_reach_status": it.get("tp_reach_status"),
+                "keepa_ref_price": it.get("keepa_ref_price"),
+            }
         return None
+
+    def _preview_csv_snapshot_for_sku(self, sku: str, asin: str) -> Optional[Dict[str, Any]]:
+        """読み込み済み在庫CSVから、現在価格・現在見込み利益・日数を補完する。"""
+        df = getattr(self, "preview_df", None)
+        if df is None or getattr(df, "empty", True):
+            return None
+        for pos, (_, row) in enumerate(df.iterrows()):
+            row_sku = self.clean_excel_formula(str(row.get("SKU", "") or "")).strip()
+            if row_sku != sku:
+                continue
+            row_asin = self.clean_excel_formula(str(row.get("ASIN", "") or "")).strip()
+            if asin and row_asin and row_asin != asin:
+                continue
+            price = self._number_from_csv_value(row.get("price")) or 0.0
+            profit = self._csv_profit_from_preview_row(row)
+            days_val = None
+            preview_days = getattr(self, "preview_days", None)
+            if preview_days is not None and pos < len(preview_days):
+                days_val = preview_days[pos]
+            return {"price": price, "profit": profit, "days": days_val}
+        return None
+
+    def _csv_profit_from_preview_row(self, row: Any) -> float:
+        """profit列が空でも、現在価格と原価から現在見込み利益を計算する。"""
+        profit = self._number_from_csv_value(row.get("profit"))
+        if profit not in (None, 0):
+            return float(profit)
+        price = self._number_from_csv_value(row.get("price"))
+        cost = self._number_from_csv_value(row.get("cost"))
+        if price is None or cost is None:
+            return float(profit or 0.0)
+        amazon_fee = self._number_from_csv_value(row.get("amazon-fee")) or 0.0
+        shipping_price = self._number_from_csv_value(row.get("shipping-price")) or 0.0
+        return float(price - cost - amazon_fee - shipping_price)
+
+    def _number_from_csv_value(self, value: Any) -> Optional[float]:
+        try:
+            if value is None:
+                return None
+            text = self.clean_excel_formula(str(value)).replace(",", "").strip()
+            if not text or text.lower() in ("nan", "none"):
+                return None
+            return float(text)
+        except (TypeError, ValueError):
+            return None
 
     def _get_purchase_db(self):
         pw = self.product_widget
@@ -1070,7 +1217,12 @@ class RepricerWidget(QWidget):
             from ui.purchase_row_edit_dialog import PurchaseRowEditDialog
         except ImportError:
             from desktop.ui.purchase_row_edit_dialog import PurchaseRowEditDialog
-        dialog = PurchaseRowEditDialog(record, product_widget=pw, csv_inventory_snapshot=csv_snap or {})
+        dialog = PurchaseRowEditDialog(
+            record,
+            product_widget=pw,
+            csv_inventory_snapshot=csv_snap or {},
+            repricer_widget=self,
+        )
         dialog.setModal(False)
         dialog.setWindowModality(Qt.NonModal)
         dialog.setAttribute(Qt.WA_DeleteOnClose, True)
@@ -1254,6 +1406,7 @@ class RepricerWidget(QWidget):
         
     def on_preview_completed(self, result):
         """プレビュー完了時の処理"""
+        result = self._apply_manual_overrides_to_result(result)
         self.repricing_result = result
         self.progress_bar.setVisible(False)
         self.preview_btn.setEnabled(True)
@@ -1307,6 +1460,7 @@ class RepricerWidget(QWidget):
         
     def on_repricing_completed(self, result):
         """価格改定完了時の処理"""
+        result = self._apply_manual_overrides_to_result(result)
         self.repricing_result = result
         self.progress_bar.setVisible(False)
         self.execute_btn.setEnabled(True)
@@ -1776,7 +1930,8 @@ class RepricerWidget(QWidget):
             repricing_dict[sku] = {
                 'new_price': new_price,
                 'price_trace': price_trace,
-                'akaji': akaji_value  # Noneの場合は元の値を保持、空文字の場合は空白に設定
+                'akaji': akaji_value,
+                'takane': item.get('takane', None),
             }
         
         # 元ファイルのデータをコピーして、該当する行のみpriceとpriceTraceを更新
@@ -1789,25 +1944,74 @@ class RepricerWidget(QWidget):
             original_price = float(row.get('price', 0)) if pd.notna(row.get('price')) else 0
             original_price_trace = float(row.get('priceTrace', 0)) if pd.notna(row.get('priceTrace')) else 0
             
+            manual_price = self._manual_export_prices.get(sku)
+
             # 価格改定対象の場合はpriceとpriceTraceを更新
             if sku in repricing_dict:
                 new_price = repricing_dict[sku]['new_price']
                 new_price_trace = repricing_dict[sku]['price_trace']
                 akaji_value = repricing_dict[sku].get('akaji', None)
-                
-                # 価格とpriceTraceの両方が変更されていない場合はスキップ（CSVに保存しない）
-                if new_price == original_price and new_price_trace == original_price_trace:
+                takane_value = repricing_dict[sku].get('takane', None)
+                if manual_price is not None:
+                    new_price = manual_price
+
+                orig_akaji = float(row.get('akaji', 0)) if pd.notna(row.get('akaji')) else 0
+                orig_takane = float(row.get('takane', 0)) if pd.notna(row.get('takane')) else 0
+                new_akaji_f = float(akaji_value) if akaji_value not in (None, "") else orig_akaji
+                new_takane_f = float(takane_value) if takane_value not in (None, "") else orig_takane
+
+                # 価格とpriceTraceの両方が変更されていない場合はスキップ（手動上書き時は価格差があれば出力）
+                if (
+                    manual_price is None
+                    and new_price == original_price
+                    and new_price_trace == original_price_trace
+                ):
                     print(f"[DEBUG CSV保存] スキップ: {sku} (変更なし)")
                     continue
-                
+                if (
+                    manual_price is not None
+                    and int(manual_price) == int(original_price)
+                    and new_price_trace == original_price_trace
+                    and abs(new_akaji_f - orig_akaji) < 1e-9
+                    and abs(new_takane_f - orig_takane) < 1e-9
+                ):
+                    print(f"[DEBUG CSV保存] スキップ: {sku} (手動・価格/Trace/akaji/takane 変更なし)")
+                    continue
+
                 row_data = row.to_dict()
                 row_data['price'] = new_price
                 row_data['priceTrace'] = new_price_trace
-                # conditionNoteは空にする
                 row_data['conditionNote'] = ""
-                # 利益無視（price_down_ignore）の場合はakajiを空白にする
                 if akaji_value is not None:
-                    row_data['akaji'] = akaji_value  # 空文字の場合は空白に設定
+                    row_data['akaji'] = akaji_value
+                if takane_value is not None and takane_value != "":
+                    row_data['takane'] = takane_value
+                data.append(row_data)
+            elif manual_price is not None:
+                orig_akaji = float(row.get('akaji', 0)) if pd.notna(row.get('akaji')) else 0
+                orig_takane = float(row.get('takane', 0)) if pd.notna(row.get('takane')) else 0
+                akaji_out, takane_out = self._akaji_takane_from_rule_percents(int(manual_price), 2, 1)
+                for it in items:
+                    it_sku = self.clean_excel_formula(str(it.get("sku", ""))).strip()
+                    if it_sku == sku:
+                        akaji_out, takane_out = self._akaji_takane_from_rule_percents(
+                            int(manual_price),
+                            it.get("akaji_drop_percent"),
+                            it.get("takane_rise_percent"),
+                        )
+                        break
+                if (
+                    int(manual_price) == int(original_price)
+                    and abs(akaji_out - orig_akaji) < 1e-9
+                    and abs(takane_out - orig_takane) < 1e-9
+                ):
+                    print(f"[DEBUG CSV保存] スキップ: {sku} (手動価格のみ・変更なし)")
+                    continue
+                row_data = row.to_dict()
+                row_data['price'] = manual_price
+                row_data['akaji'] = akaji_out
+                row_data['takane'] = takane_out
+                row_data['conditionNote'] = ""
                 data.append(row_data)
             else:
                 # 対象外の場合は元のデータをそのまま使用
