@@ -1,3 +1,39 @@
+## 2026-06-07 ルート選択・店舗訪問詳細のテンプレート出力チェック
+
+- **目的**: ルート選択タブで店舗ごとにテンプレート生成の対象を選べるようにし、チェック状態を訪問順序保存で永続化する。
+- **ルート選択**（`route_summary_widget.py`）
+  - 店舗訪問詳細テーブル1列目に「出力」チェック列を追加（デフォルト全チェックON）。
+  - **テンプレート生成**はチェック済み店舗のみ Excel 出力。全件OFF時は警告。
+  - **訪問順序保存**で訪問順序とチェック ON/OFF を同時保存。次回 **選択ルート読み込み** で復元。
+  - 列インデックス定数化（`COL_VISIT_INCLUDE` 等）、行追加・Undo/並び替え・ドラッグ移動でもチェック状態を維持。
+- **店舗マスタ**（`store_db.py`）
+  - `stores.template_include` 列を追加（1=出力対象, 0=除外）。`update_store_display_order` で順序と併せて更新。
+- **変更ファイル**:
+  - `python/desktop/ui/route_summary_widget.py`
+  - `python/desktop/database/store_db.py`
+  - `docs/cursor_development_progress.md`
+- **リポジトリ**: sedori-app.github
+- **Git**: feat(desktop): ルート選択のテンプレート出力チェック列と訪問順序保存連携
+
+## 2026-06-07 カスタマー対応AIタブ（Gemini連携）
+
+- **目的**: 仕入DBのSKU情報を参照しながら、カスタマー対応文案をAIで生成するタブを追加。
+- **カスタマー対応AI**（`customer_support_widget.py`, `customer_support_chat_window.py` 新規）
+  - 案件起動・チャットUI・画像添付スロット。仕入DB（`product_widget`）連携で SKU ルックアップ。
+- **サービス**（`gemini_customer_support_service.py`, `customer_support_sku_lookup.py`, `customer_support_settings.py` 新規）
+  - Gemini API 連携、SKU検索、設定読込。
+- **メインウィンドウ**（`main_window.py`）
+  - phase 7 に「カスタマー対応AI」タブを追加。`product_widget` 参照を接続。
+- **変更ファイル**:
+  - `python/desktop/ui/customer_support_widget.py`（新規）
+  - `python/desktop/ui/customer_support_chat_window.py`（新規）
+  - `python/desktop/services/gemini_customer_support_service.py`（新規）
+  - `python/desktop/services/customer_support_sku_lookup.py`（新規）
+  - `python/desktop/services/customer_support_settings.py`（新規）
+  - `python/desktop/ui/main_window.py`
+- **リポジトリ**: sedori-app.github
+- **Git**: feat(desktop): カスタマー対応AIタブ（Gemini連携）を追加
+
 ## 2026-06-03 仕入DB手数料・利益編集・価格改定手動上書き・検索フィルタ
 
 - **目的**: 仕入行編集から手数料・チャネル・利益を仕入DBへ反映し、価格改定プレビュー連携とプライスター手動価格を安定化。一覧の数値表示とチャネル絞り込みを整備。

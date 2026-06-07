@@ -72,6 +72,12 @@ class StoreDatabase:
         except sqlite3.OperationalError:
             # カラムが既に存在する場合はスキップ
             pass
+
+        # template_include: ルートテンプレート生成に含めるか（1=含める, 0=除外）
+        try:
+            cursor.execute("ALTER TABLE stores ADD COLUMN template_include INTEGER DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass
         
         # google_map_urlカラムが存在しない場合は追加（マイグレーション）
         try:
@@ -1041,8 +1047,13 @@ class StoreDatabase:
             # パースできない場合は'-001'を追加
             return f"{max_code}-001"
     
-    def update_store_display_order(self, route_name: str, store_orders: Dict[str, int]) -> bool:
-        """ルート内の店舗の表示順序を更新
+    def update_store_display_order(
+        self,
+        route_name: str,
+        store_orders: Dict[str, int],
+        store_template_includes: Optional[Dict[str, bool]] = None,
+    ) -> bool:
+        """ルート内の店舗の表示順序（およびテンプレート出力フラグ）を更新
         
         store_ordersのキーはstore_codeまたはsupplier_codeのいずれか
         """
@@ -1051,13 +1062,23 @@ class StoreDatabase:
         
         try:
             for code, order in store_orders.items():
-                # store_codeまたはsupplier_codeで検索
-                cursor.execute("""
-                    UPDATE stores 
-                    SET display_order = ? 
-                    WHERE affiliated_route_name = ? 
-                      AND (store_code = ? OR supplier_code = ?)
-                """, (order, route_name, code, code))
+                include_val = None
+                if store_template_includes is not None and code in store_template_includes:
+                    include_val = 1 if store_template_includes[code] else 0
+                if include_val is not None:
+                    cursor.execute("""
+                        UPDATE stores 
+                        SET display_order = ?, template_include = ?
+                        WHERE affiliated_route_name = ? 
+                          AND (store_code = ? OR supplier_code = ?)
+                    """, (order, include_val, route_name, code, code))
+                else:
+                    cursor.execute("""
+                        UPDATE stores 
+                        SET display_order = ? 
+                        WHERE affiliated_route_name = ? 
+                          AND (store_code = ? OR supplier_code = ?)
+                    """, (order, route_name, code, code))
             conn.commit()
             return True
         except Exception as e:
@@ -1229,6 +1250,22 @@ class StoreDatabase:
             conn.rollback()
             return False
     
+    def get_route_google_map_url(self, route_name: str) -> str:
+        """ルート名から Google Map URL を取得（routes テーブル）"""
+        name = (route_name or "").strip()
+        if not name:
+            return ""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT google_map_url FROM routes WHERE route_name = ?",
+            (name,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return ""
+        return str(row[0] or "").strip()
+
     def update_route_google_map_url(self, route_name: str, google_map_url: str) -> bool:
         """ルートの Google Map URL を更新"""
         conn = self._get_connection()

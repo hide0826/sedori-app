@@ -29,6 +29,7 @@ import os
 from datetime import time as dt_time
 import openpyxl
 import logging
+import webbrowser
 from functools import partial
 
 # プロジェクトルートをパスに追加
@@ -57,6 +58,39 @@ try:
     from utils.template_generator import TemplateGenerator
 except ImportError:
     TemplateGenerator = None
+
+# 店舗訪問詳細テーブル列インデックス
+COL_VISIT_INCLUDE = 0   # テンプレート出力チェック
+COL_VISIT_ORDER = 1
+COL_STORE_CODE = 2
+COL_STORE_NAME = 3
+COL_IN_TIME = 4
+COL_OUT_TIME = 5
+COL_STAY = 6
+COL_TRAVEL = 7
+COL_PROFIT = 8
+COL_QTY = 9
+COL_STAR = 10
+COL_NOTES = 11
+
+
+def _template_include_from_db_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    try:
+        return int(value) != 0
+    except (TypeError, ValueError):
+        return bool(value)
+
+
+def _visit_include_checked(table: QTableWidget, row: int) -> bool:
+    widget = table.cellWidget(row, COL_VISIT_INCLUDE)
+    if widget is None:
+        return True
+    checkbox = widget.findChild(QCheckBox)
+    return checkbox.isChecked() if checkbox else True
 
 
 class SafeInternalMoveTable(QTableWidget):
@@ -88,23 +122,36 @@ class SafeInternalMoveTable(QTableWidget):
 
     def _clone_row(self, row: int) -> Dict[str, Any]:
         texts: List[str] = []
-        star_rating: float = 0.0
         for col in range(self.columnCount()):
-            item = self.item(row, col)
-            texts.append(item.text() if item is not None else "")
-            if col == 9:
-                w = self.cellWidget(row, col)
-                if isinstance(w, StarRatingWidget):
-                    star_rating = float(w.rating())
-        return {"texts": texts, "star_rating": star_rating}
+            if col in (COL_VISIT_INCLUDE, COL_STAR):
+                texts.append("")
+            else:
+                item = self.item(row, col)
+                texts.append(item.text() if item is not None else "")
+        include_checked = _visit_include_checked(self, row)
+        star_rating = 0.0
+        star_widget = self.cellWidget(row, COL_STAR)
+        if isinstance(star_widget, StarRatingWidget):
+            star_rating = float(star_widget.rating())
+        return {"texts": texts, "star_rating": star_rating, "include_checked": include_checked}
 
     def _restore_row(self, row: int, payload: Dict[str, Any]) -> None:
         texts = payload.get("texts", [])
         for col, text in enumerate(texts):
+            if col in (COL_VISIT_INCLUDE, COL_STAR):
+                continue
             self.setItem(row, col, QTableWidgetItem(str(text)))
-        # 星評価ウィジェットは行移動で崩れやすいため毎回再生成する
+        include_checked = payload.get("include_checked", True)
+        container = QWidget(self)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setAlignment(Qt.AlignCenter)
+        checkbox = QCheckBox(container)
+        checkbox.setChecked(bool(include_checked))
+        layout.addWidget(checkbox)
+        self.setCellWidget(row, COL_VISIT_INCLUDE, container)
         star_widget = StarRatingWidget(self, rating=float(payload.get("star_rating", 0.0)), star_size=14)
-        self.setCellWidget(row, 9, star_widget)
+        self.setCellWidget(row, COL_STAR, star_widget)
 
     def dropEvent(self, event) -> None:
         if event.source() is not self:
@@ -248,7 +295,7 @@ class RouteSummaryWidget(QWidget):
         
         # 上部：ルート情報セクション（サイズを小さく設定）
         route_group = QGroupBox("ルート情報")
-        route_group.setMaximumHeight(300)  # 最大高さを制限
+        route_group.setMaximumHeight(360)  # 最大高さを制限
         route_layout = QFormLayout(route_group)
         route_layout.setSpacing(8)  # スペーシングを詰める
         
@@ -267,6 +314,22 @@ class RouteSummaryWidget(QWidget):
         self.update_route_codes()
         # デフォルトは空白（update_route_codes()の後に設定）
         self.route_code_combo.setCurrentText("")
+
+        # Google Map URL（店舗マスタ＞店舗一覧のルート選択と同じ DB 値を表示）
+        url_row_widget = QWidget()
+        url_row_layout = QHBoxLayout(url_row_widget)
+        url_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.google_map_url_edit = QLineEdit()
+        self.google_map_url_edit.setReadOnly(True)
+        self.google_map_url_edit.setPlaceholderText("ルートを選択すると表示されます")
+        self.google_map_url_open_btn = QPushButton("ブラウザで開く")
+        self.google_map_url_open_btn.clicked.connect(self.open_google_map_url_in_browser)
+        self.google_map_url_open_btn.setStyleSheet(
+            "background-color: #17a2b8; color: white; padding: 4px 10px; border-radius: 4px;"
+        )
+        url_row_layout.addWidget(self.google_map_url_edit, 1)
+        url_row_layout.addWidget(self.google_map_url_open_btn)
+        route_layout.addRow("Google Map URL:", url_row_widget)
         
         layout.addWidget(route_group, 0)  # stretch=0で最小サイズに
         
@@ -302,7 +365,7 @@ class RouteSummaryWidget(QWidget):
         self.store_visits_table.setDefaultDropAction(Qt.MoveAction)
         
         headers = [
-            "訪問順序", "店舗コード", "店舗名", "店舗IN時間", "店舗OUT時間",
+            "出力", "訪問順序", "店舗コード", "店舗名", "店舗IN時間", "店舗OUT時間",
             "店舗滞在時間", "移動時間（分）", "想定粗利", "仕入れ点数",
             "店舗評価", "備考"
         ]
@@ -322,10 +385,11 @@ class RouteSummaryWidget(QWidget):
         except Exception:
             pass
         
-        # 店舗名列をコンテンツに合わせて自動調整
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # 店舗名列（インデックス2）
-        # 備考カラム（10列目）はStretchモードで残りのスペースを使用
-        header.setSectionResizeMode(10, QHeaderView.Stretch)
+        # チェック列・店舗名列をコンテンツに合わせて自動調整
+        header.setSectionResizeMode(COL_VISIT_INCLUDE, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(COL_STORE_NAME, QHeaderView.ResizeToContents)
+        # 備考カラムはStretchモードで残りのスペースを使用
+        header.setSectionResizeMode(COL_NOTES, QHeaderView.Stretch)
         
         # デフォルトの行高を調整（星評価が綺麗に収まるように）
         self.store_visits_table.verticalHeader().setDefaultSectionSize(24)
@@ -374,7 +438,7 @@ class RouteSummaryWidget(QWidget):
                     pass
                 return editor
 
-        self.store_visits_table.setItemDelegateForColumn(10, MinimalFocusDelegate(self.store_visits_table))
+        self.store_visits_table.setItemDelegateForColumn(COL_NOTES, MinimalFocusDelegate(self.store_visits_table))
 
         # 選択時の可視性を上げつつ、強すぎないハイライトに調整
         self.store_visits_table.setStyleSheet(
@@ -416,7 +480,10 @@ class RouteSummaryWidget(QWidget):
         # 訪問順序保存ボタン
         save_order_btn = QPushButton("訪問順序保存")
         save_order_btn.clicked.connect(self.save_visit_order_to_db)
-        save_order_btn.setToolTip("現在の訪問順序をデータベースに保存します。次回同じルートを呼び出した時に保存された順序で表示されます。")
+        save_order_btn.setToolTip(
+            "現在の訪問順序とテンプレート出力チェックをデータベースに保存します。"
+            "次回同じルートを呼び出した時に保存された順序・チェック状態で表示されます。"
+        )
         save_order_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
         button_layout.addWidget(save_order_btn)
         
@@ -464,24 +531,17 @@ class RouteSummaryWidget(QWidget):
                 for i, store in enumerate(selected):
                     row = base_rows + i
                     self.store_visits_table.insertRow(row)
-                    order_item = QTableWidgetItem(str(row + 1))
-                    order_item.setFlags(order_item.flags() & ~Qt.ItemIsEditable)
-                    self.store_visits_table.setItem(row, 0, order_item)
-                    # 店舗コード列には店舗マスタの「店舗コード(store_code)」を優先して使用し、
-                    # 空の場合は仕入れ先コード（supplier_code）をフォールバックとして使用する
                     store_code = (store.get('store_code') or '').strip()
                     visit_code = store_code or (store.get('supplier_code') or '').strip()
-                    self.store_visits_table.setItem(row, 1, QTableWidgetItem(visit_code))
-                    self.store_visits_table.setItem(row, 2, QTableWidgetItem(store.get('store_name', '')))
-                    # 星評価初期化
-                    star_widget = StarRatingWidget(self.store_visits_table, rating=0, star_size=14)
-                    star_widget.rating_changed.connect(lambda rating, r=row: self.on_star_rating_changed(r, rating))
-                    self.store_visits_table.setCellWidget(row, 9, star_widget)
-                    notes_text = self._resolve_store_master_notes(store)
-                    notes_item = QTableWidgetItem(notes_text)
-                    if notes_text:
-                        notes_item.setToolTip(notes_text)
-                    self.store_visits_table.setItem(row, 10, notes_item)
+                    include_checked = _template_include_from_db_value(store.get('template_include'))
+                    self._fill_visit_table_row(
+                        row,
+                        store_code=visit_code,
+                        store_name=store.get('store_name', ''),
+                        notes=self._resolve_store_master_notes(store),
+                        include_checked=include_checked,
+                        order_editable=False,
+                    )
                 self.update_visit_order()
                 self.save_store_order()
                 self.recalc_travel_times()
@@ -541,7 +601,7 @@ class RouteSummaryWidget(QWidget):
         self.store_visits_table.setDefaultDropAction(Qt.MoveAction)
         
         headers = [
-            "訪問順序", "店舗コード", "店舗名", "店舗IN時間", "店舗OUT時間",
+            "出力", "訪問順序", "店舗コード", "店舗名", "店舗IN時間", "店舗OUT時間",
             "店舗滞在時間", "移動時間（分）", "想定粗利", "仕入れ点数",
             "店舗評価", "備考"
         ]
@@ -552,10 +612,9 @@ class RouteSummaryWidget(QWidget):
         header.setStretchLastSection(True)
         header.setSectionResizeMode(QHeaderView.Interactive)
         
-        # 店舗名列をコンテンツに合わせて自動調整
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # 店舗名列（インデックス2）
-        # 備考カラム（10列目）はStretchモードで残りのスペースを使用
-        header.setSectionResizeMode(10, QHeaderView.Stretch)
+        header.setSectionResizeMode(COL_VISIT_INCLUDE, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(COL_STORE_NAME, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(COL_NOTES, QHeaderView.Stretch)
         
         # デフォルトの行高を調整（星評価が綺麗に収まるように）
         self.store_visits_table.verticalHeader().setDefaultSectionSize(24)
@@ -658,11 +717,11 @@ class RouteSummaryWidget(QWidget):
                 rating = 0.0
             else:
                 rating = max(0.0, min(5.0, round(rating * 2) / 2))
-            star_widget = self.store_visits_table.cellWidget(row, 9)
+            star_widget = self.store_visits_table.cellWidget(row, COL_STAR)
             if not isinstance(star_widget, StarRatingWidget):
                 star_widget = StarRatingWidget(self.store_visits_table, rating=0, star_size=14)
                 star_widget.rating_changed.connect(partial(self.on_star_rating_changed, row))
-                self.store_visits_table.setCellWidget(row, 9, star_widget)
+                self.store_visits_table.setCellWidget(row, COL_STAR, star_widget)
             # setRatingでシグナルが発火してUndo履歴が増えないよう一時的にブロック
             block_prev = star_widget.blockSignals(True)
             try:
@@ -672,9 +731,9 @@ class RouteSummaryWidget(QWidget):
 
     def _calculate_store_rating_for_row(self, row: int) -> float:
         """指定行の星評価を算出"""
-        qty = self._parse_float_value(self._get_table_item(row, 8))
-        profit = self._parse_float_value(self._get_table_item(row, 7))
-        stay = self._parse_float_value(self._get_table_item(row, 5))
+        qty = self._parse_float_value(self._get_table_item(row, COL_QTY))
+        profit = self._parse_float_value(self._get_table_item(row, COL_PROFIT))
+        stay = self._parse_float_value(self._get_table_item(row, COL_STAY))
 
         if qty <= 0 or profit <= 0:
             return 0
@@ -744,14 +803,32 @@ class RouteSummaryWidget(QWidget):
     def on_route_code_changed(self, route_name: str):
         """ルートコード変更時の処理"""
         try:
-            if route_name:
-                # ルート名からルートコードを取得
-                route_code = self.store_db.get_route_code_by_name(route_name)
-                if route_code:
-                    # ルートコードを表示用に更新（必要に応じて）
-                    pass
+            self._sync_google_map_url_from_selected_route(route_name)
         except Exception as e:
             print(f"ルートコード変更処理エラー: {e}")
+
+    def _sync_google_map_url_from_selected_route(self, route_name: Optional[str] = None) -> None:
+        """選択ルートの Google Map URL を店舗マスタと同じ routes テーブルから表示する。"""
+        if not hasattr(self, "google_map_url_edit"):
+            return
+        name = (route_name if route_name is not None else self.route_code_combo.currentText()).strip()
+        url = self.store_db.get_route_google_map_url(name) if name else ""
+        self.google_map_url_edit.setText(url)
+        if hasattr(self, "google_map_url_open_btn"):
+            self.google_map_url_open_btn.setEnabled(bool(url))
+
+    def open_google_map_url_in_browser(self) -> None:
+        """表示中の Google Map URL をブラウザで開く。"""
+        if not hasattr(self, "google_map_url_edit"):
+            return
+        url = self.google_map_url_edit.text().strip()
+        if not url:
+            QMessageBox.warning(self, "警告", "Google Map URLが設定されていません")
+            return
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            QMessageBox.warning(self, "エラー", f"ブラウザで開くのに失敗しました:\n{str(e)}")
     
     def get_selected_route_code(self) -> str:
         """選択されたルートコードを取得"""
@@ -761,6 +838,73 @@ class RouteSummaryWidget(QWidget):
             route_code = self.store_db.get_route_code_by_name(route_name)
             return route_code or route_name  # ルートコードが見つからない場合はルート名を返す
         return ""
+
+    def _set_visit_row_checkbox(self, row: int, checked: bool = True) -> None:
+        """店舗訪問行のテンプレート出力チェックボックスを配置"""
+        container = QWidget(self.store_visits_table)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setAlignment(Qt.AlignCenter)
+        checkbox = QCheckBox(container)
+        checkbox.setChecked(checked)
+        checkbox.stateChanged.connect(lambda _state: self.on_table_item_changed(None))
+        layout.addWidget(checkbox)
+        self.store_visits_table.setCellWidget(row, COL_VISIT_INCLUDE, container)
+
+    def _collect_visit_order_and_includes(self) -> tuple:
+        """現在テーブルの訪問順序とテンプレート出力フラグを店舗コード別に収集"""
+        store_orders: Dict[str, int] = {}
+        store_includes: Dict[str, bool] = {}
+        for row in range(self.store_visits_table.rowCount()):
+            code_item = self.store_visits_table.item(row, COL_STORE_CODE)
+            if not code_item:
+                continue
+            store_code = code_item.text().strip()
+            if store_code:
+                store_orders[store_code] = row + 1
+                store_includes[store_code] = _visit_include_checked(self.store_visits_table, row)
+        return store_orders, store_includes
+
+    def _fill_visit_table_row(
+        self,
+        row: int,
+        *,
+        store_code: str = "",
+        store_name: str = "",
+        in_time: str = "",
+        out_time: str = "",
+        stay: str = "",
+        travel: str = "",
+        profit: str = "0",
+        qty: str = "0",
+        rating: float = 0,
+        notes: str = "",
+        include_checked: bool = True,
+        visit_order: Optional[str] = None,
+        order_editable: bool = True,
+    ) -> None:
+        """店舗訪問詳細テーブルの1行を標準構成で埋める"""
+        order_text = visit_order if visit_order is not None else str(row + 1)
+        order_item = QTableWidgetItem(order_text)
+        if not order_editable:
+            order_item.setFlags(order_item.flags() & ~Qt.ItemIsEditable)
+        self.store_visits_table.setItem(row, COL_VISIT_ORDER, order_item)
+        self._set_visit_row_checkbox(row, include_checked)
+        self.store_visits_table.setItem(row, COL_STORE_CODE, QTableWidgetItem(store_code))
+        self.store_visits_table.setItem(row, COL_STORE_NAME, QTableWidgetItem(store_name))
+        self.store_visits_table.setItem(row, COL_IN_TIME, QTableWidgetItem(in_time))
+        self.store_visits_table.setItem(row, COL_OUT_TIME, QTableWidgetItem(out_time))
+        self.store_visits_table.setItem(row, COL_STAY, QTableWidgetItem(stay))
+        self.store_visits_table.setItem(row, COL_TRAVEL, QTableWidgetItem(travel))
+        self.store_visits_table.setItem(row, COL_PROFIT, QTableWidgetItem(profit))
+        self.store_visits_table.setItem(row, COL_QTY, QTableWidgetItem(qty))
+        star_widget = StarRatingWidget(self.store_visits_table, rating=rating, star_size=14)
+        star_widget.rating_changed.connect(lambda rating, r=row: self.on_star_rating_changed(r, rating))
+        self.store_visits_table.setCellWidget(row, COL_STAR, star_widget)
+        notes_item = QTableWidgetItem(notes)
+        if notes:
+            notes_item.setToolTip(notes)
+        self.store_visits_table.setItem(row, COL_NOTES, notes_item)
 
     @staticmethod
     def _merge_notes_for_template_export(*parts: str) -> str:
@@ -790,7 +934,7 @@ class RouteSummaryWidget(QWidget):
         return (store.get("supplier_code") or "").strip()
 
     def _table_notes_at_row(self, row: int) -> str:
-        notes_item = self.store_visits_table.item(row, 10)
+        notes_item = self.store_visits_table.item(row, COL_NOTES)
         if not notes_item:
             return ""
         return notes_item.text().strip()
@@ -800,7 +944,7 @@ class RouteSummaryWidget(QWidget):
         updated = 0
         skipped = 0
         for row in range(self.store_visits_table.rowCount()):
-            code_item = self.store_visits_table.item(row, 1)
+            code_item = self.store_visits_table.item(row, COL_STORE_CODE)
             store_code = code_item.text().strip() if code_item else ""
             if not store_code:
                 skipped += 1
@@ -813,8 +957,11 @@ class RouteSummaryWidget(QWidget):
                 print(f"店舗マスタ備考の上書きをスキップ（店舗未登録）: {store_code}")
         return updated, skipped
 
-    def get_stores_from_table(self) -> List[Dict[str, Any]]:
-        """テーブルから訪問順序に基づいて店舗一覧を取得"""
+    def get_stores_from_table(self, for_template_output: bool = False) -> List[Dict[str, Any]]:
+        """テーブルから訪問順序に基づいて店舗一覧を取得
+
+        for_template_output=True のときはチェックが入っている店舗のみ返す。
+        """
         try:
             stores = []
             table = self.store_visits_table
@@ -827,8 +974,11 @@ class RouteSummaryWidget(QWidget):
             # 各行から訪問順序と店舗コードを取得
             table_data = []
             for row in range(row_count):
-                # 訪問順序（0列目）
-                visit_order_item = table.item(row, 0)
+                if for_template_output and not _visit_include_checked(table, row):
+                    continue
+
+                # 訪問順序
+                visit_order_item = table.item(row, COL_VISIT_ORDER)
                 visit_order = None
                 if visit_order_item:
                     try:
@@ -838,12 +988,12 @@ class RouteSummaryWidget(QWidget):
                 else:
                     visit_order = row + 1
                 
-                # 店舗コード（1列目）
-                store_code_item = table.item(row, 1)
+                # 店舗コード
+                store_code_item = table.item(row, COL_STORE_CODE)
                 store_code = store_code_item.text().strip() if store_code_item else ''
                 
-                # 店舗名（2列目）
-                store_name_item = table.item(row, 2)
+                # 店舗名
+                store_name_item = table.item(row, COL_STORE_NAME)
                 store_name = store_name_item.text().strip() if store_name_item else ''
                 
                 if store_code:  # 店舗コードがある行のみ処理
@@ -923,14 +1073,16 @@ class RouteSummaryWidget(QWidget):
         redo_shortcut.activated.connect(self.redo_action)
     
     def _snapshot_table_state(self):
-        """現在のテーブル状態をスナップショットとして返す（星評価含む）"""
+        """現在のテーブル状態をスナップショットとして返す（星評価・チェック含む）"""
         state = []
         for row in range(self.store_visits_table.rowCount()):
             row_data = {}
             for col in range(self.store_visits_table.columnCount()):
-                if col == 9:
+                if col == COL_STAR:
                     star_widget = self.store_visits_table.cellWidget(row, col)
                     row_data[col] = int(star_widget.rating()) if star_widget else 0
+                elif col == COL_VISIT_INCLUDE:
+                    row_data[col] = _visit_include_checked(self.store_visits_table, row)
                 else:
                     item = self.store_visits_table.item(row, col)
                     row_data[col] = item.text() if item else ''
@@ -958,9 +1110,7 @@ class RouteSummaryWidget(QWidget):
             for row_idx, row_data in enumerate(state):
                 for col_idx, value in row_data.items():
                     col_idx_int = int(col_idx)
-                    # 星評価列の場合はウィジェットを設定
-                    if col_idx_int == 9:
-                        # self._safe_int が未定義な環境でも安全にパース
+                    if col_idx_int == COL_STAR:
                         try:
                             rating = int(float(str(value))) if str(value) not in (None, '', 'None') else 0
                         except Exception:
@@ -968,6 +1118,8 @@ class RouteSummaryWidget(QWidget):
                         star_widget = StarRatingWidget(self.store_visits_table, rating=rating)
                         star_widget.rating_changed.connect(lambda rating, r=row_idx: self.on_star_rating_changed(r, rating))
                         self.store_visits_table.setCellWidget(row_idx, col_idx_int, star_widget)
+                    elif col_idx_int == COL_VISIT_INCLUDE:
+                        self._set_visit_row_checkbox(row_idx, bool(value))
                     else:
                         item = QTableWidgetItem(str(value))
                         self.store_visits_table.setItem(row_idx, col_idx_int, item)
@@ -1048,7 +1200,7 @@ class RouteSummaryWidget(QWidget):
     def _rebind_star_rating_signals(self) -> None:
         """星評価ウィジェットのシグナルを現在の行構成に合わせて再接続する。"""
         for row in range(self.store_visits_table.rowCount()):
-            star_widget = self.store_visits_table.cellWidget(row, 9)
+            star_widget = self.store_visits_table.cellWidget(row, COL_STAR)
             if not isinstance(star_widget, StarRatingWidget):
                 continue
             try:
@@ -1073,7 +1225,7 @@ class RouteSummaryWidget(QWidget):
         try:
             # 訪問順序を再設定
             for i in range(self.store_visits_table.rowCount()):
-                order_item = self.store_visits_table.item(i, 0)
+                order_item = self.store_visits_table.item(i, COL_VISIT_ORDER)
                 if order_item:
                     order_item.setText(str(i + 1))
             self._rebind_star_rating_signals()
@@ -1096,19 +1248,12 @@ class RouteSummaryWidget(QWidget):
             if not route_name:
                 return
             
-            # 現在の訪問順序を取得
-            store_orders = {}
-            for row in range(self.store_visits_table.rowCount()):
-                code_item = self.store_visits_table.item(row, 1)  # 店舗コード列
-                if code_item:
-                    supplier_code = code_item.text().strip()
-                    if supplier_code:
-                        store_orders[supplier_code] = row + 1  # 1始まりの順序
-            
+            store_orders, store_includes = self._collect_visit_order_and_includes()
             if store_orders:
-                # データベースに保存
                 if hasattr(self.store_db, 'update_store_display_order'):
-                    self.store_db.update_store_display_order(route_name, store_orders)
+                    self.store_db.update_store_display_order(
+                        route_name, store_orders, store_includes
+                    )
         except Exception as e:
             print(f"訪問順序保存エラー: {e}")
     
@@ -1125,30 +1270,30 @@ class RouteSummaryWidget(QWidget):
                 QMessageBox.warning(self, "警告", "保存する店舗データがありません。")
                 return
             
-            # 現在の訪問順序を取得
-            store_orders = {}
-            for row in range(self.store_visits_table.rowCount()):
-                code_item = self.store_visits_table.item(row, 1)  # 店舗コード列
-                if code_item:
-                    store_code = code_item.text().strip()
-                    if store_code:
-                        store_orders[store_code] = row + 1  # 1始まりの順序
-            
+            store_orders, store_includes = self._collect_visit_order_and_includes()
             if not store_orders:
                 QMessageBox.warning(self, "警告", "保存する店舗コードがありません。")
                 return
             
+            included_count = sum(1 for v in store_includes.values() if v)
+            excluded_count = len(store_includes) - included_count
+            
             # データベースに保存
             if hasattr(self.store_db, 'update_store_display_order'):
-                success = self.store_db.update_store_display_order(route_name, store_orders)
+                success = self.store_db.update_store_display_order(
+                    route_name, store_orders, store_includes
+                )
                 if success:
                     QMessageBox.information(
                         self, 
                         "保存完了", 
-                        f"訪問順序を保存しました。\n\n"
+                        f"訪問順序とテンプレート出力設定を保存しました。\n\n"
                         f"ルート: {route_name}\n"
-                        f"保存件数: {len(store_orders)}件\n\n"
-                        f"次回同じルートを呼び出した時に、保存された順序で表示されます。"
+                        f"保存件数: {len(store_orders)}件\n"
+                        f"テンプレート出力: {included_count}件"
+                        + (f"（除外 {excluded_count}件）" if excluded_count else "")
+                        + "\n\n"
+                        f"次回同じルートを呼び出した時に、保存された順序とチェック状態で表示されます。"
                     )
                 else:
                     QMessageBox.warning(self, "エラー", "訪問順序の保存に失敗しました。")
@@ -1255,15 +1400,15 @@ class RouteSummaryWidget(QWidget):
         exclude = {"出発時刻", "帰宅時刻", "往路高速代", "復路高速代"}
         visits: List[Dict[str, Any]] = []
         for i in range(self.store_visits_table.rowCount()):
-            code = self._get_table_item(i, 1)
+            code = self._get_table_item(i, COL_STORE_CODE)
             if code in exclude:
                 continue
             visits.append(
                 {
                     "store_code": code,
-                    "store_name": self._get_table_item(i, 2),
-                    "store_in_time": self._get_table_item(i, 3),
-                    "store_out_time": self._get_table_item(i, 4),
+                    "store_name": self._get_table_item(i, COL_STORE_NAME),
+                    "store_in_time": self._get_table_item(i, COL_IN_TIME),
+                    "store_out_time": self._get_table_item(i, COL_OUT_TIME),
                 }
             )
         return collect_route_template_time_issues(route_data, visits)
@@ -1434,43 +1579,15 @@ class RouteSummaryWidget(QWidget):
             try:
                 self.store_visits_table.setRowCount(len(visits))
                 for i, visit in enumerate(visits):
-                    # 訪問順序
-                    order_item = QTableWidgetItem(str(i + 1))
-                    self.store_visits_table.setItem(i, 0, order_item)
-                    
-                    # 店舗コード
-                    self.store_visits_table.setItem(i, 1, QTableWidgetItem(visit.get('store_code', '')))
-                    
-                    # 店舗名
-                    self.store_visits_table.setItem(i, 2, QTableWidgetItem(visit.get('store_name', '')))
-                    
-                    # IN時間
-                    in_time = visit.get('store_in_time', '')
-                    self.store_visits_table.setItem(i, 3, QTableWidgetItem(in_time))
-                    
-                    # OUT時間
-                    out_time = visit.get('store_out_time', '')
-                    self.store_visits_table.setItem(i, 4, QTableWidgetItem(out_time))
-                    
-                    # 滞在時間（自動計算されるので空欄）
-                    self.store_visits_table.setItem(i, 5, QTableWidgetItem(''))
-                    
-                    # 移動時間（自動計算されるので空欄）
-                    self.store_visits_table.setItem(i, 6, QTableWidgetItem(''))
-                    
-                    # 想定粗利
-                    self.store_visits_table.setItem(i, 7, QTableWidgetItem('0'))
-                    
-                    # 仕入れ点数
-                    self.store_visits_table.setItem(i, 8, QTableWidgetItem('0'))
-                    
-                    # 評価（星評価ウィジェット）
-                    star_widget = StarRatingWidget(self.store_visits_table, rating=0, star_size=14)
-                    star_widget.rating_changed.connect(lambda rating, r=i: self.on_star_rating_changed(r, rating))
-                    self.store_visits_table.setCellWidget(i, 9, star_widget)
-                    
-                    # メモ
-                    self.store_visits_table.setItem(i, 10, QTableWidgetItem(visit.get('store_notes', '')))
+                    self._fill_visit_table_row(
+                        i,
+                        store_code=visit.get('store_code', ''),
+                        store_name=visit.get('store_name', ''),
+                        in_time=visit.get('store_in_time', ''),
+                        out_time=visit.get('store_out_time', ''),
+                        notes=visit.get('store_notes', ''),
+                        include_checked=True,
+                    )
             finally:
                 self.store_visits_table.blockSignals(False)
             
@@ -1603,20 +1720,15 @@ class RouteSummaryWidget(QWidget):
             try:
                 self.store_visits_table.setRowCount(len(visits))
                 for i, visit in enumerate(visits):
-                    order_item = QTableWidgetItem(str(i + 1))
-                    self.store_visits_table.setItem(i, 0, order_item)
-                    self.store_visits_table.setItem(i, 1, QTableWidgetItem(visit.get('store_code', '')))
-                    self.store_visits_table.setItem(i, 2, QTableWidgetItem(visit.get('store_name', '')))
-                    self.store_visits_table.setItem(i, 3, QTableWidgetItem(visit.get('store_in_time', '')))
-                    self.store_visits_table.setItem(i, 4, QTableWidgetItem(visit.get('store_out_time', '')))
-                    self.store_visits_table.setItem(i, 5, QTableWidgetItem(''))
-                    self.store_visits_table.setItem(i, 6, QTableWidgetItem(''))
-                    self.store_visits_table.setItem(i, 7, QTableWidgetItem('0'))
-                    self.store_visits_table.setItem(i, 8, QTableWidgetItem('0'))
-                    star_widget = StarRatingWidget(self.store_visits_table, rating=0, star_size=14)
-                    star_widget.rating_changed.connect(lambda rating, r=i: self.on_star_rating_changed(r, rating))
-                    self.store_visits_table.setCellWidget(i, 9, star_widget)
-                    self.store_visits_table.setItem(i, 10, QTableWidgetItem(visit.get('store_notes', '')))
+                    self._fill_visit_table_row(
+                        i,
+                        store_code=visit.get('store_code', ''),
+                        store_name=visit.get('store_name', ''),
+                        in_time=visit.get('store_in_time', ''),
+                        out_time=visit.get('store_out_time', ''),
+                        notes=visit.get('store_notes', ''),
+                        include_checked=True,
+                    )
             finally:
                 self.store_visits_table.blockSignals(False)
             
@@ -1709,19 +1821,29 @@ class RouteSummaryWidget(QWidget):
                         + (f"（スキップ {notes_skipped}件）" if notes_skipped else "")
                     )
                 # テーブルから訪問順序を取得（テーブルにデータがある場合）
-                table_stores = self.get_stores_from_table()
+                table_stores = self.get_stores_from_table(for_template_output=True)
                 if table_stores:
-                    # テーブルの訪問順序を使用
+                    # テーブルの訪問順序を使用（チェック済み店舗のみ）
                     stores = table_stores
                     store_codes = [
                         (store.get('store_code') or store.get('supplier_code'))
                         for store in stores
                         if store.get('store_code') or store.get('supplier_code')
                     ]
+                elif self.store_visits_table.rowCount() > 0:
+                    QMessageBox.warning(
+                        self,
+                        "警告",
+                        "テンプレートに出力する店舗が選択されていません。\n"
+                        "「出力」列のチェックを確認してください。",
+                    )
+                    return
                 else:
-                    # テーブルにデータがない場合はデータベースから取得
-                    stores = self.get_stores_for_route(route_name)
-                    # 店舗マスタの備考欄を取得してstoresに追加
+                    # テーブルにデータがない場合はデータベースから取得（template_include=1 のみ）
+                    stores = [
+                        store for store in self.get_stores_for_route(route_name)
+                        if _template_include_from_db_value(store.get('template_include'))
+                    ]
                     for store in stores:
                         any_code = self._visit_store_code_from_dict(store)
                         if any_code:
@@ -1733,6 +1855,10 @@ class RouteSummaryWidget(QWidget):
                         for store in stores
                         if store.get('store_code') or store.get('supplier_code')
                     ]
+            
+            if not store_codes:
+                QMessageBox.warning(self, "警告", "テンプレートに出力する店舗がありません。")
+                return
             
             if not TemplateGenerator:
                 QMessageBox.warning(self, "エラー", "テンプレート生成機能が利用できません")
@@ -2043,10 +2169,12 @@ class RouteSummaryWidget(QWidget):
                 finally:
                     # シグナルのブロックを解除
                     self.route_code_combo.blockSignals(False)
+                    self._sync_google_map_url_from_selected_route()
             else:
                 # ルートコードが空の場合は、コンボボックスを更新してクリア
                 self.update_route_codes()
                 self.route_code_combo.setCurrentText('')
+                self._sync_google_map_url_from_selected_route("")
             # 出発時間・帰宅時間・経費・備考は削除されたため、読み込み処理をスキップ
             
             # 店舗訪問詳細
@@ -2067,22 +2195,14 @@ class RouteSummaryWidget(QWidget):
             try:
                 self.store_visits_table.setRowCount(len(visits))
                 for i, v in enumerate(visits):
-                    order_item = QTableWidgetItem(str(i + 1))
-                    order_item.setFlags(order_item.flags() & ~Qt.ItemIsEditable)
-                    self.store_visits_table.setItem(i, 0, order_item)
-                    self.store_visits_table.setItem(i, 1, QTableWidgetItem(v.get('store_code','')))
-                    # store_name はDBのstore_visit_detailsに無いのでマスタから補完
-                    code = v.get('store_code','')
+                    code = v.get('store_code', '')
                     store_name = code_to_name.get(code, '')
                     if not store_name and code:
                         try:
-                            # 店舗コード(store_code)を優先し、互換性のため仕入れ先コードも許容
                             s = self.store_db.get_store_by_code(code)
-                            store_name = (s or {}).get('store_name','')
+                            store_name = (s or {}).get('store_name', '')
                         except Exception:
                             store_name = ''
-                    self.store_visits_table.setItem(i, 2, QTableWidgetItem(store_name))
-                    # 店舗IN/OUT時間は "2025-10-26 17:22:00" 形式から HH:MM を抽出
                     store_in_time = v.get('store_in_time') or ''
                     store_out_time = v.get('store_out_time') or ''
                     try:
@@ -2093,43 +2213,43 @@ class RouteSummaryWidget(QWidget):
                         store_out_display = store_out_time.split(' ')[1][:5] if ' ' in store_out_time else store_out_time[:5]
                     except Exception:
                         store_out_display = ''
-                    self.store_visits_table.setItem(i, 3, QTableWidgetItem(store_in_display))
-                    self.store_visits_table.setItem(i, 4, QTableWidgetItem(store_out_display))
-                    self.store_visits_table.setItem(i, 5, QTableWidgetItem(str(v.get('stay_duration') or '')))
-                    self.store_visits_table.setItem(i, 6, QTableWidgetItem(str(v.get('travel_time_from_prev') or '')))
-                    # 想定粗利は整数で表示（None/空の場合は0）
                     gross_profit = v.get('store_gross_profit')
-                    if gross_profit is None or gross_profit == '':
-                        self.store_visits_table.setItem(i, 7, QTableWidgetItem('0'))
-                    else:
-                        self.store_visits_table.setItem(i, 7, QTableWidgetItem(str(int(float(gross_profit)))))
-                    # 仕入れ点数は整数で表示（None/空の場合は0）
+                    profit_text = '0' if gross_profit in (None, '') else str(int(float(gross_profit)))
                     item_count = v.get('store_item_count')
-                    if item_count is None or item_count == '':
-                        self.store_visits_table.setItem(i, 8, QTableWidgetItem('0'))
-                    else:
-                        self.store_visits_table.setItem(i, 8, QTableWidgetItem(str(int(item_count))))
+                    qty_text = '0' if item_count in (None, '') else str(int(item_count))
                     existing_rating = v.get('store_rating')
                     try:
                         rating_value = float(existing_rating) if existing_rating not in (None, '') else 0.0
                     except (TypeError, ValueError):
                         rating_value = 0.0
-                    star_widget = StarRatingWidget(self.store_visits_table, rating=rating_value, star_size=14)
-                    star_widget.rating_changed.connect(lambda rating, r=i: self.on_star_rating_changed(r, rating))
-                    self.store_visits_table.setCellWidget(i, 9, star_widget)
-                    code_for_notes = v.get('store_code', '') or ''
                     store_notes = v.get('store_notes', '') or ''
-                    if code_for_notes:
+                    if code:
                         try:
-                            master_row = self.store_db.get_store_by_code(code_for_notes)
+                            master_row = self.store_db.get_store_by_code(code)
                             if master_row:
                                 store_notes = self._resolve_store_master_notes(master_row) or store_notes
+                                include_checked = _template_include_from_db_value(master_row.get('template_include'))
+                            else:
+                                include_checked = True
                         except Exception:
-                            pass
-                    notes_item = QTableWidgetItem(store_notes)
-                    if store_notes:
-                        notes_item.setToolTip(store_notes)
-                    self.store_visits_table.setItem(i, 10, notes_item)
+                            include_checked = True
+                    else:
+                        include_checked = True
+                    self._fill_visit_table_row(
+                        i,
+                        store_code=code,
+                        store_name=store_name,
+                        in_time=store_in_display,
+                        out_time=store_out_display,
+                        stay=str(v.get('stay_duration') or ''),
+                        travel=str(v.get('travel_time_from_prev') or ''),
+                        profit=profit_text,
+                        qty=qty_text,
+                        rating=rating_value,
+                        notes=store_notes,
+                        include_checked=include_checked,
+                        order_editable=False,
+                    )
             finally:
                 self.store_visits_table.blockSignals(False)
             
@@ -2209,7 +2329,7 @@ class RouteSummaryWidget(QWidget):
             # 既存の店舗コード一覧を取得（重複チェック用）
             existing_codes = set()
             for row in range(self.store_visits_table.rowCount()):
-                code_item = self.store_visits_table.item(row, 1)  # 店舗コード列
+                code_item = self.store_visits_table.item(row, COL_STORE_CODE)
                 if code_item:
                     code = code_item.text().strip()
                     if code:
@@ -2232,34 +2352,20 @@ class RouteSummaryWidget(QWidget):
             for i, store in enumerate(stores_to_add):
                 row = current_rows + i
                 self.store_visits_table.insertRow(row)
-                
-                # 訪問順序（編集可能）
-                order_item = QTableWidgetItem(str(row + 1))
-                self.store_visits_table.setItem(row, 0, order_item)
-                
-                # 店舗コード（店舗マスタの「仕入れ先コード」を優先し、なければ店舗コードを使用）
-                code_item = QTableWidgetItem(_get_visit_store_code(store))
-                self.store_visits_table.setItem(row, 1, code_item)
-                
-                # 店舗名
-                name_item = QTableWidgetItem(store.get('store_name', ''))
-                self.store_visits_table.setItem(row, 2, name_item)
-                
-                # 星評価ウィジェットをセルに配置
-                star_widget = StarRatingWidget(self.store_visits_table, rating=0, star_size=14)
-                star_widget.rating_changed.connect(lambda rating, r=row: self.on_star_rating_changed(r, rating))
-                self.store_visits_table.setCellWidget(row, 9, star_widget)
-                
-                # 備考（店舗マスタの備考欄から取得。旧 custom_fields.notes も統合）
-                any_code = _get_visit_store_code(store)
+                visit_code = _get_visit_store_code(store)
+                include_checked = _template_include_from_db_value(store.get('template_include'))
+                any_code = visit_code
                 store_info = self.store_db.get_store_by_code(any_code) if any_code else None
                 notes = self._resolve_store_master_notes(store_info) if store_info else (
                     store.get('notes', '') or ''
                 )
-                notes_item = QTableWidgetItem(notes)
-                if notes:
-                    notes_item.setToolTip(notes)
-                self.store_visits_table.setItem(row, 10, notes_item)
+                self._fill_visit_table_row(
+                    row,
+                    store_code=visit_code,
+                    store_name=store.get('store_name', ''),
+                    notes=notes,
+                    include_checked=include_checked,
+                )
             
             # 訪問順序を再設定
             self.update_visit_order()
@@ -2282,14 +2388,14 @@ class RouteSummaryWidget(QWidget):
     def update_visit_order(self):
         """訪問順序を再設定"""
         for i in range(self.store_visits_table.rowCount()):
-            order_item = self.store_visits_table.item(i, 0)
+            order_item = self.store_visits_table.item(i, COL_VISIT_ORDER)
             if order_item:
                 order_item.setText(str(i + 1))
         # 順序が変わったら移動時間も更新
         self.recalc_travel_times()
 
     def recalc_travel_times(self):
-        """滞在時間と移動時間（分）を自動計算して5/6列目に反映"""
+        """滞在時間と移動時間（分）を自動計算して反映"""
         try:
             row_count = self.store_visits_table.rowCount()
             if row_count == 0:
@@ -2318,29 +2424,29 @@ class RouteSummaryWidget(QWidget):
 
             # 各行の滞在時間（店舗OUT - 店舗IN）を算出
             for r in range(row_count):
-                in_t = parse_hhmm(get_text(r, 3))
-                out_t = parse_hhmm(get_text(r, 4))
+                in_t = parse_hhmm(get_text(r, COL_IN_TIME))
+                out_t = parse_hhmm(get_text(r, COL_OUT_TIME))
                 if in_t and out_t:
                     mins = in_t.secsTo(out_t) // 60
                     mins = max(0, int(mins))
-                    self.store_visits_table.setItem(r, 5, QTableWidgetItem(str(mins)))
+                    self.store_visits_table.setItem(r, COL_STAY, QTableWidgetItem(str(mins)))
                 else:
-                    self.store_visits_table.setItem(r, 5, QTableWidgetItem(''))
+                    self.store_visits_table.setItem(r, COL_STAY, QTableWidgetItem(''))
 
             # 1店舗目の移動時間は空（出発時間が削除されたため）
             if row_count > 0:
-                self.store_visits_table.setItem(0, 6, QTableWidgetItem(''))
+                self.store_visits_table.setItem(0, COL_TRAVEL, QTableWidgetItem(''))
 
             # 2店舗目以降: 前店舗OUT → 現在IN
             for r in range(1, row_count):
-                prev_out = parse_hhmm(get_text(r - 1, 4))
-                cur_in = parse_hhmm(get_text(r, 3))
+                prev_out = parse_hhmm(get_text(r - 1, COL_OUT_TIME))
+                cur_in = parse_hhmm(get_text(r, COL_IN_TIME))
                 if prev_out and cur_in:
                     mins = prev_out.secsTo(cur_in) // 60
                     mins = max(0, int(mins))
-                    self.store_visits_table.setItem(r, 6, QTableWidgetItem(str(mins)))
+                    self.store_visits_table.setItem(r, COL_TRAVEL, QTableWidgetItem(str(mins)))
                 else:
-                    self.store_visits_table.setItem(r, 6, QTableWidgetItem(''))
+                    self.store_visits_table.setItem(r, COL_TRAVEL, QTableWidgetItem(''))
         except Exception as e:
             print(f"移動時間計算エラー: {e}")
 
@@ -2358,33 +2464,31 @@ class RouteSummaryWidget(QWidget):
             # 各行のデータと訪問順序を取得
             rows_data = []
             for row in range(row_count):
-                # 訪問順序を取得
-                order_item = self.store_visits_table.item(row, 0)
+                order_item = self.store_visits_table.item(row, COL_VISIT_ORDER)
                 order_text = order_item.text().strip() if order_item else ""
                 
-                # 訪問順序を数値に変換（数値でない場合は元の行番号+1000で最後に配置）
                 try:
                     order_num = int(order_text) if order_text else row + 1000
                 except ValueError:
-                    order_num = row + 1000  # 数値変換できない場合は最後尾へ
+                    order_num = row + 1000
                 
-                # 行データを収集
                 row_data = {
                     'order': order_num,
                     'original_row': row,
-                    'cells': []
+                    'cells': [],
+                    'include_checked': _visit_include_checked(self.store_visits_table, row),
                 }
                 
-                # 全列のデータを保存
                 for col in range(self.store_visits_table.columnCount()):
+                    if col in (COL_VISIT_INCLUDE, COL_STAR):
+                        row_data['cells'].append("")
+                        continue
                     item = self.store_visits_table.item(row, col)
-                    cell_text = item.text() if item else ""
-                    row_data['cells'].append(cell_text)
+                    row_data['cells'].append(item.text() if item else "")
                 
-                # 星評価ウィジェットの値も保存
-                star_widget = self.store_visits_table.cellWidget(row, 9)
+                star_widget = self.store_visits_table.cellWidget(row, COL_STAR)
                 if star_widget and hasattr(star_widget, 'rating'):
-                    row_data['star_rating'] = star_widget.rating()  # メソッド呼び出し
+                    row_data['star_rating'] = star_widget.rating()
                 else:
                     row_data['star_rating'] = 0
                 
@@ -2402,16 +2506,16 @@ class RouteSummaryWidget(QWidget):
                 self.store_visits_table.setRowCount(len(rows_data))
                 
                 for new_row, data in enumerate(rows_data):
-                    # 全列のデータを設定
                     for col, cell_text in enumerate(data['cells']):
-                        if col == 0:
-                            # 訪問順序は新しい行番号+1に設定
+                        if col in (COL_VISIT_INCLUDE, COL_STAR):
+                            continue
+                        if col == COL_VISIT_ORDER:
                             item = QTableWidgetItem(str(new_row + 1))
                         else:
                             item = QTableWidgetItem(cell_text)
                         self.store_visits_table.setItem(new_row, col, item)
                     
-                    # 星評価ウィジェットを再配置
+                    self._set_visit_row_checkbox(new_row, data.get('include_checked', True))
                     star_widget = StarRatingWidget(
                         self.store_visits_table, 
                         rating=data['star_rating'], 
@@ -2420,7 +2524,7 @@ class RouteSummaryWidget(QWidget):
                     star_widget.rating_changed.connect(
                         lambda rating, r=new_row: self.on_star_rating_changed(r, rating)
                     )
-                    self.store_visits_table.setCellWidget(new_row, 9, star_widget)
+                    self.store_visits_table.setCellWidget(new_row, COL_STAR, star_widget)
                 
             finally:
                 self.store_visits_table.blockSignals(False)
@@ -2451,15 +2555,7 @@ class RouteSummaryWidget(QWidget):
         
         row = self.store_visits_table.rowCount()
         self.store_visits_table.insertRow(row)
-        
-        # 訪問順序を自動設定（編集可能）
-        order_item = QTableWidgetItem(str(row + 1))
-        self.store_visits_table.setItem(row, 0, order_item)
-        
-        # 星評価ウィジェットをセルに配置
-        star_widget = StarRatingWidget(self.store_visits_table, rating=0, star_size=14)
-        star_widget.rating_changed.connect(lambda rating, r=row: self.on_star_rating_changed(r, rating))
-        self.store_visits_table.setCellWidget(row, 9, star_widget)
+        self._fill_visit_table_row(row, include_checked=True)
         
         # 変更後の状態を保存
         self.save_table_state()
@@ -2690,18 +2786,18 @@ class RouteSummaryWidget(QWidget):
         exclude_store_codes = ['出発時刻', '帰宅時刻', '往路高速代', '復路高速代']
         
         for i in range(self.store_visits_table.rowCount()):
-            store_code = self._get_table_item(i, 1)
+            store_code = self._get_table_item(i, COL_STORE_CODE)
             
             # 出発時刻・帰宅時間・往路高速代・復路高速代は店舗訪問情報として扱わない
             if store_code in exclude_store_codes:
                 continue
             
-            star_widget = self.store_visits_table.cellWidget(i, 9)
+            star_widget = self.store_visits_table.cellWidget(i, COL_STAR)
             rating = star_widget.rating() if star_widget else 0
             
             # HH:MM形式の時間を取得してルート日付と結合
-            in_time_str = self._get_table_item(i, 3)
-            out_time_str = self._get_table_item(i, 4)
+            in_time_str = self._get_table_item(i, COL_IN_TIME)
+            out_time_str = self._get_table_item(i, COL_OUT_TIME)
             
             # HH:MMを yyyy-MM-dd HH:MM:SS に変換
             store_in_time = self._combine_datetime(route_date, in_time_str)
@@ -2710,15 +2806,15 @@ class RouteSummaryWidget(QWidget):
             visit = {
                 'visit_order': len(visits) + 1,  # 除外した行を考慮して訪問順序を再計算
                 'store_code': store_code,
-                'store_name': self._get_table_item(i, 2),
+                'store_name': self._get_table_item(i, COL_STORE_NAME),
                 'store_in_time': store_in_time,
                 'store_out_time': store_out_time,
-                'stay_duration': self._safe_float(self._get_table_item(i, 5)),
-                'travel_time_from_prev': self._safe_float(self._get_table_item(i, 6)),
-                'store_gross_profit': self._safe_float(self._get_table_item(i, 7)),
-                'store_item_count': self._safe_int(self._get_table_item(i, 8)),
+                'stay_duration': self._safe_float(self._get_table_item(i, COL_STAY)),
+                'travel_time_from_prev': self._safe_float(self._get_table_item(i, COL_TRAVEL)),
+                'store_gross_profit': self._safe_float(self._get_table_item(i, COL_PROFIT)),
+                'store_item_count': self._safe_int(self._get_table_item(i, COL_QTY)),
                 'store_rating': rating,
-                'store_notes': self._get_table_item(i, 10)
+                'store_notes': self._get_table_item(i, COL_NOTES)
             }
             visits.append(visit)
         return visits
@@ -2759,27 +2855,29 @@ class RouteSummaryWidget(QWidget):
                         self.route_code_combo.setCurrentText(display_value)
             finally:
                 self.route_code_combo.blockSignals(False)
+                self._sync_google_map_url_from_selected_route()
         # 出発時間・帰宅時間・経費・備考は削除されたため、読み込み処理をスキップ
         
         self.store_visits_table.blockSignals(True)
         try:
             self.store_visits_table.setRowCount(len(visits))
             for i, visit in enumerate(visits):
-                order_item = QTableWidgetItem(str(visit.get('visit_order', i + 1)))
-                order_item.setFlags(order_item.flags() & ~Qt.ItemIsEditable)
-                self.store_visits_table.setItem(i, 0, order_item)
-                self.store_visits_table.setItem(i, 1, QTableWidgetItem(visit.get('store_code', '')))
-                self.store_visits_table.setItem(i, 2, QTableWidgetItem(visit.get('store_name', '')))
-                self.store_visits_table.setItem(i, 3, QTableWidgetItem(self._format_hm(visit.get('store_in_time'))))
-                self.store_visits_table.setItem(i, 4, QTableWidgetItem(self._format_hm(visit.get('store_out_time'))))
-                self.store_visits_table.setItem(i, 5, QTableWidgetItem(str(visit.get('stay_duration', ''))))
-                self.store_visits_table.setItem(i, 6, QTableWidgetItem(str(visit.get('travel_time_from_prev', ''))))
-                self.store_visits_table.setItem(i, 7, QTableWidgetItem(str(visit.get('store_gross_profit', ''))))
-                self.store_visits_table.setItem(i, 8, QTableWidgetItem(str(visit.get('store_item_count', ''))))
-                rating = visit.get('store_rating', 0) or 0
-                star_widget = StarRatingWidget(self.store_visits_table, rating=rating, star_size=14)
-                self.store_visits_table.setCellWidget(i, 9, star_widget)
-                self.store_visits_table.setItem(i, 10, QTableWidgetItem(visit.get('store_notes', '') or ''))
+                self._fill_visit_table_row(
+                    i,
+                    visit_order=str(visit.get('visit_order', i + 1)),
+                    store_code=visit.get('store_code', ''),
+                    store_name=visit.get('store_name', ''),
+                    in_time=self._format_hm(visit.get('store_in_time')),
+                    out_time=self._format_hm(visit.get('store_out_time')),
+                    stay=str(visit.get('stay_duration', '')),
+                    travel=str(visit.get('travel_time_from_prev', '')),
+                    profit=str(visit.get('store_gross_profit', '')),
+                    qty=str(visit.get('store_item_count', '')),
+                    rating=float(visit.get('store_rating', 0) or 0),
+                    notes=visit.get('store_notes', '') or '',
+                    include_checked=True,
+                    order_editable=False,
+                )
         finally:
             self.store_visits_table.blockSignals(False)
         self.update_visit_order()
@@ -2970,9 +3068,9 @@ class RouteSummaryWidget(QWidget):
         table_items = 0
         table_profit = 0.0
         for row in range(self.store_visits_table.rowCount()):
-            qty = to_float(self._get_table_item(row, 8)) or 0.0
+            qty = to_float(self._get_table_item(row, COL_QTY)) or 0.0
             table_items += int(round(qty))
-            profit_val = to_float(self._get_table_item(row, 7)) or 0.0
+            profit_val = to_float(self._get_table_item(row, COL_PROFIT)) or 0.0
             table_profit += profit_val
 
         if total_items == 0:

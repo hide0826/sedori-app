@@ -402,6 +402,8 @@ class MainWindow(QMainWindow):
             if hasattr(self, "repricer_widget_369") and self.repricer_widget_369 is not None:
                 self.repricer_widget_369.set_product_widget(self.product_widget)
             self.inventory_widget.set_product_widget(self.product_widget)
+            if hasattr(self, "customer_support_widget") and self.customer_support_widget is not None:
+                self.customer_support_widget.set_product_widget(self.product_widget)
             # 3-6-9仕入管理からDB保存したときも仕入DBタブに即反映するため参照を渡す
             if hasattr(self, "inventory_widget_dev") and self.inventory_widget_dev is not None:
                 self.inventory_widget_dev.set_product_widget(self.product_widget)
@@ -470,10 +472,11 @@ class MainWindow(QMainWindow):
             return False
 
         if phase == 7:
-            # Keepaテスト・SP-APIテスト・画像テスト・設定（最後に設定タブ）
+            # Keepaテスト・SP-APIテスト・画像テスト・カスタマー対応AI・設定（最後に設定タブ）
             from ui.keepa_test_widget import KeepaTestWidget
             from ui.sp_api_test_widget import SPAPITestWidget
             from ui.image_test_widget import ImageTestWidget
+            from ui.customer_support_widget import CustomerSupportWidget
             from ui.settings_widget import SettingsWidget
             self.keepa_test_widget = KeepaTestWidget(product_widget=getattr(self, "product_widget", None))
             self.tab_widget.addTab(self.keepa_test_widget, "Keepaテスト")
@@ -481,6 +484,10 @@ class MainWindow(QMainWindow):
             self.tab_widget.addTab(self.sp_api_test_widget, "SP-APIテスト")
             self.image_test_widget = ImageTestWidget()
             self.tab_widget.addTab(self.image_test_widget, "画像テスト")
+            self.customer_support_widget = CustomerSupportWidget(
+                product_widget=getattr(self, "product_widget", None)
+            )
+            self.tab_widget.addTab(self.customer_support_widget, "カスタマー対応AI")
             self.settings_widget = SettingsWidget(self.api_client)
             self.settings_widget.settings_changed.connect(self.on_settings_changed)
             self.tab_widget.addTab(self.settings_widget, "設定")
