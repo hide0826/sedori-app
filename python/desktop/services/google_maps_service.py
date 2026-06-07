@@ -7,8 +7,9 @@ Google Maps APIを使用した店舗情報取得サービス
 
 注意:
 - `requests`ライブラリが必要です（通常は標準でインストール済み）
-- APIキーは QSettings("HIRIO", "DesktopApp") の "ocr/gemini_api_key" から読み込みます。
-  （Gemini APIキーにMaps APIの権限を付与したものを使用）
+- APIキーは QSettings("HIRIO", "DesktopApp") の "maps/api_key" から読み込みます。
+  （設定タブの Google Maps API キー。Gemini キーとは別です）
+- 環境変数 GOOGLE_MAPS_API_KEY でも指定可能
 - 新しいPlaces API (New) を使用します
 """
 
@@ -339,14 +340,28 @@ def normalize_stored_japanese_address(address: Optional[str]) -> str:
     return normalize_japanese_address(formatted=raw) or _strip_country_prefix(raw)
 
 
-def _resolve_api_key(api_key: Optional[str]) -> Optional[str]:
+def resolve_maps_api_key(api_key: Optional[str] = None) -> Optional[str]:
+    """Google Maps 用 API キーを解決（Embed / Places 共通）
+
+    優先順位:
+    1. 引数で明示指定
+    2. 設定タブ maps/api_key
+    3. 環境変数 GOOGLE_MAPS_API_KEY / Maps_API_KEY
+    """
     if api_key:
-        return api_key
+        stripped = api_key.strip()
+        return stripped or None
     settings = QSettings("HIRIO", "DesktopApp")
-    api_key = settings.value("ocr/gemini_api_key", "") or None
-    if not api_key:
-        api_key = os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("Maps_API_KEY") or None
-    return api_key
+    maps_key = str(settings.value("maps/api_key", "") or "").strip()
+    if maps_key:
+        return maps_key
+    env_key = os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("Maps_API_KEY")
+    return (env_key or "").strip() or None
+
+
+def _resolve_api_key(api_key: Optional[str]) -> Optional[str]:
+    """後方互換エイリアス"""
+    return resolve_maps_api_key(api_key)
 
 
 def _parse_location(location: Optional[Dict[str, Any]]) -> tuple[Optional[float], Optional[float]]:
@@ -390,8 +405,8 @@ def get_store_info_from_google(
     api_key = _resolve_api_key(api_key)
     if not api_key:
         print("警告: Google Maps APIキーが設定されていません。")
-        print("設定タブの「OCR設定」でGemini APIキーを設定してください。")
-        print("（Gemini APIキーにMaps APIの権限を付与してください）")
+        print("設定タブ → API設定 → 外部APIキーの「Google Maps APIキー」を入力してください。")
+        print("（Maps Embed API / Places API (New) が有効なキー。Gemini キーとは別です）")
         return None
 
     try:

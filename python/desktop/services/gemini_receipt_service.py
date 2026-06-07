@@ -55,6 +55,14 @@ Rules:
 class GeminiReceiptService:
     """Gemini APIを用いたレシート構造化サービス"""
 
+    @staticmethod
+    def _default_model_name() -> str:
+        try:
+            from utils.gemini_model_helper import resolve_gemini_flash_model
+        except ImportError:
+            from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
+        return resolve_gemini_flash_model()
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -62,7 +70,7 @@ class GeminiReceiptService:
         prompt: str = DEFAULT_PROMPT,
     ) -> None:
         self.api_key = api_key
-        self.model_name = model_name or "gemini-flash-latest"
+        self.model_name = model_name or self._default_model_name()
         self.prompt = prompt
         self.model = None
         self.available = False
@@ -78,9 +86,16 @@ class GeminiReceiptService:
             try:
                 from PySide6.QtCore import QSettings  # type: ignore
 
+                try:
+                    from utils.gemini_model_helper import resolve_gemini_flash_model
+                except ImportError:
+                    from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
+
                 settings = QSettings("HIRIO", "DesktopApp")
                 self.api_key = self.api_key or (settings.value("ocr/gemini_api_key", "") or None)
-                self.model_name = self.model_name or settings.value("ocr/gemini_model", "gemini-flash-latest")
+                self.model_name = self.model_name or resolve_gemini_flash_model(
+                    settings.value("ocr/gemini_model", "")
+                )
             except Exception as exc:
                 logger.debug("Failed to load Gemini settings from QSettings: %s", exc)
 

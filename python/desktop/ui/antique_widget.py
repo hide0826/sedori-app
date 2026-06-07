@@ -1317,6 +1317,11 @@ class AntiqueWidget(QWidget):
 
         self._load_operator_info_settings()
 
+    def _settings(self):
+        """事業者情報などの QSettings"""
+        from PySide6.QtCore import QSettings
+        return QSettings("HIRIO", "DesktopApp")
+
     def _operator_info_settings_keys(self) -> Dict[str, str]:
         """QSettings 用キー（プレフィックス ledger/operator_）"""
         return {

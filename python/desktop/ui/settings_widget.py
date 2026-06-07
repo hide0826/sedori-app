@@ -91,6 +91,105 @@ class SettingsWidget(QWidget):
         api_layout.addWidget(self.test_connection_btn, 2, 0, 1, 2)
         
         layout.addWidget(api_group)
+
+        # 外部サービス APIキー（QSettings キーは従来どおり・値は保持）
+        ext_keys_group = QGroupBox("外部APIキー")
+        ext_layout = QGridLayout(ext_keys_group)
+
+        ext_layout.addWidget(QLabel("Google Maps APIキー:"), 0, 0)
+        self.maps_api_key_edit = QLineEdit()
+        self.maps_api_key_edit.setPlaceholderText(
+            "Maps Embed API / Places API (New) 用（Gemini キーとは別）"
+        )
+        self.maps_api_key_edit.setEchoMode(QLineEdit.Password)
+        self.maps_api_key_edit.setClearButtonEnabled(True)
+        self.maps_api_key_edit.setToolTip(
+            "ルート地図表示・店舗の住所/緯度経度取得に使用します。\n"
+            "Cloud Console で Maps Embed API と Places API (New) を有効化したキーを入力してください。"
+        )
+        ext_layout.addWidget(self.maps_api_key_edit, 0, 1)
+        maps_toggle_btn = QPushButton("表示")
+        maps_toggle_btn.setCheckable(True)
+        maps_toggle_btn.setMaximumWidth(60)
+
+        def _toggle_maps_visibility(checked: bool) -> None:
+            self.maps_api_key_edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
+            maps_toggle_btn.setText("非表示" if checked else "表示")
+
+        maps_toggle_btn.toggled.connect(_toggle_maps_visibility)
+        ext_layout.addWidget(maps_toggle_btn, 0, 2)
+        maps_test_btn = QPushButton("テスト")
+        maps_test_btn.setMaximumWidth(60)
+        maps_test_btn.setToolTip("Places API (New) で接続を確認します")
+        maps_test_btn.clicked.connect(self.test_maps_api_key)
+        ext_layout.addWidget(maps_test_btn, 0, 3)
+
+        ext_layout.addWidget(QLabel("Gemini APIキー:"), 1, 0)
+        self.gemini_api_key_edit = QLineEdit()
+        self.gemini_api_key_edit.setPlaceholderText("（オプション）Gemini APIキー")
+        self.gemini_api_key_edit.setEchoMode(QLineEdit.Password)
+        self.gemini_api_key_edit.setClearButtonEnabled(True)
+        ext_layout.addWidget(self.gemini_api_key_edit, 1, 1)
+        gemini_toggle_btn = QPushButton("表示")
+        gemini_toggle_btn.setCheckable(True)
+        gemini_toggle_btn.setMaximumWidth(60)
+
+        def _toggle_gemini_visibility(checked: bool) -> None:
+            self.gemini_api_key_edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
+            gemini_toggle_btn.setText("非表示" if checked else "表示")
+
+        gemini_toggle_btn.toggled.connect(_toggle_gemini_visibility)
+        ext_layout.addWidget(gemini_toggle_btn, 1, 2)
+        gemini_test_btn = QPushButton("テスト")
+        gemini_test_btn.setMaximumWidth(60)
+        gemini_test_btn.setToolTip("APIキーと選択中モデルで接続を確認します")
+        gemini_test_btn.clicked.connect(self.test_gemini_api_key)
+        ext_layout.addWidget(gemini_test_btn, 1, 3)
+
+        ext_layout.addWidget(QLabel("Geminiモデル:"), 2, 0)
+        try:
+            from utils.gemini_model_helper import CHEAPEST_GEMINI_FLASH_MODEL
+        except ImportError:
+            from desktop.utils.gemini_model_helper import CHEAPEST_GEMINI_FLASH_MODEL
+        self.gemini_model_label = QLabel(CHEAPEST_GEMINI_FLASH_MODEL)
+        self.gemini_model_label.setToolTip(
+            "HIRIO は常に最安の Flash モデル（gemini-2.0-flash-lite）を使用します。\n"
+            "レシートOCR・Keepa解釈・カスタマー対応AIなど共通です。"
+        )
+        self.gemini_model_label.setStyleSheet("color: #adb5bd; padding: 4px 0;")
+        ext_layout.addWidget(self.gemini_model_label, 2, 1, 1, 2)
+
+        ext_layout.addWidget(QLabel("Keepa APIキー:"), 3, 0)
+        self.keepa_api_key_edit = QLineEdit()
+        self.keepa_api_key_edit.setPlaceholderText("（任意）Keepa APIキー（ASINから商品情報を取得）")
+        self.keepa_api_key_edit.setEchoMode(QLineEdit.Password)
+        self.keepa_api_key_edit.setClearButtonEnabled(True)
+        ext_layout.addWidget(self.keepa_api_key_edit, 3, 1)
+        keepa_toggle_btn = QPushButton("表示")
+        keepa_toggle_btn.setCheckable(True)
+        keepa_toggle_btn.setMaximumWidth(60)
+
+        def _toggle_keepa_visibility(checked: bool) -> None:
+            self.keepa_api_key_edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
+            keepa_toggle_btn.setText("非表示" if checked else "表示")
+
+        keepa_toggle_btn.toggled.connect(_toggle_keepa_visibility)
+        ext_layout.addWidget(keepa_toggle_btn, 3, 2)
+        keepa_test_btn = QPushButton("テスト")
+        keepa_test_btn.setMaximumWidth(60)
+        keepa_test_btn.setToolTip("Keepa APIキーの有効性を確認します（トークン残量表示）")
+        keepa_test_btn.clicked.connect(self.test_keepa_api_key)
+        ext_layout.addWidget(keepa_test_btn, 3, 3)
+
+        ext_hint = QLabel(
+            "Maps / Gemini / Keepa はそれぞれ別キーを使用します。"
+            "各キー横の「テスト」で接続確認できます。エラー時は原因と対処法を表示します。"
+        )
+        ext_hint.setWordWrap(True)
+        ext_hint.setStyleSheet("color: #adb5bd; font-size: 11px;")
+        ext_layout.addWidget(ext_hint, 4, 0, 1, 4)
+
+        layout.addWidget(ext_keys_group)
         
         # デフォルトディレクトリ設定
         dir_group = QGroupBox("デフォルトディレクトリ設定")
@@ -283,61 +382,9 @@ class SettingsWidget(QWidget):
         gcv_browse_btn.clicked.connect(lambda: self.browse_file(self.gcv_credentials_edit, "GCV認証情報", "JSONファイル (*.json)"))
         ocr_layout.addWidget(gcv_browse_btn, 2, 2)
 
-        # Gemini API設定
-        ocr_layout.addWidget(QLabel("Gemini APIキー:"), 3, 0)
-        self.gemini_api_key_edit = QLineEdit()
-        self.gemini_api_key_edit.setPlaceholderText("（オプション）Gemini APIキー")
-        self.gemini_api_key_edit.setEchoMode(QLineEdit.Password)
-        self.gemini_api_key_edit.setClearButtonEnabled(True)
-        ocr_layout.addWidget(self.gemini_api_key_edit, 3, 1)
-
-        api_toggle_btn = QPushButton("表示")
-        api_toggle_btn.setCheckable(True)
-        api_toggle_btn.setMaximumWidth(60)
-
-        def _toggle_api_visibility(checked: bool) -> None:
-            self.gemini_api_key_edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
-            api_toggle_btn.setText("非表示" if checked else "表示")
-
-        api_toggle_btn.toggled.connect(_toggle_api_visibility)
-        ocr_layout.addWidget(api_toggle_btn, 3, 2)
-
-        # Keepa API設定
-        ocr_layout.addWidget(QLabel("Keepa APIキー:"), 5, 0)
-        self.keepa_api_key_edit = QLineEdit()
-        self.keepa_api_key_edit.setPlaceholderText("（任意）Keepa APIキー（ASINから商品情報を取得）")
-        self.keepa_api_key_edit.setEchoMode(QLineEdit.Password)
-        self.keepa_api_key_edit.setClearButtonEnabled(True)
-        ocr_layout.addWidget(self.keepa_api_key_edit, 5, 1)
-
-        keepa_toggle_btn = QPushButton("表示")
-        keepa_toggle_btn.setCheckable(True)
-        keepa_toggle_btn.setMaximumWidth(60)
-
-        def _toggle_keepa_visibility(checked: bool) -> None:
-            self.keepa_api_key_edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
-            keepa_toggle_btn.setText("非表示" if checked else "表示")
-
-        keepa_toggle_btn.toggled.connect(_toggle_keepa_visibility)
-        ocr_layout.addWidget(keepa_toggle_btn, 5, 2)
-
-        ocr_layout.addWidget(QLabel("Geminiモデル:"), 4, 0)
-        self.gemini_model_combo = QComboBox()
-        self.gemini_model_combo.addItems([
-            "gemini-flash-latest",
-            "gemini-pro-latest",
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
-            "gemini-2.0-pro",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
-        ])
-        ocr_layout.addWidget(self.gemini_model_combo, 4, 1, 1, 2)
-        
-        # OCRテストボタン
         self.test_ocr_btn = QPushButton("OCR設定テスト")
         self.test_ocr_btn.clicked.connect(self.test_ocr_settings)
-        ocr_layout.addWidget(self.test_ocr_btn, 6, 0, 1, 3)
+        ocr_layout.addWidget(self.test_ocr_btn, 3, 0, 1, 3)
         
         layout.addWidget(ocr_group)
 
@@ -683,27 +730,72 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         if file_path:
             line_edit.setText(file_path)
             
+    def _show_api_test_result(self, title: str, result) -> None:
+        """APIテスト結果を表示（失敗時は詳細解説付き）"""
+        if result.success:
+            text = result.summary
+            if result.details:
+                text += f"\n\n{result.details}"
+            QMessageBox.information(self, title, text)
+            return
+        text = result.summary
+        if result.details:
+            text += f"\n\n{result.details}"
+        QMessageBox.warning(self, title, text)
+
     def test_api_connection(self):
         """API接続テスト"""
         try:
-            # 一時的にAPIクライアントのURLを更新
-            original_url = self.api_client.base_url
-            self.api_client.base_url = self.api_url_edit.text()
-            
-            if self.api_client.test_connection():
-                QMessageBox.information(self, "接続テスト", "API接続に成功しました")
-            else:
-                QMessageBox.warning(self, "接続テスト", "API接続に失敗しました")
-                
-            # URLを元に戻す
+            from utils.api_test_helper import test_fastapi_connection
+        except ImportError:
+            from desktop.utils.api_test_helper import test_fastapi_connection
+
+        original_url = self.api_client.base_url
+        self.api_client.base_url = self.api_url_edit.text()
+        try:
+            result = test_fastapi_connection(
+                self.api_url_edit.text(),
+                test_fn=self.api_client.test_connection,
+            )
+            self._show_api_test_result("接続テスト", result)
+        finally:
             self.api_client.base_url = original_url
-            
-        except Exception as e:
-            QMessageBox.critical(self, "接続テストエラー", f"接続テスト中にエラーが発生しました:\n{str(e)}")
+
+    def test_maps_api_key(self):
+        """Google Maps APIキーの接続テスト"""
+        try:
+            from utils.api_test_helper import test_maps_api
+        except ImportError:
+            from desktop.utils.api_test_helper import test_maps_api
+        result = test_maps_api(self.maps_api_key_edit.text())
+        self._show_api_test_result("Google Maps APIテスト", result)
+
+    def test_gemini_api_key(self):
+        """Gemini APIキー・モデルの接続テスト"""
+        try:
+            from utils.api_test_helper import test_gemini_api
+        except ImportError:
+            from desktop.utils.api_test_helper import test_gemini_api
+        result = test_gemini_api(self.gemini_api_key_edit.text())
+        self._show_api_test_result("Gemini APIテスト", result)
+
+    def test_keepa_api_key(self):
+        """Keepa APIキーの接続テスト"""
+        try:
+            from utils.api_test_helper import test_keepa_api
+        except ImportError:
+            from desktop.utils.api_test_helper import test_keepa_api
+        result = test_keepa_api(self.keepa_api_key_edit.text())
+        self._show_api_test_result("Keepa APIテスト", result)
     
     def test_ocr_settings(self):
         """OCR設定のテスト"""
         try:
+            try:
+                from utils.api_test_helper import explain_api_error
+            except ImportError:
+                from desktop.utils.api_test_helper import explain_api_error
+
             tesseract_cmd = self.tesseract_cmd_edit.text().strip() or None
             tessdata_dir = self.tessdata_dir_edit.text().strip() or None
             gcv_credentials = self.gcv_credentials_edit.text().strip() or None
@@ -737,6 +829,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                 
                 # 結果メッセージを構築
                 messages = []
+                error_details = []
                 
                 # GCVの確認
                 if OCRService.is_gcv_available():
@@ -746,12 +839,27 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                                 messages.append("✅ Google Cloud Vision API: 設定済み・利用可能")
                             else:
                                 messages.append("⚠️  Google Cloud Vision API: 認証情報ファイルは存在しますが、初期化に失敗しました")
+                                error_details.append(
+                                    explain_api_error(
+                                        "ocr_gcv",
+                                        "認証情報JSONは存在しますがクライアント初期化に失敗",
+                                    )
+                                )
                         else:
                             messages.append("❌ Google Cloud Vision API: 認証情報ファイルが見つかりません")
+                            error_details.append(
+                                explain_api_error(
+                                    "ocr_gcv",
+                                    f"ファイルが見つかりません: {gcv_credentials}",
+                                )
+                            )
                     else:
                         messages.append("ℹ️  Google Cloud Vision API: 認証情報が設定されていません（オプション）")
                 else:
                     messages.append("ℹ️  Google Cloud Vision API: google-cloud-visionパッケージがインストールされていません")
+                    error_details.append(
+                        explain_api_error("ocr_gcv", "google-cloud-vision パッケージ未インストール")
+                    )
                 
                 # Tesseractの確認
                 if OCRService.is_tesseract_available():
@@ -760,6 +868,12 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                             messages.append(f"✅ Tesseract OCR: 設定済み ({tesseract_cmd})")
                         else:
                             messages.append(f"❌ Tesseract OCR: 実行ファイルが見つかりません ({tesseract_cmd})")
+                            error_details.append(
+                                explain_api_error(
+                                    "ocr_tesseract",
+                                    f"実行ファイルが見つかりません: {tesseract_cmd}",
+                                )
+                            )
                     else:
                         messages.append("✅ Tesseract OCR: 利用可能（デフォルト設定）")
                     
@@ -768,11 +882,22 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                             messages.append(f"✅ Tessdataディレクトリ: {tessdata_dir}")
                         else:
                             messages.append(f"⚠️  Tessdataディレクトリが見つかりません: {tessdata_dir}")
+                            error_details.append(
+                                explain_api_error(
+                                    "ocr_tesseract",
+                                    f"tessdata ディレクトリが見つかりません: {tessdata_dir}",
+                                )
+                            )
                 else:
                     messages.append("❌ Tesseract OCR: pytesseractがインストールされていません")
+                    error_details.append(
+                        explain_api_error("ocr_tesseract", "pytesseract がインストールされていません")
+                    )
                 
                 # メッセージを表示
                 message_text = "OCR設定テスト結果\n\n" + "\n".join(messages)
+                if error_details:
+                    message_text += "\n\n" + "\n\n".join(error_details)
                 
                 if any("✅" in msg for msg in messages):
                     QMessageBox.information(self, "OCR設定テスト", message_text)
@@ -786,7 +911,15 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                     del os.environ['TESSDATA_PREFIX']
                     
         except Exception as e:
-            QMessageBox.critical(self, "OCR設定テストエラー", f"OCR設定テスト中にエラーが発生しました:\n{str(e)}")
+            try:
+                from utils.api_test_helper import explain_api_error
+            except ImportError:
+                from desktop.utils.api_test_helper import explain_api_error
+            QMessageBox.critical(
+                self,
+                "OCR設定テストエラー",
+                f"OCR設定テスト中にエラーが発生しました:\n\n{explain_api_error('ocr_tesseract', e)}",
+            )
             
     def load_settings(self):
         """設定の読み込み"""
@@ -822,6 +955,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.tessdata_dir_edit.setText(self.settings.value("ocr/tessdata_dir", ""))
         self.gcv_credentials_edit.setText(self.settings.value("ocr/gcv_credentials", ""))
         self.gemini_api_key_edit.setText(self.settings.value("ocr/gemini_api_key", ""))
+        self.maps_api_key_edit.setText(self.settings.value("maps/api_key", ""))
         # Keepa APIキー（新規）
         self.keepa_api_key_edit.setText(self.settings.value("keepa/api_key", ""))
         # Amazon 自店セラーID
@@ -834,10 +968,15 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         )
         # 3-6-9版（開発段階ではデフォルトON）
         self.pro_enabled_cb.setChecked(self.settings.value("pro/enabled", True, type=bool))
-        gemini_model = self.settings.value("ocr/gemini_model", "gemini-flash-latest")
-        if gemini_model not in [self.gemini_model_combo.itemText(i) for i in range(self.gemini_model_combo.count())]:
-            self.gemini_model_combo.addItem(gemini_model)
-        self.gemini_model_combo.setCurrentText(gemini_model)
+        try:
+            from utils.gemini_model_helper import resolve_gemini_flash_model
+        except ImportError:
+            from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
+        gemini_model = resolve_gemini_flash_model(self.settings.value("ocr/gemini_model"))
+        if hasattr(self, "gemini_model_label"):
+            self.gemini_model_label.setText(gemini_model)
+        if self.settings.value("ocr/gemini_model") != gemini_model:
+            self.settings.setValue("ocr/gemini_model", gemini_model)
 
         if hasattr(self, "flea_market_settings_widget"):
             self.flea_market_settings_widget.reload()
@@ -877,7 +1016,12 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             self.settings.setValue("ocr/tessdata_dir", self.tessdata_dir_edit.text())
             self.settings.setValue("ocr/gcv_credentials", self.gcv_credentials_edit.text())
             self.settings.setValue("ocr/gemini_api_key", self.gemini_api_key_edit.text())
-            self.settings.setValue("ocr/gemini_model", self.gemini_model_combo.currentText())
+            self.settings.setValue("maps/api_key", self.maps_api_key_edit.text())
+            try:
+                from utils.gemini_model_helper import resolve_gemini_flash_model
+            except ImportError:
+                from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
+            self.settings.setValue("ocr/gemini_model", resolve_gemini_flash_model())
             # Keepa API設定
             self.settings.setValue("keepa/api_key", self.keepa_api_key_edit.text())
             # Amazon 自店セラーID
@@ -941,14 +1085,24 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.tessdata_dir_edit.setText("")
         self.gcv_credentials_edit.setText("")
         self.gemini_api_key_edit.setText("")
+        self.maps_api_key_edit.setText("")
         self.keepa_api_key_edit.setText("")
         self.amazon_seller_id_edit.setText("")
         self.amazon_fba_simulator_url_edit.setText("https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP")
-        self.gemini_model_combo.setCurrentText("gemini-flash-latest")
+        try:
+            from utils.gemini_model_helper import resolve_gemini_flash_model, CHEAPEST_GEMINI_FLASH_MODEL
+        except ImportError:
+            from desktop.utils.gemini_model_helper import resolve_gemini_flash_model, CHEAPEST_GEMINI_FLASH_MODEL
+        if hasattr(self, "gemini_model_label"):
+            self.gemini_model_label.setText(CHEAPEST_GEMINI_FLASH_MODEL)
         self.pro_enabled_cb.setChecked(True)  # 開発段階ではデフォルトON
         
     def get_current_settings(self):
         """現在の設定を辞書で取得"""
+        try:
+            from utils.gemini_model_helper import resolve_gemini_flash_model
+        except ImportError:
+            from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
         return {
             "api": {
                 "url": self.api_url_edit.text(),
@@ -982,7 +1136,10 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                 "tessdata_dir": self.tessdata_dir_edit.text(),
                 "gcv_credentials": self.gcv_credentials_edit.text(),
                 "gemini_api_key": self.gemini_api_key_edit.text(),
-                "gemini_model": self.gemini_model_combo.currentText()
+                "gemini_model": resolve_gemini_flash_model(),
+            },
+            "maps": {
+                "api_key": self.maps_api_key_edit.text(),
             },
             "keepa": {
                 "api_key": self.keepa_api_key_edit.text(),

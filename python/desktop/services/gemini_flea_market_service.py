@@ -89,13 +89,21 @@ FLEA_STYLE_INSTRUCTIONS: Dict[str, str] = {
 
 
 class GeminiFleaMarketService:
+    @staticmethod
+    def _default_model_name() -> str:
+        try:
+            from utils.gemini_model_helper import resolve_gemini_flash_model
+        except ImportError:
+            from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
+        return resolve_gemini_flash_model()
+
     def __init__(
         self,
         api_key: Optional[str] = None,
         model_name: Optional[str] = None,
     ) -> None:
         self.api_key = api_key
-        self.model_name = model_name or "gemini-flash-latest"
+        self.model_name = model_name or self._default_model_name()
         self.model = None
         self.available = False
         self._configure()
@@ -107,10 +115,14 @@ class GeminiFleaMarketService:
             try:
                 from PySide6.QtCore import QSettings
 
+                try:
+                    from utils.gemini_model_helper import resolve_gemini_flash_model
+                except ImportError:
+                    from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
+
                 settings = QSettings("HIRIO", "DesktopApp")
                 self.api_key = self.api_key or (settings.value("ocr/gemini_api_key", "") or None)
-                configured = settings.value("ocr/gemini_model", "gemini-flash-latest")
-                self.model_name = self.model_name or (str(configured).strip() if configured else "gemini-flash-latest")
+                self.model_name = resolve_gemini_flash_model(settings.value("ocr/gemini_model", ""))
             except Exception as exc:
                 logger.debug("Gemini settings load failed: %s", exc)
 

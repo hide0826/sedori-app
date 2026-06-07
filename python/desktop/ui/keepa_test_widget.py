@@ -742,7 +742,13 @@ class KeepaTestWidget(QWidget):
 
         settings = QSettings("HIRIO", "DesktopApp")
         api_key = (settings.value("ocr/gemini_api_key", "") or "").strip()
-        configured_model = (settings.value("ocr/gemini_model", "gemini-flash-latest") or "gemini-flash-latest").strip()
+        try:
+            from utils.gemini_model_helper import gemini_flash_model_candidates
+        except ImportError:
+            from desktop.utils.gemini_model_helper import gemini_flash_model_candidates
+        candidate_models = gemini_flash_model_candidates(
+            settings.value("ocr/gemini_model", "")
+        )
         if not api_key:
             QMessageBox.warning(self, "AI判定", "Gemini APIキーが未設定です。設定タブで入力してください。")
             return
@@ -808,19 +814,8 @@ class KeepaTestWidget(QWidget):
             )
             return
 
-        # モデル名の互換ゆらぎに備え、候補を順に試す（404 model not found 対策）
-        candidate_models: List[str] = []
-        for m in [
-            configured_model,
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-lite",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
-            "gemini-flash-latest",
-        ]:
-            mm = (m or "").strip()
-            if mm and mm not in candidate_models:
-                candidate_models.append(mm)
+        # 最安 Flash から順に試す（404 model not found 対策）
+        # candidate_models は上で gemini_flash_model_candidates から取得済み
 
         self.apply_ai_tp_btn.setEnabled(False)
         self.apply_ai_tp_btn.setText("AI判定中...")

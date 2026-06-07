@@ -434,12 +434,6 @@ QCheckBox::indicator:checked {
     image: none;
 }
 
-QCheckBox::indicator:checked:after {
-    /* contentプロパティはQtのスタイルシートではサポートされていません */
-    color: #ffffff;
-    font-weight: bold;
-}
-
 /* フレーム */
 QFrame {
     background-color: #2b2b2b;
@@ -589,29 +583,4 @@ WorkflowStep[status="error"] {
     background-color: #f8d7da;
     border-color: #dc3545;
     color: #721c24;
-}
-
-/* レスポンシブデザイン対応 */
-@media (max-width: 1200px) {
-    QTabBar::tab {
-        padding: 6px 12px;
-        font-size: 11px;
-    }
-    
-    QPushButton {
-        padding: 4px 8px;
-        font-size: 11px;
-    }
-}
-
-@media (max-width: 800px) {
-    QTabBar::tab {
-        padding: 4px 8px;
-        font-size: 10px;
-    }
-    
-    QPushButton {
-        padding: 3px 6px;
-        font-size: 10px;
-    }
 }

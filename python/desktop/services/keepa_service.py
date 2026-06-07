@@ -1054,12 +1054,17 @@ class KeepaService:
         analysis: Dict[str, Any],
         *,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-2.0-flash",
+        model_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         抽出済み分析データをGeminiに渡して、運用モードと補正値を返す。
         補正値は -5.0〜+5.0% にクリップする。
         """
+        try:
+            from utils.gemini_model_helper import resolve_gemini_flash_model
+        except ImportError:
+            from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
+        model_name = resolve_gemini_flash_model(model_name)
         if api_key is None:
             settings = QSettings("HIRIO", "DesktopApp")
             api_key = (settings.value("ocr/gemini_api_key", "") or "").strip() or None
@@ -1139,7 +1144,7 @@ class KeepaService:
         *,
         window_days: int = 90,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-2.0-flash",
+        model_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         3-6-9ロジックの最終出力を返す。

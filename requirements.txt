@@ -15,3 +15,4 @@ google-cloud-storage  # Optional: For GCS image upload (requires service account
 google-generativeai  # Optional: Gemini-based AI receipt parsing
 requests  # Required for Google Maps Places API (New) - store information retrieval
 # googlemaps  # Deprecated: Legacy API is no longer supported, using Places API (New) instead
+PySide6-WebEngine  # Optional: embedded Google Maps in route selection tab
