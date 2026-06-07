@@ -746,6 +746,8 @@ class ProductWidget(QWidget):
         layout.addLayout(controls_layout)
 
         self.table = QTableWidget()
+        self.table._hirio_table_column_settings_key = "table_column_widths/ProductWidget/ProductTable"
+        self.table._hirio_table_column_legacy_keys = ["ProductWidget/ProductTableState"]
         self.table.setColumnCount(17)  # 11 + 6 (画像1〜6)
         self.table.setHorizontalHeaderLabels([
             "SKU", "商品名", "JAN", "ASIN", "仕入日", "仕入価格",
@@ -935,6 +937,12 @@ class ProductWidget(QWidget):
 
         # 仕入DBテーブル
         self.purchase_table = DraggableTableWidget()  # ドラッグ対応テーブルに変更
+        self.purchase_table._hirio_table_column_settings_key = (
+            "table_column_widths/ProductWidget/PurchaseTableColumnWidths"
+        )
+        self.purchase_table._hirio_table_column_legacy_keys = [
+            "ProductWidget/PurchaseTableColumnWidths",
+        ]
         self.purchase_table.setAlternatingRowColors(True)
         self.purchase_table.setSelectionBehavior(QTableWidget.SelectRows)
         # 編集トリガーを設定（選択＋クリック、F2キーで編集可能）
@@ -980,6 +988,8 @@ class ProductWidget(QWidget):
         layout.addLayout(controls_layout)
         
         self.sales_table = QTableWidget()
+        self.sales_table._hirio_table_column_settings_key = "table_column_widths/ProductWidget/SalesTable"
+        self.sales_table._hirio_table_column_legacy_keys = ["ProductWidget/SalesTableState"]
         self.sales_table.setColumnCount(8)
         self.sales_table.setHorizontalHeaderLabels(["販売日", "SKU", "商品名", "販売価格", "個数", "手数料", "利益", "返金総額"])
         # 右側の数値列で罫線が見えづらくならないよう明示設定

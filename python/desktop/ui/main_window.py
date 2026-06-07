@@ -156,6 +156,12 @@ class MainWindow(QMainWindow):
             self.expense_ledger_widget.save_settings()
         if hasattr(self, 'image_manager_widget') and hasattr(self.image_manager_widget, 'save_settings'):
             self.image_manager_widget.save_settings()
+
+        try:
+            from utils.ui_utils import save_all_table_column_widths
+            save_all_table_column_widths()
+        except Exception:
+            pass
         
         # FastAPIサーバーを停止
         self.stop_fastapi_server()

@@ -103,12 +103,18 @@ class HIRIOApplication:
         except Exception as e:
             _log_error("combobox_wheel_guard import error:\n" + "".join(traceback.format_exception(type(e), e, e.__traceback__)))
             raise
+        try:
+            from utils.ui_utils import install_global_table_column_width_persistence
+        except Exception as e:
+            _log_error("ui_utils import error:\n" + "".join(traceback.format_exception(type(e), e, e.__traceback__)))
+            raise
         
         self.api_client = APIClient()
         self.main_window = MainWindow(self.api_client)
         self.main_window.show()
         install_copy_context_menu(self.app)
         install_combobox_wheel_guard(self.app)
+        install_global_table_column_width_persistence(self.app)
         
         # スタイルシートの適用
         self.load_styles()

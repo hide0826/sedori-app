@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from database.store_db import StoreDatabase
 from database.account_title_db import AccountTitleDatabase
 from utils.excel_importer import ExcelImporter
+from utils.ui_utils import reapply_table_column_widths
 from ui.company_master_widget import CompanyMasterWidget
 # デスクトップ側servicesを優先して読み込む
 try:
@@ -68,6 +69,8 @@ class StoreEditDialog(QDialog):
         self.initial_route_name = initial_route_name
         # カスタムフィールド編集ウィジェットのマップは必ず初期化しておく
         self.custom_field_edits = {}
+        self._latitude: Optional[float] = None
+        self._longitude: Optional[float] = None
         
         self.setWindowTitle("店舗編集" if store_data else "店舗追加")
         self.setModal(True)
@@ -168,7 +171,9 @@ class StoreEditDialog(QDialog):
         info_button_layout = QHBoxLayout()
         info_button_layout.addStretch()
         self.fetch_info_btn = QPushButton("情報取得")
-        self.fetch_info_btn.setToolTip("店舗名からGoogle Map APIで住所と電話番号を取得します")
+        self.fetch_info_btn.setToolTip(
+            "店舗名からGoogle Map APIで住所・電話番号・緯度経度を取得します"
+        )
         self.fetch_info_btn.clicked.connect(self.fetch_store_info)
         info_button_layout.addWidget(self.fetch_info_btn)
         layout.addLayout(info_button_layout)
@@ -237,6 +242,11 @@ class StoreEditDialog(QDialog):
             self.address_edit.setText(address)
         if phone:
             self.phone_edit.setText(phone)
+        lat = info.get("latitude")
+        lng = info.get("longitude")
+        if lat is not None and lng is not None:
+            self._latitude = lat
+            self._longitude = lng
     
     def load_route_names(self):
         """既存のルート名一覧をロード"""
@@ -386,6 +396,8 @@ class StoreEditDialog(QDialog):
         self.store_name_edit.setText(self.store_data.get('store_name', ''))
         self.address_edit.setText(self.store_data.get('address', ''))
         self.phone_edit.setText(self.store_data.get('phone', ''))
+        self._latitude = self._coerce_coordinate(self.store_data.get('latitude'))
+        self._longitude = self._coerce_coordinate(self.store_data.get('longitude'))
         
         # カスタムフィールドの読み込み
         custom_fields = self.store_data.get('custom_fields', {})
@@ -394,6 +406,15 @@ class StoreEditDialog(QDialog):
             for field_name, edit in self.custom_field_edits.items():
                 value = custom_fields.get(field_name, '')
                 edit.setText(str(value))
+    
+    @staticmethod
+    def _coerce_coordinate(value: Any) -> Optional[float]:
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
     
     def get_data(self) -> dict:
         """入力データを取得"""
@@ -415,6 +436,10 @@ class StoreEditDialog(QDialog):
         # カスタムフィールドの取得
         for field_name, edit in self.custom_field_edits.items():
             data['custom_fields'][field_name] = edit.text().strip()
+
+        if self._latitude is not None and self._longitude is not None:
+            data['latitude'] = self._latitude
+            data['longitude'] = self._longitude
         
         return data
     
@@ -1233,6 +1258,27 @@ class StoreListWidget(QWidget):
         """)
         route_layout.addWidget(fetch_info_btn)
         
+        # 経度緯度取得ボタン（既存データ向け）
+        fetch_coords_btn = QPushButton("経度緯度取得")
+        fetch_coords_btn.clicked.connect(self.fetch_missing_coordinates)
+        fetch_coords_btn.setToolTip(
+            "緯度経度が未設定の店舗について、Google Maps APIで取得してDBに保存します"
+        )
+        fetch_coords_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6f42c1;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+                min-width: 120px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #5a32a3;
+            }
+        """)
+        route_layout.addWidget(fetch_coords_btn)
+        
         # データリカバリーボタン（英語住所を日本語に修正）
         recover_info_btn = QPushButton("データリカバリー")
         recover_info_btn.clicked.connect(self.recover_japanese_store_info)
@@ -1514,6 +1560,14 @@ class StoreListWidget(QWidget):
                 # 電話番号が空の場合のみ更新
                 if not current_phone and info.get('phone'):
                     update_data['phone'] = info['phone']
+
+                # 緯度経度が未設定の場合は同時に更新
+                if not self._store_has_coordinates(store):
+                    lat = info.get('latitude')
+                    lng = info.get('longitude')
+                    if lat is not None and lng is not None:
+                        update_data['latitude'] = lat
+                        update_data['longitude'] = lng
                 
                 if update_data:
                     try:
@@ -1545,6 +1599,118 @@ class StoreListWidget(QWidget):
         )
         
         # テーブルを再読み込み
+        self.load_stores(self.search_edit.text())
+    
+    @staticmethod
+    def _store_has_coordinates(store: Dict[str, Any]) -> bool:
+        """店舗に緯度経度が保存されているか"""
+        lat = store.get('latitude')
+        lng = store.get('longitude')
+        if lat is None or lng is None or lat == '' or lng == '':
+            return False
+        try:
+            float(lat)
+            float(lng)
+            return True
+        except (TypeError, ValueError):
+            return False
+
+    def fetch_missing_coordinates(self):
+        """緯度経度が未設定の店舗の座標をGoogle Maps APIから取得"""
+        def safe_strip(value):
+            if value is None:
+                return ''
+            return str(value).strip() if isinstance(value, str) else ''
+
+        if get_store_info_from_google is None:
+            QMessageBox.warning(
+                self,
+                "エラー",
+                "Google Mapsサービスモジュールが読み込めませんでした。\n"
+                "googlemapsライブラリがインストールされているか確認してください。"
+            )
+            return
+
+        stores = self.db.list_stores()
+        if self.current_filtered_route:
+            stores = [
+                store for store in stores
+                if store.get('affiliated_route_name') == self.current_filtered_route
+            ]
+
+        missing_coords_stores = []
+        for store in stores:
+            if not store:
+                continue
+            store_name = safe_strip(store.get('store_name'))
+            if store_name and not self._store_has_coordinates(store):
+                missing_coords_stores.append(store)
+
+        if not missing_coords_stores:
+            QMessageBox.information(
+                self,
+                "情報",
+                "緯度経度が未設定の店舗はありません。"
+            )
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "確認",
+            f"{len(missing_coords_stores)}件の店舗の緯度経度を取得しますか？\n"
+            f"（Google Maps APIを使用します）",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        progress = QProgressDialog(
+            "緯度経度を取得中...", "キャンセル", 0, len(missing_coords_stores), self
+        )
+        progress.setWindowTitle("経度緯度取得中")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        updated_count = 0
+        failed_count = 0
+
+        for i, store in enumerate(missing_coords_stores):
+            if progress.wasCanceled():
+                break
+
+            store_id = store.get('id')
+            store_name = safe_strip(store.get('store_name'))
+
+            progress.setValue(i)
+            progress.setLabelText(f"取得中: {store_name}")
+            QApplication.processEvents()
+
+            info = get_store_info_from_google(store_name, language_code='ja')
+            if info and info.get('latitude') is not None and info.get('longitude') is not None:
+                try:
+                    self.db.update_store(store_id, {
+                        'latitude': info['latitude'],
+                        'longitude': info['longitude'],
+                    })
+                    updated_count += 1
+                except Exception as e:
+                    print(f"緯度経度の更新エラー (ID: {store_id}): {e}")
+                    failed_count += 1
+            else:
+                failed_count += 1
+
+        progress.setValue(len(missing_coords_stores))
+        progress.close()
+
+        QMessageBox.information(
+            self,
+            "完了",
+            f"経度緯度取得が完了しました。\n\n"
+            f"更新: {updated_count}件\n"
+            f"失敗: {failed_count}件"
+        )
         self.load_stores(self.search_edit.text())
     
     def recover_japanese_store_info(self):
@@ -1686,10 +1852,8 @@ class StoreListWidget(QWidget):
         # ソート機能を有効化
         self.store_table.setSortingEnabled(True)
         
-        # ヘッダー設定
+        # ヘッダー設定（列幅は ui_utils が永続化）
         header = self.store_table.horizontalHeader()
-        header.setStretchLastSection(True)
-        header.setSectionResizeMode(QHeaderView.Interactive)
         header.setSectionsClickable(True)  # ヘッダークリックでソート可能に
         
         # 備考欄の変更を監視
@@ -1741,7 +1905,7 @@ class StoreListWidget(QWidget):
         
         # 基本カラム + カスタムフィールドカラム
         # 「登録番号」カラムを追加
-        basic_columns = ["ID", "所属ルート名", "ルートコード", "店舗コード", "店舗名", "住所", "電話番号", "登録番号", "備考"]
+        basic_columns = ["ID", "所属ルート名", "ルートコード", "店舗コード", "店舗名", "住所", "電話番号", "登録番号", "備考", "経度緯度"]
         custom_columns = [field['display_name'] for field in self.custom_fields_def]
         columns = basic_columns + custom_columns
         
@@ -1821,15 +1985,25 @@ class StoreListWidget(QWidget):
                     item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self.store_table.setItem(i, col, item)
             
-            # 備考欄（最後の基本カラム）は編集可能
+            # 備考欄は編集可能
             notes_text = store.get('notes', '') or ''
             notes_item = QTableWidgetItem(notes_text)
-            notes_item.setData(Qt.UserRole, store_id)  # 店舗IDを保存（更新時に使用）
-            notes_item.setToolTip(notes_text)  # ツールチップで全文表示
-            # 編集可能（フラグはそのまま）
-            # 備考カラムのインデックスは basic_columns の最後
-            notes_col_index = len(basic_columns) - 1
+            notes_item.setData(Qt.UserRole, store_id)
+            notes_item.setToolTip(notes_text)
+            notes_col_index = basic_columns.index("備考")
             self.store_table.setItem(i, notes_col_index, notes_item)
+
+            # 経度緯度（取得済みならチェック表示のみ）
+            coords_col_index = basic_columns.index("経度緯度")
+            has_coords = self._store_has_coordinates(store)
+            coords_item = QTableWidgetItem("✓" if has_coords else "")
+            coords_item.setTextAlignment(Qt.AlignCenter)
+            coords_item.setFlags(coords_item.flags() & ~Qt.ItemIsEditable)
+            if has_coords:
+                lat = store.get('latitude')
+                lng = store.get('longitude')
+                coords_item.setToolTip(f"緯度: {lat}\n経度: {lng}")
+            self.store_table.setItem(i, coords_col_index, coords_item)
             
             # カスタムフィールド（編集不可）
             custom_fields = store.get('custom_fields', {})
@@ -1871,14 +2045,7 @@ class StoreListWidget(QWidget):
         store_code_col_index = basic_columns.index("店舗コード")
         self.store_table.sortItems(store_code_col_index, Qt.AscendingOrder)
         
-        # 列幅の自動調整
-        self.store_table.resizeColumnsToContents()
-        
-        # 備考カラム（8列目）の設定
-        if self.store_table.columnCount() > 8:
-            # 備考カラムはStretchモードで残りのスペースを使用
-            header = self.store_table.horizontalHeader()
-            header.setSectionResizeMode(8, QHeaderView.Stretch)
+        reapply_table_column_widths(self.store_table)
         
         # 行の高さを内容に合わせて自動調整（折り返しテキスト対応）
         self.store_table.resizeRowsToContents()
@@ -1894,9 +2061,9 @@ class StoreListWidget(QWidget):
     def on_store_cell_changed(self, row: int, column: int):
         """セルが変更されたときの処理（登録番号・備考欄を保存）"""
         # 登録番号列と備考列のみ保存対象
-        basic_columns = ["ID", "所属ルート名", "ルートコード", "店舗コード", "店舗名", "住所", "電話番号", "登録番号", "備考"]
+        basic_columns = ["ID", "所属ルート名", "ルートコード", "店舗コード", "店舗名", "住所", "電話番号", "登録番号", "備考", "経度緯度"]
         registration_column_index = basic_columns.index("登録番号")
-        notes_column_index = len(basic_columns) - 1
+        notes_column_index = basic_columns.index("備考")
         if column not in (registration_column_index, notes_column_index):
             return
         
@@ -2427,8 +2594,6 @@ class ExpenseDestinationListWidget(QWidget):
         self.dest_table.setWordWrap(True)
         self.dest_table.setSortingEnabled(True)
         header = self.dest_table.horizontalHeader()
-        header.setStretchLastSection(True)
-        header.setSectionResizeMode(QHeaderView.Interactive)
         header.setSectionsClickable(True)
         self.dest_table.cellChanged.connect(self.on_dest_cell_changed)
         table_layout.addWidget(self.dest_table)
@@ -2464,9 +2629,7 @@ class ExpenseDestinationListWidget(QWidget):
             self.dest_table.setItem(i, 7, notes_item)
         self.dest_table.blockSignals(False)
         self.dest_table.setSortingEnabled(True)
-        self.dest_table.resizeColumnsToContents()
-        if self.dest_table.columnCount() > 7:
-            self.dest_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)
+        reapply_table_column_widths(self.dest_table)
         self.dest_table.resizeRowsToContents()
     
     def update_statistics(self):
@@ -3035,15 +3198,7 @@ class OnlinePlatformListWidget(QWidget):
             self.table.setItem(i, 4, QTableWidgetItem(r.get("code_prefix", "")))
             self.table.setItem(i, 5, QTableWidgetItem("ON" if r.get("is_active", 1) else "OFF"))
             self.table.setItem(i, 6, QTableWidgetItem(r.get("notes", "")))
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.Stretch)  # 名称
-        header.setSectionResizeMode(6, QHeaderView.Stretch)  # 備考
-        self.table.setColumnWidth(0, 48)   # ID
-        self.table.setColumnWidth(1, 80)   # コード
-        self.table.setColumnWidth(3, 80)   # 区分
-        self.table.setColumnWidth(4, 80)   # 接頭辞
-        self.table.setColumnWidth(5, 60)   # 有効
+        reapply_table_column_widths(self.table)
         self.table.verticalHeader().setDefaultSectionSize(26)
 
     def _get_selected_id(self) -> Optional[int]:
@@ -3160,15 +3315,7 @@ class FleaMarketListWidget(QWidget):
             self.table.setItem(i, 4, QTableWidgetItem(r.get("code_prefix", "")))
             self.table.setItem(i, 5, QTableWidgetItem("ON" if r.get("is_active", 1) else "OFF"))
             self.table.setItem(i, 6, QTableWidgetItem(r.get("notes", "")))
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.Stretch)
-        header.setSectionResizeMode(6, QHeaderView.Stretch)
-        self.table.setColumnWidth(0, 48)
-        self.table.setColumnWidth(1, 80)
-        self.table.setColumnWidth(3, 80)
-        self.table.setColumnWidth(4, 80)
-        self.table.setColumnWidth(5, 60)
+        reapply_table_column_widths(self.table)
         self.table.verticalHeader().setDefaultSectionSize(26)
 
     def _get_selected_id(self) -> Optional[int]:
@@ -3480,15 +3627,7 @@ class FleaMarketUserListWidget(QWidget):
             self.table.setItem(i, 5, QTableWidgetItem("✓" if verified else ""))
             self.table.setItem(i, 6, QTableWidgetItem(r.get("notes", "") or ""))
 
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setSectionResizeMode(3, QHeaderView.Stretch)
-        header.setSectionResizeMode(6, QHeaderView.Stretch)
-        self.table.setColumnWidth(0, 48)
-        self.table.setColumnWidth(1, 140)
-        self.table.setColumnWidth(2, 160)
-        self.table.setColumnWidth(4, 90)
-        self.table.setColumnWidth(5, 80)
+        reapply_table_column_widths(self.table)
         self.table.verticalHeader().setDefaultSectionSize(26)
 
     def _get_selected_id(self) -> Optional[int]:
@@ -3589,12 +3728,9 @@ class FleaMarketUserListWidget(QWidget):
 
 
 class OnlineStoreListWidget(QWidget):
-    _COL_WIDTHS_SETTINGS_KEY = "store_master/online_stores_column_widths"
-
     def __init__(self):
         super().__init__()
         self.db = StoreDatabase()
-        self._online_store_restoring_widths = False
         self._build_ui()
         self.load_data()
 
@@ -3610,63 +3746,16 @@ class OnlineStoreListWidget(QWidget):
         del_btn = QPushButton("削除"); del_btn.clicked.connect(self.delete_item); top.addWidget(del_btn)
         layout.addLayout(top)
         self.table = QTableWidget()
+        self.table._hirio_table_column_settings_key = "table_column_widths/store_master/online_stores"
+        self.table._hirio_table_column_legacy_keys = ["store_master/online_stores_column_widths"]
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setAlternatingRowColors(True)
         # セル直接編集は DB に保存されない（一覧は参照専用）。変更は「編集」または行ダブルクリック。
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.cellDoubleClicked.connect(self._on_online_store_cell_double_clicked)
         self.table.setToolTip("内容の保存は「編集」ボタン、または行のダブルクリックで開くダイアログから行ってください。")
-        self.table.horizontalHeader().sectionResized.connect(self._save_online_store_column_widths)
         self.table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self.table, 1)
-
-    def _online_store_fixed_column_count(self) -> int:
-        """最終列は Stretch で余白を埋めるため、ユーザー幅の対象はこれ未満の列。"""
-        n = self.table.columnCount()
-        return max(0, n - 1)
-
-    def _save_online_store_column_widths(self, *_):
-        if self._online_store_restoring_widths:
-            return
-        try:
-            s = QSettings("HIRIO", "SedoriDesktopApp")
-            nfix = self._online_store_fixed_column_count()
-            if nfix <= 0:
-                return
-            widths = [self.table.columnWidth(i) for i in range(nfix)]
-            s.setValue(self._COL_WIDTHS_SETTINGS_KEY, widths)
-        except Exception:
-            pass
-
-    def _restore_online_store_column_widths(self):
-        try:
-            s = QSettings("HIRIO", "SedoriDesktopApp")
-            widths = s.value(self._COL_WIDTHS_SETTINGS_KEY)
-            if not widths or not isinstance(widths, (list, tuple)):
-                return
-            n = self.table.columnCount()
-            nfix = self._online_store_fixed_column_count()
-            if nfix <= 0:
-                return
-            wlist = list(widths)
-            # 以前は全列分を保存していた場合に対応（最終列は Stretch のため無視）
-            if len(wlist) == n:
-                wlist = wlist[:nfix]
-            elif len(wlist) != nfix:
-                return
-            self._online_store_restoring_widths = True
-            try:
-                for i, val in enumerate(wlist):
-                    try:
-                        w = int(val)
-                        if w > 0:
-                            self.table.setColumnWidth(i, w)
-                    except (TypeError, ValueError):
-                        continue
-            finally:
-                self._online_store_restoring_widths = False
-        except Exception:
-            self._online_store_restoring_widths = False
 
     def _on_online_store_cell_double_clicked(self, row: int, _col: int):
         if row < 0 or row >= self.table.rowCount():
@@ -3694,23 +3783,7 @@ class OnlineStoreListWidget(QWidget):
             self.table.setItem(i, 8, QTableWidgetItem(r.get("secondhand_license_number", "") or ""))
             self.table.setItem(i, 9, QTableWidgetItem("ON" if r.get("is_active", 1) else "OFF"))
             self.table.setItem(i, 10, QTableWidgetItem(r.get("notes", "")))
-        header = self.table.horizontalHeader()
-        last_col = self.table.columnCount() - 1
-        for col in range(last_col):
-            header.setSectionResizeMode(col, QHeaderView.Interactive)
-        header.setSectionResizeMode(last_col, QHeaderView.Stretch)
-        self.table.setColumnWidth(0, 48)    # ID
-        self.table.setColumnWidth(1, 110)   # 店舗コード
-        self.table.setColumnWidth(2, 140)   # 店舗名
-        self.table.setColumnWidth(3, 160)   # 住所
-        self.table.setColumnWidth(4, 110)   # 電話番号
-        self.table.setColumnWidth(5, 140)   # プラットフォーム
-        self.table.setColumnWidth(6, 80)    # 区分
-        self.table.setColumnWidth(7, 120)   # 登録番号
-        self.table.setColumnWidth(8, 130)   # 古物商許可番号
-        self.table.setColumnWidth(9, 60)    # 有効
-        # 備考列は Stretch（画面幅に合わせて拡張）
-        self._restore_online_store_column_widths()
+        reapply_table_column_widths(self.table)
         self.table.verticalHeader().setDefaultSectionSize(26)
 
     def _get_selected_id(self) -> Optional[int]:
@@ -3798,7 +3871,7 @@ class WholesalerListWidget(QWidget):
             self.table.setItem(i, 3, QTableWidgetItem(r.get("registration_number", "")))
             self.table.setItem(i, 4, QTableWidgetItem("ON" if r.get("is_active", 1) else "OFF"))
             self.table.setItem(i, 5, QTableWidgetItem(r.get("notes", "")))
-        self.table.resizeColumnsToContents()
+        reapply_table_column_widths(self.table)
 
     def _get_selected_id(self) -> Optional[int]:
         sel = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []

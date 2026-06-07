@@ -92,6 +92,15 @@ class StoreDatabase:
         except sqlite3.OperationalError:
             # カラムが既に存在する場合はスキップ
             pass
+        # 緯度・経度カラムが存在しない場合は追加（マイグレーション）
+        for col, ddl in (
+            ("latitude", "ALTER TABLE stores ADD COLUMN latitude REAL"),
+            ("longitude", "ALTER TABLE stores ADD COLUMN longitude REAL"),
+        ):
+            try:
+                cursor.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
         # address / phone カラムが存在しない場合は追加（マイグレーション）
         for col, ddl in (
             ("address", "ALTER TABLE stores ADD COLUMN address TEXT"),
@@ -399,8 +408,9 @@ class StoreDatabase:
         cursor.execute("""
             INSERT INTO stores (
                 affiliated_route_name, route_code, supplier_code, 
-                store_name, address, phone, custom_fields, store_code
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                store_name, address, phone, custom_fields, store_code,
+                latitude, longitude
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             store_data.get('affiliated_route_name'),
             store_data.get('route_code'),
@@ -409,7 +419,9 @@ class StoreDatabase:
             store_data.get('address'),
             store_data.get('phone'),
             custom_fields_json,
-            store_data.get('store_code')
+            store_data.get('store_code'),
+            store_data.get('latitude'),
+            store_data.get('longitude'),
         ))
         
         conn.commit()
@@ -462,6 +474,14 @@ class StoreDatabase:
         if 'store_code' in store_data:
             update_fields.append('store_code = ?')
             update_values.append(store_data.get('store_code'))
+
+        if 'latitude' in store_data:
+            update_fields.append('latitude = ?')
+            update_values.append(store_data.get('latitude'))
+
+        if 'longitude' in store_data:
+            update_fields.append('longitude = ?')
+            update_values.append(store_data.get('longitude'))
         
         if not update_fields:
             return False  # 更新するフィールドがない

@@ -1509,22 +1509,16 @@ class AntiqueWidget(QWidget):
         """データテーブルエリアの設定"""
         # テーブルウィジェットの作成（統一スキーマ列）
         self.data_table = QTableWidget()
+        self.data_table._hirio_table_column_settings_key = "table_column_widths/antique/ledger"
+        self.data_table._hirio_table_column_legacy_keys = ["ledger/column_widths"]
         self.data_table.setAlternatingRowColors(True)
         self.data_table.setSelectionBehavior(QTableWidget.SelectRows)
-        
-        # ヘッダーの設定
-        header = self.data_table.horizontalHeader()
-        header.setStretchLastSection(True)
-        header.setSectionResizeMode(QHeaderView.Interactive)
-        # 列幅保存/復元
-        header.sectionResized.connect(self._save_column_widths)
         
         # 統一スキーマの見出し（日本語）
         self.column_headers = [label for _, label in self.ALL_COLUMNS]
         self.column_keys = [key for key, _ in self.ALL_COLUMNS]
         self.data_table.setColumnCount(len(self.column_headers))
         self.data_table.setHorizontalHeaderLabels(self.column_headers)
-        self._load_column_widths()
         
         # テーブルをレイアウトに追加
         (parent_layout or self.layout()).addWidget(self.data_table)
@@ -2066,31 +2060,6 @@ class AntiqueWidget(QWidget):
                 QMessageBox.information(self, "出力完了", f"CSVファイルを保存しました:\n{str(target)}")
             except Exception as e:
                 QMessageBox.critical(self, "エラー", f"保存に失敗しました:\n{str(e)}")
-
-    # === 列幅保存/復元 ===
-    def _settings(self) -> QSettings:
-        return QSettings("HIRIO", "SedoriDesktopApp")
-
-    def _save_column_widths(self, *_):
-        try:
-            s = self._settings()
-            widths = [self.data_table.columnWidth(i) for i in range(self.data_table.columnCount())]
-            s.setValue("ledger/column_widths", widths)
-        except Exception:
-            pass
-
-    def _load_column_widths(self):
-        try:
-            s = self._settings()
-            widths = s.value("ledger/column_widths", None)
-            if widths:
-                for i, w in enumerate(widths):
-                    try:
-                        self.data_table.setColumnWidth(i, int(w))
-                    except Exception:
-                        continue
-        except Exception:
-            pass
 
     def _store_column_group_visible(self) -> bool:
         """「法人」列グループが ON なら店舗系列カラムを表示。"""

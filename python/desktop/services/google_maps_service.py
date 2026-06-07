@@ -3,7 +3,7 @@
 """
 Google Maps APIを使用した店舗情報取得サービス
 
-店舗名から住所・電話番号を取得する機能を提供
+店舗名から住所・電話番号・緯度経度を取得する機能を提供
 
 注意:
 - `requests`ライブラリが必要です（通常は標準でインストール済み）
@@ -349,13 +349,27 @@ def _resolve_api_key(api_key: Optional[str]) -> Optional[str]:
     return api_key
 
 
+def _parse_location(location: Optional[Dict[str, Any]]) -> tuple[Optional[float], Optional[float]]:
+    """Places API の location から (latitude, longitude) を取り出す。"""
+    if not location:
+        return None, None
+    try:
+        lat = location.get("latitude")
+        lng = location.get("longitude")
+        if lat is None or lng is None:
+            return None, None
+        return float(lat), float(lng)
+    except (TypeError, ValueError):
+        return None, None
+
+
 def get_store_info_from_google(
     store_name: str,
     api_key: Optional[str] = None,
     language_code: str = "ja",
-) -> Optional[Dict[str, str]]:
+) -> Optional[Dict[str, Any]]:
     """
-    店舗名からGoogle Maps APIを使用して住所・電話番号を取得
+    店舗名からGoogle Maps APIを使用して住所・電話番号・緯度経度を取得
 
     Args:
         store_name: 店舗名（例: "BOOKOFF SUPER BAZAAR 14号千葉幕張店"）
@@ -363,7 +377,7 @@ def get_store_info_from_google(
         language_code: 言語コード（デフォルト: 'ja' 日本語）
 
     Returns:
-        辞書型 {'address': '...', 'phone': '...'} または None
+        辞書型 {'address': '...', 'phone': '...', 'latitude': float, 'longitude': float} または None
     """
     if requests is None:
         error_msg = (
@@ -417,7 +431,7 @@ def get_store_info_from_google(
             "X-Goog-Api-Key": api_key,
             "X-Goog-FieldMask": (
                 "formattedAddress,addressComponents,postalAddress,"
-                "nationalPhoneNumber,internationalPhoneNumber"
+                "nationalPhoneNumber,internationalPhoneNumber,location"
             ),
         }
 
@@ -449,13 +463,20 @@ def get_store_info_from_google(
             or ""
         )
 
-        if not address and not phone:
+        latitude, longitude = _parse_location(details_data.get("location"))
+
+        if not address and not phone and latitude is None and longitude is None:
             return None
 
-        return {
+        result: Dict[str, Any] = {
             "address": address,
             "phone": phone,
         }
+        if latitude is not None:
+            result["latitude"] = latitude
+        if longitude is not None:
+            result["longitude"] = longitude
+        return result
 
     except requests.exceptions.RequestException as e:
         print(f"店舗情報の取得エラー ({store_name}): APIリクエストエラー - {e}")
@@ -529,6 +550,7 @@ def recover_store_info_with_japanese(
 
         new_address = ""
         new_phone = store.get("phone") or ""
+        info = None
 
         if store_name:
             info = get_store_info_from_google(
@@ -559,6 +581,10 @@ def recover_store_info_with_japanese(
             existing_store["address"] = new_address
             if new_phone:
                 existing_store["phone"] = new_phone
+            if info and info.get("latitude") is not None:
+                existing_store["latitude"] = info["latitude"]
+            if info and info.get("longitude") is not None:
+                existing_store["longitude"] = info["longitude"]
             store_db.update_store(store_id, existing_store)
             updated += 1
             print(f"  更新成功: 住所={new_address[:60]}...")
