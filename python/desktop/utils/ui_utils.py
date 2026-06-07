@@ -13,10 +13,10 @@ import re
 from typing import Any, List, Optional, Sequence, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QEvent, QSettings, QTimer
-from PySide6.QtWidgets import QHeaderView, QTableView, QTabWidget, QGroupBox, QWidget
+from PySide6.QtWidgets import QHeaderView, QTableView, QTableWidget, QTabWidget, QGroupBox, QWidget
 
 if TYPE_CHECKING:
-    from PySide6.QtWidgets import QTableWidget
+    pass
 
 SETTINGS_ORG = "HIRIO"
 SETTINGS_APP = "SedoriDesktopApp"
@@ -59,6 +59,18 @@ def _widget_contains(ancestor: QWidget, widget: QWidget) -> bool:
             return True
         w = w.parentWidget()
     return False
+
+
+def _table_column_count(table: QTableView) -> int:
+    """QTableWidget / QTableView 両対応の列数取得。"""
+    if hasattr(table, "columnCount"):
+        try:
+            count = int(table.columnCount())
+            if count > 0:
+                return count
+        except (TypeError, ValueError):
+            pass
+    return int(table.horizontalHeader().count())
 
 
 def build_table_column_settings_key(table: QTableView) -> str:
@@ -146,7 +158,7 @@ class TableColumnWidthPersistence:
         table = self.table
         if table is None:
             return
-        column_count = table.columnCount()
+        column_count = _table_column_count(table)
         if column_count <= 0:
             return
         widths = [table.columnWidth(i) for i in range(column_count)]
@@ -164,7 +176,7 @@ class TableColumnWidthPersistence:
         if table is None:
             return
         header = table.horizontalHeader()
-        column_count = table.columnCount()
+        column_count = _table_column_count(table)
         if column_count <= 0:
             return
 
@@ -219,7 +231,12 @@ def attach_table_column_width_persistence(
 
 
 def _wrap_table_column_mutators(table: QTableView, persistence: TableColumnWidthPersistence) -> None:
+    """QTableWidget 専用: setColumnCount 変更時に列幅を再適用する。"""
     if getattr(table, "_hirio_col_width_wrapped", False):
+        return
+    if not isinstance(table, QTableWidget):
+        return
+    if not hasattr(table, "setColumnCount") or not hasattr(table, "setHorizontalHeaderLabels"):
         return
     table._hirio_col_width_wrapped = True  # type: ignore[attr-defined]
 
@@ -253,11 +270,11 @@ def save_all_table_column_widths() -> None:
 
 
 class _TableColumnWidthShowFilter(QObject):
-    """初回表示時に QTableWidget / QTableView へ列幅永続化を自動取り付けする。"""
+    """初回表示時に QTableWidget へ列幅永続化を自動取り付けする。"""
 
     def eventFilter(self, obj, event):  # noqa: N802
-        if event.type() == QEvent.Type.Show:
-            if isinstance(obj, QTableView):
+        if event.type() == QEvent.Type.Show and isinstance(obj, QTableWidget):
+            try:
                 persistence = getattr(obj, "_hirio_column_width_persistence", None)
                 if persistence is None:
                     legacy = getattr(obj, "_hirio_table_column_legacy_keys", None)
@@ -265,8 +282,10 @@ class _TableColumnWidthShowFilter(QObject):
                         obj,
                         legacy_keys=legacy,
                     )
-                if obj.columnCount() > 0:
+                if _table_column_count(obj) > 0:
                     persistence.apply(deferred=False)
+            except Exception as exc:
+                print(f"[WARN] テーブル列幅の復元をスキップしました: {exc}")
         return super().eventFilter(obj, event)
 
 
