@@ -148,12 +148,13 @@ class SettingsWidget(QWidget):
 
         ext_layout.addWidget(QLabel("Geminiモデル:"), 2, 0)
         try:
-            from utils.gemini_model_helper import CHEAPEST_GEMINI_FLASH_MODEL
+            from utils.gemini_model_helper import resolve_gemini_flash_model
         except ImportError:
-            from desktop.utils.gemini_model_helper import CHEAPEST_GEMINI_FLASH_MODEL
-        self.gemini_model_label = QLabel(CHEAPEST_GEMINI_FLASH_MODEL)
+            from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
+        self.gemini_model_label = QLabel(resolve_gemini_flash_model())
         self.gemini_model_label.setToolTip(
-            "HIRIO は常に最安の Flash モデル（gemini-2.0-flash-lite）を使用します。\n"
+            "HIRIO は gemini-flash-latest（Google 管理の最新 Flash エイリアス）を第一候補に使います。\n"
+            "利用不可の場合は flash-lite 等へ自動フォールバックし、API の list_models でも探索します。\n"
             "レシートOCR・Keepa解釈・カスタマー対応AIなど共通です。"
         )
         self.gemini_model_label.setStyleSheet("color: #adb5bd; padding: 4px 0;")
@@ -1090,11 +1091,11 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.amazon_seller_id_edit.setText("")
         self.amazon_fba_simulator_url_edit.setText("https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP")
         try:
-            from utils.gemini_model_helper import resolve_gemini_flash_model, CHEAPEST_GEMINI_FLASH_MODEL
+            from utils.gemini_model_helper import resolve_gemini_flash_model
         except ImportError:
-            from desktop.utils.gemini_model_helper import resolve_gemini_flash_model, CHEAPEST_GEMINI_FLASH_MODEL
+            from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
         if hasattr(self, "gemini_model_label"):
-            self.gemini_model_label.setText(CHEAPEST_GEMINI_FLASH_MODEL)
+            self.gemini_model_label.setText(resolve_gemini_flash_model())
         self.pro_enabled_cb.setChecked(True)  # 開発段階ではデフォルトON
         
     def get_current_settings(self):

@@ -96,7 +96,7 @@ def explain_api_error(
         if "not found" in combined and (model or "model" in combined):
             hints.append(
                 f"モデル名「{model or '（指定モデル）'}」が見つかりません。\n"
-                "HIRIO は `gemini-2.0-flash-lite`（最安 Flash）を自動使用します。"
+                "HIRIO は `gemini-flash-latest` を第一候補にし、利用可能な Flash モデルを自動探索します。"
                 "アプリを再起動してから再テストしてください。"
             )
         if "429" in combined or "resource_exhausted" in combined or "quota" in combined:

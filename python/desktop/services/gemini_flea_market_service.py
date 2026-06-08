@@ -104,46 +104,36 @@ class GeminiFleaMarketService:
     ) -> None:
         self.api_key = api_key
         self.model_name = model_name or self._default_model_name()
-        self.model = None
-        self.available = False
+        self.last_error = ""
         self._configure()
 
-    def _configure(self) -> None:
-        if not GEMINI_AVAILABLE:
-            return
-        if not self.api_key or not self.model_name:
-            try:
-                from PySide6.QtCore import QSettings
-
-                try:
-                    from utils.gemini_model_helper import resolve_gemini_flash_model
-                except ImportError:
-                    from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
-
-                settings = QSettings("HIRIO", "DesktopApp")
-                self.api_key = self.api_key or (settings.value("ocr/gemini_api_key", "") or None)
-                self.model_name = resolve_gemini_flash_model(settings.value("ocr/gemini_model", ""))
-            except Exception as exc:
-                logger.debug("Gemini settings load failed: %s", exc)
-
-        if not self.api_key:
-            return
-
+    def _load_api_key(self) -> Optional[str]:
+        if self.api_key:
+            return str(self.api_key).strip() or None
         try:
-            genai.configure(api_key=self.api_key)
-            generation_config = {
-                "temperature": 0.4,
-                "max_output_tokens": 2048,
-                "response_mime_type": "application/json",
-            }
-            self.model = genai.GenerativeModel(self.model_name, generation_config=generation_config)
-            self.available = True
+            from PySide6.QtCore import QSettings
+
+            settings = QSettings("HIRIO", "DesktopApp")
+            key = (settings.value("ocr/gemini_api_key", "") or "").strip()
+            return key or None
         except Exception as exc:
-            logger.warning("Gemini flea market model init failed: %s", exc)
-            self.available = False
+            logger.debug("Gemini settings load failed: %s", exc)
+            return None
+
+    def _configure(self) -> None:
+        self.last_error = ""
+        if not GEMINI_AVAILABLE:
+            self.last_error = (
+                "google-generativeai がインストールされていません。\n"
+                "`pip install google-generativeai` を実行してください。"
+            )
+            return
+        self.api_key = self._load_api_key()
+        if not self.api_key:
+            self.last_error = "Gemini APIキーが未設定です。設定タブで API キーを登録してください。"
 
     def is_available(self) -> bool:
-        return bool(self.available and self.model)
+        return bool(GEMINI_AVAILABLE and self.api_key)
 
     def generate_listing(
         self,
@@ -192,20 +182,43 @@ class GeminiFleaMarketService:
             user_text += f"\n【今回だけ必ず含める文言（出品説明に反映すること）】\n{one_time}\n"
 
         try:
-            response = self.model.generate_content(
-                contents=[
-                    {"role": "user", "parts": [{"text": system_prompt}, {"text": user_text}]},
-                ]
+            from utils.gemini_model_helper import (
+                extract_gemini_response_text,
+                run_with_flash_model_fallback,
             )
-            text = _response_text(response)
-            if not text:
-                return None
+        except ImportError:
+            from desktop.utils.gemini_model_helper import (  # type: ignore
+                extract_gemini_response_text,
+                run_with_flash_model_fallback,
+            )
+
+        prompt = f"{system_prompt}\n\n{user_text}"
+        generation_config = {
+            "temperature": 0.4,
+            "max_output_tokens": 2048,
+            "response_mime_type": "application/json",
+        }
+
+        def _invoke(model_name: str) -> Optional[str]:
+            model = genai.GenerativeModel(model_name, generation_config=generation_config)
+            response = model.generate_content(prompt)
+            return extract_gemini_response_text(response) or None
+
+        text, error, used_model = run_with_flash_model_fallback(
+            self.api_key or "",
+            _invoke,
+            configured_model=self.model_name,
+        )
+        if not text:
+            self.last_error = error
+            logger.warning("Gemini flea market generation failed: %s", error)
+            return None
+        self.model_name = used_model or self.model_name
+        try:
             data = json.loads(text)
         except json.JSONDecodeError as exc:
             logger.warning("Gemini flea market JSON parse error: %s", exc)
-            return None
-        except Exception as exc:
-            logger.warning("Gemini flea market generation failed: %s", exc)
+            self.last_error = f"AI応答のJSON解析に失敗しました: {exc}"
             return None
 
         title = _safe_str(data.get("title")) or (product_name[:40] if product_name else "")

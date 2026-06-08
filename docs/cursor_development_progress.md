@@ -1,3 +1,36 @@
+## 2026-06-08 仕入データ行編集AI・Geminiモデル共通化・カスタマー対応AI UI刷新
+
+- **目的**: コンディション説明のAI生成、Gemini API 404 対策、カスタマー対応AIを Web チャット風の同一画面＋履歴永続化に改善。
+- **仕入データ・行の編集**（`inventory_widget.py`）
+  - 「欠品・詳細」と「コンディション説明」の間に **その他詳細** 自由入力列を追加。
+  - **コンディション説明呼び出し**: その他詳細が空なら従来テンプレート、入力ありなら欠品チェック＋その他詳細をもとに AI 生成（別ボタンは廃止）。
+  - **クリア** ボタンでコンディション説明欄のみ空にする。
+- **Gemini 共通**（`gemini_model_helper.py`）
+  - 第一候補 `gemini-flash-latest`、404 時は flash-lite 等へフォールバック。`list_models()` で利用可能モデルを探索。
+  - カスタマー対応・フリマ文案・レシートOCR・コンディション説明AIで共通利用。失敗時は日本語の具体エラー表示。
+- **コンディション説明AI**（`gemini_condition_description_service.py` 新規）
+- **カスタマー対応AI**（`customer_support_widget.py`, `customer_support_chat_window.py`）
+  - 別ウィンドウ廃止。左 **チャット履歴** ＋右 **新規入力/会話** の同一タブ構成。
+  - 最大 **10件** を `data/customer_support_sessions.json` に保存（`.gitignore` 対象）。再起動後も再開可。
+  - 会話1件以上ある案件のみ保存。開発用ダミー（user11/msg11 等）は読込時に自動除去。
+- **変更ファイル**:
+  - `python/desktop/ui/inventory_widget.py`
+  - `python/desktop/services/gemini_condition_description_service.py`（新規）
+  - `python/desktop/services/customer_support_session_store.py`（新規）
+  - `python/desktop/services/gemini_customer_support_service.py`
+  - `python/desktop/services/gemini_flea_market_service.py`
+  - `python/desktop/services/gemini_receipt_service.py`
+  - `python/desktop/ui/customer_support_widget.py`
+  - `python/desktop/ui/customer_support_chat_window.py`
+  - `python/desktop/ui/main_window.py`
+  - `python/desktop/utils/gemini_model_helper.py`
+  - `python/desktop/utils/api_test_helper.py`
+  - `python/desktop/ui/settings_widget.py`
+  - `.gitignore`
+  - `docs/cursor_development_progress.md`
+- **リポジトリ**: sedori-app.github
+- **Git**: feat(desktop): コンディション説明AIとカスタマー対応チャット履歴、Geminiモデル自動フォールバック
+
 ## 2026-06-07 ルート選択・店舗訪問詳細のテンプレート出力チェック
 
 - **目的**: ルート選択タブで店舗ごとにテンプレート生成の対象を選べるようにし、チェック状態を訪問順序保存で永続化する。

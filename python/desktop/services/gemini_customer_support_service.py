@@ -6,7 +6,7 @@ Gemini による Amazon カスタマー対応返信文案の生成。
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import google.generativeai as genai
@@ -65,13 +65,6 @@ SYSTEM_PROMPT = """
 """.strip()
 
 
-def _response_text(response: Any) -> str:
-    try:
-        return (response.text or "").strip()
-    except Exception:
-        return ""
-
-
 def _format_product_block(ctx: Optional[Dict[str, Any]]) -> str:
     if not ctx:
         return "（商品情報: SKUに該当する仕入DBデータなし）"
@@ -108,6 +101,16 @@ def _history_to_gemini(history: List[Dict[str, str]]) -> List[Dict[str, Any]]:
 
 
 class GeminiCustomerSupportService:
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model_name: Optional[str] = None,
+    ) -> None:
+        self.api_key = api_key
+        self.model_name = model_name or self._default_model_name()
+        self.last_error = ""
+        self._configure()
+
     @staticmethod
     def _default_model_name() -> str:
         try:
@@ -116,56 +119,33 @@ class GeminiCustomerSupportService:
             from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
         return resolve_gemini_flash_model()
 
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        model_name: Optional[str] = None,
-    ) -> None:
-        self.api_key = api_key
-        self.model_name = model_name or self._default_model_name()
-        self.model = None
-        self.available = False
-        self._configure()
+    def _load_api_key(self) -> Optional[str]:
+        if self.api_key:
+            return str(self.api_key).strip() or None
+        try:
+            from PySide6.QtCore import QSettings
+
+            settings = QSettings("HIRIO", "DesktopApp")
+            key = (settings.value("ocr/gemini_api_key", "") or "").strip()
+            return key or None
+        except Exception as exc:
+            logger.debug("Gemini settings load failed: %s", exc)
+            return None
 
     def _configure(self) -> None:
+        self.last_error = ""
         if not GEMINI_AVAILABLE:
-            return
-        if not self.api_key or not self.model_name:
-            try:
-                from PySide6.QtCore import QSettings
-
-                try:
-                    from utils.gemini_model_helper import resolve_gemini_flash_model
-                except ImportError:
-                    from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
-
-                settings = QSettings("HIRIO", "DesktopApp")
-                self.api_key = self.api_key or (settings.value("ocr/gemini_api_key", "") or None)
-                self.model_name = resolve_gemini_flash_model(settings.value("ocr/gemini_model", ""))
-            except Exception as exc:
-                logger.debug("Gemini settings load failed: %s", exc)
-
-        if not self.api_key:
-            return
-
-        try:
-            genai.configure(api_key=self.api_key)
-            generation_config = {
-                "temperature": 0.35,
-                "max_output_tokens": 2048,
-            }
-            self.model = genai.GenerativeModel(
-                self.model_name,
-                generation_config=generation_config,
-                system_instruction=SYSTEM_PROMPT,
+            self.last_error = (
+                "google-generativeai がインストールされていません。\n"
+                "`pip install google-generativeai` を実行してください。"
             )
-            self.available = True
-        except Exception as exc:
-            logger.warning("Gemini customer support model init failed: %s", exc)
-            self.available = False
+            return
+        self.api_key = self._load_api_key()
+        if not self.api_key:
+            self.last_error = "Gemini APIキーが未設定です。設定タブで API キーを登録してください。"
 
     def is_available(self) -> bool:
-        return bool(self.available and self.model)
+        return bool(GEMINI_AVAILABLE and self.api_key)
 
     def generate_reply(
         self,
@@ -176,14 +156,26 @@ class GeminiCustomerSupportService:
         extra_instructions: str = "",
         customer_name: str = "",
         chat_history: Optional[List[Dict[str, str]]] = None,
-    ) -> Optional[str]:
-        """返信文案（定型文なしの本文）を生成する。"""
+    ) -> Tuple[Optional[str], str]:
+        """返信文案（定型文なしの本文）を生成する。戻り値は (本文, エラーメッセージ)。"""
+        self.last_error = ""
         if not self.is_available():
-            return None
+            return None, self.last_error or "Gemini API が利用できません。"
 
         customer_message = (customer_message or "").strip()
         if not customer_message:
-            return None
+            return None, "カスタマーからのメッセージが空です。"
+
+        try:
+            from utils.gemini_model_helper import (
+                extract_gemini_response_text,
+                run_with_flash_model_fallback,
+            )
+        except ImportError:
+            from desktop.utils.gemini_model_helper import (  # type: ignore
+                extract_gemini_response_text,
+                run_with_flash_model_fallback,
+            )
 
         policy_block = RESPONSE_POLICY_INSTRUCTIONS.get(policy_key, "")
         extra = (extra_instructions or "").strip()
@@ -211,15 +203,31 @@ class GeminiCustomerSupportService:
         )
 
         history = _history_to_gemini(chat_history or [])
+        generation_config = {
+            "temperature": 0.35,
+            "max_output_tokens": 2048,
+        }
 
-        try:
+        def _invoke(model_name: str) -> Optional[str]:
+            model = genai.GenerativeModel(
+                model_name,
+                generation_config=generation_config,
+                system_instruction=SYSTEM_PROMPT,
+            )
             if history:
-                chat = self.model.start_chat(history=history)
+                chat = model.start_chat(history=history)
                 response = chat.send_message(prompt)
             else:
-                response = self.model.generate_content(prompt)
-            text = _response_text(response)
-            return text or None
-        except Exception as exc:
-            logger.warning("Gemini customer support generation failed: %s", exc)
-            return None
+                response = model.generate_content(prompt)
+            return extract_gemini_response_text(response) or None
+
+        text, error, used_model = run_with_flash_model_fallback(
+            self.api_key or "",
+            _invoke,
+            configured_model=self.model_name,
+        )
+        if text:
+            self.model_name = used_model or self.model_name
+            return text, ""
+        self.last_error = error
+        return None, error

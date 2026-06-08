@@ -72,30 +72,22 @@ class GeminiReceiptService:
         self.api_key = api_key
         self.model_name = model_name or self._default_model_name()
         self.prompt = prompt
-        self.model = None
-        self.available = False
+        self.last_error = ""
         self._configure()
 
     def _configure(self) -> None:
-        """QSettingsと環境から設定を読み込み、Geminiクライアントを初期化"""
+        """QSettingsと環境から設定を読み込む"""
+        self.last_error = ""
         if not GEMINI_AVAILABLE:
             logger.debug("google-generativeai is not installed; GeminiReceiptService disabled")
             return
 
-        if not self.api_key or not self.model_name:
+        if not self.api_key:
             try:
                 from PySide6.QtCore import QSettings  # type: ignore
 
-                try:
-                    from utils.gemini_model_helper import resolve_gemini_flash_model
-                except ImportError:
-                    from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
-
                 settings = QSettings("HIRIO", "DesktopApp")
-                self.api_key = self.api_key or (settings.value("ocr/gemini_api_key", "") or None)
-                self.model_name = self.model_name or resolve_gemini_flash_model(
-                    settings.value("ocr/gemini_model", "")
-                )
+                self.api_key = (settings.value("ocr/gemini_api_key", "") or "").strip() or None
             except Exception as exc:
                 logger.debug("Failed to load Gemini settings from QSettings: %s", exc)
 
@@ -103,22 +95,10 @@ class GeminiReceiptService:
             logger.info("Gemini API key is not configured; AI receipt parsing disabled")
             return
 
-        try:
-            genai.configure(api_key=self.api_key)
-            generation_config = {
-                "temperature": 0.0,
-                "max_output_tokens": 2048,
-                "response_mime_type": "application/json",
-            }
-            self.model = genai.GenerativeModel(self.model_name, generation_config=generation_config)
-            self.available = True
-            logger.info("Gemini receipt parsing enabled (model=%s)", self.model_name)
-        except Exception as exc:  # pragma: no cover - API初期化は外部依存
-            logger.warning("Failed to initialize Gemini model: %s", exc)
-            self.available = False
+        logger.info("Gemini receipt parsing enabled (model=%s)", self.model_name)
 
     def is_available(self) -> bool:
-        return bool(self.available and self.model)
+        return bool(GEMINI_AVAILABLE and self.api_key)
 
     def extract_structured_data(self, image_path: str | Path) -> Optional[Dict[str, Any]]:
         """レシート画像から構造化データを抽出"""
@@ -133,30 +113,52 @@ class GeminiReceiptService:
         image_bytes = path.read_bytes()
 
         try:
-            response = self.model.generate_content(
-                contents=[
-                    {
-                        "role": "user",
-                        "parts": [
-                            {"text": self.prompt},
-                            {
-                                "inline_data": {
-                                    "mime_type": mime_type,
-                                    "data": image_bytes,
-                                }
-                            },
-                        ],
-                    }
-                ]
+            from utils.gemini_model_helper import (
+                extract_gemini_response_text,
+                run_with_flash_model_fallback,
             )
-            text = getattr(response, "text", None)
-            if not text and getattr(response, "candidates", None):
-                parts = response.candidates[0].content.parts  # type: ignore[attr-defined]
-                if parts:
-                    text = parts[0].text
-            if not text:
-                raise ValueError("Gemini response did not contain text output")
+        except ImportError:
+            from desktop.utils.gemini_model_helper import (  # type: ignore
+                extract_gemini_response_text,
+                run_with_flash_model_fallback,
+            )
 
+        generation_config = {
+            "temperature": 0.0,
+            "max_output_tokens": 2048,
+            "response_mime_type": "application/json",
+        }
+        contents = [
+            {
+                "role": "user",
+                "parts": [
+                    {"text": self.prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": mime_type,
+                            "data": image_bytes,
+                        }
+                    },
+                ],
+            }
+        ]
+
+        def _invoke(model_name: str) -> Optional[str]:
+            model = genai.GenerativeModel(model_name, generation_config=generation_config)
+            response = model.generate_content(contents)
+            return extract_gemini_response_text(response) or None
+
+        try:
+            text, error, used_model = run_with_flash_model_fallback(
+                self.api_key or "",
+                _invoke,
+                configured_model=self.model_name,
+            )
+            if not text:
+                self.last_error = error
+                logger.warning("Gemini receipt extraction failed: %s", error)
+                return None
+            self.model_name = used_model or self.model_name
             payload = json.loads(text)
             return self._normalize_payload(payload)
         except json.JSONDecodeError as exc:

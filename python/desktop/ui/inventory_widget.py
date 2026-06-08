@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QScrollArea, QFormLayout, QTimeEdit,
     QToolButton, QApplication, QAbstractItemView,
 )
-from PySide6.QtCore import Qt, QDate, QTime, QDateTime, Signal, QSettings
+from PySide6.QtCore import Qt, QDate, QTime, QDateTime, Signal, QSettings, QThread
 from PySide6.QtGui import QFont, QColor, QPalette, QStandardItemModel, QStandardItem, QDesktopServices
 from PySide6.QtCore import QUrl
 import pandas as pd
@@ -141,6 +141,60 @@ SALES_CHANNEL_OPTIONS = ["Amazon", "メルカリ", "ヤフオク", "ラクマ", 
 SHIPPING_METHOD_OPTIONS = ["FBA", "自己発送"]
 
 
+class _ConditionNoteAiGenerateThread(QThread):
+    finished_ok = Signal(str)
+    finished_error = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        condition_label: str,
+        condition_template: str,
+        missing_items: List[Dict[str, str]],
+        other_details: str,
+        product_name: str = "",
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+        self._condition_label = condition_label
+        self._condition_template = condition_template
+        self._missing_items = missing_items
+        self._other_details = other_details
+        self._product_name = product_name
+
+    def run(self) -> None:
+        try:
+            try:
+                from services.gemini_condition_description_service import (
+                    GeminiConditionDescriptionService,
+                )
+            except ImportError:
+                from desktop.services.gemini_condition_description_service import (  # type: ignore
+                    GeminiConditionDescriptionService,
+                )
+            svc = GeminiConditionDescriptionService()
+            if not svc.is_available():
+                self.finished_error.emit(
+                    svc.last_error
+                    or "Gemini API が利用できません。\n"
+                    "設定タブで API キーを登録するか、pip install google-generativeai を確認してください。"
+                )
+                return
+            result, error = svc.generate(
+                condition_label=self._condition_label,
+                condition_template=self._condition_template,
+                missing_items=self._missing_items,
+                other_details=self._other_details,
+                product_name=self._product_name,
+            )
+            if not result:
+                self.finished_error.emit(error or "コンディション説明の生成に失敗しました。")
+                return
+            self.finished_ok.emit(result)
+        except Exception as exc:
+            self.finished_error.emit(str(exc))
+
+
 class InventoryRowEditDialog(QDialog):
     """仕入データ1行を編集するダイアログ（コンディション説明は複数行・呼び出しボタン付き）"""
     
@@ -152,6 +206,9 @@ class InventoryRowEditDialog(QDialog):
         self.condition_template_db = condition_template_db
         self.get_condition_key = get_condition_key_func
         self._widgets = {}
+        self._ai_generate_thread: Optional[_ConditionNoteAiGenerateThread] = None
+        self.other_details_edit: Optional[QLineEdit] = None
+        self.call_condition_note_btn: Optional[QPushButton] = None
         self.setWindowTitle("行の編集")
         self.setMinimumWidth(520)
         self.setMinimumHeight(400)
@@ -217,6 +274,8 @@ class InventoryRowEditDialog(QDialog):
         self.missing_inner_box_checkbox.toggled.connect(self._sync_missing_custom_checkboxes_enabled)
         
         for col in self.column_headers:
+            if col == "その他詳細":
+                continue
             if col == "コンディション説明":
                 # コンディション説明の上に欠品・詳細（カスタム）チェックを配置
                 missing_opts = QWidget()
@@ -234,6 +293,11 @@ class InventoryRowEditDialog(QDialog):
                 row2.addStretch()
                 missing_opts_layout.addLayout(row2)
                 form.addRow("欠品・詳細（選択）:", missing_opts)
+
+                self.other_details_edit = QLineEdit()
+                self.other_details_edit.setPlaceholderText("例）シール使用済み、ブルーリュウソウル欠品 等")
+                self._widgets["その他詳細"] = self.other_details_edit
+                form.addRow("その他詳細:", self.other_details_edit)
 
                 w = QPlainTextEdit()
                 w.setPlaceholderText("複数行入力可。改行は\\nで保存されます。")
@@ -263,11 +327,22 @@ class InventoryRowEditDialog(QDialog):
                 self._widgets[col] = w
                 form.addRow(QLabel(col + ":"), w)
         
-        # コンディション説明呼び出しボタン（コンディション列の値にマッチするテンプレートを挿入）
-        call_btn = QPushButton("コンディション説明呼び出し")
-        call_btn.setToolTip("この行の「コンディション」に合わせて、コンディション説明タブのテンプレートを挿入します。")
-        call_btn.clicked.connect(self._on_call_condition_note)
-        form.addRow("", call_btn)
+        btn_row = QWidget()
+        btn_layout = QHBoxLayout(btn_row)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        self.call_condition_note_btn = QPushButton("コンディション説明呼び出し")
+        self.call_condition_note_btn.setToolTip(
+            "コンディション説明タブのテンプレートを挿入します。\n"
+            "「その他詳細」に入力がある場合は、欠品・詳細の選択と合わせて AI が説明文を生成します。"
+        )
+        self.call_condition_note_btn.clicked.connect(self._on_call_condition_note)
+        clear_condition_note_btn = QPushButton("クリア")
+        clear_condition_note_btn.setToolTip("コンディション説明欄のテキストを空にします。")
+        clear_condition_note_btn.clicked.connect(self._on_clear_condition_note)
+        btn_layout.addWidget(self.call_condition_note_btn)
+        btn_layout.addWidget(clear_condition_note_btn)
+        btn_layout.addStretch()
+        form.addRow("", btn_row)
         
         scroll.setWidget(scroll_content)
         layout.addWidget(scroll)
@@ -318,7 +393,19 @@ class InventoryRowEditDialog(QDialog):
             else:
                 w.setText(val)
     
+    def _on_clear_condition_note(self) -> None:
+        note_w = self._widgets.get("コンディション説明")
+        if note_w and isinstance(note_w, QPlainTextEdit):
+            note_w.clear()
+
     def _on_call_condition_note(self):
+        other_details = ""
+        if self.other_details_edit is not None:
+            other_details = self.other_details_edit.text().strip()
+        if other_details:
+            self._start_ai_condition_note_generation(other_details)
+            return
+
         cond_w = self._widgets.get("コンディション")
         note_w = self._widgets.get("コンディション説明")
         if not cond_w or not note_w:
@@ -378,6 +465,109 @@ class InventoryRowEditDialog(QDialog):
             pass
 
         note_w.setPlainText(text)
+
+    def _collect_missing_selection_items(self) -> List[Dict[str, str]]:
+        """欠品・詳細チェックと詳細説明タブの文面を収集する。"""
+        items: List[Dict[str, str]] = []
+        try:
+            missing_data = self.condition_template_db.load_missing_keywords()
+            kw = missing_data.get("keywords", {}) or {}
+        except Exception:
+            kw = {}
+
+        manual_checked = bool(self.missing_manual_checkbox.isChecked())
+        inner_box_checked = bool(self.missing_inner_box_checkbox.isChecked())
+        if manual_checked and inner_box_checked:
+            missing_key = "取説・内箱欠品"
+            label = "取説・内箱欠品"
+        elif manual_checked:
+            missing_key = "取説欠品"
+            label = "取説欠品"
+        elif inner_box_checked:
+            missing_key = "内箱欠品"
+            label = "内箱欠品"
+        else:
+            missing_key = ""
+            label = ""
+
+        if missing_key:
+            items.append({
+                "label": label,
+                "text": str(kw.get(missing_key, "") or "").strip(),
+            })
+
+        for ck, cb in (
+            ("custom1", self.missing_custom1_checkbox),
+            ("custom2", self.missing_custom2_checkbox),
+            ("custom3", self.missing_custom3_checkbox),
+        ):
+            if cb.isChecked():
+                items.append({
+                    "label": cb.text().strip(),
+                    "text": str(kw.get(ck, "") or "").strip(),
+                })
+        return items
+
+    def _start_ai_condition_note_generation(self, other_details: str) -> None:
+        cond_w = self._widgets.get("コンディション")
+        if not cond_w:
+            return
+        condition_text = cond_w.text().strip() if isinstance(cond_w, QLineEdit) else cond_w.toPlainText().strip()
+        if not condition_text:
+            QMessageBox.information(self, "呼び出し", "先に「コンディション」を入力してください。")
+            return
+
+        if self._ai_generate_thread is not None and self._ai_generate_thread.isRunning():
+            QMessageBox.information(self, "呼び出し", "生成処理が実行中です。しばらくお待ちください。")
+            return
+
+        condition_key = self.get_condition_key(condition_text)
+        template_text = self.condition_template_db.get_condition_description_text(condition_key)
+        if not template_text:
+            QMessageBox.information(
+                self,
+                "呼び出し",
+                f"コンディション「{condition_text}」に対応する説明が登録されていません。\n"
+                "コンディション説明タブで登録してください。",
+            )
+            return
+
+        product_w = self._widgets.get("商品名")
+        product_name = ""
+        if isinstance(product_w, QLineEdit):
+            product_name = product_w.text().strip()
+
+        missing_items = self._collect_missing_selection_items()
+        if self.call_condition_note_btn is not None:
+            self.call_condition_note_btn.setEnabled(False)
+            self.call_condition_note_btn.setText("AI生成中...")
+
+        self._ai_generate_thread = _ConditionNoteAiGenerateThread(
+            condition_label=condition_text,
+            condition_template=template_text,
+            missing_items=missing_items,
+            other_details=other_details,
+            product_name=product_name,
+            parent=self,
+        )
+        self._ai_generate_thread.finished_ok.connect(self._on_ai_generate_finished)
+        self._ai_generate_thread.finished_error.connect(self._on_ai_generate_error)
+        self._ai_generate_thread.finished.connect(self._on_ai_generate_thread_finished)
+        self._ai_generate_thread.start()
+
+    def _on_ai_generate_finished(self, text: str) -> None:
+        note_w = self._widgets.get("コンディション説明")
+        if note_w and isinstance(note_w, QPlainTextEdit):
+            note_w.setPlainText(_normalize_condition_note_newlines(text))
+
+    def _on_ai_generate_error(self, message: str) -> None:
+        QMessageBox.warning(self, "呼び出し", message)
+
+    def _on_ai_generate_thread_finished(self) -> None:
+        if self.call_condition_note_btn is not None:
+            self.call_condition_note_btn.setEnabled(True)
+            self.call_condition_note_btn.setText("コンディション説明呼び出し")
+        self._ai_generate_thread = None
     
     def get_result(self) -> Dict[str, Any]:
         result = {}
@@ -2403,7 +2593,7 @@ class InventoryWidget(QWidget):
             "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
             "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
             "発送方法", "販売チャネル", COL_PLATFORM_FEE, COL_SHIPPING, COL_TOTAL_COST,
-            "在庫保管手数料", "仕入先", "価格改定", "コンディション説明"
+            "在庫保管手数料", "仕入先", "価格改定", "その他詳細", "コンディション説明"
         ]
         # 開発用タブでは、店舗コードの右に「3-6-9」カラムを追加
         if self.dev_mode:
@@ -3295,7 +3485,7 @@ class InventoryWidget(QWidget):
                 "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
                 "発送方法", "販売チャネル", COL_PLATFORM_FEE, COL_SHIPPING, COL_TOTAL_COST,
                 "在庫保管手数料",
-                "仕入先", "価格改定", "コンディション説明"
+                "仕入先", "価格改定", "その他詳細", "コンディション説明"
             ]
             if self.filtered_data is not None and len(self.filtered_data) > 0:
                 cols = [c for c in BASE_COLUMNS_FOR_PURCHASE_DB if c in self.filtered_data.columns]
@@ -4506,7 +4696,9 @@ class InventoryWidget(QWidget):
             "tracking_number": "伝票番号",
             "受取都道府県": "受取都道府県",
             "prefecture": "受取都道府県",
-            # コンディション説明（後で処理予定、一旦空）
+            # その他詳細・コンディション説明
+            "その他詳細": "その他詳細",
+            "other_details": "その他詳細",
             "コンディション説明": "コンディション説明",
             "conditionNote": "コンディション説明",
             # SKU（取込時は空でもOK）
