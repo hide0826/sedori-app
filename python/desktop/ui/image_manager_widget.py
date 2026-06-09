@@ -58,8 +58,69 @@ except Exception:
     from desktop.services.ocr_service import OCRService
 
 from database.image_db import ImageDatabase
+from html import escape
 
 logger = logging.getLogger(__name__)
+
+# ファイル操作エリア直下の手順ラベル用（①〜⑤）。ハイライトは 1..5 / なしは None
+_WORKFLOW_PIPELINE_SEGMENTS = [
+    "①フォルダ選択",
+    "②スキャン実行",
+    "③画像紐付け調整（手動）",
+    "④全画像リネーム",
+    "⑤確定処理",
+]
+_WORKFLOW_PIPELINE_SEP = "\u2010"
+_ACTION_TO_PIPELINE_STEP = {
+    "フォルダ選択": 1,
+    "スキャン実行": 2,
+    "全画像リネーム": 4,
+    "確定処理": 5,
+}
+
+# 画像登録タブ用ワークフロー（①〜④）
+_REGISTRATION_WORKFLOW_PIPELINE_SEGMENTS = [
+    "①GCS一括アップロード",
+    "②DBに保存",
+    "③amazon（出品ファイルL）テンプレートに書き込み",
+    "④Amazonアップロードページを開く",
+]
+_REGISTRATION_ACTION_TO_PIPELINE_STEP = {
+    "GCS一括アップロード": 1,
+    "DBに保存": 2,
+    "amazon（出品ファイルL）テンプレートに書き込み": 3,
+    "Amazonアップロードページを開く": 4,
+}
+
+
+def _format_status_prefix_html(text: str, emphasize: bool) -> str:
+    """ワークフロー行の左側（手順リストより前）。"""
+    if not emphasize:
+        return f'<span style="color:#cccccc;">{escape(text)}</span>'
+    t = text.strip()
+    if t == "ワークフロー: 実行中":
+        return (
+            '<span style="color:#cccccc;">ワークフロー: </span>'
+            '<span style="color:#ffd54f;font-weight:600;">実行中</span>'
+        )
+    return f'<span style="color:#ffd54f;font-weight:600;">{escape(text)}</span>'
+
+
+def _format_workflow_pipeline_html(
+    active_step: Optional[int],
+    segments: Optional[List[str]] = None,
+) -> str:
+    segs = segments if segments is not None else _WORKFLOW_PIPELINE_SEGMENTS
+    parts: List[str] = []
+    for i, seg in enumerate(segs, start=1):
+        esc = escape(seg)
+        if active_step == i:
+            parts.append(
+                f'<span style="color:#ffd54f;font-weight:600;">{esc}</span>'
+            )
+        else:
+            parts.append(f'<span style="color:#9e9e9e;">{esc}</span>')
+    return _WORKFLOW_PIPELINE_SEP.join(parts)
 
 
 class ScanCancelledError(Exception):
@@ -490,6 +551,13 @@ class ImageManagerWidget(QWidget):
         self.selected_group: Optional[JanGroup] = None
         self.selected_image_path: Optional[str] = None
         self._scan_cancelled = False
+        self._workflow_status_text = "ワークフロー: 未実行"
+        self._workflow_emphasize = False
+        self._workflow_active_step: Optional[int] = None
+        self._workflow_post_step: Optional[int] = None
+        self._registration_workflow_status_text = "ワークフロー: 未実行"
+        self._registration_workflow_emphasize = False
+        self._registration_workflow_active_step: Optional[int] = None
         self._jan_title_cache: Dict[str, str] = {}
         self.registration_records: List[Dict[str, Any]] = []
         # 画像登録タブ用の簡易スナップショット保存先
@@ -549,41 +617,76 @@ class ImageManagerWidget(QWidget):
         layout.setSpacing(10)
         layout.setContentsMargins(10, 10, 10, 10)
         
-        # 上部：フォルダ選択エリア（最小サイズ）
-        folder_group = QGroupBox("フォルダ選択")
-        folder_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)  # 高さを最小限に
-        folder_outer = QVBoxLayout(folder_group)
-        folder_outer.setSpacing(4)
-        folder_outer.setContentsMargins(5, 5, 5, 5)
-        folder_layout = QHBoxLayout()
-        folder_layout.setSpacing(5)
-        
+        # 上部：ファイル操作・アクション（仕入管理タブと同じ構成）
+        file_group = QGroupBox("ファイル操作・アクション")
+        file_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        file_outer = QVBoxLayout(file_group)
+        file_outer.setSpacing(4)
+        file_outer.setContentsMargins(5, 5, 5, 5)
+
+        green_button_style = """
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+        """
+
+        file_layout = QHBoxLayout()
+        file_layout.setSpacing(5)
+
         folder_label = QLabel("フォルダ:")
         self.folder_path_label = QLabel("（未選択）")
-        self.folder_path_label.setMinimumHeight(20)  # 高さを小さく
-        self.folder_path_label.setMaximumHeight(20)  # 最大高さも制限
-        self.folder_path_label.setStyleSheet("border: 1px solid gray; padding: 2px;")  # パディングを小さく
-        self.folder_path_label.setWordWrap(False)  # 折り返しを無効化（1行に）
-        
+        self.folder_path_label.setMinimumHeight(20)
+        self.folder_path_label.setMaximumHeight(20)
+        self.folder_path_label.setStyleSheet("border: 1px solid gray; padding: 2px;")
+        self.folder_path_label.setWordWrap(False)
+
         self.select_folder_btn = QPushButton("フォルダ選択")
-        self.select_folder_btn.clicked.connect(self.select_directory)
-        # 画像管理タブの起点となるデフォルトフォルダを登録するボタン
+        self.select_folder_btn.clicked.connect(
+            lambda: self._run_action_with_status("フォルダ選択", self.select_directory)
+        )
+        self.select_folder_btn.setStyleSheet(green_button_style)
+
+        self.scan_btn = QPushButton("スキャン実行")
+        self.scan_btn.clicked.connect(
+            lambda: self._run_action_with_status("スキャン実行", self.scan_directory)
+        )
+        self.scan_btn.setEnabled(False)
+        self.scan_btn.setStyleSheet(green_button_style)
+
+        self.rename_btn = QPushButton("全画像リネーム")
+        self.rename_btn.clicked.connect(
+            lambda: self._run_action_with_status("全画像リネーム", self.rename_all_images)
+        )
+        self.rename_btn.setEnabled(False)
+        self.rename_btn.setStyleSheet(green_button_style)
+
+        self.confirm_btn = QPushButton("確定処理")
+        self.confirm_btn.clicked.connect(
+            lambda: self._run_action_with_status("確定処理", self.confirm_image_links)
+        )
+        self.confirm_btn.setEnabled(False)
+        self.confirm_btn.setStyleSheet(green_button_style)
+
         self.set_default_folder_btn = QPushButton("デフォルト設定")
         self.set_default_folder_btn.setToolTip("画像管理タブでフォルダを開くときの起点フォルダを登録します。")
         self.set_default_folder_btn.clicked.connect(self.set_default_root_directory)
-        self.scan_btn = QPushButton("スキャン実行")
-        self.scan_btn.clicked.connect(self.scan_directory)
-        self.scan_btn.setEnabled(False)
 
         self.scan_unknown_btn = QPushButton("JAN不明検索")
         self.scan_unknown_btn.clicked.connect(self.scan_unknown_jan_images)
         self.scan_unknown_btn.setEnabled(False)
 
-        # 仕入日を指定して仕入DBと紐付けるボタン（スキャン済みの全JANグループを対象にまとめて紐付け）
         self.manual_link_btn = QPushButton("指定紐付け")
         self.manual_link_btn.setToolTip("スキャン済みのJANグループを、データベース管理タブの仕入DBから選んだ仕入日で一括紐付けします。")
         self.manual_link_btn.clicked.connect(self.manual_link_by_purchase_date)
-        
+
         self.clear_images_btn = QPushButton("画像クリア")
         self.clear_images_btn.clicked.connect(self.clear_jan_groups)
         self.clear_images_btn.setStyleSheet("""
@@ -598,17 +701,27 @@ class ImageManagerWidget(QWidget):
                 background-color: #c82333;
             }
         """)
-        
-        folder_layout.addWidget(folder_label)
-        folder_layout.addWidget(self.folder_path_label, stretch=1)
-        folder_layout.addWidget(self.select_folder_btn)
-        folder_layout.addWidget(self.set_default_folder_btn)
-        folder_layout.addWidget(self.scan_btn)
-        folder_layout.addWidget(self.scan_unknown_btn)
-        folder_layout.addWidget(self.manual_link_btn)
-        folder_layout.addWidget(self.clear_images_btn)
 
-        folder_outer.addLayout(folder_layout)
+        file_layout.addWidget(folder_label)
+        file_layout.addWidget(self.folder_path_label, stretch=1)
+        file_layout.addWidget(self.select_folder_btn)
+        file_layout.addWidget(self.scan_btn)
+        file_layout.addWidget(self.rename_btn)
+        file_layout.addWidget(self.confirm_btn)
+        file_layout.addStretch()
+        file_layout.addWidget(self.set_default_folder_btn)
+        file_layout.addWidget(self.scan_unknown_btn)
+        file_layout.addWidget(self.manual_link_btn)
+        file_layout.addWidget(self.clear_images_btn)
+        file_outer.addLayout(file_layout)
+
+        self.workflow_status_label = QLabel()
+        self.workflow_status_label.setTextFormat(Qt.TextFormat.RichText)
+        self.workflow_status_label.setWordWrap(True)
+        self.workflow_status_label.setStyleSheet("padding: 2px 0px;")
+        self._sync_workflow_status_label()
+        file_outer.addWidget(self.workflow_status_label)
+
         rename_options_row = QHBoxLayout()
         rename_options_row.setSpacing(16)
         self.lightweight_rename_checkbox = QCheckBox("リネーム時に軽量化（長辺1600px・JPEG品質85・EXIF削除）")
@@ -635,9 +748,9 @@ class ImageManagerWidget(QWidget):
         self.auto_correct_preset_combo.currentIndexChanged.connect(self._on_auto_correct_preset_changed)
         rename_options_row.addWidget(self.auto_correct_preset_combo)
         rename_options_row.addStretch()
-        folder_outer.addLayout(rename_options_row)
-        
-        layout.addWidget(folder_group)
+        file_outer.addLayout(rename_options_row)
+
+        layout.addWidget(file_group)
         
         # メインエリア：三分割レイアウト
         splitter = QSplitter(Qt.Horizontal)
@@ -678,16 +791,6 @@ class ImageManagerWidget(QWidget):
         self.tree_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree_widget.customContextMenuRequested.connect(self.on_tree_context_menu)
         left_layout.addWidget(self.tree_widget)
-
-        # グループ操作ボタン
-        group_action_layout = QHBoxLayout()
-        self.rename_btn = QPushButton("全画像リネーム")
-        self.rename_btn.clicked.connect(self.rename_all_images)
-        self.confirm_btn = QPushButton("確定処理")
-        self.confirm_btn.clicked.connect(self.confirm_image_links)
-        group_action_layout.addWidget(self.rename_btn)
-        group_action_layout.addWidget(self.confirm_btn)
-        left_layout.addLayout(group_action_layout)
 
         splitter.addWidget(left_group)
         
@@ -799,7 +902,7 @@ class ImageManagerWidget(QWidget):
         self.save_jan_btn.setEnabled(False)
         self.rename_btn.setEnabled(False)
         self.confirm_btn.setEnabled(False)
-        
+
         # バーコードリーダーの利用可能性を確認
         if not self.image_service.is_barcode_reader_available():
             self.read_barcode_btn.setToolTip(
@@ -809,7 +912,90 @@ class ImageManagerWidget(QWidget):
                 "Linux: sudo apt-get install libzbar0\n"
                 "macOS: brew install zbar"
             )
-    
+
+    def _sync_workflow_status_label(self) -> None:
+        """ワークフロー: 〜 と ①〜⑤ 手順を1行の HTML で表示する。"""
+        if not hasattr(self, "workflow_status_label") or self.workflow_status_label is None:
+            return
+        text = getattr(self, "_workflow_status_text", "ワークフロー: 未実行")
+        emph = getattr(self, "_workflow_emphasize", False)
+        step = getattr(self, "_workflow_active_step", None)
+        prefix = _format_status_prefix_html(text, emph)
+        pipe = _format_workflow_pipeline_html(step)
+        sep = '<span style="color:#cccccc;">　</span>'
+        self.workflow_status_label.setText(prefix + sep + pipe)
+
+    def _update_workflow_status(self, text: str, emphasize: bool = False) -> None:
+        """ワークフロー状態ラベルを更新（手順リストと1行に結合）"""
+        self._workflow_status_text = text
+        self._workflow_emphasize = emphasize
+        if "画像紐付け調整" in text:
+            self._workflow_active_step = 3
+        elif text.strip() == "ワークフロー: 未実行":
+            self._workflow_active_step = None
+        self._sync_workflow_status_label()
+
+    def _run_action_with_status(self, action_name: str, action_func):
+        """押したボタン名をワークフロー表示に反映してから処理を実行"""
+        step = _ACTION_TO_PIPELINE_STEP.get(action_name)
+        self._workflow_post_step = None
+        try:
+            if step is not None:
+                self._workflow_active_step = step
+            self._update_workflow_status("ワークフロー: 実行中", emphasize=True)
+            QApplication.processEvents()
+        except Exception:
+            pass
+        try:
+            return action_func()
+        finally:
+            post_step = getattr(self, "_workflow_post_step", None)
+            if post_step is not None:
+                self._workflow_active_step = post_step
+                self._workflow_post_step = None
+            elif step is not None:
+                self._workflow_active_step = step
+            self._update_workflow_status("ワークフロー: 待機", emphasize=False)
+
+    def _sync_registration_workflow_status_label(self) -> None:
+        """画像登録タブ: ワークフロー行を更新"""
+        if not hasattr(self, "registration_workflow_status_label"):
+            return
+        if self.registration_workflow_status_label is None:
+            return
+        text = getattr(self, "_registration_workflow_status_text", "ワークフロー: 未実行")
+        emph = getattr(self, "_registration_workflow_emphasize", False)
+        step = getattr(self, "_registration_workflow_active_step", None)
+        prefix = _format_status_prefix_html(text, emph)
+        pipe = _format_workflow_pipeline_html(step, _REGISTRATION_WORKFLOW_PIPELINE_SEGMENTS)
+        sep = '<span style="color:#cccccc;">　</span>'
+        self.registration_workflow_status_label.setText(prefix + sep + pipe)
+
+    def _update_registration_workflow_status(self, text: str, emphasize: bool = False) -> None:
+        """画像登録タブのワークフロー状態を更新"""
+        self._registration_workflow_status_text = text
+        self._registration_workflow_emphasize = emphasize
+        if text.strip() == "ワークフロー: 未実行":
+            self._registration_workflow_active_step = None
+        self._sync_registration_workflow_status_label()
+
+    def _run_registration_action_with_status(self, action_name: str, action_func):
+        """画像登録タブ: ボタン操作をワークフロー表示に反映してから実行"""
+        step = _REGISTRATION_ACTION_TO_PIPELINE_STEP.get(action_name)
+        try:
+            if step is not None:
+                self._registration_workflow_active_step = step
+            self._update_registration_workflow_status("ワークフロー: 実行中", emphasize=True)
+            QApplication.processEvents()
+        except Exception:
+            pass
+        try:
+            return action_func()
+        finally:
+            if step is not None:
+                self._registration_workflow_active_step = step
+            self._update_registration_workflow_status("ワークフロー: 待機", emphasize=False)
+
     def load_last_directory(self):
         """最後に開いたフォルダパスを読み込む"""
         try:
@@ -1169,6 +1355,9 @@ class ImageManagerWidget(QWidget):
             
             # UI更新
             self.update_tree_widget()
+
+            # スキャン完了後は手動工程③（画像紐付け調整）へ進む
+            self._workflow_post_step = 3
             
             # 全画像を一覧表示（遅延読み込み：スキャン完了後に非同期で実行）
             # 画像読み込みは重いので、まずスキャン完了を通知してから実行
@@ -1274,6 +1463,8 @@ class ImageManagerWidget(QWidget):
             # ボタンの状態を更新
             self.rename_btn.setEnabled(False)
             self.confirm_btn.setEnabled(False)
+
+            self._update_workflow_status("ワークフロー: 未実行", emphasize=False)
             
             QMessageBox.information(self, "完了", "JANグループエリアの画像をクリアしました。")
     
@@ -2298,6 +2489,85 @@ class ImageManagerWidget(QWidget):
         top_row.addWidget(QLabel("(0=無期限)"))
         layout.addLayout(top_row)
 
+        registration_action_group = QGroupBox("ファイル操作・アクション")
+        registration_action_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        registration_action_outer = QVBoxLayout(registration_action_group)
+        registration_action_outer.setSpacing(4)
+        registration_action_outer.setContentsMargins(5, 5, 5, 5)
+
+        green_button_style = """
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+        """
+
+        registration_ops_layout = QHBoxLayout()
+        registration_ops_layout.setSpacing(5)
+
+        self.upload_all_to_gcs_btn = QPushButton("GCS一括アップロード")
+        self.upload_all_to_gcs_btn.setToolTip("表示中の全行の未アップロード画像をGCSに一括アップロードします")
+        self.upload_all_to_gcs_btn.clicked.connect(
+            lambda: self._run_registration_action_with_status(
+                "GCS一括アップロード", self.upload_all_images_to_gcs
+            )
+        )
+        self.upload_all_to_gcs_btn.setStyleSheet(green_button_style)
+
+        self.save_to_db_btn = QPushButton("DBに保存")
+        self.save_to_db_btn.setToolTip("一覧のSKUごとに、画像URL1〜6を仕入DBに保存します")
+        self.save_to_db_btn.clicked.connect(
+            lambda: self._run_registration_action_with_status(
+                "DBに保存", self.save_registration_to_purchase_db
+            )
+        )
+        self.save_to_db_btn.setStyleSheet(green_button_style)
+
+        self.write_amazon_template_btn = QPushButton("amazon（出品ファイルL）テンプレートに書き込み")
+        self.write_amazon_template_btn.setToolTip(
+            "AmazonテンプレートExcelファイル（出品ファイルL）にSKUと画像URLを書き込みます。"
+        )
+        self.write_amazon_template_btn.clicked.connect(
+            lambda: self._run_registration_action_with_status(
+                "amazon（出品ファイルL）テンプレートに書き込み", self.write_to_amazon_template
+            )
+        )
+        self.write_amazon_template_btn.setStyleSheet(green_button_style)
+
+        self.amazon_upload_link_btn = QPushButton("Amazonアップロードページを開く")
+        self.amazon_upload_link_btn.setToolTip(
+            "Amazon Seller Centralの出品ファイルアップロードページをブラウザで開きます"
+        )
+        self.amazon_upload_link_btn.clicked.connect(
+            lambda: self._run_registration_action_with_status(
+                "Amazonアップロードページを開く", self.open_amazon_upload_page
+            )
+        )
+        self.amazon_upload_link_btn.setStyleSheet(green_button_style)
+
+        registration_ops_layout.addWidget(self.upload_all_to_gcs_btn)
+        registration_ops_layout.addWidget(self.save_to_db_btn)
+        registration_ops_layout.addWidget(self.write_amazon_template_btn)
+        registration_ops_layout.addWidget(self.amazon_upload_link_btn)
+        registration_ops_layout.addStretch()
+        registration_action_outer.addLayout(registration_ops_layout)
+
+        self.registration_workflow_status_label = QLabel()
+        self.registration_workflow_status_label.setTextFormat(Qt.TextFormat.RichText)
+        self.registration_workflow_status_label.setWordWrap(True)
+        self.registration_workflow_status_label.setStyleSheet("padding: 2px 0px;")
+        self._sync_registration_workflow_status_label()
+        registration_action_outer.addWidget(self.registration_workflow_status_label)
+
+        layout.addWidget(registration_action_group)
+
         self.registration_table = RegistrationTableWidget()
         self.registration_columns = [
             "コンディション", "SKU", "ASIN", "JAN", "商品名",
@@ -2482,35 +2752,10 @@ class ImageManagerWidget(QWidget):
         self.upload_to_gcs_btn.clicked.connect(self.upload_images_to_gcs)
         button_layout.addWidget(self.upload_to_gcs_btn)
 
-        # GCS一括アップロード（全行）
-        self.upload_all_to_gcs_btn = QPushButton("GCS一括アップロード")
-        self.upload_all_to_gcs_btn.setToolTip("表示中の全行の未アップロード画像をGCSに一括アップロードします")
-        self.upload_all_to_gcs_btn.clicked.connect(self.upload_all_images_to_gcs)
-        button_layout.addWidget(self.upload_all_to_gcs_btn)
-
-        # GCS存在チェック（全行 or 選択行）
         self.check_existing_gcs_btn = QPushButton("GCS存在チェック")
         self.check_existing_gcs_btn.setToolTip("GCSに既に存在する画像があれば検索し、画像URL欄に自動入力します（ファイル名で検索）")
         self.check_existing_gcs_btn.clicked.connect(self.check_existing_images_in_gcs)
         button_layout.addWidget(self.check_existing_gcs_btn)
-
-        # 仕入DBに保存ボタン（画像URL1〜6を永続化）
-        self.save_to_db_btn = QPushButton("DBに保存")
-        self.save_to_db_btn.setToolTip("一覧のSKUごとに、画像URL1〜6を仕入DBに保存します")
-        self.save_to_db_btn.clicked.connect(self.save_registration_to_purchase_db)
-        button_layout.addWidget(self.save_to_db_btn)
-
-        # AmazonテンプレートExcelに書き込み
-        self.write_amazon_template_btn = QPushButton("amazon（出品ファイルL）テンプレートに書き込み")
-        self.write_amazon_template_btn.setToolTip("AmazonテンプレートExcelファイル（出品ファイルL）にSKUと画像URLを書き込みます。")
-        self.write_amazon_template_btn.clicked.connect(self.write_to_amazon_template)
-        button_layout.addWidget(self.write_amazon_template_btn)
-
-        # Amazonアップロードリンクボタン
-        self.amazon_upload_link_btn = QPushButton("Amazonアップロードページを開く")
-        self.amazon_upload_link_btn.setToolTip("Amazon Seller Centralの出品ファイルアップロードページをブラウザで開きます")
-        self.amazon_upload_link_btn.clicked.connect(self.open_amazon_upload_page)
-        button_layout.addWidget(self.amazon_upload_link_btn)
 
         layout.addLayout(button_layout)
         
@@ -2701,6 +2946,7 @@ class ImageManagerWidget(QWidget):
             self.registration_records = []
             self.registration_table.setRowCount(0)
             self._set_registration_preview(None)
+            self._update_registration_workflow_status("ワークフロー: 未実行", emphasize=False)
 
     def delete_selected_registration_rows(self):
         """選択されている行だけを画像登録リストから削除"""

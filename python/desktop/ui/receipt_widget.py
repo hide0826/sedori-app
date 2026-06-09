@@ -74,6 +74,53 @@ check_gcs_authentication = None
 set_bucket_lifecycle_policy = None
 GCS_AVAILABLE = False
 
+# レシート・領収書・保証書タブ用ワークフロー（①〜⑧）
+_RECEIPT_WORKFLOW_PIPELINE_SEGMENTS = [
+    "①フォルダ選択",
+    "②全件OCR",
+    "③一括マッチング",
+    "④手動調整",
+    "⑤一括リネーム",
+    "⑥照合チェック",
+    "⑦GCSアップロード",
+    "⑧確定",
+]
+_RECEIPT_WORKFLOW_PIPELINE_SEP = "\u2010"
+_RECEIPT_ACTION_TO_PIPELINE_STEP = {
+    "フォルダ選択": 1,
+    "全件OCR": 2,
+    "一括マッチング": 3,
+    "一括リネーム": 5,
+    "照合チェック": 6,
+    "GCSアップロード": 7,
+    "確定": 8,
+}
+
+
+def _format_receipt_status_prefix_html(text: str, emphasize: bool) -> str:
+    from html import escape
+    if not emphasize:
+        return f'<span style="color:#cccccc;">{escape(text)}</span>'
+    t = text.strip()
+    if t == "ワークフロー: 実行中":
+        return (
+            '<span style="color:#cccccc;">ワークフロー: </span>'
+            '<span style="color:#ffd54f;font-weight:600;">実行中</span>'
+        )
+    return f'<span style="color:#ffd54f;font-weight:600;">{escape(text)}</span>'
+
+
+def _format_receipt_workflow_pipeline_html(active_step: Optional[int]) -> str:
+    from html import escape
+    parts: List[str] = []
+    for i, seg in enumerate(_RECEIPT_WORKFLOW_PIPELINE_SEGMENTS, start=1):
+        esc = escape(seg)
+        if active_step == i:
+            parts.append(f'<span style="color:#ffd54f;font-weight:600;">{esc}</span>')
+        else:
+            parts.append(f'<span style="color:#9e9e9e;">{esc}</span>')
+    return _RECEIPT_WORKFLOW_PIPELINE_SEP.join(parts)
+
 
 class AccountTitleDelegate(QStyledItemDelegate):
     """
@@ -459,6 +506,10 @@ class ReceiptWidget(QWidget):
         self._confirm_in_progress: bool = False
         # 日付自動修復で「いいえ」を選んだレシートID（同一セッションで再確認しない）
         self._date_repair_declined_ids: set[int] = set()
+        self._workflow_status_text = "ワークフロー: 未実行"
+        self._workflow_emphasize = False
+        self._workflow_active_step: Optional[int] = None
+        self._workflow_post_step: Optional[int] = None
         
         self.setup_ui()
         
@@ -836,37 +887,14 @@ class ReceiptWidget(QWidget):
     
     
     def setup_action_section(self):
-        """処理実行エリア"""
-        action_group = QGroupBox("処理実行")
-        action_layout = QHBoxLayout(action_group)  # QVBoxLayoutからQHBoxLayoutに変更
-        
-        # すべてのボタンを1行に配置
-        self.folder_btn = QPushButton("フォルダ選択")
-        self.folder_btn.clicked.connect(self.select_folder_for_batch)
-        action_layout.addWidget(self.folder_btn)
-        
-        self.process_btn = QPushButton("OCR処理")
-        self.process_btn.clicked.connect(self.process_selected_file)
-        action_layout.addWidget(self.process_btn)
-        
-        self.batch_btn = QPushButton("全件OCR")
-        self.batch_btn.clicked.connect(self.start_batch_ocr)
-        action_layout.addWidget(self.batch_btn)
-        
-        self.bulk_match_btn = QPushButton("一括マッチング")
-        self.bulk_match_btn.clicked.connect(self.bulk_match_receipts)
-        action_layout.addWidget(self.bulk_match_btn)
-        
-        self.bulk_rename_btn = QPushButton("一括リネーム")
-        self.bulk_rename_btn.clicked.connect(self.bulk_rename_receipts)
-        action_layout.addWidget(self.bulk_rename_btn)
-        
-        self.verify_btn = QPushButton("照合チェック")
-        self.verify_btn.clicked.connect(self.verify_receipts_with_purchases)
-        action_layout.addWidget(self.verify_btn)
-        
-        self.confirm_btn = QPushButton("確定")
-        self.confirm_btn.setStyleSheet("""
+        """ファイル操作・アクション（ワークフロー付き）"""
+        action_group = QGroupBox("ファイル操作・アクション")
+        action_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        action_outer = QVBoxLayout(action_group)
+        action_outer.setSpacing(4)
+        action_outer.setContentsMargins(5, 5, 5, 5)
+
+        green_button_style = """
             QPushButton {
                 background-color: #28a745;
                 color: white;
@@ -878,43 +906,149 @@ class ReceiptWidget(QWidget):
             QPushButton:hover {
                 background-color: #218838;
             }
-        """)
-        self.confirm_btn.clicked.connect(self.confirm_receipt_linkage)
-        action_layout.addWidget(self.confirm_btn)
-        
-        # 検証用: レシート一覧のスナップ保存・読込ボタン
-        self.save_receipt_snapshot_btn = QPushButton("スナップ保存")
-        self.save_receipt_snapshot_btn.setToolTip("現在のレシート一覧を一時保存します（検証用）")
-        self.save_receipt_snapshot_btn.clicked.connect(self.save_receipt_snapshot)
-        action_layout.addWidget(self.save_receipt_snapshot_btn)
+        """
 
-        self.load_receipt_snapshot_btn = QPushButton("スナップ読込")
-        self.load_receipt_snapshot_btn.setToolTip("前回保存したレシート一覧スナップショットを読み込みます（検証用）")
-        self.load_receipt_snapshot_btn.clicked.connect(self.load_receipt_snapshot)
-        action_layout.addWidget(self.load_receipt_snapshot_btn)
-        
-        self.delete_row_btn = QPushButton("選択行削除")
-        self.delete_row_btn.setEnabled(False)
-        self.delete_row_btn.clicked.connect(self.delete_selected_receipts)
-        action_layout.addWidget(self.delete_row_btn)
-        
+        action_layout = QHBoxLayout()
+        action_layout.setSpacing(5)
+
+        self.folder_btn = QPushButton("フォルダ選択")
+        self.folder_btn.clicked.connect(
+            lambda: self._run_action_with_status("フォルダ選択", self.select_folder_for_batch)
+        )
+        self.folder_btn.setStyleSheet(green_button_style)
+
+        self.batch_btn = QPushButton("全件OCR")
+        self.batch_btn.clicked.connect(
+            lambda: self._run_action_with_status("全件OCR", self.start_batch_ocr)
+        )
+        self.batch_btn.setStyleSheet(green_button_style)
+
+        self.bulk_match_btn = QPushButton("一括マッチング")
+        self.bulk_match_btn.clicked.connect(
+            lambda: self._run_action_with_status("一括マッチング", self.bulk_match_receipts)
+        )
+        self.bulk_match_btn.setStyleSheet(green_button_style)
+
+        self.bulk_rename_btn = QPushButton("一括リネーム")
+        self.bulk_rename_btn.clicked.connect(
+            lambda: self._run_action_with_status("一括リネーム", self.bulk_rename_receipts)
+        )
+        self.bulk_rename_btn.setStyleSheet(green_button_style)
+
+        self.verify_btn = QPushButton("照合チェック")
+        self.verify_btn.clicked.connect(
+            lambda: self._run_action_with_status("照合チェック", self.verify_receipts_with_purchases)
+        )
+        self.verify_btn.setStyleSheet(green_button_style)
+
+        self.gcs_upload_btn = QPushButton("GCSアップロード")
+        self.gcs_upload_btn.setToolTip("レシート一覧の全件をGCSにアップロードします")
+        self.gcs_upload_btn.clicked.connect(
+            lambda: self._run_action_with_status("GCSアップロード", self.show_gcs_upload_dialog)
+        )
+        self.gcs_upload_btn.setStyleSheet(green_button_style)
+
+        self.confirm_btn = QPushButton("確定")
+        self.confirm_btn.clicked.connect(
+            lambda: self._run_action_with_status("確定", self.confirm_receipt_linkage)
+        )
+        self.confirm_btn.setStyleSheet(green_button_style)
+
+        action_layout.addWidget(self.folder_btn)
+        action_layout.addWidget(self.batch_btn)
+        action_layout.addWidget(self.bulk_match_btn)
+        action_layout.addWidget(self.bulk_rename_btn)
+        action_layout.addWidget(self.verify_btn)
+        action_layout.addWidget(self.gcs_upload_btn)
+        action_layout.addWidget(self.confirm_btn)
+        action_layout.addStretch()
+
         self.delete_all_btn = QPushButton("クリア")
         self.delete_all_btn.clicked.connect(self.delete_all_receipts)
         action_layout.addWidget(self.delete_all_btn)
-        
-        self.gcs_upload_btn = QPushButton("GCSアップロード")
-        self.gcs_upload_btn.clicked.connect(self.show_gcs_upload_dialog)
-        action_layout.addWidget(self.gcs_upload_btn)
 
-        # デフォルトフォルダ設定ボタン（右端寄せ）
         self.default_folder_btn = QPushButton("デフォルトフォルダ設定")
         self.default_folder_btn.setToolTip("処理の起点となるデフォルトフォルダを設定します")
         self.default_folder_btn.clicked.connect(self.set_default_folder)
         action_layout.addWidget(self.default_folder_btn)
-        
-        action_layout.addStretch()
-        
+
+        action_outer.addLayout(action_layout)
+
+        self.workflow_status_label = QLabel()
+        self.workflow_status_label.setTextFormat(Qt.TextFormat.RichText)
+        self.workflow_status_label.setWordWrap(True)
+        self.workflow_status_label.setStyleSheet("padding: 2px 0px;")
+        self._sync_workflow_status_label()
+        action_outer.addWidget(self.workflow_status_label)
+
+        aux_layout = QHBoxLayout()
+        self.process_btn = QPushButton("OCR処理")
+        self.process_btn.setToolTip("フォルダ選択後、キューの先頭1枚だけOCR処理します")
+        self.process_btn.clicked.connect(self.process_selected_file)
+        aux_layout.addWidget(self.process_btn)
+
+        self.save_receipt_snapshot_btn = QPushButton("スナップ保存")
+        self.save_receipt_snapshot_btn.setToolTip("現在のレシート一覧を一時保存します（検証用）")
+        self.save_receipt_snapshot_btn.clicked.connect(self.save_receipt_snapshot)
+        aux_layout.addWidget(self.save_receipt_snapshot_btn)
+
+        self.load_receipt_snapshot_btn = QPushButton("スナップ読込")
+        self.load_receipt_snapshot_btn.setToolTip("前回保存したレシート一覧スナップショットを読み込みます（検証用）")
+        self.load_receipt_snapshot_btn.clicked.connect(self.load_receipt_snapshot)
+        aux_layout.addWidget(self.load_receipt_snapshot_btn)
+
+        self.delete_row_btn = QPushButton("選択行削除")
+        self.delete_row_btn.setEnabled(False)
+        self.delete_row_btn.clicked.connect(self.delete_selected_receipts)
+        aux_layout.addWidget(self.delete_row_btn)
+        aux_layout.addStretch()
+        action_outer.addLayout(aux_layout)
+
         self.layout.addWidget(action_group)
+
+    def _sync_workflow_status_label(self) -> None:
+        """ワークフロー: 〜 と ①〜⑧ 手順を1行の HTML で表示する。"""
+        if not hasattr(self, "workflow_status_label") or self.workflow_status_label is None:
+            return
+        text = getattr(self, "_workflow_status_text", "ワークフロー: 未実行")
+        emph = getattr(self, "_workflow_emphasize", False)
+        step = getattr(self, "_workflow_active_step", None)
+        prefix = _format_receipt_status_prefix_html(text, emph)
+        pipe = _format_receipt_workflow_pipeline_html(step)
+        sep = '<span style="color:#cccccc;">　</span>'
+        self.workflow_status_label.setText(prefix + sep + pipe)
+
+    def _update_workflow_status(self, text: str, emphasize: bool = False) -> None:
+        """ワークフロー状態ラベルを更新"""
+        self._workflow_status_text = text
+        self._workflow_emphasize = emphasize
+        if "手動調整" in text:
+            self._workflow_active_step = 4
+        elif text.strip() == "ワークフロー: 未実行":
+            self._workflow_active_step = None
+        self._sync_workflow_status_label()
+
+    def _run_action_with_status(self, action_name: str, action_func):
+        """押したボタン名をワークフロー表示に反映してから処理を実行"""
+        step = _RECEIPT_ACTION_TO_PIPELINE_STEP.get(action_name)
+        self._workflow_post_step = None
+        try:
+            if step is not None:
+                self._workflow_active_step = step
+            self._update_workflow_status("ワークフロー: 実行中", emphasize=True)
+            QApplication.processEvents()
+        except Exception:
+            pass
+        try:
+            return action_func()
+        finally:
+            post_step = getattr(self, "_workflow_post_step", None)
+            if post_step is not None:
+                self._workflow_active_step = post_step
+                self._workflow_post_step = None
+            elif step is not None:
+                self._workflow_active_step = step
+            self._update_workflow_status("ワークフロー: 待機", emphasize=False)
     
     def setup_receipt_list_simple(self):
         """レシート一覧セクション（シンプル版）"""
@@ -1264,6 +1398,9 @@ class ReceiptWidget(QWidget):
             self.batch_running = False
             if hasattr(self, "folder_label"):
                 self.folder_label.setText(f"{str(self.current_folder)} - 一括OCR完了")
+            # 全件OCR完了後は次の工程③（一括マッチング）へ
+            self._workflow_active_step = 3
+            self._update_workflow_status("ワークフロー: 待機", emphasize=False)
             QMessageBox.information(self, "一括OCR完了", "選択されたフォルダ内のすべての画像の処理が完了しました。")
             return
         next_path = self.ocr_queue.pop(0)
@@ -3386,6 +3523,7 @@ class ReceiptWidget(QWidget):
         deleted = self.receipt_db.delete_all_receipts()
         self.reset_form()
         self.refresh_receipt_list()
+        self._update_workflow_status("ワークフロー: 未実行", emphasize=False)
         QMessageBox.information(self, "クリア完了", f"{deleted} 件のレシートをクリアしました。")
 
     # ===== 一括処理 =====
@@ -3762,6 +3900,8 @@ class ReceiptWidget(QWidget):
         # テーブルを更新（紐付き候補SKUと店舗名を表示）
         self.refresh_receipt_list()
         print(f"[一括マッチング] 完了: 更新={updated}件, 候補なし={skipped_no_candidates}件, 更新なし={skipped_no_updates}件")
+        # 一括マッチング完了後は手動工程④（手動調整）へ
+        self._workflow_post_step = 4
         QMessageBox.information(self, "一括マッチング", f"{updated} 件のレシートにマッチング候補を適用しました。\n（候補なし: {skipped_no_candidates}件, 更新なし: {skipped_no_updates}件）")
 
     def bulk_rename_receipts(self):

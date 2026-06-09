@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QFileDialog,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QProgressBar, QTextEdit, QGroupBox, QSplitter, QApplication,
-    QMessageBox, QFrame, QMenu
+    QMessageBox, QFrame, QMenu, QSizePolicy,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSettings, QUrl
 from PySide6.QtGui import QFont, QColor, QDesktopServices
@@ -26,6 +26,47 @@ try:
     from desktop.services.keepa_service import KeepaService
 except ImportError:
     from services.keepa_service import KeepaService  # type: ignore
+
+# 改定実行タブ用ワークフロー（①〜⑤）
+_REPRICER_WORKFLOW_PIPELINE_SEGMENTS = [
+    "①ファイル選択",
+    "②価格改定プレビュー",
+    "③価格確認（目視）",
+    "④価格改定実行",
+    "⑤結果をCSV保存",
+]
+_REPRICER_WORKFLOW_PIPELINE_SEP = "\u2010"
+_REPRICER_ACTION_TO_PIPELINE_STEP = {
+    "ファイル選択": 1,
+    "価格改定プレビュー": 2,
+    "価格改定実行": 4,
+    "結果をCSV保存": 5,
+}
+
+
+def _format_repricer_status_prefix_html(text: str, emphasize: bool) -> str:
+    from html import escape
+    if not emphasize:
+        return f'<span style="color:#cccccc;">{escape(text)}</span>'
+    t = text.strip()
+    if t == "ワークフロー: 実行中":
+        return (
+            '<span style="color:#cccccc;">ワークフロー: </span>'
+            '<span style="color:#ffd54f;font-weight:600;">実行中</span>'
+        )
+    return f'<span style="color:#ffd54f;font-weight:600;">{escape(text)}</span>'
+
+
+def _format_repricer_workflow_pipeline_html(active_step: Optional[int]) -> str:
+    from html import escape
+    parts: List[str] = []
+    for i, seg in enumerate(_REPRICER_WORKFLOW_PIPELINE_SEGMENTS, start=1):
+        esc = escape(seg)
+        if active_step == i:
+            parts.append(f'<span style="color:#ffd54f;font-weight:600;">{esc}</span>')
+        else:
+            parts.append(f'<span style="color:#9e9e9e;">{esc}</span>')
+    return _REPRICER_WORKFLOW_PIPELINE_SEP.join(parts)
 
 
 class NumericTableWidgetItem(QTableWidgetItem):
@@ -107,6 +148,10 @@ class RepricerWidget(QWidget):
         self._purchase_edit_dialogs = []
         # SKU → プライスター返却CSVの price に書く手動上書き（自動値上げはしない）
         self._manual_export_prices: Dict[str, int] = {}
+        self._workflow_status_text = "ワークフロー: 未実行"
+        self._workflow_emphasize = False
+        self._workflow_active_step: Optional[int] = None
+        self._workflow_post_step: Optional[int] = None
         
         # UIの初期化
         self.setup_ui()
@@ -206,59 +251,109 @@ class RepricerWidget(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
         
-        # 上部：ファイル選択エリア
+        # 上部：ファイル操作・アクション（ワークフロー付き）
         self.setup_file_selection()
         
         # 中央：プレビューと結果表示エリア
         self.setup_content_area()
-        
-        # 下部：実行ボタンエリア
-        self.setup_action_buttons()
 
     def set_product_widget(self, product_widget):
         """商品DBウィジェット参照を受け取り、仕入行編集ダイアログ連携に使う"""
         self.product_widget = product_widget
         
     def setup_file_selection(self):
-        """ファイル選択エリアの設定"""
-        file_group = QGroupBox("CSVファイル選択")
-        file_group.setMaximumHeight(80)  # 高さを制限
-        file_layout = QHBoxLayout(file_group)
-        file_layout.setContentsMargins(5, 5, 5, 5)  # マージンを小さく
-        
-        # ファイルパス表示
+        """ファイル操作・アクション（ワークフロー付き）"""
+        file_group = QGroupBox("ファイル操作・アクション")
+        file_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        file_outer = QVBoxLayout(file_group)
+        file_outer.setSpacing(4)
+        file_outer.setContentsMargins(5, 5, 5, 5)
+
+        green_button_style = """
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+                color: #666666;
+            }
+        """
+
+        file_layout = QHBoxLayout()
+        file_layout.setSpacing(5)
+
         self.file_path_edit = QLineEdit()
         self.file_path_edit.setPlaceholderText("CSVファイルを選択してください")
         self.file_path_edit.setReadOnly(True)
-        self.file_path_edit.setMaximumHeight(30)  # 高さを制限
-        file_layout.addWidget(self.file_path_edit)
-        
-        # ファイル選択ボタン
+        self.file_path_edit.setMaximumHeight(30)
+        file_layout.addWidget(self.file_path_edit, stretch=1)
+
         self.select_file_btn = QPushButton("ファイル選択")
-        self.select_file_btn.clicked.connect(self.select_csv_file)
-        self.select_file_btn.setMaximumHeight(30)  # 高さを制限
+        self.select_file_btn.clicked.connect(
+            lambda: self._run_action_with_status("ファイル選択", self.select_csv_file)
+        )
+        self.select_file_btn.setStyleSheet(green_button_style)
         file_layout.addWidget(self.select_file_btn)
 
-        # ファイル選択クリアボタン
+        self.preview_btn = QPushButton("価格改定プレビュー")
+        self.preview_btn.clicked.connect(
+            lambda: self._run_action_with_status("価格改定プレビュー", self.preview_csv)
+        )
+        self.preview_btn.setEnabled(False)
+        self.preview_btn.setStyleSheet(green_button_style)
+        file_layout.addWidget(self.preview_btn)
+
+        self.execute_btn = QPushButton("価格改定実行")
+        self.execute_btn.clicked.connect(
+            lambda: self._run_action_with_status("価格改定実行", self.execute_repricing)
+        )
+        self.execute_btn.setEnabled(False)
+        self.execute_btn.setStyleSheet(green_button_style)
+        file_layout.addWidget(self.execute_btn)
+
+        self.save_btn = QPushButton("結果をCSV保存")
+        self.save_btn.clicked.connect(
+            lambda: self._run_action_with_status("結果をCSV保存", self.save_results)
+        )
+        self.save_btn.setEnabled(False)
+        self.save_btn.setStyleSheet(green_button_style)
+        file_layout.addWidget(self.save_btn)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setMaximumHeight(25)
+        self.progress_bar.setMaximumWidth(160)
+        file_layout.addWidget(self.progress_bar)
+
+        file_layout.addStretch()
+
         self.clear_file_btn = QPushButton("クリア")
         self.clear_file_btn.clicked.connect(self.clear_csv_selection)
-        self.clear_file_btn.setMaximumHeight(30)  # 高さを制限
         self.clear_file_btn.setEnabled(False)
         file_layout.addWidget(self.clear_file_btn)
-        
-        # CSV内容プレビューボタン
+
+        file_outer.addLayout(file_layout)
+
+        self.workflow_status_label = QLabel()
+        self.workflow_status_label.setTextFormat(Qt.TextFormat.RichText)
+        self.workflow_status_label.setWordWrap(True)
+        self.workflow_status_label.setStyleSheet("padding: 2px 0px;")
+        self._sync_workflow_status_label()
+        file_outer.addWidget(self.workflow_status_label)
+
+        aux_layout = QHBoxLayout()
         self.csv_preview_btn = QPushButton("CSV内容表示")
         self.csv_preview_btn.clicked.connect(self.show_csv_preview)
         self.csv_preview_btn.setEnabled(False)
-        self.csv_preview_btn.setMaximumHeight(30)  # 高さを制限
-        file_layout.addWidget(self.csv_preview_btn)
-        
-        # 価格改定プレビューボタン
-        self.preview_btn = QPushButton("価格改定プレビュー")
-        self.preview_btn.clicked.connect(self.preview_csv)
-        self.preview_btn.setEnabled(False)
-        self.preview_btn.setMaximumHeight(30)  # 高さを制限
-        file_layout.addWidget(self.preview_btn)
+        aux_layout.addWidget(self.csv_preview_btn)
 
         self.missing_skus_btn = QPushButton("仕入DB未登録SKU")
         self.missing_skus_btn.setToolTip(
@@ -268,10 +363,60 @@ class RepricerWidget(QWidget):
         )
         self.missing_skus_btn.clicked.connect(self.show_missing_inventory_skus_dialog)
         self.missing_skus_btn.setEnabled(False)
-        self.missing_skus_btn.setMaximumHeight(30)
-        file_layout.addWidget(self.missing_skus_btn)
-        
+        aux_layout.addWidget(self.missing_skus_btn)
+
+        self.keepa_fetch_btn = QPushButton("Keepa取得")
+        self.keepa_fetch_btn.clicked.connect(self.fetch_keepa_for_target_rows)
+        self.keepa_fetch_btn.setEnabled(False)
+        aux_layout.addWidget(self.keepa_fetch_btn)
+        aux_layout.addStretch()
+        file_outer.addLayout(aux_layout)
+
         self.layout().addWidget(file_group)
+
+    def _sync_workflow_status_label(self) -> None:
+        """ワークフロー: 〜 と ①〜⑤ 手順を1行の HTML で表示する。"""
+        if not hasattr(self, "workflow_status_label") or self.workflow_status_label is None:
+            return
+        text = getattr(self, "_workflow_status_text", "ワークフロー: 未実行")
+        emph = getattr(self, "_workflow_emphasize", False)
+        step = getattr(self, "_workflow_active_step", None)
+        prefix = _format_repricer_status_prefix_html(text, emph)
+        pipe = _format_repricer_workflow_pipeline_html(step)
+        sep = '<span style="color:#cccccc;">　</span>'
+        self.workflow_status_label.setText(prefix + sep + pipe)
+
+    def _update_workflow_status(self, text: str, emphasize: bool = False) -> None:
+        """ワークフロー状態ラベルを更新"""
+        self._workflow_status_text = text
+        self._workflow_emphasize = emphasize
+        if "価格確認" in text:
+            self._workflow_active_step = 3
+        elif text.strip() == "ワークフロー: 未実行":
+            self._workflow_active_step = None
+        self._sync_workflow_status_label()
+
+    def _run_action_with_status(self, action_name: str, action_func):
+        """押したボタン名をワークフロー表示に反映してから処理を実行"""
+        step = _REPRICER_ACTION_TO_PIPELINE_STEP.get(action_name)
+        self._workflow_post_step = None
+        try:
+            if step is not None:
+                self._workflow_active_step = step
+            self._update_workflow_status("ワークフロー: 実行中", emphasize=True)
+            QApplication.processEvents()
+        except Exception:
+            pass
+        try:
+            return action_func()
+        finally:
+            post_step = getattr(self, "_workflow_post_step", None)
+            if post_step is not None:
+                self._workflow_active_step = post_step
+                self._workflow_post_step = None
+            elif step is not None:
+                self._workflow_active_step = step
+            self._update_workflow_status("ワークフロー: 待機", emphasize=False)
         
     def setup_content_area(self):
         """コンテンツエリアの設定"""
@@ -571,59 +716,6 @@ class RepricerWidget(QWidget):
         url = f"https://www.amazon.co.jp/dp/{asin}"
         QDesktopServices.openUrl(QUrl(url))
 
-    def setup_action_buttons(self):
-        """アクションボタンエリアの設定"""
-        button_layout = QHBoxLayout()
-        button_layout.setContentsMargins(5, 5, 5, 5)  # マージンを小さく
-        
-        # 価格改定実行ボタン
-        self.execute_btn = QPushButton("価格改定実行")
-        self.execute_btn.clicked.connect(self.execute_repricing)
-        self.execute_btn.setEnabled(False)
-        self.execute_btn.setMaximumHeight(35)  # 高さを制限
-        self.execute_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #28a745;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #218838;
-            }
-            QPushButton:disabled {
-                background-color: #cccccc;
-                color: #666666;
-            }
-        """)
-        button_layout.addWidget(self.execute_btn)
-        
-        # 進捗バー
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        self.progress_bar.setMaximumHeight(25)  # 高さを制限
-        button_layout.addWidget(self.progress_bar)
-        
-        # 結果保存ボタン
-        self.save_btn = QPushButton("結果をCSV保存")
-        self.save_btn.clicked.connect(self.save_results)
-        self.save_btn.setEnabled(False)
-        self.save_btn.setMaximumHeight(35)  # 高さを制限
-        button_layout.addWidget(self.save_btn)
-
-        # Keepa取得ボタン（対象行のみ）
-        self.keepa_fetch_btn = QPushButton("Keepa取得")
-        self.keepa_fetch_btn.clicked.connect(self.fetch_keepa_for_target_rows)
-        self.keepa_fetch_btn.setEnabled(False)
-        self.keepa_fetch_btn.setMaximumHeight(35)
-        button_layout.addWidget(self.keepa_fetch_btn)
-        
-        button_layout.addStretch()
-        
-        self.layout().addLayout(button_layout)
-        
     def select_csv_file(self):
         """CSVファイルの選択"""
         try:
@@ -726,6 +818,7 @@ class RepricerWidget(QWidget):
 
         # フィルタボタンの見た目を通常に戻す
         self._update_days_filter_styles()
+        self._update_workflow_status("ワークフロー: 未実行", emphasize=False)
             
     def preview_csv(self):
         """CSVファイルのプレビュー（価格改定プレビュー）"""
@@ -1414,6 +1507,10 @@ class RepricerWidget(QWidget):
         
         # 結果テーブルの更新
         self.update_result_table(result)
+
+        # プレビュー完了後は手動工程③（価格確認・目視）へ
+        self._workflow_active_step = 3
+        self._update_workflow_status("ワークフロー: 待機", emphasize=False)
         
         QMessageBox.information(
             self, 
