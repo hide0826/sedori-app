@@ -18,7 +18,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 import logging
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QMimeData, QUrl, QSettings
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QMimeData, QUrl, QSettings, QFileInfo
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 from PySide6.QtWidgets import (
@@ -27,9 +27,12 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QSplitter, QGroupBox, QFormLayout,
     QFileDialog, QMessageBox, QSizePolicy, QTextEdit, QProgressDialog,
     QInputDialog, QMenu, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
-    QTabWidget, QSpinBox, QComboBox
+    QTabWidget, QSpinBox, QComboBox, QFrame, QFileIconProvider
 )
-from PySide6.QtGui import QPixmap, QFont, QDrag, QDropEvent, QImageReader, QImage, QDesktopServices, QCursor
+from PySide6.QtGui import (
+    QPixmap, QFont, QDrag, QDropEvent, QImageReader, QImage, QDesktopServices, QCursor,
+    QColor, QBrush,
+)
 from PIL import Image, ImageOps
 
 from desktop.utils.ui_utils import save_table_header_state, restore_table_header_state
@@ -91,6 +94,35 @@ _REGISTRATION_ACTION_TO_PIPELINE_STEP = {
     "amazon（出品ファイルL）テンプレートに書き込み": 3,
     "Amazonアップロードページを開く": 4,
 }
+
+# 仕入DB未紐付けのJANグループ・候補行のハイライト色
+_UNLINKED_HIGHLIGHT_BG = QColor("#ffc107")
+_UNLINKED_HIGHLIGHT_FG = QColor("#1a1a1a")
+_PURCHASE_IMAGE_COLUMNS = [f"画像{i}" for i in range(1, 7)]
+
+
+def _normalize_image_path(path: str) -> str:
+    if not path:
+        return ""
+    return os.path.normcase(os.path.normpath(str(path).strip()))
+
+
+def _record_has_any_image_paths(record: Dict[str, Any], image_paths: set[str]) -> bool:
+    if not record or not image_paths:
+        return False
+    for col in _PURCHASE_IMAGE_COLUMNS:
+        val = str(record.get(col) or "").strip()
+        if val and _normalize_image_path(val) in image_paths:
+            return True
+    return False
+
+
+def _apply_unlinked_item_style(item: QTreeWidgetItem) -> None:
+    brush_bg = QBrush(_UNLINKED_HIGHLIGHT_BG)
+    brush_fg = QBrush(_UNLINKED_HIGHLIGHT_FG)
+    for col in range(item.columnCount()):
+        item.setBackground(col, brush_bg)
+        item.setForeground(col, brush_fg)
 
 
 def _format_status_prefix_html(text: str, emphasize: bool) -> str:
@@ -251,11 +283,21 @@ class CandidateSelectionDialog(QDialog):
 class PurchaseCandidateDialog(QDialog):
     """JANグループと仕入DBを手動で紐付けるための候補選択ダイアログ"""
 
-    def __init__(self, jan_group: JanGroup, base_dt: datetime, candidates: List[Dict[str, Any]], parent=None):
+    def __init__(
+        self,
+        jan_group: JanGroup,
+        base_dt: datetime,
+        candidates: List[Dict[str, Any]],
+        group_image_paths: Optional[List[str]] = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.jan_group = jan_group
         self.base_dt = base_dt
         self.candidates = candidates
+        self.group_image_paths = {
+            _normalize_image_path(p) for p in (group_image_paths or []) if p
+        }
         self.selected_record: Optional[Dict[str, Any]] = None
         self.setup_ui()
 
@@ -322,10 +364,14 @@ class PurchaseCandidateDialog(QDialog):
             price = str(record.get("仕入れ価格") or record.get("purchase_price") or "")
 
             values = [diff, purchase_date, sku, asin, jan, title, store, price]
+            is_linked = _record_has_any_image_paths(record, self.group_image_paths)
             for col, val in enumerate(values):
                 item = QTableWidgetItem(str(val))
                 if col == 5 and title:
                     item.setToolTip(title)
+                if not is_linked:
+                    item.setBackground(QBrush(_UNLINKED_HIGHLIGHT_BG))
+                    item.setForeground(QBrush(_UNLINKED_HIGHLIGHT_FG))
                 self.table.setItem(row, col, item)
 
             # 行全体に元レコードを紐付け
@@ -418,6 +464,83 @@ class ImageListWidget(QListWidget):
         drag = QDrag(self)
         drag.setMimeData(mime_data)
         drag.exec_(supportedActions)
+
+
+class DraggableAmazonTemplateWidget(QLabel):
+    """Amazonアップロード用：書き出したExcelをブラウザへドラッグするアイコン"""
+
+    def __init__(self, file_path: str = "", parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._file_path = ""
+        self._drag_start_pos = None
+        self.setAlignment(Qt.AlignCenter)
+        self.setFixedSize(80, 80)
+        self.setCursor(QCursor(Qt.OpenHandCursor))
+        self.setStyleSheet(
+            "border: 2px dashed #ffc107; border-radius: 8px; background-color: #3a3520;"
+        )
+        if file_path:
+            self.set_file_path(file_path)
+        else:
+            self.clear_file()
+
+    def set_file_path(self, file_path: str) -> None:
+        self._file_path = str(file_path or "").strip()
+        if not self._file_path or not os.path.isfile(self._file_path):
+            self.clear_file()
+            return
+        provider = QFileIconProvider()
+        icon = provider.icon(QFileInfo(self._file_path))
+        pixmap = icon.pixmap(56, 56)
+        self.setPixmap(pixmap)
+        file_name = Path(self._file_path).name
+        self.setToolTip(
+            "①「Amazonアップロードページを開く」を押す\n"
+            "②このアイコンをドラッグしてブラウザのドロップ欄へ\n\n"
+            f"{file_name}\n{self._file_path}"
+        )
+        self.setEnabled(True)
+
+    def clear_file(self) -> None:
+        self._file_path = ""
+        self.clear()
+        self.setToolTip("")
+        self.setEnabled(False)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._drag_start_pos = event.position().toPoint()
+            self.setCursor(QCursor(Qt.ClosedHandCursor))
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self.setCursor(QCursor(Qt.OpenHandCursor))
+        super().mouseReleaseEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if not (event.buttons() & Qt.LeftButton):
+            return
+        if self._drag_start_pos is None:
+            return
+        if (
+            event.position().toPoint() - self._drag_start_pos
+        ).manhattanLength() < QApplication.startDragDistance():
+            return
+        if not self._file_path or not os.path.isfile(self._file_path):
+            return
+
+        mime_data = QMimeData()
+        mime_data.setUrls([QUrl.fromLocalFile(self._file_path)])
+        mime_data.setText(self._file_path)
+        drag = QDrag(self)
+        drag.setMimeData(mime_data)
+        pixmap = self.pixmap()
+        if pixmap and not pixmap.isNull():
+            drag.setPixmap(
+                pixmap.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
+        drag.exec(Qt.CopyAction)
+        self._drag_start_pos = None
 
 
 class RegistrationTableWidget(QTableWidget):
@@ -560,6 +683,7 @@ class ImageManagerWidget(QWidget):
         self._registration_workflow_active_step: Optional[int] = None
         self._jan_title_cache: Dict[str, str] = {}
         self.registration_records: List[Dict[str, Any]] = []
+        self._last_amazon_template_output_path: str = ""
         # 画像登録タブ用の簡易スナップショット保存先
         base_dir = Path(__file__).parent.parent
         self.registration_snapshot_path = base_dir / "data" / "image_registration_snapshot.json"
@@ -572,7 +696,8 @@ class ImageManagerWidget(QWidget):
         self.progress_dialog: Optional[QProgressDialog] = None
         
         self.setup_ui()
-        self.load_last_directory()
+        self.load_preferences()
+        self._reset_image_manager_folder_state()
 
         # テーブルの列幅を復元
         # 列構成を変更したのでキーを更新（古い保存状態を無効化）
@@ -587,19 +712,58 @@ class ImageManagerWidget(QWidget):
         """ProductWidgetへの参照を設定"""
         self.product_widget = product_widget
 
-    def _ensure_product_widget_data_loaded(self) -> None:
+    def _group_image_paths(self, group: JanGroup) -> List[str]:
+        return [img.path for img in (group.images or []) if img.path]
+
+    def _is_group_linked_to_purchase_db(
+        self,
+        group: JanGroup,
+        all_records: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
+        """JANグループの画像が仕入DBの画像列に1枚以上登録済みか"""
+        if not group or not group.images:
+            return False
+        if group.jan == "unknown":
+            return False
+        image_paths = {
+            _normalize_image_path(p) for p in self._group_image_paths(group)
+        }
+        if not image_paths:
+            return False
+        if all_records is None:
+            if not self.product_widget:
+                return False
+            self._ensure_product_widget_data_loaded()
+            try:
+                all_records = self.product_widget.get_all_purchase_records()
+            except Exception:
+                return False
+        return any(_record_has_any_image_paths(rec, image_paths) for rec in all_records)
+
+    def _ensure_product_widget_data_loaded(self, full: bool = False) -> None:
         """
         データベース管理タブを開かなくても仕入DB（purchase_all_records）を参照できるようにする。
-        ProductWidget は showEvent で初回読み込みするため、画像管理だけ先に使うと商品名が空になる。
+
+        full=False（既定）: スナップショットのみ読み込み（画像管理の紐付け用・高速）
+        full=True: テーブル描画まで含む完全読み込み（確定処理など）
         """
         if not self.product_widget:
             return
         try:
             pw = self.product_widget
-            was_loaded = getattr(pw, "_initial_data_loaded", False)
-            pw.ensure_initial_data_loaded()
-            if getattr(pw, "_initial_data_loaded", False) and not was_loaded:
-                self._jan_title_cache.clear()
+            if full:
+                was_loaded = getattr(pw, "_initial_data_loaded", False)
+                pw.ensure_initial_data_loaded()
+                if getattr(pw, "_initial_data_loaded", False) and not was_loaded:
+                    self._jan_title_cache.clear()
+            else:
+                was_loaded = (
+                    getattr(pw, "_purchase_lookup_loaded", False)
+                    or getattr(pw, "_initial_data_loaded", False)
+                )
+                pw.ensure_purchase_records_for_lookup()
+                if getattr(pw, "purchase_all_records", None) and not was_loaded:
+                    self._jan_title_cache.clear()
         except Exception as e:
             logger.warning("仕入DBの先行読み込みに失敗しました: %s", e)
     
@@ -894,6 +1058,7 @@ class ImageManagerWidget(QWidget):
         self.tab_widget.addTab(self.main_tab, "画像管理")
         self.setup_registration_tab()
         self.tab_widget.addTab(self.registration_tab, "画像登録")
+        self.tab_widget.currentChanged.connect(self._on_inner_tab_changed)
         
         # 初期状態でボタンを無効化
         self.rotate_left_btn.setEnabled(False)
@@ -996,8 +1161,23 @@ class ImageManagerWidget(QWidget):
                 self._registration_workflow_active_step = step
             self._update_registration_workflow_status("ワークフロー: 待機", emphasize=False)
 
-    def load_last_directory(self):
-        """最後に開いたフォルダパスを読み込む"""
+    def _reset_image_manager_folder_state(self) -> None:
+        """画像管理タブ表示時にフォルダ選択状態を初期化（前回パスは残さない）"""
+        self.current_directory = ""
+        if hasattr(self, "folder_path_label"):
+            self.folder_path_label.setText("（未選択）")
+        if hasattr(self, "scan_btn"):
+            self.scan_btn.setEnabled(False)
+        if hasattr(self, "scan_unknown_btn"):
+            self.scan_unknown_btn.setEnabled(False)
+
+    def _on_inner_tab_changed(self, index: int) -> None:
+        """サブタブ「画像管理」を開いたときにフォルダ情報をクリア"""
+        if index == 0:
+            self._reset_image_manager_folder_state()
+
+    def load_preferences(self):
+        """デフォルトフォルダ・リネームオプション等の設定を読み込む（作業フォルダは復元しない）"""
         try:
             if self.config_path.exists():
                 with open(self.config_path, 'r', encoding='utf-8') as f:
@@ -1006,14 +1186,6 @@ class ImageManagerWidget(QWidget):
                     default_dir = config.get('image_manager_default_root_dir')
                     if default_dir and os.path.exists(default_dir) and os.path.isdir(default_dir):
                         self.default_root_dir = default_dir
-
-                    if 'image_manager_last_directory' in config:
-                        last_dir = config['image_manager_last_directory']
-                        if os.path.exists(last_dir) and os.path.isdir(last_dir):
-                            self.current_directory = last_dir
-                            self.folder_path_label.setText(last_dir)
-                            self.scan_btn.setEnabled(True)
-                            self.scan_unknown_btn.setEnabled(True)
 
                     lw = config.get('image_manager_lightweight_rename')
                     if lw is not None:
@@ -1027,10 +1199,10 @@ class ImageManagerWidget(QWidget):
                     )
                     self._set_auto_correct_preset_combo(preset_id)
         except Exception as e:
-            print(f"Failed to load last directory: {e}")
+            print(f"Failed to load image manager preferences: {e}")
     
     def save_last_directory(self):
-        """最後に開いたフォルダパスを保存"""
+        """画像管理の設定（デフォルトフォルダ・リネームオプション）を保存"""
         try:
             # 設定ファイルを読み込む（存在しない場合は新規作成）
             config = {}
@@ -1038,9 +1210,8 @@ class ImageManagerWidget(QWidget):
                 with open(self.config_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
             
-            # 最後に開いたフォルダパスを保存
-            if self.current_directory:
-                config['image_manager_last_directory'] = self.current_directory
+            # 作業フォルダはセッション跨ぎで復元しない
+            config.pop('image_manager_last_directory', None)
 
             # 起点となるデフォルトフォルダも保存
             if self.default_root_dir:
@@ -1162,16 +1333,35 @@ class ImageManagerWidget(QWidget):
             auto_correct_preset=self._auto_correct_preset_id(),
         )
     
+    def _folder_dialog_start_dir(self, prefer_default: bool = False) -> str:
+        """フォルダ選択ダイアログの開始位置を決定"""
+        candidates: List[str] = []
+        if prefer_default and self.default_root_dir:
+            candidates.append(self.default_root_dir)
+        if self.current_directory:
+            candidates.append(self.current_directory)
+        if self.default_root_dir:
+            candidates.append(self.default_root_dir)
+        candidates.append(str(Path.home()))
+        for path in candidates:
+            if path and os.path.isdir(path):
+                return path
+        return str(Path.home())
+
     def select_directory(self):
         """フォルダ選択ダイアログを表示"""
-        # 優先順位: 現在のフォルダ > デフォルトフォルダ > ホームディレクトリ
-        if self.current_directory:
-            last_dir = self.current_directory
-        elif self.default_root_dir:
-            last_dir = self.default_root_dir
-        else:
-            last_dir = str(Path.home())
-        directory = QFileDialog.getExistingDirectory(self, "画像フォルダを選択", last_dir)
+        # フォルダ選択はデフォルト設定の起点フォルダから開く
+        start_dir = self._folder_dialog_start_dir(prefer_default=True)
+        dialog = QFileDialog(self, "画像フォルダを選択", start_dir)
+        dialog.setFileMode(QFileDialog.FileMode.Directory)
+        dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+        if os.path.isdir(start_dir):
+            dialog.setDirectory(start_dir)
+        directory = ""
+        if dialog.exec():
+            selected = dialog.selectedFiles()
+            if selected:
+                directory = selected[0]
         
         if directory:
             self.current_directory = directory
@@ -1382,6 +1572,14 @@ class ImageManagerWidget(QWidget):
         self._updating_tree_checks = True
         try:
             self.tree_widget.clear()
+
+            purchase_records: Optional[List[Dict[str, Any]]] = None
+            if self.product_widget:
+                try:
+                    self._ensure_product_widget_data_loaded()
+                    purchase_records = self.product_widget.get_all_purchase_records()
+                except Exception:
+                    purchase_records = None
             
             for group in self.jan_groups:
                 # 親ノード（JANグループ）
@@ -1396,6 +1594,9 @@ class ImageManagerWidget(QWidget):
                 title_text = f" - {title}" if title else ""
                 parent_item = QTreeWidgetItem([f"{jan_text}{title_text} ({len(group.images)}枚)"])
                 parent_item.setData(0, Qt.UserRole, group)
+                is_unlinked = not self._is_group_linked_to_purchase_db(group, purchase_records)
+                if is_unlinked:
+                    _apply_unlinked_item_style(parent_item)
                 self.tree_widget.addTopLevelItem(parent_item)
                 
                 # 子ノード（各画像）
@@ -1408,10 +1609,13 @@ class ImageManagerWidget(QWidget):
                         flag = self.first_image_flags.get(record.path, True)
                         child_item.setFlags(child_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                         child_item.setCheckState(0, Qt.Checked if flag else Qt.Unchecked)
-                        # テキストは白字にして見やすくする
-                        child_item.setForeground(0, Qt.white)
+                        if not is_unlinked:
+                            # テキストは白字にして見やすくする（未紐付け時は黄色背景＋黒字）
+                            child_item.setForeground(0, Qt.white)
                         # 状態を保存
                         self.first_image_flags[record.path] = flag
+                    if is_unlinked:
+                        _apply_unlinked_item_style(child_item)
                     child_item.setData(0, Qt.UserRole, record.path)
                     parent_item.addChild(child_item)
             
@@ -2449,6 +2653,7 @@ class ImageManagerWidget(QWidget):
             if failed_groups:
                 message_parts.append(f"\n以下のJANグループの処理に失敗しました:\n{', '.join(failed_groups)}")
 
+            self.update_tree_widget()
             if message_parts:
                 QMessageBox.information(self, "確定処理完了", "\n".join(message_parts))
             else:
@@ -2565,6 +2770,65 @@ class ImageManagerWidget(QWidget):
         self.registration_workflow_status_label.setStyleSheet("padding: 2px 0px;")
         self._sync_registration_workflow_status_label()
         registration_action_outer.addWidget(self.registration_workflow_status_label)
+
+        # テンプレート書き込み後：Amazonへドラッグ＆ドロップ用パネル
+        self.amazon_upload_drop_panel = QFrame()
+        self.amazon_upload_drop_panel.setObjectName("amazonUploadDropPanel")
+        self.amazon_upload_drop_panel.setStyleSheet(
+            """
+            QFrame#amazonUploadDropPanel {
+                background-color: #2a3320;
+                border: 1px solid #5a7a3a;
+                border-radius: 8px;
+                margin-top: 4px;
+            }
+            """
+        )
+        amazon_drop_layout = QHBoxLayout(self.amazon_upload_drop_panel)
+        amazon_drop_layout.setContentsMargins(12, 10, 12, 10)
+        amazon_drop_layout.setSpacing(12)
+
+        self.amazon_template_drag_icon = DraggableAmazonTemplateWidget()
+        amazon_drop_layout.addWidget(self.amazon_template_drag_icon)
+
+        amazon_drop_text_col = QVBoxLayout()
+        amazon_drop_text_col.setSpacing(4)
+        self.amazon_upload_drop_title = QLabel("Amazonアップロード用ファイル")
+        self.amazon_upload_drop_title.setStyleSheet(
+            "font-size: 11pt; font-weight: bold; color: #d4f0b0;"
+        )
+        amazon_drop_text_col.addWidget(self.amazon_upload_drop_title)
+        self.amazon_upload_drop_hint = QLabel(
+            "①「Amazonアップロードページを開く」→ ②左のアイコンをドラッグしてブラウザのドロップ欄へ"
+        )
+        self.amazon_upload_drop_hint.setWordWrap(True)
+        self.amazon_upload_drop_hint.setStyleSheet("color: #b8d8a0;")
+        amazon_drop_text_col.addWidget(self.amazon_upload_drop_hint)
+        self.amazon_upload_drop_filename = QLabel("（テンプレート書き込み後に表示）")
+        self.amazon_upload_drop_filename.setWordWrap(True)
+        self.amazon_upload_drop_filename.setStyleSheet("color: #e8e8e8; font-family: monospace;")
+        amazon_drop_text_col.addWidget(self.amazon_upload_drop_filename)
+
+        amazon_drop_btn_row = QHBoxLayout()
+        self.amazon_upload_open_page_btn = QPushButton("① Amazonアップロードページを開く")
+        self.amazon_upload_open_page_btn.setToolTip(
+            "Seller Centralの出品ファイルアップロードページをブラウザで開きます"
+        )
+        self.amazon_upload_open_page_btn.clicked.connect(self.open_amazon_upload_page)
+        self.amazon_upload_open_page_btn.setStyleSheet(green_button_style)
+        self.amazon_upload_open_folder_btn = QPushButton("保存フォルダを開く")
+        self.amazon_upload_open_folder_btn.setToolTip(
+            "エクスプローラーでファイルの場所を開きます（ドラッグがうまくいかない場合）"
+        )
+        self.amazon_upload_open_folder_btn.clicked.connect(self._open_last_amazon_template_folder)
+        amazon_drop_btn_row.addWidget(self.amazon_upload_open_page_btn)
+        amazon_drop_btn_row.addWidget(self.amazon_upload_open_folder_btn)
+        amazon_drop_btn_row.addStretch()
+        amazon_drop_text_col.addLayout(amazon_drop_btn_row)
+        amazon_drop_layout.addLayout(amazon_drop_text_col, stretch=1)
+
+        self.amazon_upload_drop_panel.setVisible(False)
+        registration_action_outer.addWidget(self.amazon_upload_drop_panel)
 
         layout.addWidget(registration_action_group)
 
@@ -4754,10 +5018,23 @@ class ImageManagerWidget(QWidget):
                 auto_detect=write_params["auto_detect"],
             )
             
-            QMessageBox.information(
-                self, "完了",
-                self._format_template_layout_message(layout_used, len(products), output_path)
+            self._set_amazon_template_upload_file(output_path)
+
+            summary = self._format_template_layout_message(layout_used, len(products), output_path)
+            reply = QMessageBox.question(
+                self,
+                "書き込み完了",
+                summary
+                + "\n\n"
+                "次の手順:\n"
+                "① Amazonアップロードページを開く\n"
+                "② 表示されたExcelアイコンをブラウザのドロップ欄にドラッグ\n\n"
+                "Amazonアップロードページを今すぐ開きますか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
             )
+            if reply == QMessageBox.Yes:
+                self.open_amazon_upload_page()
 
             # ルートタブ側の「画像」チェックをONにする（対応するルートサマリーが判定できた場合）
             try:
@@ -4856,11 +5133,53 @@ class ImageManagerWidget(QWidget):
             "毎回このフォルダの中から、ルート別フォルダなどを書き出し先として選んでください。"
         )
 
+    def _set_amazon_template_upload_file(self, file_path: str) -> None:
+        """テンプレート書き込み後、Amazonへドラッグするファイルをパネルに表示"""
+        path = str(file_path or "").strip()
+        self._last_amazon_template_output_path = path
+        if not path or not os.path.isfile(path):
+            if hasattr(self, "amazon_upload_drop_panel"):
+                self.amazon_upload_drop_panel.setVisible(False)
+            if hasattr(self, "amazon_template_drag_icon"):
+                self.amazon_template_drag_icon.clear_file()
+            return
+
+        self.amazon_template_drag_icon.set_file_path(path)
+        self.amazon_upload_drop_filename.setText(path)
+        self.amazon_upload_drop_panel.setVisible(True)
+        self.amazon_upload_drop_hint.setText(
+            "①「Amazonアップロードページを開く」→ "
+            "②左のExcelアイコンをドラッグしてブラウザのドロップ欄へ"
+        )
+
+    def _open_last_amazon_template_folder(self) -> None:
+        """直近に書き出したAmazonテンプレートの保存フォルダを開く"""
+        path = self._last_amazon_template_output_path
+        if not path or not os.path.isfile(path):
+            QMessageBox.information(
+                self,
+                "情報",
+                "まだテンプレートファイルが書き出されていません。\n"
+                "先に「amazon（出品ファイルL）テンプレートに書き込み」を実行してください。",
+            )
+            return
+        folder = str(Path(path).parent)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
     def open_amazon_upload_page(self):
         """Amazon Seller Centralの出品ファイルアップロードページをブラウザで開く"""
         amazon_url = "https://sellercentral-japan.amazon.com/product-search/bulk"
         try:
             QDesktopServices.openUrl(QUrl(amazon_url))
+            if (
+                self._last_amazon_template_output_path
+                and os.path.isfile(self._last_amazon_template_output_path)
+                and hasattr(self, "amazon_upload_drop_panel")
+            ):
+                self.amazon_upload_drop_panel.setVisible(True)
+                self.amazon_upload_drop_hint.setText(
+                    "ページを開きました → 左のExcelアイコンをドラッグしてドロップ欄へ"
+                )
         except Exception as e:
             QMessageBox.critical(
                 self, "エラー",
@@ -5146,8 +5465,6 @@ class ImageManagerWidget(QWidget):
             QMessageBox.warning(self, "エラー", "仕入DBタブ（商品データベース）への参照がありません。")
             return
 
-        self._ensure_product_widget_data_loaded()
-
         if not group or not group.images:
             QMessageBox.information(self, "情報", "画像が含まれていないJANグループです。")
             return
@@ -5157,8 +5474,9 @@ class ImageManagerWidget(QWidget):
         for record in group.images:
             if record.capture_dt:
                 capture_times.append(record.capture_dt)
-            else:
-                # EXIF優先で取得できれば上書き
+
+        if not capture_times:
+            for record in group.images:
                 exif_dt = self.image_service.get_exif_datetime(record.path)
                 if exif_dt:
                     capture_times.append(exif_dt)
@@ -5169,12 +5487,27 @@ class ImageManagerWidget(QWidget):
 
         base_dt = min(capture_times)
 
-        # 画像撮影日時 ±7日以内の仕入DB候補を取得
+        progress = QProgressDialog("仕入DB候補を検索中...", None, 0, 0, self)
+        progress.setWindowTitle("仕入DB候補")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+
+        # 画像撮影日時 ±7日以内の仕入DB候補を取得（軽量読み込み）
         try:
-            candidates = self.product_widget.find_purchase_candidates_by_datetime(base_dt, days_window=7)
+            self._ensure_product_widget_data_loaded(full=False)
+            candidates = self.product_widget.find_purchase_candidates_by_datetime(
+                base_dt,
+                days_window=7,
+                jan=group.jan,
+            )
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"仕入DB候補の取得中にエラーが発生しました:\n{e}")
             return
+        finally:
+            progress.close()
 
         if not candidates:
             QMessageBox.information(
@@ -5185,7 +5518,13 @@ class ImageManagerWidget(QWidget):
             )
             return
 
-        dialog = PurchaseCandidateDialog(group, base_dt, candidates, parent=self)
+        dialog = PurchaseCandidateDialog(
+            group,
+            base_dt,
+            candidates,
+            group_image_paths=self._group_image_paths(group),
+            parent=self,
+        )
         if dialog.exec_() != QDialog.Accepted or not dialog.selected_record:
             return
 
@@ -5254,6 +5593,7 @@ class ImageManagerWidget(QWidget):
         else:
             msg += "\nすべての画像は既に仕入DB側に登録済みでした。"
 
+        self.update_tree_widget()
         QMessageBox.information(self, "完了", msg)
 
     def manual_link_by_purchase_date(self):
@@ -5268,7 +5608,7 @@ class ImageManagerWidget(QWidget):
             QMessageBox.warning(self, "エラー", "仕入DBタブ（商品データベース）への参照がありません。")
             return
 
-        self._ensure_product_widget_data_loaded()
+        self._ensure_product_widget_data_loaded(full=False)
 
         if not getattr(self, "jan_groups", None):
             QMessageBox.information(self, "情報", "JANグループがありません。先にスキャンを実行してください。")

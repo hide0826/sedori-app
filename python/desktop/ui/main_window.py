@@ -250,6 +250,18 @@ class MainWindow(QMainWindow):
             self.restore_tab_order()
             raise
 
+    def _on_main_tab_changed_for_top(self, index: int) -> None:
+        """TOPタブ表示時にダッシュボードを最新化"""
+        try:
+            if index < 0:
+                return
+            if self.tab_widget.tabText(index) == "TOP":
+                top_widget = getattr(self, "top_widget", None)
+                if top_widget is not None and hasattr(top_widget, "refresh"):
+                    top_widget.refresh()
+        except Exception:
+            pass
+
     def _on_main_tab_current_changed(self, index: int) -> None:
         """データベース管理タブを初めて開いたときに商品DBの遅延読み込みを開始する。"""
         try:
@@ -331,9 +343,58 @@ class MainWindow(QMainWindow):
 
         tab_widget.currentChanged.connect(_on_tab_changed)
 
+    def _ensure_top_tab_first_and_selected(self) -> None:
+        """TOPタブを先頭に固定し、起動時はTOPを表示する"""
+        if not getattr(self, "_tabs_loaded", False):
+            return
+        top_index = None
+        for i in range(self.tab_widget.count()):
+            if self.tab_widget.tabText(i) == "TOP":
+                top_index = i
+                break
+        if top_index is None:
+            return
+        if top_index != 0:
+            self.tab_widget.setMovable(False)
+            self.tab_widget.tabBar().moveTab(top_index, 0)
+            self.tab_widget.setMovable(True)
+        self.tab_widget.setCurrentIndex(0)
+        top_widget = getattr(self, "top_widget", None)
+        if top_widget is not None and hasattr(top_widget, "refresh"):
+            top_widget.refresh()
+
+    def _connect_top_widget_refresh(self) -> None:
+        """ルートデータ更新時にTOPダッシュボードを再読み込み"""
+        top_widget = getattr(self, "top_widget", None)
+        if top_widget is None or not hasattr(top_widget, "refresh"):
+            return
+        route_list = getattr(self, "route_list_widget", None)
+        if route_list is not None and hasattr(route_list, "routes_updated"):
+            try:
+                route_list.routes_updated.connect(top_widget.refresh)
+            except Exception:
+                pass
+        route_summary = getattr(self, "route_summary_widget", None)
+        if route_summary is not None and hasattr(route_summary, "data_saved"):
+            try:
+                route_summary.data_saved.connect(lambda _rid: top_widget.refresh())
+            except Exception:
+                pass
+        inventory = getattr(self, "inventory_widget", None)
+        if inventory is not None and hasattr(inventory, "spot_saved"):
+            try:
+                inventory.spot_saved.connect(top_widget.refresh)
+            except Exception:
+                pass
+
     def _setup_tabs_phase(self, phase: int) -> bool:
         """タブを1フェーズずつ構築。True を返すと全タブ完了。"""
         if phase == 0:
+            # TOP（ホーム）— 起動時の最初の画面
+            from ui.top_widget import TopWidget
+            self.top_widget = TopWidget()
+            self.tab_widget.addTab(self.top_widget, "TOP")
+            self.tab_widget.currentChanged.connect(self._on_main_tab_changed_for_top)
             # 価格改定・仕入管理（まずここが使えるようにする）
             from ui.repricer_widget import RepricerWidget
             self.repricer_widget = RepricerWidget(self.api_client, mode="standard")
@@ -394,6 +455,7 @@ class MainWindow(QMainWindow):
                 self.inventory_widget_dev.set_route_summary_widget(self.route_summary_widget)
                 self.inventory_widget_dev.set_antique_widget(self.antique_widget)
                 self.inventory_widget_dev.spot_saved.connect(self.route_list_widget.load_routes)
+            self._connect_top_widget_refresh()
             return False
 
         if phase == 2:
@@ -839,3 +901,6 @@ class MainWindow(QMainWindow):
         
         # タブの移動を再有効化
         self.tab_widget.setMovable(True)
+
+        # TOPタブは常に先頭・起動時はTOPを表示
+        self._ensure_top_tab_first_and_selected()

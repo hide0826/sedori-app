@@ -511,6 +511,7 @@ class ProductWidget(QWidget):
         # 重いデータ読み込みが完了しているかどうか
         self._initial_data_loaded: bool = False
         self._initial_load_in_progress: bool = False
+        self._purchase_lookup_loaded: bool = False
         self._purchase_loaded: bool = False
         self._sales_loaded: bool = False
         self._products_loaded: bool = False
@@ -558,6 +559,24 @@ class ProductWidget(QWidget):
                 parent_tabs.setEnabled(True)
             QApplication.processEvents()
 
+    def ensure_purchase_records_for_lookup(self) -> bool:
+        """
+        画像管理タブなどから仕入DBを参照するための軽量読み込み。
+
+        スナップショットをメモリに載せるだけで、テーブル描画や
+        SKUごとのDB照会（_augment_purchase_records）は行わない。
+        """
+        if self._initial_data_loaded:
+            return bool(getattr(self, "purchase_all_records", None))
+        if self._purchase_lookup_loaded and getattr(self, "purchase_all_records", None):
+            return True
+
+        if not getattr(self, "purchase_all_records", None):
+            self.restore_latest_purchase_snapshot()
+
+        self._purchase_lookup_loaded = bool(self.purchase_all_records)
+        return self._purchase_lookup_loaded
+
     def ensure_initial_data_loaded(self) -> None:
         """
         初回は仕入DBのみを読み込む（販売DBはタブ表示時に遅延読込）。
@@ -569,8 +588,9 @@ class ProductWidget(QWidget):
         self._initial_load_in_progress = True
         try:
             with self._initial_db_load_busy_scope():
-                # 仕入スナップショットから最新状態を復元
-                self.restore_latest_purchase_snapshot()
+                # 軽量読込済みならスナップショット復元は省略
+                if not getattr(self, "purchase_all_records", None):
+                    self.restore_latest_purchase_snapshot()
                 QApplication.processEvents()
                 # 仕入テーブルのみ先に反映
                 self.load_purchase_data(self.purchase_records)
@@ -578,6 +598,7 @@ class ProductWidget(QWidget):
                 self._purchase_loaded = True
 
             self._initial_data_loaded = True
+            self._purchase_lookup_loaded = True
         finally:
             self._initial_load_in_progress = False
 
@@ -1898,22 +1919,59 @@ class ProductWidget(QWidget):
 
     # ===== 画像管理タブとの連携用ユーティリティ =====
 
+    @staticmethod
+    def _normalize_jan_for_match(value: Any) -> str:
+        jan = str(value or "").strip()
+        if jan.endswith(".0"):
+            jan = jan[:-2]
+        return "".join(c for c in jan if c.isdigit()).upper()
+
+    @staticmethod
+    def _extract_purchase_record_date(raw_date: str) -> Optional[date]:
+        """候補検索用の高速日付抽出"""
+        if not raw_date:
+            return None
+        s = (
+            str(raw_date)
+            .strip()
+            .replace("/", "-")
+            .replace(".", "-")
+            .replace("年", "-")
+            .replace("月", "-")
+            .replace("日", "")
+        )
+        if " " in s:
+            s = s.split(" ", 1)[0]
+        if "T" in s:
+            s = s.split("T", 1)[0]
+        parts = s.split("-")
+        if len(parts) < 3:
+            return None
+        try:
+            day_part = str(parts[2]).split(" ")[0]
+            return date(int(parts[0]), int(parts[1]), int(day_part))
+        except (ValueError, TypeError):
+            return None
+
     def find_purchase_candidates_by_datetime(
         self,
         base_dt: datetime,
         days_window: int = 7,
+        jan: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         指定した日時に近い仕入レコード候補を返す
 
         - 画像の撮影日時から「±N日以内」の仕入データを探すために使用
-        - 仕入日カラムは「仕入れ日」または「purchase_date」を想定
+        - JANが分かっている場合は一致レコードを優先（見つかればJAN一致のみ返す）
         """
         if not hasattr(self, "purchase_all_records") or not self.purchase_all_records:
             return []
 
         base_date: date = base_dt.date()
-        candidates: List[Dict[str, Any]] = []
+        jan_norm = self._normalize_jan_for_match(jan) if jan and str(jan) != "unknown" else ""
+        date_matches: List[Tuple[int, Dict[str, Any]]] = []
+        jan_matches: List[Tuple[int, Dict[str, Any]]] = []
 
         for record in self.purchase_all_records:
             raw_date = str(
@@ -1924,40 +1982,42 @@ class ProductWidget(QWidget):
             if not raw_date:
                 continue
 
-            norm = self._normalize_date_for_search(raw_date)
-            if not norm:
-                continue
-
-            try:
-                y, m, d = [int(x) for x in norm.split("-")[:3]]
-                rec_date = date(y, m, d)
-            except Exception:
+            rec_date = self._extract_purchase_record_date(raw_date)
+            if rec_date is None:
                 continue
 
             diff_days = abs((rec_date - base_date).days)
-            if diff_days <= days_window:
-                rec_copy = dict(record)
-                rec_copy["_date_diff"] = diff_days
-                # JANコードの.0を削除（正規化）
-                jan_keys = ['JAN', 'jan', 'JANコード', 'jan_code']
-                for key in jan_keys:
-                    if key in rec_copy and rec_copy[key]:
-                        jan_str = str(rec_copy[key]).strip()
-                        if jan_str.endswith(".0"):
-                            jan_str = jan_str[:-2]
-                        jan_str = ''.join(c for c in jan_str if c.isdigit())
-                        rec_copy[key] = jan_str if jan_str else None
-                candidates.append(rec_copy)
+            if diff_days > days_window:
+                continue
 
-        # 日差 → 仕入日 → SKU の順でソート
-        def _sort_key(r: Dict[str, Any]):
+            date_matches.append((diff_days, record))
+            if jan_norm:
+                record_jan = self._normalize_jan_for_match(
+                    record.get("JAN") or record.get("jan") or record.get("JANコード")
+                )
+                if record_jan == jan_norm:
+                    jan_matches.append((diff_days, record))
+
+        source = jan_matches if jan_matches else date_matches
+
+        def _sort_key(item: Tuple[int, Dict[str, Any]]):
+            diff_days, rec = item
             return (
-                r.get("_date_diff", 9999),
-                str(r.get("仕入れ日") or r.get("purchase_date") or ""),
-                str(r.get("SKU") or r.get("sku") or ""),
+                diff_days,
+                str(rec.get("仕入れ日") or rec.get("purchase_date") or ""),
+                str(rec.get("SKU") or rec.get("sku") or ""),
             )
 
-        candidates.sort(key=_sort_key)
+        source.sort(key=_sort_key)
+
+        candidates: List[Dict[str, Any]] = []
+        for diff_days, record in source:
+            rec_copy = {**record, "_date_diff": diff_days}
+            for key in ("JAN", "jan", "JANコード", "jan_code"):
+                if key in rec_copy and rec_copy[key]:
+                    jan_str = self._normalize_jan_for_match(rec_copy[key])
+                    rec_copy[key] = jan_str if jan_str else None
+            candidates.append(rec_copy)
         return candidates
 
     def update_image_paths_for_jan(

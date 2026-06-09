@@ -28,6 +28,7 @@ class RouteListWidget(QWidget):
     
     # データ更新シグナル
     route_selected = Signal(int)  # route_idを送信
+    routes_updated = Signal()  # 一覧読み込み・フラグ変更後
     
     def __init__(self):
         super().__init__()
@@ -179,6 +180,7 @@ class RouteListWidget(QWidget):
         routes = self.route_db.list_route_summaries()
         self.update_table(routes)
         self.update_statistics()
+        self.routes_updated.emit()
     
     def update_table(self, routes: list):
         """テーブルを更新"""
@@ -465,6 +467,7 @@ class RouteListWidget(QWidget):
 
         try:
             self.route_db.set_route_flag(route_id, flag_name, item.checkState() == Qt.Checked)
+            self.routes_updated.emit()
         except Exception as e:
             # エラーが出てもUIはそのままにしておき、コンソールにだけ出力
             print(f"ルートフラグ更新エラー (route_id={route_id}, flag={flag_name}): {e}")
