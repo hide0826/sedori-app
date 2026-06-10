@@ -44,6 +44,11 @@ from database.warranty_db import WarrantyDatabase
 from ui.star_rating_widget import StarRatingWidget
 from utils.route_utils import mark_route_flags_from_folder
 from utils.settings_helper import is_pro_enabled
+
+try:
+    from ui.utils.draggable_file_icon import DraggableFileIconWidget
+except ImportError:
+    from desktop.ui.utils.draggable_file_icon import DraggableFileIconWidget  # type: ignore
 from services.keepa_service import KeepaService
 from services.ocr_service import OCRService
 from services.purchase_cost_calc import (
@@ -2063,6 +2068,7 @@ class InventoryWidget(QWidget):
         self._profit_recalc_block = False
         # ワークフロー状態（工程6まで完了して一時停止中かどうか）
         self.workflow_paused_after_step6 = False
+        self._last_saved_listing_csv_path: Optional[str] = None
         
         # ルートサマリーウィジェットへの参照（後で設定される）
         self.route_summary_widget = None
@@ -2144,7 +2150,10 @@ class InventoryWidget(QWidget):
     def setup_file_operations(self):
         """ファイル操作エリアの設定（改良版）"""
         file_group = QGroupBox("ファイル操作・アクション")
-        file_layout = QHBoxLayout(file_group)
+        file_outer = QVBoxLayout(file_group)
+        file_outer.setSpacing(4)
+        file_outer.setContentsMargins(5, 5, 5, 5)
+        file_layout = QHBoxLayout()
         green_button_style = """
             QPushButton {
                 background-color: #28a745;
@@ -2159,140 +2168,77 @@ class InventoryWidget(QWidget):
             }
         """
         
-        # ファイル操作セクション
-        file_ops_layout = QHBoxLayout()
-        
-        # CSV取込ボタン
+        # ── ワークフロー行（①〜⑧） ──
+        workflow_layout = QHBoxLayout()
+        workflow_layout.setSpacing(5)
+
         self.import_btn = QPushButton("CSV取込")
         self.import_btn.clicked.connect(lambda: self._run_action_with_status("CSV取込", self.import_csv))
         self.import_btn.setStyleSheet(green_button_style)
-        file_ops_layout.addWidget(self.import_btn)
-        
-        # エクスポートボタン
-        self.export_btn = QPushButton("CSV出力")
-        self.export_btn.clicked.connect(lambda: self._run_action_with_status("CSV出力", self.export_csv))
-        self.export_btn.setEnabled(False)
-        # 外部ユーザー向け運用では混乱を避けるため既定で非表示。
-        # 必要になったら `self.export_btn.setVisible(True)` で復帰可能。
-        self.export_btn.setVisible(False)
-        
-        # オールクリアボタン
-        self.clear_btn = QPushButton("オールクリア")
-        self.clear_btn.clicked.connect(lambda: self._run_action_with_status("オールクリア", self.clear_data))
-        self.clear_btn.setEnabled(False)
-        
-        # 統合保存ボタン
-        self.combined_save_btn = QPushButton("統合保存")
-        self.combined_save_btn.clicked.connect(lambda: self._run_action_with_status("統合保存", self.save_combined_snapshot))
-        
-        # 統合読込ボタン
-        self.combined_load_btn = QPushButton("統合読込")
-        self.combined_load_btn.clicked.connect(lambda: self._run_action_with_status("統合読込", self.open_combined_snapshot_history))
-        
-        # DB保存ボタン
+        workflow_layout.addWidget(self.import_btn)
+
+        self.route_template_btn = QPushButton("ルートテンプレ読込")
+        self.route_template_btn.clicked.connect(
+            lambda: self._run_action_with_status("ルートテンプレ読込", self.apply_route_template)
+        )
+        self.route_template_btn.setEnabled(self.route_summary_widget is not None)
+        self.route_template_btn.setStyleSheet(green_button_style)
+        workflow_layout.addWidget(self.route_template_btn)
+
+        self.matching_btn = QPushButton("照合処理実行")
+        self.matching_btn.clicked.connect(
+            lambda: self._run_action_with_status("照合処理実行", self.run_matching)
+        )
+        self.matching_btn.setEnabled(self.route_summary_widget is not None)
+        self.matching_btn.setStyleSheet(green_button_style)
+        workflow_layout.addWidget(self.matching_btn)
+
+        self.generate_sku_btn = QPushButton("SKU生成")
+        self.generate_sku_btn.clicked.connect(
+            lambda: self._run_action_with_status("SKU生成", self.generate_sku)
+        )
+        self.generate_sku_btn.setEnabled(False)
+        self.generate_sku_btn.setStyleSheet(green_button_style)
+        workflow_layout.addWidget(self.generate_sku_btn)
+
         self.db_save_btn = QPushButton("DB保存")
         self.db_save_btn.clicked.connect(
             lambda: self._run_action_with_status("DB保存", self._confirm_condition_edit_then_save_to_databases)
         )
         self.db_save_btn.setStyleSheet(green_button_style)
-        
-        # アクションボタンセクション
-        action_ops_layout = QHBoxLayout()
-        
-        # SKU生成ボタン
-        self.generate_sku_btn = QPushButton("SKU生成")
-        self.generate_sku_btn.clicked.connect(lambda: self._run_action_with_status("SKU生成", self.generate_sku))
-        self.generate_sku_btn.setEnabled(False)
-        self.generate_sku_btn.setStyleSheet(green_button_style)
+        workflow_layout.addWidget(self.db_save_btn)
 
-        # SKUクリアボタン（SKU列だけ「未実装」に戻す）
-        self.clear_sku_btn = QPushButton("SKUクリア")
-        self.clear_sku_btn.setToolTip("仕入データは残したまま、SKU列だけをすべて『未実装』に戻します。")
-        self.clear_sku_btn.clicked.connect(lambda: self._run_action_with_status("SKUクリア", self.clear_sku))
-        self.clear_sku_btn.setEnabled(False)
-        action_ops_layout.addWidget(self.clear_sku_btn)
-        
-        # 出品CSV生成ボタン
-        self.export_listing_btn = QPushButton("出品CSV生成")
-        self.export_listing_btn.clicked.connect(lambda: self._run_action_with_status("出品CSV生成", self.export_listing_csv))
-        self.export_listing_btn.setEnabled(False)
-        
-        # 古物台帳生成ボタン
         self.antique_register_btn = QPushButton("古物台帳生成")
-        self.antique_register_btn.clicked.connect(lambda: self._run_action_with_status("古物台帳生成", self.generate_antique_register))
+        self.antique_register_btn.clicked.connect(
+            lambda: self._run_action_with_status("古物台帳生成", self.generate_antique_register)
+        )
         self.antique_register_btn.setEnabled(False)
-
-        # ルートテンプレート読み込みボタン
-        self.route_template_btn = QPushButton("ルートテンプレ読込")
-        self.route_template_btn.clicked.connect(lambda: self._run_action_with_status("ルートテンプレ読込", self.apply_route_template))
-        self.route_template_btn.setEnabled(self.route_summary_widget is not None)
-        
-        # 照合処理実行ボタン
-        self.matching_btn = QPushButton("照合処理実行")
-        self.matching_btn.clicked.connect(lambda: self._run_action_with_status("照合処理実行", self.run_matching))
-        self.matching_btn.setEnabled(self.route_summary_widget is not None)
-        self.matching_btn.setStyleSheet(green_button_style)
-
-        # 主要アクションは同系色で統一
-        self.route_template_btn.setStyleSheet(green_button_style)
         self.antique_register_btn.setStyleSheet(green_button_style)
+        workflow_layout.addWidget(self.antique_register_btn)
+
+        self.export_listing_btn = QPushButton("出品CSV生成")
+        self.export_listing_btn.clicked.connect(
+            lambda: self._run_action_with_status("出品CSV生成", self.export_listing_csv)
+        )
+        self.export_listing_btn.setEnabled(False)
         self.export_listing_btn.setStyleSheet(green_button_style)
-        self.clear_sku_btn.setStyleSheet(green_button_style)
+        workflow_layout.addWidget(self.export_listing_btn)
 
-        # 先頭に並べる運用ボタン（指定順）
-        # CSV取込 → ルートテンプレ読込 → 照合処理実行 → SKU生成 → DB保存 → 古物台帳生成 → 出品CSV生成
-        file_ops_layout.addWidget(self.route_template_btn)
-        file_ops_layout.addWidget(self.matching_btn)
-        file_ops_layout.addWidget(self.generate_sku_btn)
-        file_ops_layout.addWidget(self.db_save_btn)
-        file_ops_layout.addWidget(self.antique_register_btn)
-        file_ops_layout.addWidget(self.export_listing_btn)
-
-        # そのほかのボタンは後ろに維持
-        file_ops_layout.addWidget(self.export_btn)
-        file_ops_layout.addWidget(self.clear_btn)
-        file_ops_layout.addWidget(self.combined_save_btn)
-        file_ops_layout.addWidget(self.combined_load_btn)
-
-        file_layout.addLayout(file_ops_layout)
-        
-        # スポット仕入（1店舗・スキマ時間用）
-        self.single_purchase_btn = QPushButton("単品仕入")
-        self.single_purchase_btn.setToolTip("単品仕入の入力ウィンドウを開いて、1件ずつ仕入データへ追加します")
-        self.single_purchase_btn.clicked.connect(lambda: self._run_action_with_status("単品仕入", self.open_single_purchase_dialog))
-        self.single_purchase_btn.setStyleSheet(green_button_style)
-        action_ops_layout.addWidget(self.single_purchase_btn)
-
-        self.spot_purchase_btn = QPushButton("スポット")
-        self.spot_purchase_btn.setToolTip("スキマ時間の1店舗スポット仕入をルート情報として登録し、ルートサマリー一覧に残します")
-        self.spot_purchase_btn.clicked.connect(lambda: self._run_action_with_status("スポット", self.open_spot_purchase_dialog))
-        self.spot_purchase_btn.setStyleSheet(green_button_style)
-        action_ops_layout.addWidget(self.spot_purchase_btn)
-        
-        file_layout.addLayout(action_ops_layout)
-
-        # 右側操作ボタン（デフォルト設定 / SKU設定）
-        file_layout.addStretch()
+        workflow_layout.addStretch()
 
         self.default_base_folder_btn = QPushButton("デフォルト設定")
         self.default_base_folder_btn.setToolTip("仕入管理タブで使うデフォルトフォルダを設定します。")
         self.default_base_folder_btn.clicked.connect(self.browse_default_base_folder)
-        file_layout.addWidget(self.default_base_folder_btn)
+        workflow_layout.addWidget(self.default_base_folder_btn)
 
-        # SKU設定トグルボタン
         self.toggle_settings_btn = QPushButton("SKU設定")
         self.toggle_settings_btn.clicked.connect(self.toggle_settings_panel)
-        file_layout.addWidget(self.toggle_settings_btn)
-        
-        # データ件数表示
-        self.data_count_label = QLabel("データ件数: 0")
-        file_layout.addWidget(self.data_count_label)
-        file_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        
-        # グループボックスをメインレイアウトに追加
-        self.layout().addWidget(file_group)
+        workflow_layout.addWidget(self.toggle_settings_btn)
 
-        # ワークフロー状態 + 手順①〜⑧を1行のリッチテキストで表示
+        self.data_count_label = QLabel("データ件数: 0")
+        workflow_layout.addWidget(self.data_count_label)
+        file_outer.addLayout(workflow_layout)
+
         self._workflow_status_text = "ワークフロー: 未実行"
         self._workflow_emphasize = False
         self._workflow_active_step: Optional[int] = None
@@ -2301,13 +2247,158 @@ class InventoryWidget(QWidget):
         self.workflow_status_label.setWordWrap(True)
         self.workflow_status_label.setStyleSheet("padding: 2px 0px;")
         self._sync_workflow_status_label()
-        status_layout = QHBoxLayout()
-        status_layout.addWidget(self.workflow_status_label, 1)
-        status_layout.addStretch()
-        self.layout().addLayout(status_layout)
+        file_outer.addWidget(self.workflow_status_label)
+
+        # ── サブボタン行（ワークフロー外） ──
+        aux_layout = QHBoxLayout()
+        aux_layout.setSpacing(5)
+
+        self.export_btn = QPushButton("CSV出力")
+        self.export_btn.clicked.connect(lambda: self._run_action_with_status("CSV出力", self.export_csv))
+        self.export_btn.setEnabled(False)
+        self.export_btn.setVisible(False)
+        aux_layout.addWidget(self.export_btn)
+
+        self.clear_btn = QPushButton("オールクリア")
+        self.clear_btn.clicked.connect(lambda: self._run_action_with_status("オールクリア", self.clear_data))
+        self.clear_btn.setEnabled(False)
+        aux_layout.addWidget(self.clear_btn)
+
+        self.combined_save_btn = QPushButton("統合保存")
+        self.combined_save_btn.clicked.connect(
+            lambda: self._run_action_with_status("統合保存", self.save_combined_snapshot)
+        )
+        aux_layout.addWidget(self.combined_save_btn)
+
+        self.combined_load_btn = QPushButton("統合読込")
+        self.combined_load_btn.clicked.connect(
+            lambda: self._run_action_with_status("統合読込", self.open_combined_snapshot_history)
+        )
+        aux_layout.addWidget(self.combined_load_btn)
+
+        self.clear_sku_btn = QPushButton("SKUクリア")
+        self.clear_sku_btn.setToolTip("仕入データは残したまま、SKU列だけをすべて『未実装』に戻します。")
+        self.clear_sku_btn.clicked.connect(lambda: self._run_action_with_status("SKUクリア", self.clear_sku))
+        self.clear_sku_btn.setEnabled(False)
+        self.clear_sku_btn.setStyleSheet(green_button_style)
+        aux_layout.addWidget(self.clear_sku_btn)
+
+        self.single_purchase_btn = QPushButton("単品仕入")
+        self.single_purchase_btn.setToolTip("単品仕入の入力ウィンドウを開いて、1件ずつ仕入データへ追加します")
+        self.single_purchase_btn.clicked.connect(
+            lambda: self._run_action_with_status("単品仕入", self.open_single_purchase_dialog)
+        )
+        self.single_purchase_btn.setStyleSheet(green_button_style)
+        aux_layout.addWidget(self.single_purchase_btn)
+
+        self.spot_purchase_btn = QPushButton("スポット")
+        self.spot_purchase_btn.setToolTip(
+            "スキマ時間の1店舗スポット仕入をルート情報として登録し、ルートサマリー一覧に残します"
+        )
+        self.spot_purchase_btn.clicked.connect(
+            lambda: self._run_action_with_status("スポット", self.open_spot_purchase_dialog)
+        )
+        self.spot_purchase_btn.setStyleSheet(green_button_style)
+        aux_layout.addWidget(self.spot_purchase_btn)
+
+        aux_layout.addStretch()
+        file_outer.addLayout(aux_layout)
+
+        self.listing_drop_panel = QFrame()
+        self.listing_drop_panel.setObjectName("listingDropPanel")
+        self.listing_drop_panel.setStyleSheet(
+            """
+            QFrame#listingDropPanel {
+                background-color: #1e2a36;
+                border: 1px solid #4a6fa5;
+                border-radius: 8px;
+                margin-top: 4px;
+            }
+            """
+        )
+        listing_drop_layout = QHBoxLayout(self.listing_drop_panel)
+        listing_drop_layout.setContentsMargins(12, 10, 12, 10)
+        listing_drop_layout.setSpacing(12)
+
+        self.listing_csv_drag_icon = DraggableFileIconWidget()
+        self.listing_csv_drag_icon.set_tooltip_prefix(
+            "①プライスターの出品画面を開く\n"
+            "②このアイコンをドラッグしてCSVのドロップ欄へ"
+        )
+        listing_drop_layout.addWidget(self.listing_csv_drag_icon)
+
+        listing_text_col = QVBoxLayout()
+        listing_text_col.setSpacing(4)
+        listing_title = QLabel("プライスター出品用CSV")
+        listing_title.setStyleSheet("font-size: 11pt; font-weight: bold; color: #b8d4f0;")
+        listing_text_col.addWidget(listing_title)
+
+        self.listing_drop_hint = QLabel(
+            "「出品CSV生成」後、左のファイルアイコンをドラッグしてプライスターへ送れます"
+        )
+        self.listing_drop_hint.setWordWrap(True)
+        self.listing_drop_hint.setStyleSheet("color: #9eb8d0;")
+        listing_text_col.addWidget(self.listing_drop_hint)
+
+        self.listing_drop_filename = QLabel("（出品CSV生成後に表示）")
+        self.listing_drop_filename.setWordWrap(True)
+        self.listing_drop_filename.setStyleSheet("color: #e8e8e8; font-family: monospace;")
+        listing_text_col.addWidget(self.listing_drop_filename)
+
+        listing_btn_row = QHBoxLayout()
+        self.listing_open_folder_btn = QPushButton("保存フォルダを開く")
+        self.listing_open_folder_btn.setToolTip("保存した出品CSVがあるフォルダをエクスプローラーで開きます")
+        self.listing_open_folder_btn.clicked.connect(self._open_last_listing_csv_folder)
+        self.listing_open_folder_btn.setEnabled(False)
+        listing_btn_row.addWidget(self.listing_open_folder_btn)
+        listing_btn_row.addStretch()
+        listing_text_col.addLayout(listing_btn_row)
+
+        listing_drop_layout.addLayout(listing_text_col, 1)
+        self.listing_drop_panel.setVisible(False)
+        file_outer.addWidget(self.listing_drop_panel)
+
+        file_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        
+        # グループボックスをメインレイアウトに追加
+        self.layout().addWidget(file_group)
 
         # デフォルトフォルダ設定をロード
         self._load_default_base_folder()
+
+    def _set_listing_csv_drag_file(self, file_path: str) -> None:
+        """出品CSV保存後、プライスターへドラッグするファイルをパネルに表示する。"""
+        path = str(file_path or "").strip()
+        self._last_saved_listing_csv_path = path if path and Path(path).is_file() else None
+        if not self._last_saved_listing_csv_path:
+            if hasattr(self, "listing_drop_panel"):
+                self.listing_drop_panel.setVisible(False)
+            if hasattr(self, "listing_csv_drag_icon"):
+                self.listing_csv_drag_icon.clear_file()
+            if hasattr(self, "listing_open_folder_btn"):
+                self.listing_open_folder_btn.setEnabled(False)
+            return
+
+        self.listing_csv_drag_icon.set_file_path(self._last_saved_listing_csv_path)
+        self.listing_drop_filename.setText(self._last_saved_listing_csv_path)
+        self.listing_drop_hint.setText(
+            "①プライスターの出品画面を開く → "
+            "②左のCSVアイコンをドラッグしてドロップ欄へ"
+        )
+        self.listing_open_folder_btn.setEnabled(True)
+        self.listing_drop_panel.setVisible(True)
+
+    def _open_last_listing_csv_folder(self) -> None:
+        """直近に保存した出品CSVのフォルダを開く。"""
+        path = self._last_saved_listing_csv_path
+        if not path or not Path(path).is_file():
+            QMessageBox.information(
+                self,
+                "情報",
+                "保存済みの出品CSVがありません。\n先に「出品CSV生成」を実行してください。",
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
 
     def setup_view_mode_selector(self):
         selector_layout = QHBoxLayout()
@@ -5804,6 +5895,7 @@ class InventoryWidget(QWidget):
             self.route_delete_row_btn.setEnabled(False)
 
         self._update_workflow_status("ワークフロー: 未実行", emphasize=False)
+        self._set_listing_csv_drag_file("")
     
     def clear_inventory_data(self):
         """仕入データ一覧のみをクリア"""
@@ -6781,10 +6873,14 @@ class InventoryWidget(QWidget):
                     except Exception:
                         pass
                     
+                    self._set_listing_csv_drag_file(str(target))
                     QMessageBox.information(
                         self,
                         "出品CSV生成完了",
-                        f"出品CSV生成が完了しました\n出力数: {result['exported_count']}件 (除外 {excluded_count}件)\n保存先: {str(target)}"
+                        f"出品CSV生成が完了しました\n出力数: {result['exported_count']}件 (除外 {excluded_count}件)\n"
+                        f"保存先: {str(target)}\n\n"
+                        "ファイル操作エリア下のCSVアイコンをドラッグして、"
+                        "プライスターの出品画面へ送れます。",
                     )
 
                     # ルートタブ側の「出品」チェックをONにする（対応するルートサマリーが判定できた場合）

@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QFileDialog, QDateTimeEdit, QLineEdit,
     QTextEdit, QDoubleSpinBox, QSpinBox, QCheckBox, QComboBox,
     QDialog, QFormLayout, QDialogButtonBox, QTabWidget, QStyledItemDelegate, QStyle, QInputDialog,
-    QSplitter,
+    QSplitter, QApplication,
 )
 from ui.star_rating_widget import StarRatingWidget
 from PySide6.QtCore import Qt, QDateTime, QTime, Signal, QSettings, QUrl
@@ -47,6 +47,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from database.route_db import RouteDatabase
 from database.store_db import StoreDatabase
 from database.route_visit_db import RouteVisitDatabase
+from utils.ui_utils import attach_table_column_width_persistence, reapply_table_column_widths
 
 # サービス・ユーティリティのインポート（相対パス）
 import sys
@@ -108,6 +109,45 @@ VISIT_TABLE_VISIBLE_COLUMNS = {
     COL_STORE_NAME,
     COL_NOTES,
 }
+
+# ルート選択タブ用ワークフロー手順（①〜⑤）
+_ROUTE_WORKFLOW_PIPELINE_SEGMENTS = [
+    "①ルート日付選択",
+    "②ルートコード選択",
+    "③選択ルート読込（ボタン）",
+    "④地図エリアの再読込（ボタン）",
+    "⑤テンプレート生成",
+]
+_ROUTE_WORKFLOW_PIPELINE_SEP = "\u2010"
+
+# 店舗訪問詳細テーブル: 列幅の初期値（12列・未保存時のみ使用）
+_VISIT_TABLE_DEFAULT_WIDTHS = [
+    52, 72, 100, 200, 80, 80, 80, 80, 80, 72, 100, 180,
+]
+
+
+def _format_route_workflow_prefix_html(text: str, emphasize: bool) -> str:
+    """ワークフロー行の左側（手順リストより前）。"""
+    if not emphasize:
+        return f'<span style="color:#cccccc;">{html.escape(text)}</span>'
+    t = text.strip()
+    if t == "ワークフロー: 実行中":
+        return (
+            '<span style="color:#cccccc;">ワークフロー: </span>'
+            '<span style="color:#ffd54f;font-weight:600;">実行中</span>'
+        )
+    return f'<span style="color:#ffd54f;font-weight:600;">{html.escape(text)}</span>'
+
+
+def _format_route_workflow_pipeline_html(active_step: Optional[int]) -> str:
+    parts: List[str] = []
+    for i, seg in enumerate(_ROUTE_WORKFLOW_PIPELINE_SEGMENTS, start=1):
+        esc = html.escape(seg)
+        if active_step == i:
+            parts.append(f'<span style="color:#ffd54f;font-weight:600;">{esc}</span>')
+        else:
+            parts.append(f'<span style="color:#9e9e9e;">{esc}</span>')
+    return _ROUTE_WORKFLOW_PIPELINE_SEP.join(parts)
 
 
 def _template_include_from_db_value(value: Any) -> bool:
@@ -298,15 +338,19 @@ class RouteSummaryWidget(QWidget):
         button_group = QGroupBox("操作")
         button_layout = QHBoxLayout(button_group)
         
-        template_btn = QPushButton("テンプレート生成")
-        template_btn.clicked.connect(self.generate_template)
-        template_btn.setStyleSheet("background-color: #28a745; color: white;")
-        button_layout.addWidget(template_btn)
-        
-        auto_add_btn = QPushButton("選択ルート読み込み")
-        auto_add_btn.clicked.connect(self.auto_add_stores)
-        auto_add_btn.setStyleSheet("background-color: #17a2b8; color: white;")
-        button_layout.addWidget(auto_add_btn)
+        self.template_btn = QPushButton("テンプレート生成")
+        self.template_btn.clicked.connect(
+            lambda: self._run_workflow_action(5, self.generate_template)
+        )
+        self.template_btn.setStyleSheet("background-color: #28a745; color: white;")
+        button_layout.addWidget(self.template_btn)
+
+        self.load_route_btn = QPushButton("選択ルート読み込み")
+        self.load_route_btn.clicked.connect(
+            lambda: self._run_workflow_action(3, self.auto_add_stores)
+        )
+        self.load_route_btn.setStyleSheet("background-color: #17a2b8; color: white;")
+        button_layout.addWidget(self.load_route_btn)
         
         button_layout.addStretch()
         
@@ -316,6 +360,45 @@ class RouteSummaryWidget(QWidget):
         button_layout.addWidget(self.template_root_btn)
         
         return button_group
+
+    def _sync_workflow_guide_label(self) -> None:
+        """ワークフロー: 〜 と ①〜⑤ 手順を1行の HTML で表示する。"""
+        if not hasattr(self, "workflow_guide_label") or self.workflow_guide_label is None:
+            return
+        text = getattr(self, "_workflow_status_text", "ワークフロー: 未実行")
+        emph = getattr(self, "_workflow_emphasize", False)
+        step = getattr(self, "_workflow_active_step", None)
+        prefix = _format_route_workflow_prefix_html(text, emph)
+        pipe = _format_route_workflow_pipeline_html(step)
+        sep = '<span style="color:#cccccc;">　</span>'
+        self.workflow_guide_label.setText(prefix + sep + pipe)
+
+    def _set_workflow_pipeline_highlight(self, step: Optional[int]) -> None:
+        """手順（①〜⑤）のどれを強調するか。None で強調なし。"""
+        self._workflow_active_step = step
+        self._sync_workflow_guide_label()
+
+    def _update_workflow_status(self, text: str, emphasize: bool = False) -> None:
+        """ワークフロー状態ラベルを更新（手順リストと1行に結合）"""
+        self._workflow_status_text = text
+        self._workflow_emphasize = emphasize
+        if text.strip() == "ワークフロー: 未実行":
+            self._workflow_active_step = None
+        self._sync_workflow_guide_label()
+
+    def _run_workflow_action(self, step: int, action_func):
+        """押したボタンに対応する手順をハイライトしてから処理を実行"""
+        try:
+            self._workflow_active_step = step
+            self._update_workflow_status("ワークフロー: 実行中", emphasize=True)
+            QApplication.processEvents()
+        except Exception:
+            pass
+        try:
+            return action_func()
+        finally:
+            self._workflow_active_step = step
+            self._update_workflow_status("ワークフロー: 待機", emphasize=False)
     
     def setup_tabs(self, parent_layout):
         """タブの設定（統合版）"""
@@ -339,6 +422,24 @@ class RouteSummaryWidget(QWidget):
         left_layout.setSpacing(8)
         left_layout.addWidget(self.create_action_button_group())
 
+        self.visit_order_hint_label = QLabel(
+            "店舗訪問順序はドラッグ＆ドロップで変更出来ます。"
+            "訪問順序を変更した場合は訪問順序保存ボタンを押してください。"
+        )
+        self.visit_order_hint_label.setWordWrap(True)
+        self.visit_order_hint_label.setStyleSheet("color: #cccccc; padding: 2px 0px;")
+        left_layout.addWidget(self.visit_order_hint_label)
+
+        self._workflow_status_text = "ワークフロー: 未実行"
+        self._workflow_emphasize = False
+        self._workflow_active_step: Optional[int] = None
+        self.workflow_guide_label = QLabel()
+        self.workflow_guide_label.setTextFormat(Qt.TextFormat.RichText)
+        self.workflow_guide_label.setWordWrap(True)
+        self.workflow_guide_label.setStyleSheet("padding: 2px 0px;")
+        self._sync_workflow_guide_label()
+        left_layout.addWidget(self.workflow_guide_label)
+
         route_group = QGroupBox("ルート情報")
         route_layout = QFormLayout(route_group)
         route_layout.setSpacing(6)
@@ -347,11 +448,17 @@ class RouteSummaryWidget(QWidget):
         self.route_date_edit.setCalendarPopup(True)
         self.route_date_edit.setDateTime(QDateTime.currentDateTime())
         self.route_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.route_date_edit.dateChanged.connect(
+            lambda _date: self._set_workflow_pipeline_highlight(1)
+        )
         route_layout.addRow("ルート日付:", self.route_date_edit)
 
         self.route_code_combo = QComboBox()
         self.route_code_combo.setEditable(True)
         self.route_code_combo.currentTextChanged.connect(self.on_route_code_changed)
+        self.route_code_combo.currentTextChanged.connect(
+            lambda text: self._set_workflow_pipeline_highlight(2) if str(text).strip() else None
+        )
         route_layout.addRow("ルートコード:", self.route_code_combo)
         self.route_code_combo.blockSignals(True)
         self.update_route_codes()
@@ -401,7 +508,7 @@ class RouteSummaryWidget(QWidget):
         self.store_visits_table.setHorizontalHeaderLabels(headers)
 
         header = self.store_visits_table.horizontalHeader()
-        header.setStretchLastSection(True)
+        header.setStretchLastSection(False)
         header.setSectionResizeMode(QHeaderView.Interactive)
         try:
             header.setSectionsMovable(False)
@@ -412,12 +519,8 @@ class RouteSummaryWidget(QWidget):
         except Exception:
             pass
 
-        header.setSectionResizeMode(COL_VISIT_INCLUDE, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(COL_VISIT_ORDER, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(COL_STORE_CODE, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(COL_STORE_NAME, QHeaderView.Stretch)
-        header.setSectionResizeMode(COL_NOTES, QHeaderView.Stretch)
         self._apply_visit_table_column_visibility()
+        self._setup_visit_table_column_persistence()
 
         self.store_visits_table.verticalHeader().setDefaultSectionSize(24)
         self.store_visits_table.rows_reordered.connect(self.on_rows_reordered_safe)
@@ -533,6 +636,23 @@ class RouteSummaryWidget(QWidget):
         row_layout.addWidget(copy_btn)
         return row_widget, url_edit
 
+    def _setup_visit_table_column_persistence(self) -> None:
+        """店舗訪問詳細テーブルの列幅を保存・復元する（初回のみ取り付け）。"""
+        if not hasattr(self, "store_visits_table"):
+            return
+        table = self.store_visits_table
+        if getattr(table, "_hirio_visit_table_persistence_ready", False):
+            return
+        table._hirio_table_column_settings_key = (
+            "table_column_widths/route_summary/store_visits"
+        )
+        persistence = attach_table_column_width_persistence(
+            table,
+            default_widths=_VISIT_TABLE_DEFAULT_WIDTHS,
+        )
+        table._hirio_visit_table_persistence_ready = True
+        persistence.apply(allow_defaults=True)
+
     def _apply_visit_table_column_visibility(self) -> None:
         """テンプレート向け列のみ表示（データ列は非表示で保持）"""
         if not hasattr(self, "store_visits_table"):
@@ -576,7 +696,9 @@ class RouteSummaryWidget(QWidget):
             "出力チェックが入った店舗を訪問順に読み込み、地図と URL を更新します。"
             "チェックのオン/オフを変えたあとに押してください。"
         )
-        self.map_reload_btn.clicked.connect(lambda: self.generate_map_urls(silent=True))
+        self.map_reload_btn.clicked.connect(
+            lambda: self._run_workflow_action(4, lambda: self.generate_map_urls(silent=True))
+        )
         self.map_reload_btn.setStyleSheet(
             "background-color: #28a745; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px;"
         )
@@ -1001,12 +1123,8 @@ class RouteSummaryWidget(QWidget):
         self.store_visits_table.setHorizontalHeaderLabels(headers)
         
         header = self.store_visits_table.horizontalHeader()
-        header.setStretchLastSection(True)
+        header.setStretchLastSection(False)
         header.setSectionResizeMode(QHeaderView.Interactive)
-        
-        header.setSectionResizeMode(COL_VISIT_INCLUDE, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(COL_STORE_NAME, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(COL_NOTES, QHeaderView.Stretch)
         
         # デフォルトの行高を調整（星評価が綺麗に収まるように）
         self.store_visits_table.verticalHeader().setDefaultSectionSize(24)

@@ -28,11 +28,14 @@ def table_column_settings() -> QSettings:
 
 
 def _normalize_width_list(raw: Any, column_count: int) -> Optional[List[int]]:
+    """QSettings から読み込んだ列幅を列インデックスに対応づけて返す。"""
     if raw is None:
         return None
     if hasattr(raw, "__iter__") and not isinstance(raw, (str, bytes)):
         items = list(raw)
     else:
+        return None
+    if not items:
         return None
     widths: List[int] = []
     for col_idx in range(column_count):
@@ -41,10 +44,9 @@ def _normalize_width_list(raw: Any, column_count: int) -> Optional[List[int]]:
         try:
             w = int(items[col_idx])
         except (TypeError, ValueError):
-            continue
-        if w > 0:
-            widths.append(w)
-    return widths if widths else None
+            w = 0
+        widths.append(w)
+    return widths if any(w > 0 for w in widths) else None
 
 
 def _slug(text: str) -> str:
@@ -132,6 +134,7 @@ class TableColumnWidthPersistence:
         self.default_widths = list(default_widths) if default_widths else None
         self.legacy_keys = list(legacy_keys) if legacy_keys else []
         self._connected = False
+        self._memory_widths: Optional[List[int]] = None
         TableColumnWidthPersistence._registry.append(self)
 
     @classmethod
@@ -162,16 +165,31 @@ class TableColumnWidthPersistence:
         if column_count <= 0:
             return
         widths = [table.columnWidth(i) for i in range(column_count)]
+        self._memory_widths = widths
         table_column_settings().setValue(self.settings_key, widths)
+        table_column_settings().sync()
 
-    def apply(self, *, deferred: bool = True) -> None:
+    def apply(self, *, deferred: bool = True, allow_defaults: bool = True) -> None:
         """列数確定後に呼び出し、Interactive 化と幅復元を行う。"""
         if deferred:
-            QTimer.singleShot(0, self._apply_now)
+            QTimer.singleShot(0, lambda: self._apply_now(allow_defaults=allow_defaults))
             return
-        self._apply_now()
+        self._apply_now(allow_defaults=allow_defaults)
 
-    def _apply_now(self) -> None:
+    def _resolve_widths_to_apply(
+        self, column_count: int, *, allow_defaults: bool
+    ) -> Optional[List[int]]:
+        saved_widths = self._load_widths(column_count)
+        if saved_widths:
+            return saved_widths[:column_count]
+        memory_widths = self._memory_widths
+        if memory_widths and len(memory_widths) >= column_count:
+            return memory_widths[:column_count]
+        if allow_defaults and self.default_widths:
+            return list(self.default_widths[:column_count])
+        return None
+
+    def _apply_now(self, *, allow_defaults: bool = True) -> None:
         table = self.table
         if table is None:
             return
@@ -184,21 +202,22 @@ class TableColumnWidthPersistence:
             header.sectionResized.connect(self._on_section_resized)
             self._connected = True
 
-        saved_widths = self._load_widths(column_count)
+        widths_to_apply = self._resolve_widths_to_apply(
+            column_count, allow_defaults=allow_defaults
+        )
         header.blockSignals(True)
         try:
             header.setStretchLastSection(False)
             for col_idx in range(column_count):
                 header.setSectionResizeMode(col_idx, QHeaderView.Interactive)
 
-            if saved_widths:
-                for col_idx, width in enumerate(saved_widths):
+            if widths_to_apply:
+                for col_idx, width in enumerate(widths_to_apply):
                     if col_idx < column_count and width > 0:
                         table.setColumnWidth(col_idx, width)
-            elif self.default_widths:
-                for col_idx, width in enumerate(self.default_widths):
-                    if col_idx < column_count and width > 0:
-                        table.setColumnWidth(col_idx, width)
+            self._memory_widths = [
+                table.columnWidth(i) for i in range(column_count)
+            ]
         finally:
             header.blockSignals(False)
 
@@ -242,26 +261,41 @@ def _wrap_table_column_mutators(table: QTableView, persistence: TableColumnWidth
 
     original_set_column_count = table.setColumnCount
     original_set_header_labels = table.setHorizontalHeaderLabels
+    original_set_row_count = getattr(table, "setRowCount", None)
 
     def setColumnCount(columns: int) -> None:
         original_set_column_count(columns)
-        persistence.apply()
+        persistence.apply(allow_defaults=False, deferred=False)
 
     def setHorizontalHeaderLabels(labels) -> None:
         original_set_header_labels(labels)
-        persistence.apply()
+        persistence.apply(allow_defaults=False, deferred=False)
+
+    def setRowCount(rows: int) -> None:
+        if original_set_row_count is not None:
+            original_set_row_count(rows)
+            persistence.apply(allow_defaults=False, deferred=False)
 
     table.setColumnCount = setColumnCount  # type: ignore[method-assign]
     table.setHorizontalHeaderLabels = setHorizontalHeaderLabels  # type: ignore[method-assign]
+    if original_set_row_count is not None:
+        table.setRowCount = setRowCount  # type: ignore[method-assign]
 
 
-def reapply_table_column_widths(table: QTableView, *, deferred: bool = True) -> None:
+def reapply_table_column_widths(
+    table: QTableView,
+    *,
+    deferred: bool = True,
+    allow_defaults: bool = False,
+) -> None:
     """データ再描画後に列幅を再適用する（Stretch / resizeColumnsToContents の代わりに使用）。"""
     persistence = getattr(table, "_hirio_column_width_persistence", None)
     if persistence is not None:
-        persistence.apply(deferred=deferred)
+        persistence.apply(deferred=deferred, allow_defaults=allow_defaults)
     else:
-        attach_table_column_width_persistence(table).apply(deferred=deferred)
+        attach_table_column_width_persistence(table).apply(
+            deferred=deferred, allow_defaults=allow_defaults
+        )
 
 
 def save_all_table_column_widths() -> None:
@@ -282,8 +316,9 @@ class _TableColumnWidthShowFilter(QObject):
                         obj,
                         legacy_keys=legacy,
                     )
-                if _table_column_count(obj) > 0:
-                    persistence.apply(deferred=False)
+                    persistence.apply(deferred=False, allow_defaults=True)
+                elif _table_column_count(obj) > 0:
+                    persistence.apply(deferred=False, allow_defaults=False)
             except Exception as exc:
                 print(f"[WARN] テーブル列幅の復元をスキップしました: {exc}")
         return super().eventFilter(obj, event)

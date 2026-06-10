@@ -386,6 +386,12 @@ class MainWindow(QMainWindow):
                 inventory.spot_saved.connect(top_widget.refresh)
             except Exception:
                 pass
+        repricer_369 = getattr(self, "repricer_widget_369", None)
+        if repricer_369 is not None and hasattr(repricer_369, "repricing_executed"):
+            try:
+                repricer_369.repricing_executed.connect(lambda _mode: top_widget.refresh())
+            except Exception:
+                pass
 
     def _setup_tabs_phase(self, phase: int) -> bool:
         """タブを1フェーズずつ構築。True を返すと全タブ完了。"""

@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from database.route_db import RouteDatabase
 from database.store_db import StoreDatabase
+from services.repricer_execution_store import build_repricer_schedule_info
 
 FLAG_LABELS = {
     "listing_completed": "出品",
@@ -27,9 +28,11 @@ class TopDashboardService:
         self,
         route_db: Optional[RouteDatabase] = None,
         store_db: Optional[StoreDatabase] = None,
+        api_client: Any = None,
     ):
         self.route_db = route_db or RouteDatabase()
         self.store_db = store_db or StoreDatabase()
+        self.api_client = api_client
 
     def _resolve_route_name(self, route: Dict[str, Any]) -> str:
         route_code = route.get("route_code", "") or ""
@@ -119,10 +122,15 @@ class TopDashboardService:
         candidates.sort(key=_sort_key)
         return candidates[:limit]
 
+    def get_repricer_schedule(self) -> Dict[str, Any]:
+        """次回価格改定実行予定（3-6-9共通設定の改定間隔を使用）。"""
+        return build_repricer_schedule_info(mode="369", api_client=self.api_client)
+
     def build_dashboard_data(self) -> Dict[str, Any]:
         """TOP画面用のデータをまとめて返す"""
         return {
             "pending_tasks": self.get_pending_tasks(),
+            "repricer_schedule": self.get_repricer_schedule(),
             "last_route": self.get_last_route(),
             "next_route_candidates": self.get_next_route_candidates(),
         }

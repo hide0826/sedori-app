@@ -185,7 +185,12 @@ class TopWidget(QWidget):
             self.next_route_card.set_body_widget(self._empty_label("—", "#888888"))
             return
 
-        self.pending_card.set_body_widget(self._build_pending_body(data.get("pending_tasks") or []))
+        self.pending_card.set_body_widget(
+            self._build_pending_body(
+                data.get("pending_tasks") or [],
+                data.get("repricer_schedule"),
+            )
+        )
         self.last_route_card.set_body_widget(self._build_last_route_body(data.get("last_route")))
         self.next_route_card.set_body_widget(
             self._build_next_candidates_body(data.get("next_route_candidates") or [])
@@ -198,14 +203,83 @@ class TopWidget(QWidget):
         label.setStyleSheet(f"font-size: 12pt; color: {color}; padding: 4px 0;")
         return label
 
-    def _build_pending_body(self, tasks: List[Dict[str, Any]]) -> QWidget:
-        if not tasks:
-            return self._empty_label("未完了のタスクはありません ✓", "#5cb85c")
+    def _build_repricer_schedule_row(self, schedule: Dict[str, Any]) -> QFrame:
+        """次回価格改定実行予定日の表示行。"""
+        interval = int(schedule.get("interval_days") or 7)
+        has_record = bool(schedule.get("has_execution_record"))
+        next_display = schedule.get("next_scheduled_display")
+        last_display = schedule.get("last_execution_display")
+        is_due = bool(schedule.get("is_due"))
 
+        if not has_record:
+            text = (
+                "次回価格改定実行予定日: —\n"
+                f"（改定間隔 {interval}日／価格改定タブで実行すると予定日が表示されます）"
+            )
+            dot_color = "#e8a838"
+            text_color = "#f0e8dc"
+            border_color = "#4a4035"
+        elif is_due:
+            text = (
+                f"次回価格改定実行予定日: {next_display}\n"
+                f"（改定間隔 {interval}日／前回実行: {last_display}／本日までに実行予定です）"
+            )
+            dot_color = "#e85d4c"
+            text_color = "#ffe0d8"
+            border_color = "#6a3535"
+        else:
+            text = (
+                f"次回価格改定実行予定日: {next_display}\n"
+                f"（改定間隔 {interval}日／前回実行: {last_display}）"
+            )
+            dot_color = "#3d9ae8"
+            text_color = "#e0f0ff"
+            border_color = "#354a6a"
+
+        row = QFrame()
+        row.setStyleSheet(
+            f"""
+            QFrame {{
+                background-color: #2a2a2a;
+                border-radius: 8px;
+                border: 1px solid {border_color};
+            }}
+            """
+        )
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(14, 10, 14, 10)
+
+        dot = QLabel("●")
+        dot.setStyleSheet(f"color: {dot_color}; font-size: 10pt;")
+        row_layout.addWidget(dot, alignment=Qt.AlignTop)
+
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setStyleSheet(f"font-size: 12pt; color: {text_color}; line-height: 1.4;")
+        row_layout.addWidget(label, stretch=1)
+        return row
+
+    def _build_pending_body(
+        self,
+        tasks: List[Dict[str, Any]],
+        repricer_schedule: Optional[Dict[str, Any]] = None,
+    ) -> QWidget:
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
+
+        if repricer_schedule:
+            layout.addWidget(self._build_repricer_schedule_row(repricer_schedule))
+
+        if not tasks:
+            if repricer_schedule:
+                hint = QLabel("ルート関連の未完了タスクはありません ✓")
+                hint.setStyleSheet("font-size: 11pt; color: #5cb85c; padding: 4px 0;")
+                layout.addWidget(hint)
+            else:
+                return self._empty_label("未完了のタスクはありません ✓", "#5cb85c")
+            return container
 
         for task in tasks:
             date = task.get("route_date", "")

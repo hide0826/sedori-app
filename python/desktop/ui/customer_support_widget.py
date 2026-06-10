@@ -65,7 +65,7 @@ QListWidget {
     border-radius: 4px;
 }
 QListWidget::item {
-    padding: 8px 6px;
+    padding: 2px 4px;
     border-bottom: 1px solid #333;
 }
 QListWidget::item:selected {
@@ -73,6 +73,48 @@ QListWidget::item:selected {
     color: #ffffff;
 }
 """
+
+_SESSION_ROW_DELETE_STYLE = """
+QPushButton#sessionRowDeleteBtn {
+    background-color: transparent;
+    color: #888888;
+    border: none;
+    font-size: 15px;
+    font-weight: bold;
+    padding: 0px 4px;
+    min-width: 22px;
+    max-width: 22px;
+}
+QPushButton#sessionRowDeleteBtn:hover {
+    color: #ff6b6b;
+    background-color: rgba(220, 53, 69, 0.25);
+    border-radius: 4px;
+}
+"""
+
+
+class _SessionListRow(QWidget):
+    """チャット履歴1行（タイトル＋削除ボタン）。"""
+
+    def __init__(self, title: str, case_id: str, on_delete, parent=None):
+        super().__init__(parent)
+        self._case_id = case_id
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 4, 2, 4)
+        layout.setSpacing(4)
+
+        self.title_label = QLabel(title)
+        self.title_label.setWordWrap(True)
+        self.title_label.setStyleSheet("background: transparent;")
+        layout.addWidget(self.title_label, 1)
+
+        delete_btn = QPushButton("×")
+        delete_btn.setObjectName("sessionRowDeleteBtn")
+        delete_btn.setToolTip("このチャット履歴を削除")
+        delete_btn.setStyleSheet(_SESSION_ROW_DELETE_STYLE)
+        delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        delete_btn.clicked.connect(lambda: on_delete(case_id))
+        layout.addWidget(delete_btn, 0, Qt.AlignmentFlag.AlignTop)
 
 
 class _ClickableImageLink(QLabel):
@@ -456,9 +498,17 @@ class CustomerSupportWidget(QWidget):
             session = self._sessions.get(case_id)
             if not session:
                 continue
-            list_item = QListWidgetItem(_session_list_title(session))
+            title = _session_list_title(session)
+            list_item = QListWidgetItem()
             list_item.setData(Qt.ItemDataRole.UserRole, case_id)
+            row_widget = _SessionListRow(
+                title,
+                case_id,
+                on_delete=self._delete_session_by_id,
+            )
+            list_item.setSizeHint(row_widget.sizeHint())
             self.session_list.addItem(list_item)
+            self.session_list.setItemWidget(list_item, row_widget)
         if select_case_id:
             for i in range(self.session_list.count()):
                 item = self.session_list.item(i)
@@ -466,6 +516,38 @@ class CustomerSupportWidget(QWidget):
                     self.session_list.setCurrentItem(item)
                     break
         self.session_list.blockSignals(False)
+
+    def _delete_session_by_id(self, case_id: str) -> None:
+        """チャット履歴を1件削除する。"""
+        cid = str(case_id or "").strip()
+        session = self._sessions.get(cid)
+        if not session:
+            return
+        title = _session_list_title(session)
+        reply = QMessageBox.question(
+            self,
+            "履歴の削除",
+            f"このチャット履歴を削除しますか？\n\n{title}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self._sessions.pop(cid, None)
+        self._session_order = [x for x in self._session_order if x != cid]
+
+        if self._current_case_id == cid:
+            self._current_case_id = None
+            self.chat_panel.clear_session()
+            self._rebuild_session_list_ui()
+            self.session_list.clearSelection()
+            self.right_stack.setCurrentWidget(self.new_case_page)
+        else:
+            self._rebuild_session_list_ui(select_case_id=self._current_case_id)
+
+        self._update_session_count_label()
+        self._persist_sessions()
 
     def _refresh_product_context_for_session(self, session: Dict[str, Any]) -> None:
         sku = (session.get("sku") or "").strip()
@@ -489,6 +571,7 @@ class CustomerSupportWidget(QWidget):
     def _show_new_chat_form(self) -> None:
         self.session_list.clearSelection()
         self._current_case_id = None
+        self.chat_panel.clear_session()
         self.right_stack.setCurrentWidget(self.new_case_page)
 
     def _open_session(self, case_id: str) -> None:

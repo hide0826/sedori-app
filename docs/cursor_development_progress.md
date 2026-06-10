@@ -1,3 +1,37 @@
+## 2026-06-10 ルート選択ワークフロー・TOP改定予定日・CSVドラッグ送信・仕入UI整理
+
+- **目的**: ルート選択・価格改定・仕入管理の操作性向上、TOPダッシュボード拡充、プライスター連携のドラッグ＆ドロップ統一。
+- **ルート選択**（`route_summary_widget.py`）
+  - ワークフロー説明（①ルート日付選択〜⑤テンプレート生成）と店舗訪問順序の D&D 案内を追加。
+  - 店舗訪問詳細テーブルの列幅永続化を明示設定（`Stretch`/`ResizeToContents` 競合を解消）。
+- **列幅永続化**（`ui_utils.py`）
+  - `setRowCount` 後も保存幅を復元。セッション内メモリ保持でデータ読込時のデフォルト上書きを防止。
+- **カスタマー対応AI**（`customer_support_widget.py`, `customer_support_chat_window.py`）
+  - チャット履歴一覧に **×** ボタンで個別削除（確認ダイアログ付き、即時永続化）。
+- **TOPダッシュボード**（`top_widget.py`, `top_dashboard_service.py`, `repricer_execution_store.py` 新規）
+  - 未実装タスク欄に **次回価格改定実行予定日** を表示（3-6-9共通設定の改定間隔＋前回実行日時）。
+  - 価格改定実行完了時に実行日時を `QSettings` へ保存。
+- **プライスター連携ドラッグ**（`draggable_file_icon.py` 新規, `repricer_widget.py`, `inventory_widget.py`）
+  - 価格改定「結果をCSV保存」・仕入「出品CSV生成」後にファイルアイコンを表示し、OSドラッグでプライスターへ送信可能に。
+  - `QFileIconProvider` を `PySide6.QtWidgets` から import（起動エラー修正）。
+- **仕入データ**（`inventory_widget.py`）
+  - ファイル操作ボタンを証憑管理タブ同様に **ワークフロー行** と **サブボタン行** に分離。
+- **変更ファイル**:
+  - `python/desktop/ui/route_summary_widget.py`
+  - `python/desktop/utils/ui_utils.py`
+  - `python/desktop/ui/customer_support_widget.py`
+  - `python/desktop/ui/customer_support_chat_window.py`
+  - `python/desktop/services/repricer_execution_store.py`（新規）
+  - `python/desktop/services/top_dashboard_service.py`
+  - `python/desktop/ui/top_widget.py`
+  - `python/desktop/ui/main_window.py`
+  - `python/desktop/ui/repricer_widget.py`
+  - `python/desktop/ui/utils/draggable_file_icon.py`（新規）
+  - `python/desktop/ui/inventory_widget.py`
+  - `docs/cursor_development_progress.md`
+- **リポジトリ**: sedori-app.github
+- **Git**: feat(desktop): ルート選択ワークフロー・TOP改定予定日・CSVドラッグ送信・UI整理
+
 ## 2026-06-08 仕入データ行編集AI・Geminiモデル共通化・カスタマー対応AI UI刷新
 
 - **目的**: コンディション説明のAI生成、Gemini API 404 対策、カスタマー対応AIを Web チャット風の同一画面＋履歴永続化に改善。

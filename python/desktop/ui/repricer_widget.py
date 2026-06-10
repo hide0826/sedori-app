@@ -16,6 +16,11 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSettings, QUrl
 from PySide6.QtGui import QFont, QColor, QDesktopServices
+
+try:
+    from ui.utils.draggable_file_icon import DraggableFileIconWidget
+except ImportError:
+    from desktop.ui.utils.draggable_file_icon import DraggableFileIconWidget  # type: ignore
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
@@ -125,6 +130,8 @@ class RepricerWorker(QThread):
 
 class RepricerWidget(QWidget):
     """価格改定ウィジェット"""
+
+    repricing_executed = Signal(str)
     
     def __init__(self, api_client, mode="standard"):
         super().__init__()
@@ -146,6 +153,7 @@ class RepricerWidget(QWidget):
         self.active_result_days_filter = None
         self.keepa_cache = {}
         self._purchase_edit_dialogs = []
+        self._last_saved_csv_path: Optional[str] = None
         # SKU → プライスター返却CSVの price に書く手動上書き（自動値上げはしない）
         self._manual_export_prices: Dict[str, int] = {}
         self._workflow_status_text = "ワークフロー: 未実行"
@@ -371,6 +379,60 @@ class RepricerWidget(QWidget):
         aux_layout.addWidget(self.keepa_fetch_btn)
         aux_layout.addStretch()
         file_outer.addLayout(aux_layout)
+
+        self.pricerstar_drop_panel = QFrame()
+        self.pricerstar_drop_panel.setObjectName("pricerstarDropPanel")
+        self.pricerstar_drop_panel.setStyleSheet(
+            """
+            QFrame#pricerstarDropPanel {
+                background-color: #1e2a36;
+                border: 1px solid #4a6fa5;
+                border-radius: 8px;
+                margin-top: 4px;
+            }
+            """
+        )
+        pricerstar_drop_layout = QHBoxLayout(self.pricerstar_drop_panel)
+        pricerstar_drop_layout.setContentsMargins(12, 10, 12, 10)
+        pricerstar_drop_layout.setSpacing(12)
+
+        self.pricerstar_csv_drag_icon = DraggableFileIconWidget()
+        self.pricerstar_csv_drag_icon.set_tooltip_prefix(
+            "①プライスターの価格改定画面を開く\n"
+            "②このアイコンをドラッグしてCSVのドロップ欄へ"
+        )
+        pricerstar_drop_layout.addWidget(self.pricerstar_csv_drag_icon)
+
+        pricerstar_text_col = QVBoxLayout()
+        pricerstar_text_col.setSpacing(4)
+        pricerstar_title = QLabel("プライスター価格改定用CSV")
+        pricerstar_title.setStyleSheet("font-size: 11pt; font-weight: bold; color: #b8d4f0;")
+        pricerstar_text_col.addWidget(pricerstar_title)
+
+        self.pricerstar_drop_hint = QLabel(
+            "「結果をCSV保存」後、左のファイルアイコンをドラッグしてプライスターの価格改定へ送れます"
+        )
+        self.pricerstar_drop_hint.setWordWrap(True)
+        self.pricerstar_drop_hint.setStyleSheet("color: #9eb8d0;")
+        pricerstar_text_col.addWidget(self.pricerstar_drop_hint)
+
+        self.pricerstar_drop_filename = QLabel("（CSV保存後に表示）")
+        self.pricerstar_drop_filename.setWordWrap(True)
+        self.pricerstar_drop_filename.setStyleSheet("color: #e8e8e8; font-family: monospace;")
+        pricerstar_text_col.addWidget(self.pricerstar_drop_filename)
+
+        pricerstar_btn_row = QHBoxLayout()
+        self.pricerstar_open_folder_btn = QPushButton("保存フォルダを開く")
+        self.pricerstar_open_folder_btn.setToolTip("保存したCSVがあるフォルダをエクスプローラーで開きます")
+        self.pricerstar_open_folder_btn.clicked.connect(self._open_last_saved_csv_folder)
+        self.pricerstar_open_folder_btn.setEnabled(False)
+        pricerstar_btn_row.addWidget(self.pricerstar_open_folder_btn)
+        pricerstar_btn_row.addStretch()
+        pricerstar_text_col.addLayout(pricerstar_btn_row)
+
+        pricerstar_drop_layout.addLayout(pricerstar_text_col, 1)
+        self.pricerstar_drop_panel.setVisible(False)
+        file_outer.addWidget(self.pricerstar_drop_panel)
 
         self.layout().addWidget(file_group)
 
@@ -819,7 +881,39 @@ class RepricerWidget(QWidget):
         # フィルタボタンの見た目を通常に戻す
         self._update_days_filter_styles()
         self._update_workflow_status("ワークフロー: 未実行", emphasize=False)
-            
+        self._set_pricerstar_csv_file("")
+
+    def _set_pricerstar_csv_file(self, file_path: str) -> None:
+        """CSV保存後、プライスターへドラッグするファイルをパネルに表示する。"""
+        path = str(file_path or "").strip()
+        self._last_saved_csv_path = path if path and Path(path).is_file() else None
+        if not self._last_saved_csv_path:
+            if hasattr(self, "pricerstar_drop_panel"):
+                self.pricerstar_drop_panel.setVisible(False)
+            if hasattr(self, "pricerstar_csv_drag_icon"):
+                self.pricerstar_csv_drag_icon.clear_file()
+            if hasattr(self, "pricerstar_open_folder_btn"):
+                self.pricerstar_open_folder_btn.setEnabled(False)
+            return
+
+        self.pricerstar_csv_drag_icon.set_file_path(self._last_saved_csv_path)
+        self.pricerstar_drop_filename.setText(self._last_saved_csv_path)
+        self.pricerstar_drop_hint.setText(
+            "①プライスターの価格改定画面を開く → "
+            "②左のCSVアイコンをドラッグしてドロップ欄へ"
+        )
+        self.pricerstar_open_folder_btn.setEnabled(True)
+        self.pricerstar_drop_panel.setVisible(True)
+
+    def _open_last_saved_csv_folder(self) -> None:
+        """直近に保存した価格改定CSVのフォルダを開く。"""
+        path = self._last_saved_csv_path
+        if not path or not Path(path).is_file():
+            QMessageBox.information(self, "情報", "保存済みのCSVがありません。\n先に「結果をCSV保存」を実行してください。")
+            return
+        folder = str(Path(path).parent)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
     def preview_csv(self):
         """CSVファイルのプレビュー（価格改定プレビュー）"""
         if not self.csv_path:
@@ -1563,6 +1657,14 @@ class RepricerWidget(QWidget):
         self.execute_btn.setEnabled(True)
         self.save_btn.setEnabled(True)
         self.keepa_fetch_btn.setEnabled(True)
+
+        try:
+            from services.repricer_execution_store import record_repricer_execution
+
+            record_repricer_execution(self.mode)
+            self.repricing_executed.emit(self.mode)
+        except Exception:
+            pass
         
         # 結果テーブルの更新
         self.update_result_table(result)
@@ -1972,7 +2074,14 @@ class RepricerWidget(QWidget):
             try:
                 saved_path = self._write_results_to_csv(file_path)
                 print(f"[DEBUG CSV保存] 保存完了: {saved_path}")
-                QMessageBox.information(self, "保存完了", f"結果を保存しました:\n{saved_path}")
+                self._set_pricerstar_csv_file(saved_path)
+                QMessageBox.information(
+                    self,
+                    "保存完了",
+                    f"結果を保存しました:\n{saved_path}\n\n"
+                    "ファイル操作エリア下のCSVアイコンをドラッグして、"
+                    "プライスターの価格改定画面へ送れます。",
+                )
             except Exception as e:
                 print(f"[ERROR CSV保存] 保存エラー: {str(e)}")
                 print(f"[ERROR CSV保存] エラータイプ: {type(e).__name__}")

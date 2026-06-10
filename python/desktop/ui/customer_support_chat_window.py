@@ -123,6 +123,14 @@ class CustomerSupportChatPanel(QWidget):
         btn_row.addWidget(self.status_label, 1)
         layout.addLayout(btn_row)
 
+    def clear_session(self) -> None:
+        """表示中の案件を解除してパネルを空にする。"""
+        self._session = None
+        self.transcript_edit.clear()
+        self.followup_edit.clear()
+        self._refresh_meta_label()
+        self.status_label.setText("")
+
     def bind_session(self, session: Dict[str, Any]) -> None:
         """案件データを読み込み、会話表示を再構築する。"""
         self._session = session
