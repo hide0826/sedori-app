@@ -156,10 +156,30 @@ def load_369_repricer_config(api_client: Any = None) -> Dict[str, Any]:
         return {}
 
 
-def fill_purchase_record_tp_from_369(record: Dict[str, Any], config: Dict[str, Any]) -> bool:
+def fill_purchase_record_tp_from_369(
+    record: Dict[str, Any],
+    config: Dict[str, Any],
+    *,
+    force_auto_only: bool = False,
+) -> bool:
     """
-    空欄の TP のみ、3-6-9 ルールに基づき価格を入れる。1件でも更新したら True。
+    3-6-9 ルールに基づき TP0〜TP3 を補完する。1件でも更新したら True。
+
+    - force_auto_only=False … 空欄のみ埋める（従来の TP自動(369)）
+    - force_auto_only=True … ソースが auto_369 の帯のみ再計算（手動・未設定ソースは保護）
     """
+    try:
+        from desktop.services.repricer_369_presets import (
+            TP_SOURCE_AUTO,
+            is_tp_tier_manual,
+            tp_source_column,
+        )
+    except ImportError:
+        from services.repricer_369_presets import (  # type: ignore
+            TP_SOURCE_AUTO,
+            is_tp_tier_manual,
+            tp_source_column,
+        )
     sku = str(record.get("SKU") or record.get("sku") or "").strip()
     if not sku:
         return False
@@ -189,8 +209,12 @@ def fill_purchase_record_tp_from_369(record: Dict[str, Any], config: Dict[str, A
     changed = False
     for disp_key, low_key, rate_key in pairs:
         existing = record.get(disp_key) or record.get(low_key)
+        source_key = tp_source_column(low_key)
         if not _tp_field_empty(existing):
-            continue
+            if not force_auto_only:
+                continue
+            if is_tp_tier_manual(record, low_key):
+                continue
         rate_percent = float(tp_rates.get(rate_key) or 0)
         if rate_percent > 0 and be_float is not None:
             price_int = tp_price_from_repricer_retention_percent(sale, be_float, rate_percent)
@@ -206,5 +230,6 @@ def fill_purchase_record_tp_from_369(record: Dict[str, Any], config: Dict[str, A
         text = str(price_int)
         record[disp_key] = text
         record[low_key] = text
+        record[source_key] = TP_SOURCE_AUTO
         changed = True
     return changed

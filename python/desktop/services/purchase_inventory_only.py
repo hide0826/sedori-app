@@ -587,6 +587,9 @@ def apply_purchase_db_fields_to_display_record(
         if val is not None and str(val).strip():
             row[tp_key] = val
             row[tp_key.upper()] = val
+        src = db_row.get(f"{tp_key}_source")
+        if src is not None and str(src).strip():
+            row[f"{tp_key}_source"] = src
     le = db_row.get("ladder_enabled")
     if le is not None:
         row["ladder_enabled"] = le
@@ -724,6 +727,10 @@ def purchase_record_from_db_row(db_row: Dict[str, Any]) -> Dict[str, Any]:
         "tp1": db_row.get("tp1") or "",
         "tp2": db_row.get("tp2") or "",
         "tp3": db_row.get("tp3") or "",
+        "tp0_source": db_row.get("tp0_source") or "",
+        "tp1_source": db_row.get("tp1_source") or "",
+        "tp2_source": db_row.get("tp2_source") or "",
+        "tp3_source": db_row.get("tp3_source") or "",
         "ladder_enabled": db_row.get("ladder_enabled"),
         "ladder_rules": db_row.get("ladder_rules") or "",
         "価格改定": "OFF" if str(db_row.get("repricing_enabled", 1)).strip().lower() in ("0", "off", "false") else "ON",

@@ -1495,6 +1495,10 @@ class ProductWidget(QWidget):
                             "tp1": record.get("tp1") or record.get("TP1") or "",
                             "tp2": record.get("tp2") or record.get("TP2") or "",
                             "tp3": record.get("tp3") or record.get("TP3") or "",
+                            "tp0_source": record.get("tp0_source") or "",
+                            "tp1_source": record.get("tp1_source") or "",
+                            "tp2_source": record.get("tp2_source") or "",
+                            "tp3_source": record.get("tp3_source") or "",
                         })
                     except Exception as e:
                         db_errors.append(f"{sku}: {e}")

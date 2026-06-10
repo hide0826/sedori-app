@@ -244,11 +244,13 @@ try:
         ta_price_from_target_margin_percent,
         break_even_price_int_for_record,
     )
+    from desktop.services.repricer_369_presets import TP_SOURCE_AUTO, TP_SOURCE_MANUAL
 except ImportError:
     from services.purchase_tp_autofill_369 import (  # type: ignore
         ta_price_from_target_margin_percent,
         break_even_price_int_for_record,
     )
+    from services.repricer_369_presets import TP_SOURCE_AUTO, TP_SOURCE_MANUAL  # type: ignore
 
 try:
     from desktop.services.keepa_service import KeepaService
@@ -411,6 +413,7 @@ class PurchaseRowEditDialog(QDialog):
         self._repricer_widget = repricer_widget
         self._manual_export_price_edit: Optional[QLineEdit] = None
         self._fee_recalc_guard = False
+        self._tp_source_labels: Dict[int, QLabel] = {}
         self._platform_fee_spin: Optional[QSpinBox] = None
         self._shipping_cost_spin: Optional[QSpinBox] = None
         self._total_cost_lbl: Optional[QLabel] = None
@@ -808,6 +811,16 @@ class PurchaseRowEditDialog(QDialog):
             edit.setText(txt)
             edit.textChanged.connect(lambda _t=None, tr=tier: self._on_ta_price_text_changed(tr))
             edit.editingFinished.connect(lambda tr=tier: self._sync_rate_spin_from_price(tr))
+            edit.editingFinished.connect(lambda tr=tier: self._on_tp_price_editing_finished(tr))
+
+            source_lbl = QLabel("")
+            source_lbl.setStyleSheet("color: #999999; font-size: 11px; padding-left: 6px;")
+            self._tp_source_labels[tier] = source_lbl
+            price_row = QWidget()
+            price_row_layout = QHBoxLayout(price_row)
+            price_row_layout.setContentsMargins(0, 0, 0, 0)
+            price_row_layout.addWidget(edit, 1)
+            price_row_layout.addWidget(source_lbl)
 
             lbl_rate = QLabel(f"TP{tier} 目標利益率(%):")
             rate_spin = QDoubleSpinBox()
@@ -827,7 +840,7 @@ class PurchaseRowEditDialog(QDialog):
             profit_lbl = QLabel("-")
 
             _style_tp_tier_text(color, lbl_price, edit, lbl_rate, rate_spin, lbl_profit, profit_lbl)
-            ta_layout.addRow(lbl_price, edit)
+            ta_layout.addRow(lbl_price, price_row)
             ta_layout.addRow(lbl_rate, rate_spin)
             ta_layout.addRow(lbl_profit, profit_lbl)
 
@@ -853,6 +866,7 @@ class PurchaseRowEditDialog(QDialog):
         self._update_ta_labels()
         for tr in range(4):
             self._sync_rate_spin_from_price(tr)
+            self._update_tp_source_label(tr)
         self._on_ladder_mode_toggled(self._ladder_enabled_cb.isChecked())
         if not self._ladder_enabled_cb.isChecked():
             self._apply_tp_phase_highlight(
@@ -1114,6 +1128,34 @@ class PurchaseRowEditDialog(QDialog):
             self._update_ta_labels()
             return
         self._update_ta_labels()
+
+    def _on_tp_price_editing_finished(self, tier: int) -> None:
+        if self._tp_field_sync_guard:
+            return
+        edit = getattr(self, f"_ta{tier}_edit", None)
+        if edit is None:
+            return
+        if not edit.text().strip():
+            self.record[f"tp{tier}_source"] = ""
+            self._update_tp_source_label(tier)
+            return
+        self.record[f"tp{tier}_source"] = TP_SOURCE_MANUAL
+        self._update_tp_source_label(tier)
+
+    def _tp_source_display_text(self, tier: int) -> str:
+        src = str(self.record.get(f"tp{tier}_source") or "").strip().lower()
+        edit = getattr(self, f"_ta{tier}_edit", None)
+        has_val = bool(edit and edit.text().strip())
+        if src == TP_SOURCE_AUTO:
+            return "（自動）"
+        if src == TP_SOURCE_MANUAL or (has_val and not src):
+            return "（手動）"
+        return ""
+
+    def _update_tp_source_label(self, tier: int) -> None:
+        lbl = self._tp_source_labels.get(tier)
+        if lbl is not None:
+            lbl.setText(self._tp_source_display_text(tier))
 
     def _update_ta_labels(self) -> None:
         # 販売予定 sale での見込み利益を基準に、TP 価格との差を 0.89 倍して利益に反映する。
@@ -1563,6 +1605,12 @@ class PurchaseRowEditDialog(QDialog):
         self.record["tp2"] = tp2
         self.record["TP3"] = tp3
         self.record["tp3"] = tp3
+        for tier, val in enumerate((tp0, tp1, tp2, tp3)):
+            src_key = f"tp{tier}_source"
+            if not val:
+                self.record[src_key] = ""
+            elif str(self.record.get(src_key) or "").strip().lower() != TP_SOURCE_AUTO:
+                self.record[src_key] = TP_SOURCE_MANUAL
         repricing_enabled = bool(self._repricing_enabled_cb.isChecked())
         shipping_method = self._shipping_method_combo.currentText().strip() or "FBA"
         self.record["発送方法"] = shipping_method
@@ -1593,6 +1641,10 @@ class PurchaseRowEditDialog(QDialog):
                         "tp1": tp1,
                         "tp2": tp2,
                         "tp3": tp3,
+                        "tp0_source": self.record.get("tp0_source") or "",
+                        "tp1_source": self.record.get("tp1_source") or "",
+                        "tp2_source": self.record.get("tp2_source") or "",
+                        "tp3_source": self.record.get("tp3_source") or "",
                         "sales_channel": sales_channel,
                         "repricing_enabled": 1 if repricing_enabled else 0,
                         "ladder_enabled": 1 if ladder_on else 0,

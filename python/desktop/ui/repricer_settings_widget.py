@@ -22,6 +22,27 @@ from PySide6.QtGui import QFont, QColor, QShowEvent
 import json
 from typing import Dict, List, Any, Optional
 
+try:
+    from desktop.services.repricer_369_presets import (
+        PRESET_BALANCE,
+        PRESET_TURNOVER,
+        PRESET_PROFIT,
+        PRESET_CUSTOM,
+        PRESET_LABELS,
+        apply_preset_to_config,
+        batch_recalculate_auto_tp,
+    )
+except ImportError:
+    from services.repricer_369_presets import (  # type: ignore
+        PRESET_BALANCE,
+        PRESET_TURNOVER,
+        PRESET_PROFIT,
+        PRESET_CUSTOM,
+        PRESET_LABELS,
+        apply_preset_to_config,
+        batch_recalculate_auto_tp,
+    )
+
 
 class NoWheelComboBox(QComboBox):
     """誤操作防止: マウスホイールで値変更しないコンボボックス"""
@@ -79,6 +100,8 @@ class RepricerSettingsWidget(QWidget):
         self._worker_generation = 0
         self._worker_action = ""
         self.worker = None
+        self._active_preset_id = PRESET_CUSTOM if mode == "369" else ""
+        self._preset_buttons: Dict[str, QPushButton] = {}
         
         # UIの初期化
         self.setup_ui()
@@ -97,9 +120,6 @@ class RepricerSettingsWidget(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
-        # 上部：基本設定エリア
-        self.setup_basic_settings()
-
         # 3-6-9用か通常用かで設定UIを分岐
         if self.mode == "369":
             self.setup_369_rules_panel()
@@ -110,34 +130,128 @@ class RepricerSettingsWidget(QWidget):
         # 下部：アクションボタン
         self.setup_action_buttons()
         
-    def setup_basic_settings(self):
-        """基本設定エリアの設定"""
-        basic_group = QGroupBox("基本設定")
-        basic_layout = QGridLayout(basic_group)
-        
-        # 利益率ガード設定
-        basic_layout.addWidget(QLabel("利益率ガード:"), 0, 0)
-        self.profit_guard_spin = QDoubleSpinBox()
-        self.profit_guard_spin.setRange(1.0, 10.0)
-        self.profit_guard_spin.setSingleStep(0.1)
-        self.profit_guard_spin.setValue(1.1)
-        self.profit_guard_spin.setSuffix("倍")
-        basic_layout.addWidget(self.profit_guard_spin, 0, 1)
-        
-        # Q4ルール適用
-        self.q4_rule_check = QCheckBox("Q4ルールを適用 (10月第1週)")
-        basic_layout.addWidget(self.q4_rule_check, 1, 0, 1, 2)
-        
-        # 除外SKU設定
-        basic_layout.addWidget(QLabel("除外SKU:"), 2, 0)
-        self.excluded_skus_edit = QLineEdit()
-        self.excluded_skus_edit.setPlaceholderText("カンマ区切りで入力 (例: SKU1,SKU2,SKU3)")
-        basic_layout.addWidget(self.excluded_skus_edit, 2, 1)
-        
-        self.layout().addWidget(basic_group)
+    def _legacy_basic_config(self) -> Dict[str, Any]:
+        """基本設定UI廃止後も JSON 上の既存値を保存時に維持する。"""
+        cfg = self.config_data if isinstance(self.config_data, dict) else {}
+        return {
+            "profit_guard_percentage": cfg.get("profit_guard_percentage", 1.1),
+            "q4_rule_enabled": cfg.get("q4_rule_enabled", False),
+            "excluded_skus": list(cfg.get("excluded_skus", []) or []),
+        }
+
+    def setup_369_preset_bar(self):
+        """簡単プリセット（3/6ルール共通・9ルールは固定）"""
+        preset_group = QGroupBox("簡単プリセット")
+        preset_layout = QVBoxLayout(preset_group)
+
+        self._preset_status_label = QLabel(f"現在: {PRESET_LABELS.get(PRESET_CUSTOM, 'カスタム')}")
+        self._preset_status_label.setStyleSheet("color: #cccccc;")
+        preset_layout.addWidget(self._preset_status_label)
+
+        btn_row = QHBoxLayout()
+        for preset_id, label in (
+            (PRESET_TURNOVER, PRESET_LABELS[PRESET_TURNOVER]),
+            (PRESET_PROFIT, PRESET_LABELS[PRESET_PROFIT]),
+            (PRESET_BALANCE, PRESET_LABELS[PRESET_BALANCE]),
+        ):
+            btn = QPushButton(label)
+            tooltip = (
+                "3ルール・6ルールにプリセットを適用します。\n"
+                "9ルールは特殊商品向け固定（全期間 priceTrace / TP0 / akaji1% / takane1%）。"
+            )
+            if preset_id == PRESET_PROFIT:
+                tooltip += (
+                    "\n\n利益重視: TP0帯で仕入DBのTP0を強制床にします。"
+                    "TP0未満の価格は改定時に復帰し、akajiもTP0未満になりません。"
+                )
+            btn.setToolTip(tooltip)
+            btn.clicked.connect(lambda _c=False, pid=preset_id: self._apply_369_simple_preset(pid))
+            self._preset_buttons[preset_id] = btn
+            btn_row.addWidget(btn)
+        btn_row.addStretch()
+        preset_layout.addLayout(btn_row)
+
+        note = QLabel(
+            "利益重視: TP0帯は仕入DBのTP0を床（下回れば価格復帰・akajiもTP0以上）／"
+            "9ルール: 保持率95%固定・全期間 priceTrace・TP0・akaji1%・takane1%"
+        )
+        note.setStyleSheet("color: #888888; font-size: 11px;")
+        note.setWordWrap(True)
+        preset_layout.addWidget(note)
+
+        self.layout().addWidget(preset_group)
+
+    def _refresh_preset_status_label(self) -> None:
+        if not hasattr(self, "_preset_status_label"):
+            return
+        label = PRESET_LABELS.get(self._active_preset_id, PRESET_LABELS[PRESET_CUSTOM])
+        self._preset_status_label.setText(f"現在: {label}")
+        active_style = (
+            "QPushButton { background-color: #2d6a4f; color: white; font-weight: bold; "
+            "border: none; padding: 6px 12px; border-radius: 4px; }"
+        )
+        idle_style = (
+            "QPushButton { background-color: #3a3a3a; color: #eeeeee; "
+            "border: 1px solid #555; padding: 6px 12px; border-radius: 4px; }"
+        )
+        for pid, btn in self._preset_buttons.items():
+            btn.setStyleSheet(active_style if pid == self._active_preset_id else idle_style)
+
+    def _apply_369_simple_preset(self, preset_id: str) -> None:
+        preset_label = PRESET_LABELS.get(preset_id, preset_id)
+        confirm = QMessageBox.question(
+            self,
+            "プリセット適用",
+            f"「{preset_label}」を適用しますか？\n\n"
+            "・3ルール / 6ルール … ルール表・TP保持率・akaji% を更新\n"
+            "・9ルール … 特殊商品向け固定設定を適用\n\n"
+            "未保存の編集内容は上書きされます。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        recalc = QMessageBox.question(
+            self,
+            "自動TPの再計算",
+            "仕入DBの「自動入力」TP（手動入力は保護）を、新しい保持率で再計算しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        recalc_auto = recalc == QMessageBox.Yes
+
+        base = self.collect_current_config_369() if self.config_data else (self.config_data or {})
+        try:
+            new_cfg = apply_preset_to_config(base, preset_id)
+        except ValueError as e:
+            QMessageBox.warning(self, "プリセット", str(e))
+            return
+
+        self.config_data = new_cfg
+        self._active_preset_id = preset_id
+        self.apply_369_config(new_cfg)
+        self._refresh_preset_status_label()
+
+        recalc_msg = ""
+        if recalc_auto:
+            try:
+                updated, total = batch_recalculate_auto_tp(new_cfg)
+                recalc_msg = f"\n\n自動TP再計算: {updated}件更新（対象 {total}件）"
+            except Exception as e:
+                recalc_msg = f"\n\n自動TP再計算でエラー: {e}"
+
+        QMessageBox.information(
+            self,
+            "プリセット適用完了",
+            f"「{preset_label}」を画面に反映しました。{recalc_msg}\n\n"
+            "「設定保存」で config/reprice_rules.json に書き込んでください。",
+        )
 
     def setup_369_rules_panel(self):
         """3-6-9価格改定の専用設定UI"""
+        self.setup_369_preset_bar()
+
         profile_group = QGroupBox("3-6-9 改定ルール設定")
         profile_layout = QVBoxLayout(profile_group)
 
@@ -146,7 +260,6 @@ class RepricerSettingsWidget(QWidget):
         self.profile_tp_spins = {}
         self.profile_akaji_preset_combos = {}
         self.profile_takane_preset_combos = {}
-        self.exception_rules_table = None
         for profile_key, label_text in [("3", "3ルール"), ("6", "6ルール"), ("9", "9ルール")]:
             tab = QWidget()
             tab_layout = QVBoxLayout(tab)
@@ -197,17 +310,7 @@ class RepricerSettingsWidget(QWidget):
             tab_layout.addWidget(table)
             self.profile_tab.addTab(tab, label_text)
 
-        # 例外タブ（アプリ運用以前の在庫向け）
-        exception_tab = QWidget()
-        exception_layout = QVBoxLayout(exception_tab)
-        exception_note = QLabel("仕入DBに存在しない旧在庫向けの改定ルールです。")
-        exception_note.setStyleSheet("color: #aaaaaa;")
-        exception_layout.addWidget(exception_note)
-        # 例外タブは通常価格改定と同じ列構成（TP/akaji下限なし）
-        self.exception_rules_table = self._create_rules_table_widget(profile_key="exception", force_standard_columns=True)
-        self.setup_default_rules(table=self.exception_rules_table, connect_signals=True)
-        exception_layout.addWidget(self.exception_rules_table)
-        self.profile_tab.addTab(exception_tab, "例外")
+        # 旧在庫向けルールは仕入DBの月別運用で管理するため「例外」タブは非表示
 
         profile_layout.addWidget(self.profile_tab)
         self.layout().addWidget(profile_group)
@@ -502,9 +605,7 @@ class RepricerSettingsWidget(QWidget):
         if self.mode == "369":
             return self.collect_current_config_369()
         config = {
-            "profit_guard_percentage": self.profit_guard_spin.value(),
-            "q4_rule_enabled": self.q4_rule_check.isChecked(),
-            "excluded_skus": [sku.strip() for sku in self.excluded_skus_edit.text().split(",") if sku.strip()],
+            **self._legacy_basic_config(),
             "reprice_rules": []  # リスト形式に変更
         }
         
@@ -536,18 +637,30 @@ class RepricerSettingsWidget(QWidget):
                 "reprice_rules": self._collect_rules_from_table(table),
             }
         config = {
-            "profit_guard_percentage": self.profit_guard_spin.value(),
-            "q4_rule_enabled": self.q4_rule_check.isChecked(),
-            "excluded_skus": [sku.strip() for sku in self.excluded_skus_edit.text().split(",") if sku.strip()],
+            **self._legacy_basic_config(),
             "reprice_rules": self.config_data.get("reprice_rules", []) if isinstance(self.config_data, dict) else [],
             "rule_profiles": rule_profiles,
-            "exception_reprice_rules": self._collect_rules_from_table(self.exception_rules_table) if self.exception_rules_table else [],
+            "exception_reprice_rules": (
+                self.config_data.get("exception_reprice_rules", [])
+                if isinstance(self.config_data, dict)
+                else []
+            ),
             "default_profile": self.default_profile_combo.currentData(),
             "interval_days": self.interval_days_spin.value(),
             "alerts": {
                 "enabled": self.alert_enabled_check.isChecked(),
                 "reason_prefix": self.alert_prefix_edit.text().strip() or "ALERT",
             },
+            "repricer_preset_369": self._active_preset_id or PRESET_CUSTOM,
+            "tp0_floor_guard": (
+                True
+                if self._active_preset_id == PRESET_PROFIT
+                else (
+                    False
+                    if self._active_preset_id in (PRESET_TURNOVER, PRESET_BALANCE)
+                    else bool((self.config_data or {}).get("tp0_floor_guard", False))
+                )
+            ),
         }
         return config
 
@@ -591,13 +704,6 @@ class RepricerSettingsWidget(QWidget):
         """設定読み込み完了時の処理"""
         self.config_data = config
         
-        # 基本設定の更新
-        self.profit_guard_spin.setValue(config.get("profit_guard_percentage", 1.1))
-        self.q4_rule_check.setChecked(config.get("q4_rule_enabled", False))
-        
-        excluded_skus = config.get("excluded_skus", [])
-        self.excluded_skus_edit.setText(", ".join(excluded_skus))
-        
         if self.mode == "369":
             self.apply_369_config(config)
         else:
@@ -635,6 +741,13 @@ class RepricerSettingsWidget(QWidget):
 
     def apply_369_config(self, config):
         """3-6-9設定反映"""
+        preset_id = str(config.get("repricer_preset_369") or PRESET_CUSTOM)
+        if preset_id in PRESET_LABELS:
+            self._active_preset_id = preset_id
+        else:
+            self._active_preset_id = PRESET_CUSTOM
+        self._refresh_preset_status_label()
+
         default_rules = config.get("reprice_rules", [])
         rules_dict_default = {}
         for rule in default_rules:
@@ -675,21 +788,6 @@ class RepricerSettingsWidget(QWidget):
                         "takane_rise_percent": rule.get("takane_rise_percent", 0),
                     }
             self.update_rules_table(rules_dict, table=table)
-
-        if self.exception_rules_table is not None:
-            exception_rules = config.get("exception_reprice_rules", [])
-            if not exception_rules:
-                self.update_rules_table(rules_dict_default, table=self.exception_rules_table)
-            else:
-                exception_rules_dict = {}
-                for rule in exception_rules:
-                    days_from = rule.get("days_from")
-                    if days_from:
-                        exception_rules_dict[str(days_from)] = {
-                            "action": rule.get("action", "maintain"),
-                            "priceTrace": rule.get("value", 0),
-                        }
-                self.update_rules_table(exception_rules_dict, table=self.exception_rules_table)
 
         interval_days = int(config.get("interval_days", 7) or 7)
         self.interval_days_spin.setValue(max(1, interval_days))
@@ -790,17 +888,10 @@ class RepricerSettingsWidget(QWidget):
         )
         
         if reply == QMessageBox.Yes:
-            # デフォルト設定の適用
-            self.profit_guard_spin.setValue(1.1)
-            self.q4_rule_check.setChecked(False)
-            self.excluded_skus_edit.clear()
             if self.mode == "369":
                 for table in self.profile_rule_tables.values():
                     self.setup_default_rules(table=table, connect_signals=False)
                     self.update_price_trace_visibility(table)
-                if self.exception_rules_table is not None:
-                    self.setup_default_rules(table=self.exception_rules_table, connect_signals=False)
-                    self.update_price_trace_visibility(self.exception_rules_table)
                 default_tp = {
                     "3": {"tp0": 95, "tp1": 75, "tp2": 60, "tp3": 0},
                     "6": {"tp0": 90, "tp1": 70, "tp2": 55, "tp3": 0},

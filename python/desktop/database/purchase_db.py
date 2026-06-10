@@ -103,6 +103,10 @@ class PurchaseDatabase:
             ("tp1", "TEXT"),
             ("tp2", "TEXT"),
             ("tp3", "TEXT"),
+            ("tp0_source", "TEXT"),
+            ("tp1_source", "TEXT"),
+            ("tp2_source", "TEXT"),
+            ("tp3_source", "TEXT"),
             ("status_set_at", "DATETIME"),  # ステータスを設定した日時
             # 出品日（在庫DBとの連携用・視認用）
             ("listed_date", "TEXT"),
@@ -187,6 +191,10 @@ class PurchaseDatabase:
             "tp1",
             "tp2",
             "tp3",
+            "tp0_source",
+            "tp1_source",
+            "tp2_source",
+            "tp3_source",
             "status_set_at",
             "listed_date",
             "repricing_enabled",

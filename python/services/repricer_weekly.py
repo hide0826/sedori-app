@@ -139,6 +139,11 @@ def load_config(mode: str = "standard"):
             config.setdefault("default_profile", "6")
             config.setdefault("interval_days", 7)
             config.setdefault("alerts", {"enabled": True, "reason_prefix": "ALERT"})
+            config.setdefault("repricer_preset_369", "custom")
+            if "tp0_floor_guard" not in config:
+                config["tp0_floor_guard"] = (
+                    str(config.get("repricer_preset_369") or "").strip().lower() == "profit"
+                )
         
         return config
     except FileNotFoundError as e:
@@ -327,6 +332,44 @@ def _get_tp_band(days_since_listed: int) -> Tuple[str, int]:
 def _get_tp_floor(price: float, akaji: float, tp_rate: float) -> float:
     base = akaji if akaji and akaji > 0 else price
     return round(max(0.0, base) * (max(0.0, tp_rate) / 100.0))
+
+
+def _tp0_floor_guard_enabled(config: Dict[str, Any], tp_key: str) -> bool:
+    """利益重視プリセット等: TP0帯で仕入DBのTP0を強制床として使う。"""
+    if str(tp_key).lower() != "tp0":
+        return False
+    if bool(config.get("tp0_floor_guard")):
+        return True
+    preset = str(config.get("repricer_preset_369") or "").strip().lower()
+    return preset == "profit"
+
+
+def _apply_tp0_strong_floor_guard(
+    price: float,
+    new_price: int,
+    final_akaji: int,
+    tp_floor: int,
+    use_db_tp: bool,
+    tp_key: str,
+    config: Dict[str, Any],
+    reason_tokens: List[str],
+) -> Tuple[int, int]:
+    """
+    TP0床ガード（強制）: 価格・akaji を TP0 未満にさせない。既に下回っていれば価格を戻す。
+    """
+    if not _tp0_floor_guard_enabled(config, tp_key) or not use_db_tp or tp_floor <= 0:
+        return new_price, final_akaji
+    floor = int(round(tp_floor))
+    if price < floor:
+        new_price = floor
+        reason_tokens.append(
+            f"TP0_GUARD: 現在価格{round(price)}円がTP0({floor}円)未満のため強制復帰"
+        )
+    elif new_price < floor:
+        new_price = floor
+        reason_tokens.append(f"TP0_GUARD: 改定価格をTP0({floor}円)で固定")
+    final_akaji = max(floor, final_akaji)
+    return new_price, final_akaji
 
 
 def _to_float_or_none_strict(value: Any) -> float:
@@ -946,10 +989,28 @@ def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[s
             # 仕入DBにTP価格がある場合は、Trace変更アクションでも
             # 現在価格からTP下限へ期間内で段階的に近づける。
             # （例: 110日→TP1帯終端180日に向けて日割り/interval刻みで減算）
-            if tp_key == "tp0":
-                # TP0は段階的値下げを行わず、価格は維持（akaji/takaneのみ更新）
+            tp0_guard = _tp0_floor_guard_enabled(config, tp_key)
+            if tp_key == "tp0" and not tp0_guard:
+                # 回転・バランス等: TP0は段階的値下げを行わず、価格は維持（akaji/takaneのみ更新）
                 new_price = round(price)
                 reason_tokens.append("TP0は段階的値下げ対象外のため価格維持")
+            elif tp_key == "tp0" and tp0_guard and use_db_tp and tp_floor > 0:
+                if price < tp_floor:
+                    new_price = round(tp_floor)
+                    reason_tokens.append(
+                        f"TP0_GUARD: 現在価格{round(price)}円 < TP0({round(tp_floor)}円) のため強制復帰"
+                    )
+                elif price > tp_floor:
+                    remaining_days = max(0, period_end - days_since_listed)
+                    steps = max(1, math.ceil(remaining_days / interval_days))
+                    delta = (price - tp_floor) / steps if steps > 0 else 0
+                    new_price = max(round(tp_floor), round(price - delta))
+                    reason_tokens.append(
+                        f"TP0_DAILY: {days_since_listed}日→{period_end}日でTP0({round(tp_floor)})へ段階調整"
+                    )
+                else:
+                    new_price = round(tp_floor)
+                new_price_trace = rule_trace_value
             elif use_db_tp and tp_floor > 0 and price > tp_floor:
                 remaining_days = max(0, period_end - days_since_listed)
                 steps = max(1, math.ceil(remaining_days / interval_days))
@@ -962,8 +1023,9 @@ def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[s
                 new_price = round(price)
             new_price_trace = rule_trace_value
         elif raw_action == "tp_down":
-            if tp_key == "tp0":
-                # TP0は段階的値下げを行わず、価格は維持（akaji/takaneのみ更新）
+            tp0_guard = _tp0_floor_guard_enabled(config, tp_key)
+            if tp_key == "tp0" and not tp0_guard:
+                # 回転・バランス等: TP0は段階的値下げを行わず、価格は維持（akaji/takaneのみ更新）
                 new_price = round(price)
                 reason_tokens.append("TP0は段階的値下げ対象外のため価格維持")
             else:
@@ -1010,14 +1072,20 @@ def _apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[s
         # TP/akaji下限ガード:
         # - 価格を下げる過程で下限を割り込む場合のみ下限で止める
         # - 既に現在価格が下限以下のときは値上げしない（現在価格維持）
+        #   ※ tp0_floor_guard 有効時は後段の強制復帰が優先
+        tp0_guard_active = _tp0_floor_guard_enabled(config, tp_key) and use_db_tp and tp_floor > 0
+        skip_maintain_below = tp0_guard_active and price < tp_floor
         if price > final_akaji and new_price <= final_akaji:
             new_price = final_akaji
             reason_tokens.append("TP下限に到達（維持）")
-        elif price <= final_akaji:
+        elif price <= final_akaji and not skip_maintain_below:
             new_price = round(price)
             reason_tokens.append(
                 f"{tp_key.upper()}は{round(tp_floor)}だが現在価格{round(price)}のためTP下限以下判定で{round(price)}維持"
             )
+        new_price, final_akaji = _apply_tp0_strong_floor_guard(
+            price, new_price, final_akaji, int(round(tp_floor)), use_db_tp, tp_key, config, reason_tokens
+        )
         final_takane = max(new_price, round(new_price * (1.0 + takane_rise_percent / 100.0)))
         is_tp_floor_or_below = bool(tp_floor and tp_floor > 0 and (new_price <= tp_floor or price <= tp_floor))
         tp_reach_status = ""

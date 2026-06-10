@@ -1,3 +1,32 @@
+## 2026-06-10 3-6-9改定ルール簡単プリセット・TP0強制床・仕入TP手動/自動フラグ
+
+- **目的**: 改定ルール設定の簡素化（初心者離脱防止）、利益重視運用での TP0 保護、仕入DB TP のプリセット連動再計算基盤。
+- **簡単プリセット**（`repricer_369_presets.py` 新規, `repricer_settings_widget.py`）
+  - **回転重視 / 利益重視 / バランス重視** の3種（3ルール・6ルール共通適用）。
+  - **9ルール** は固定: 保持率95%・全期間 priceTrace・TP0・akaji1%・takane1%（ライバル検知代わり）。
+  - 適用時に **自動入力 TP のみ再計算** オプション（手動 TP は保護）。
+  - 改定ルールタブの **基本設定** UI を削除（JSON 上の既存値は保存時維持）。
+  - **例外** タブを非表示（旧在庫は仕入DBの月別運用へ移行）。
+- **利益重視: TP0 強制床**（`repricer_weekly.py`, `repricer_369_presets.py`）
+  - `tp0_floor_guard` / `repricer_preset_369=profit` 時、TP0帯で仕入DBの TP0 を床として強制。
+  - 現在価格が TP0 未満なら **価格を TP0 へ復帰**、akaji も TP0 未満にしない。
+  - 回転・バランス・カスタムは従来どおり（TP0帯は Prister 追従優先）。
+- **仕入DB TP ソース**（`purchase_db.py`, `purchase_tp_autofill_369.py`, `purchase_inventory_only.py`）
+  - `tp0_source`〜`tp3_source`（`auto_369` / `manual`）を追加。
+  - TP自動(369) は `auto_369` を付与。仕入行編集で手入力すると `manual`＋「（手動）」「（自動）」表示。
+- **変更ファイル**:
+  - `python/desktop/services/repricer_369_presets.py`（新規）
+  - `python/services/repricer_weekly.py`
+  - `python/desktop/ui/repricer_settings_widget.py`
+  - `python/desktop/services/purchase_tp_autofill_369.py`
+  - `python/desktop/database/purchase_db.py`
+  - `python/desktop/services/purchase_inventory_only.py`
+  - `python/desktop/ui/purchase_row_edit_dialog.py`
+  - `python/desktop/ui/product_widget.py`
+  - `docs/cursor_development_progress.md`
+- **リポジトリ**: sedori-app.github
+- **Git**: feat(desktop): 3-6-9改定簡単プリセットと利益重視TP0強制床
+
 ## 2026-06-10 ルート選択ワークフロー・TOP改定予定日・CSVドラッグ送信・仕入UI整理
 
 - **目的**: ルート選択・価格改定・仕入管理の操作性向上、TOPダッシュボード拡充、プライスター連携のドラッグ＆ドロップ統一。
