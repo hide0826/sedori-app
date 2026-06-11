@@ -1,3 +1,26 @@
+## 2026-06-11 プライスター連携を手動ワークフローに統一（自動送信廃止）
+
+- **目的**: アプリ内ブラウザによるプライスター自動アップロードはログイン・モーダル等で不安定なため廃止し、「ブラウザで開く＋CSVドラッグ」に一本化。
+- **仕入管理**（`inventory_widget.py`）
+  - 「プライスターへ自動送信」「ブラウザを閉じる」、`QWebEngineView` 関連処理を削除。
+  - 出品CSV生成後: **ブラウザで開く** / **CSVドラッグアイコン** / **保存フォルダを開く** のみ表示。
+- **価格改定**（`repricer_widget.py`）
+  - 同上の自動処理を削除。
+  - プライスターパネルを **常時表示**（在庫CSV取得のため「ブラウザで開く」をCSV保存前から利用可能に）。
+  - 改定CSV保存後はドラッグアイコンと「保存フォルダを開く」が有効化。
+- **詳細設定**（`settings_widget.py`, `settings_helper.py`）
+  - プライスター **識別子**（`data-v-*`）入力欄と getter を削除。
+  - URL設定のみ維持。価格改定用デフォルトURLを `csvproductedit` に更新。
+- **削除**: `python/desktop/ui/utils/pricetar_web_page.py`（未コミットの自動アップロード専用モジュール）
+- **変更ファイル**:
+  - `python/desktop/ui/inventory_widget.py`
+  - `python/desktop/ui/repricer_widget.py`
+  - `python/desktop/ui/settings_widget.py`
+  - `python/desktop/utils/settings_helper.py`
+  - `docs/cursor_development_progress.md`
+- **リポジトリ**: sedori-app.github
+- **Git**: refactor(desktop): プライスター連携をブラウザ＋ドラッグの手動運用に統一
+
 ## 2026-06-10 3-6-9改定ルール簡単プリセット・TP0強制床・仕入TP手動/自動フラグ
 
 - **目的**: 改定ルール設定の簡素化（初心者離脱防止）、利益重視運用での TP0 保護、仕入DB TP のプリセット連動再計算基盤。

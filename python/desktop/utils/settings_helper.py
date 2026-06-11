@@ -22,6 +22,32 @@ def get_amazon_seller_id() -> str:
     return str(v).strip()
 
 
+DEFAULT_PRICETAR_LISTING_URL = "https://jp3.pricetar.com/seller/product/csvwarehousing"
+DEFAULT_PRICETAR_REPRICING_URL = "https://jp3.pricetar.com/seller/product/csvproductedit"
+
+
+def get_pricetar_listing_url() -> str:
+    """
+    設定タブ（詳細設定 → プライスター）の CSV出品（入庫）URL を返します。
+    """
+    url = str(
+        _settings().value("pricetar/listing_url", DEFAULT_PRICETAR_LISTING_URL)
+        or DEFAULT_PRICETAR_LISTING_URL
+    ).strip()
+    return url or DEFAULT_PRICETAR_LISTING_URL
+
+
+def get_pricetar_repricing_url() -> str:
+    """
+    設定タブ（詳細設定 → プライスター）の CSV価格改定（在庫編集）URL を返します。
+    """
+    url = str(
+        _settings().value("pricetar/repricing_url", DEFAULT_PRICETAR_REPRICING_URL)
+        or DEFAULT_PRICETAR_REPRICING_URL
+    ).strip()
+    return url or DEFAULT_PRICETAR_REPRICING_URL
+
+
 def get_amazon_fba_simulator_url() -> str:
     """
     設定タブ（詳細設定 → Amazon）の FBA料金シミュレーターURL を返します。

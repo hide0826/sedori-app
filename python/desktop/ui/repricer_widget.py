@@ -27,6 +27,7 @@ from datetime import datetime
 import re
 from typing import Any, Dict, List, Optional
 from utils.error_handler import ErrorHandler, validate_csv_file, safe_execute
+from utils.settings_helper import get_pricetar_repricing_url
 try:
     from desktop.services.keepa_service import KeepaService
 except ImportError:
@@ -392,16 +393,18 @@ class RepricerWidget(QWidget):
             }
             """
         )
-        pricerstar_drop_layout = QHBoxLayout(self.pricerstar_drop_panel)
-        pricerstar_drop_layout.setContentsMargins(12, 10, 12, 10)
-        pricerstar_drop_layout.setSpacing(12)
+        pricerstar_drop_outer = QVBoxLayout(self.pricerstar_drop_panel)
+        pricerstar_drop_outer.setContentsMargins(12, 10, 12, 10)
+        pricerstar_drop_outer.setSpacing(8)
+
+        pricerstar_top_row = QHBoxLayout()
+        pricerstar_top_row.setSpacing(12)
 
         self.pricerstar_csv_drag_icon = DraggableFileIconWidget()
         self.pricerstar_csv_drag_icon.set_tooltip_prefix(
-            "①プライスターの価格改定画面を開く\n"
-            "②このアイコンをドラッグしてCSVのドロップ欄へ"
+            "①「ブラウザで開く」→ ②このアイコンをドラッグしてCSVのドロップ欄へ"
         )
-        pricerstar_drop_layout.addWidget(self.pricerstar_csv_drag_icon)
+        pricerstar_top_row.addWidget(self.pricerstar_csv_drag_icon)
 
         pricerstar_text_col = QVBoxLayout()
         pricerstar_text_col.setSpacing(4)
@@ -409,9 +412,11 @@ class RepricerWidget(QWidget):
         pricerstar_title.setStyleSheet("font-size: 11pt; font-weight: bold; color: #b8d4f0;")
         pricerstar_text_col.addWidget(pricerstar_title)
 
-        self.pricerstar_drop_hint = QLabel(
-            "「結果をCSV保存」後、左のファイルアイコンをドラッグしてプライスターの価格改定へ送れます"
+        self._pricerstar_drop_hint_default = (
+            "「ブラウザで開く」でプライスターを開き、在庫CSVを取得してください。"
+            "改定CSV保存後は左のアイコンをドラッグして送信できます。"
         )
+        self.pricerstar_drop_hint = QLabel(self._pricerstar_drop_hint_default)
         self.pricerstar_drop_hint.setWordWrap(True)
         self.pricerstar_drop_hint.setStyleSheet("color: #9eb8d0;")
         pricerstar_text_col.addWidget(self.pricerstar_drop_hint)
@@ -422,16 +427,29 @@ class RepricerWidget(QWidget):
         pricerstar_text_col.addWidget(self.pricerstar_drop_filename)
 
         pricerstar_btn_row = QHBoxLayout()
+        self.pricerstar_open_browser_btn = QPushButton("ブラウザで開く")
+        self.pricerstar_open_browser_btn.setToolTip(
+            "プライスター価格改定画面を既定ブラウザで開きます"
+        )
+        self.pricerstar_open_browser_btn.clicked.connect(
+            lambda: self._open_pricetar_repricing_in_browser()
+        )
+        self.pricerstar_open_browser_btn.setEnabled(True)
+        pricerstar_btn_row.addWidget(self.pricerstar_open_browser_btn)
+
         self.pricerstar_open_folder_btn = QPushButton("保存フォルダを開く")
         self.pricerstar_open_folder_btn.setToolTip("保存したCSVがあるフォルダをエクスプローラーで開きます")
         self.pricerstar_open_folder_btn.clicked.connect(self._open_last_saved_csv_folder)
         self.pricerstar_open_folder_btn.setEnabled(False)
         pricerstar_btn_row.addWidget(self.pricerstar_open_folder_btn)
+
         pricerstar_btn_row.addStretch()
         pricerstar_text_col.addLayout(pricerstar_btn_row)
 
-        pricerstar_drop_layout.addLayout(pricerstar_text_col, 1)
-        self.pricerstar_drop_panel.setVisible(False)
+        pricerstar_top_row.addLayout(pricerstar_text_col, 1)
+        pricerstar_drop_outer.addLayout(pricerstar_top_row)
+
+        self.pricerstar_drop_panel.setVisible(True)
         file_outer.addWidget(self.pricerstar_drop_panel)
 
         self.layout().addWidget(file_group)
@@ -888,10 +906,12 @@ class RepricerWidget(QWidget):
         path = str(file_path or "").strip()
         self._last_saved_csv_path = path if path and Path(path).is_file() else None
         if not self._last_saved_csv_path:
-            if hasattr(self, "pricerstar_drop_panel"):
-                self.pricerstar_drop_panel.setVisible(False)
             if hasattr(self, "pricerstar_csv_drag_icon"):
                 self.pricerstar_csv_drag_icon.clear_file()
+            if hasattr(self, "pricerstar_drop_filename"):
+                self.pricerstar_drop_filename.setText("（CSV保存後に表示）")
+            if hasattr(self, "pricerstar_drop_hint"):
+                self.pricerstar_drop_hint.setText(self._pricerstar_drop_hint_default)
             if hasattr(self, "pricerstar_open_folder_btn"):
                 self.pricerstar_open_folder_btn.setEnabled(False)
             return
@@ -899,11 +919,34 @@ class RepricerWidget(QWidget):
         self.pricerstar_csv_drag_icon.set_file_path(self._last_saved_csv_path)
         self.pricerstar_drop_filename.setText(self._last_saved_csv_path)
         self.pricerstar_drop_hint.setText(
-            "①プライスターの価格改定画面を開く → "
-            "②左のCSVアイコンをドラッグしてドロップ欄へ"
+            "「ブラウザで開く」後、左のCSVアイコンをドラッグしてプライスターへ送ってください"
         )
         self.pricerstar_open_folder_btn.setEnabled(True)
-        self.pricerstar_drop_panel.setVisible(True)
+
+    def _get_pricetar_repricing_url(self) -> str:
+        try:
+            return get_pricetar_repricing_url()
+        except Exception:
+            return "https://jp3.pricetar.com/seller/product/csvproductedit"
+
+    def _open_pricetar_repricing_in_browser(self) -> None:
+        """プライスター価格改定画面を既定ブラウザで開く。"""
+        repricing_url = self._get_pricetar_repricing_url()
+        try:
+            QDesktopServices.openUrl(QUrl(repricing_url))
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "エラー",
+                f"ブラウザでプライスターを開けませんでした:\n{e}\n\n"
+                f"手動で以下にアクセスしてください:\n{repricing_url}",
+            )
+            return
+
+        self.pricerstar_drop_hint.setText(
+            "ブラウザでプライスターを開きました。"
+            "左のCSVアイコンをドラッグしてドロップ欄へ送ってください。"
+        )
 
     def _open_last_saved_csv_folder(self) -> None:
         """直近に保存した価格改定CSVのフォルダを開く。"""
@@ -2075,12 +2118,12 @@ class RepricerWidget(QWidget):
                 saved_path = self._write_results_to_csv(file_path)
                 print(f"[DEBUG CSV保存] 保存完了: {saved_path}")
                 self._set_pricerstar_csv_file(saved_path)
+                auto_hint = "「ブラウザで開く」後、CSVアイコンをドラッグしてプライスターへ送ってください。"
                 QMessageBox.information(
                     self,
                     "保存完了",
                     f"結果を保存しました:\n{saved_path}\n\n"
-                    "ファイル操作エリア下のCSVアイコンをドラッグして、"
-                    "プライスターの価格改定画面へ送れます。",
+                    f"{auto_hint}",
                 )
             except Exception as e:
                 print(f"[ERROR CSV保存] 保存エラー: {str(e)}")

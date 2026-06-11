@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QScrollArea, QFormLayout, QTimeEdit,
     QToolButton, QApplication, QAbstractItemView,
 )
-from PySide6.QtCore import Qt, QDate, QTime, QDateTime, Signal, QSettings, QThread
+from PySide6.QtCore import Qt, QDate, QTime, QDateTime, Signal, QSettings, QThread, QTimer
 from PySide6.QtGui import QFont, QColor, QPalette, QStandardItemModel, QStandardItem, QDesktopServices
 from PySide6.QtCore import QUrl
 import pandas as pd
@@ -43,7 +43,10 @@ from database.route_visit_db import RouteVisitDatabase
 from database.warranty_db import WarrantyDatabase
 from ui.star_rating_widget import StarRatingWidget
 from utils.route_utils import mark_route_flags_from_folder
-from utils.settings_helper import is_pro_enabled
+from utils.settings_helper import (
+    get_pricetar_listing_url,
+    is_pro_enabled,
+)
 
 try:
     from ui.utils.draggable_file_icon import DraggableFileIconWidget
@@ -2316,16 +2319,18 @@ class InventoryWidget(QWidget):
             }
             """
         )
-        listing_drop_layout = QHBoxLayout(self.listing_drop_panel)
-        listing_drop_layout.setContentsMargins(12, 10, 12, 10)
-        listing_drop_layout.setSpacing(12)
+        listing_drop_outer = QVBoxLayout(self.listing_drop_panel)
+        listing_drop_outer.setContentsMargins(12, 10, 12, 10)
+        listing_drop_outer.setSpacing(8)
+
+        listing_top_row = QHBoxLayout()
+        listing_top_row.setSpacing(12)
 
         self.listing_csv_drag_icon = DraggableFileIconWidget()
         self.listing_csv_drag_icon.set_tooltip_prefix(
-            "①プライスターの出品画面を開く\n"
-            "②このアイコンをドラッグしてCSVのドロップ欄へ"
+            "①「ブラウザで開く」→ ②このアイコンをドラッグしてCSVのドロップ欄へ"
         )
-        listing_drop_layout.addWidget(self.listing_csv_drag_icon)
+        listing_top_row.addWidget(self.listing_csv_drag_icon)
 
         listing_text_col = QVBoxLayout()
         listing_text_col.setSpacing(4)
@@ -2334,7 +2339,7 @@ class InventoryWidget(QWidget):
         listing_text_col.addWidget(listing_title)
 
         self.listing_drop_hint = QLabel(
-            "「出品CSV生成」後、左のファイルアイコンをドラッグしてプライスターへ送れます"
+            "「出品CSV生成」後、「ブラウザで開く」→ 左のCSVアイコンをドラッグしてください"
         )
         self.listing_drop_hint.setWordWrap(True)
         self.listing_drop_hint.setStyleSheet("color: #9eb8d0;")
@@ -2346,15 +2351,28 @@ class InventoryWidget(QWidget):
         listing_text_col.addWidget(self.listing_drop_filename)
 
         listing_btn_row = QHBoxLayout()
+        self.listing_open_browser_btn = QPushButton("ブラウザで開く")
+        self.listing_open_browser_btn.setToolTip(
+            "プライスター CSV入庫画面を既定ブラウザで開きます"
+        )
+        self.listing_open_browser_btn.clicked.connect(
+            lambda: self._open_pricetar_in_browser()
+        )
+        self.listing_open_browser_btn.setEnabled(False)
+        listing_btn_row.addWidget(self.listing_open_browser_btn)
+
         self.listing_open_folder_btn = QPushButton("保存フォルダを開く")
         self.listing_open_folder_btn.setToolTip("保存した出品CSVがあるフォルダをエクスプローラーで開きます")
         self.listing_open_folder_btn.clicked.connect(self._open_last_listing_csv_folder)
         self.listing_open_folder_btn.setEnabled(False)
         listing_btn_row.addWidget(self.listing_open_folder_btn)
+
         listing_btn_row.addStretch()
         listing_text_col.addLayout(listing_btn_row)
 
-        listing_drop_layout.addLayout(listing_text_col, 1)
+        listing_top_row.addLayout(listing_text_col, 1)
+        listing_drop_outer.addLayout(listing_top_row)
+
         self.listing_drop_panel.setVisible(False)
         file_outer.addWidget(self.listing_drop_panel)
 
@@ -2377,16 +2395,43 @@ class InventoryWidget(QWidget):
                 self.listing_csv_drag_icon.clear_file()
             if hasattr(self, "listing_open_folder_btn"):
                 self.listing_open_folder_btn.setEnabled(False)
+            if hasattr(self, "listing_open_browser_btn"):
+                self.listing_open_browser_btn.setEnabled(False)
             return
 
         self.listing_csv_drag_icon.set_file_path(self._last_saved_listing_csv_path)
         self.listing_drop_filename.setText(self._last_saved_listing_csv_path)
         self.listing_drop_hint.setText(
-            "①プライスターの出品画面を開く → "
-            "②左のCSVアイコンをドラッグしてドロップ欄へ"
+            "「ブラウザで開く」後、左のCSVアイコンをドラッグしてプライスターへ送ってください"
         )
         self.listing_open_folder_btn.setEnabled(True)
+        self.listing_open_browser_btn.setEnabled(True)
         self.listing_drop_panel.setVisible(True)
+
+    def _get_pricetar_listing_url(self) -> str:
+        try:
+            return get_pricetar_listing_url()
+        except Exception:
+            return "https://jp3.pricetar.com/seller/product/csvwarehousing"
+
+    def _open_pricetar_in_browser(self) -> None:
+        """プライスター CSV入庫画面を既定ブラウザで開く。"""
+        listing_url = self._get_pricetar_listing_url()
+        try:
+            QDesktopServices.openUrl(QUrl(listing_url))
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "エラー",
+                f"ブラウザでプライスターを開けませんでした:\n{e}\n\n"
+                f"手動で以下にアクセスしてください:\n{listing_url}",
+            )
+            return
+
+        self.listing_drop_hint.setText(
+            "ブラウザでプライスターを開きました。"
+            "左のCSVアイコンをドラッグしてドロップ欄へ送ってください。"
+        )
 
     def _open_last_listing_csv_folder(self) -> None:
         """直近に保存した出品CSVのフォルダを開く。"""
@@ -6874,13 +6919,13 @@ class InventoryWidget(QWidget):
                         pass
                     
                     self._set_listing_csv_drag_file(str(target))
+                    auto_hint = "「ブラウザで開く」後、CSVアイコンをドラッグしてプライスターへ送ってください。"
                     QMessageBox.information(
                         self,
                         "出品CSV生成完了",
                         f"出品CSV生成が完了しました\n出力数: {result['exported_count']}件 (除外 {excluded_count}件)\n"
                         f"保存先: {str(target)}\n\n"
-                        "ファイル操作エリア下のCSVアイコンをドラッグして、"
-                        "プライスターの出品画面へ送れます。",
+                        f"{auto_hint}",
                     )
 
                     # ルートタブ側の「出品」チェックをONにする（対応するルートサマリーが判定できた場合）

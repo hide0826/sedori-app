@@ -1,3 +1,26 @@
+## 2026-06-11: プライスター連携を手動ワークフローに統一
+
+- **タスク:** 仕入管理・価格改定のプライスター自動送信を廃止し、ブラウザ＋ドラッグ運用に一本化
+- **状況:** 完了
+- **変更点:**
+  - `python/desktop/ui/inventory_widget.py`:
+    - 「プライスターへ自動送信」「ブラウザを閉じる」、`QWebEngineView` 関連を削除
+    - 出品CSV生成後は「ブラウザで開く」・CSVドラッグ・「保存フォルダを開く」のみ
+  - `python/desktop/ui/repricer_widget.py`:
+    - 同上の自動処理を削除
+    - プライスターパネルを常時表示（在庫CSV取得用にブラウザボタンを常に利用可能）
+  - `python/desktop/ui/settings_widget.py`, `python/desktop/utils/settings_helper.py`:
+    - プライスター識別子（`data-v-*`）設定を削除
+    - 価格改定用URLデフォルトを `https://jp3.pricetar.com/seller/product/csvproductedit` に更新
+  - `python/desktop/ui/utils/pricetar_web_page.py`: 削除（自動アップロード専用）
+- **動作確認:**
+  - 価格改定タブでプライスターパネルと「ブラウザで開く」が常時表示されること
+  - 出品CSV生成・改定CSV保存後にドラッグアイコンが有効になること
+- **Git:**
+  - refactor(desktop): プライスター連携をブラウザ＋ドラッグの手動運用に統一
+
+---
+
 ## 2026-01-XX: 証憑管理タブの構成変更と仕訳帳機能実装
 
 - **タスク:** 証憑管理タブの構成変更、仕訳帳機能の実装、確定処理時の仕訳帳自動登録機能

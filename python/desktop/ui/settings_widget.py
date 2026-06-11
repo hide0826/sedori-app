@@ -405,6 +405,34 @@ class SettingsWidget(QWidget):
         self.amazon_fba_simulator_url_edit.setClearButtonEnabled(True)
         amazon_layout.addWidget(self.amazon_fba_simulator_url_edit, 1, 1)
         layout.addWidget(amazon_group)
+
+        # プライスター（CSV出品・価格改定画面URL）
+        pricetar_group = QGroupBox("プライスター")
+        pricetar_layout = QGridLayout(pricetar_group)
+        pricetar_layout.addWidget(QLabel("CSV出品用URL:"), 0, 0)
+        self.pricetar_listing_url_edit = QLineEdit()
+        self.pricetar_listing_url_edit.setPlaceholderText(
+            "https://jp3.pricetar.com/seller/product/csvwarehousing"
+        )
+        self.pricetar_listing_url_edit.setClearButtonEnabled(True)
+        self.pricetar_listing_url_edit.setToolTip(
+            "仕入管理の「ブラウザで開く」で使用します。\n"
+            "プライスターの「CSVファイルで出品」画面のURLを入力してください。"
+        )
+        pricetar_layout.addWidget(self.pricetar_listing_url_edit, 0, 1)
+
+        pricetar_layout.addWidget(QLabel("CSV価格改定用URL:"), 1, 0)
+        self.pricetar_repricing_url_edit = QLineEdit()
+        self.pricetar_repricing_url_edit.setPlaceholderText(
+            "https://jp3.pricetar.com/seller/product/csvproductedit"
+        )
+        self.pricetar_repricing_url_edit.setClearButtonEnabled(True)
+        self.pricetar_repricing_url_edit.setToolTip(
+            "価格改定タブの「ブラウザで開く」で使用します。\n"
+            "プライスターの「CSVかんたん在庫編集」画面のURLを入力してください。"
+        )
+        pricetar_layout.addWidget(self.pricetar_repricing_url_edit, 1, 1)
+        layout.addWidget(pricetar_group)
         
         layout.addStretch()
         parent.addTab(advanced_widget, "詳細設定")
@@ -967,6 +995,22 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                 "https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP"
             )
         )
+        try:
+            from utils.settings_helper import (
+                DEFAULT_PRICETAR_LISTING_URL,
+                DEFAULT_PRICETAR_REPRICING_URL,
+            )
+        except ImportError:
+            from desktop.utils.settings_helper import (
+                DEFAULT_PRICETAR_LISTING_URL,
+                DEFAULT_PRICETAR_REPRICING_URL,
+            )
+        self.pricetar_listing_url_edit.setText(
+            self.settings.value("pricetar/listing_url", DEFAULT_PRICETAR_LISTING_URL)
+        )
+        self.pricetar_repricing_url_edit.setText(
+            self.settings.value("pricetar/repricing_url", DEFAULT_PRICETAR_REPRICING_URL)
+        )
         # 3-6-9版（開発段階ではデフォルトON）
         self.pro_enabled_cb.setChecked(self.settings.value("pro/enabled", True, type=bool))
         try:
@@ -1032,6 +1076,24 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                 self.amazon_fba_simulator_url_edit.text().strip()
                 or "https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP"
             )
+            try:
+                from utils.settings_helper import (
+                    DEFAULT_PRICETAR_LISTING_URL,
+                    DEFAULT_PRICETAR_REPRICING_URL,
+                )
+            except ImportError:
+                from desktop.utils.settings_helper import (
+                    DEFAULT_PRICETAR_LISTING_URL,
+                    DEFAULT_PRICETAR_REPRICING_URL,
+                )
+            self.settings.setValue(
+                "pricetar/listing_url",
+                self.pricetar_listing_url_edit.text().strip() or DEFAULT_PRICETAR_LISTING_URL,
+            )
+            self.settings.setValue(
+                "pricetar/repricing_url",
+                self.pricetar_repricing_url_edit.text().strip() or DEFAULT_PRICETAR_REPRICING_URL,
+            )
             # 3-6-9版
             self.settings.setValue("pro/enabled", self.pro_enabled_cb.isChecked())
 
@@ -1091,6 +1153,18 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.amazon_seller_id_edit.setText("")
         self.amazon_fba_simulator_url_edit.setText("https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP")
         try:
+            from utils.settings_helper import (
+                DEFAULT_PRICETAR_LISTING_URL,
+                DEFAULT_PRICETAR_REPRICING_URL,
+            )
+        except ImportError:
+            from desktop.utils.settings_helper import (
+                DEFAULT_PRICETAR_LISTING_URL,
+                DEFAULT_PRICETAR_REPRICING_URL,
+            )
+        self.pricetar_listing_url_edit.setText(DEFAULT_PRICETAR_LISTING_URL)
+        self.pricetar_repricing_url_edit.setText(DEFAULT_PRICETAR_REPRICING_URL)
+        try:
             from utils.gemini_model_helper import resolve_gemini_flash_model
         except ImportError:
             from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
@@ -1149,6 +1223,10 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                 "seller_id": self.amazon_seller_id_edit.text().strip(),
                 "fba_simulator_url": self.amazon_fba_simulator_url_edit.text().strip()
                 or "https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP",
+            },
+            "pricetar": {
+                "listing_url": self.pricetar_listing_url_edit.text().strip(),
+                "repricing_url": self.pricetar_repricing_url_edit.text().strip(),
             },
             "pro": {
                 "enabled": self.pro_enabled_cb.isChecked(),
