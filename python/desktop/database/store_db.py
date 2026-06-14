@@ -22,9 +22,12 @@ class StoreDatabase:
     def __init__(self, db_path: Optional[str] = None):
         """データベースの初期化"""
         if db_path is None:
-            # デフォルトパス: python/desktop/data/hirio.db
-            base_dir = Path(__file__).parent.parent
-            db_path = str(base_dir / "data" / "hirio.db")
+            try:
+                from utils.db_paths import get_hirio_db_path
+            except ImportError:
+                from desktop.utils.db_paths import get_hirio_db_path  # type: ignore
+            db_path = get_hirio_db_path()
+
         
         self.db_path = db_path
         self.conn = None
@@ -658,6 +661,52 @@ class StoreDatabase:
                 return m
         return None
 
+    _ROUTE_VISIT_NON_STORE_CODES = frozenset(
+        {"出発時刻", "帰宅時刻", "往路高速代", "復路高速代"}
+    )
+
+    def sync_stores_from_route_visits(self) -> int:
+        """ルート訪問詳細の store_code を店舗マスタに不足分だけ自動登録する。"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT DISTINCT store_code
+            FROM store_visit_details
+            WHERE store_code IS NOT NULL AND TRIM(store_code) != ''
+            """
+        )
+        added = 0
+        for (store_code,) in cursor.fetchall():
+            code = (store_code or "").strip()
+            if not code or code in self._ROUTE_VISIT_NON_STORE_CODES:
+                continue
+            if self.get_store_by_code(code):
+                continue
+            self._add_store_from_route_visit_code(code)
+            added += 1
+        return added
+
+    def _add_store_from_route_visit_code(self, store_code: str) -> int:
+        code = (store_code or "").strip()
+        return self.add_store(
+            {
+                "store_code": code,
+                "supplier_code": code,
+                "store_name": code,
+            }
+        )
+
+    def _resolve_from_physical_store(self, physical: Dict[str, Any], fallback_code: str) -> Dict[str, Any]:
+        sku_code = (
+            (physical.get("supplier_code") or physical.get("store_code") or fallback_code) or ""
+        ).strip()
+        return {
+            "supplier_code": sku_code or fallback_code,
+            "store_name": (physical.get("store_name") or "").strip(),
+            "store_id": physical.get("id"),
+        }
+
     def resolve_supplier_for_sku(self, supplier_code: str) -> Optional[Dict[str, Any]]:
         """
         SKU生成向けに仕入先を解決する。
@@ -672,11 +721,7 @@ class StoreDatabase:
             return None
         physical = self.get_store_by_code(code)
         if physical:
-            return {
-                "supplier_code": code,
-                "store_name": (physical.get("store_name") or "").strip(),
-                "store_id": physical.get("id"),
-            }
+            return self._resolve_from_physical_store(physical, code)
         online = self.get_online_store_by_supplier_code(code)
         if online:
             shop = (online.get("shop_name") or "").strip()
@@ -710,7 +755,27 @@ class StoreDatabase:
                 "store_name": pname or sku_token,
                 "store_id": None,
             }
+
+        # ルート訪問で使われている店舗コード（照合後の仕入先）を最小マスタとして登録
+        if self._is_route_visit_store_code(code):
+            store_id = self._add_store_from_route_visit_code(code)
+            return {
+                "supplier_code": code,
+                "store_name": code,
+                "store_id": store_id,
+            }
         return None
+
+    def _is_route_visit_store_code(self, code: str) -> bool:
+        if not code or code in self._ROUTE_VISIT_NON_STORE_CODES:
+            return False
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM store_visit_details WHERE store_code = ? LIMIT 1",
+            (code,),
+        )
+        return cursor.fetchone() is not None
     
     def list_stores(self, search_term: Optional[str] = None) -> List[Dict[str, Any]]:
         """店舗一覧を取得（検索対応）"""

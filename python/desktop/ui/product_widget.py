@@ -522,6 +522,53 @@ class ProductWidget(QWidget):
         # sales_tableもヘッダー状態のみ復元（列幅など）
         restore_table_header_state(self.sales_table, "ProductWidget/SalesTableState")
 
+    def _close_db_connection(self, db: Any) -> None:
+        if db is None:
+            return
+        conn = getattr(db, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            db.conn = None
+
+    def reinit_databases(self) -> None:
+        """撮影モード切替後にDB接続を差し替える。"""
+        for attr in (
+            "db",
+            "warranty_db",
+            "purchase_db",
+            "purchase_history_db",
+            "store_db",
+            "sales_db",
+            "receipt_db",
+        ):
+            self._close_db_connection(getattr(self, attr, None))
+        self.db = ProductDatabase()
+        self.warranty_db = WarrantyDatabase()
+        self.purchase_db = ProductPurchaseDatabase()
+        self.purchase_history_db = PurchaseDatabase()
+        self.store_db = StoreDatabase()
+        self.sales_db = SalesDatabase()
+        from database.receipt_db import ReceiptDatabase
+        self.receipt_db = ReceiptDatabase()
+        self.purchase_records = []
+        self.purchase_all_records = []
+        self.purchase_all_records_master = []
+        self._purchase_loaded = False
+        self._purchase_lookup_loaded = False
+        self._initial_data_loaded = False
+        if hasattr(self, "populate_purchase_table"):
+            self.populate_purchase_table([])
+        if hasattr(self, "update_purchase_count_label"):
+            self.update_purchase_count_label()
+
+        # テーブルの列幅を復元（データ件数に依存しない軽量処理）
+        restore_table_header_state(self.table, "ProductWidget/ProductTableState")
+        # sales_tableもヘッダー状態のみ復元（列幅など）
+        restore_table_header_state(self.sales_table, "ProductWidget/SalesTableState")
+
     def save_settings(self):
         """ウィジェットの設定（テーブルの列幅など）を保存します。"""
         save_table_header_state(self.table, "ProductWidget/ProductTableState")

@@ -651,9 +651,16 @@ class MainWindow(QMainWindow):
         # API接続ステータス
         self.api_status_label = QLabel("API: 未接続")
         self.status_bar.addPermanentWidget(self.api_status_label)
+
+        self.recording_status_label = QLabel("")
+        self.recording_status_label.setStyleSheet(
+            "color: #e53935; font-weight: bold; padding-right: 8px;"
+        )
+        self.status_bar.addPermanentWidget(self.recording_status_label)
         
         # API接続チェック
         self.check_api_connection()
+        self.update_recording_mode_ui()
         
         
     def center_window(self):
@@ -806,9 +813,53 @@ class MainWindow(QMainWindow):
         self.status_label.setText("API接続テスト完了")
         self.check_api_connection()
         
+    def update_recording_mode_ui(self) -> None:
+        """撮影モード表示とウィンドウタイトルを更新する。"""
+        try:
+            from utils.settings_helper import is_recording_mode
+        except ImportError:
+            from desktop.utils.settings_helper import is_recording_mode  # type: ignore
+
+        active = is_recording_mode()
+        if hasattr(self, "recording_status_label"):
+            if active:
+                self.recording_status_label.setText("● 撮影モード")
+                self.recording_status_label.setVisible(True)
+            else:
+                self.recording_status_label.clear()
+                self.recording_status_label.setVisible(False)
+        base_title = "HIRIO - せどり業務統合システム"
+        self.setWindowTitle(f"{base_title} [撮影モード]" if active else base_title)
+
+    def apply_recording_mode_database_reload(self) -> None:
+        """撮影モード切替後に主要ウィジェットのDB接続を差し替える。"""
+        for widget_name in (
+            "inventory_widget",
+            "inventory_widget_dev",
+            "product_widget",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None and hasattr(widget, "reinit_databases"):
+                widget.reinit_databases()
+        antique = getattr(self, "antique_widget", None)
+        if antique is not None and hasattr(antique, "reload_ledger_rows"):
+            antique.antique_data = []
+            if hasattr(antique, "data_table"):
+                antique.data_table.setRowCount(0)
+            antique._ledger_loaded = False
+
     def on_settings_changed(self, settings_dict):
         """設定変更時の処理"""
         try:
+            recording_changed = False
+            if isinstance(settings_dict, dict):
+                recording_info = settings_dict.get("recording") or {}
+                recording_changed = "enabled" in recording_info
+
+            if recording_changed:
+                self.update_recording_mode_ui()
+                self.apply_recording_mode_database_reload()
+
             # API設定の更新
             if 'api' in settings_dict:
                 api_settings = settings_dict['api']

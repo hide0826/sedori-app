@@ -46,12 +46,20 @@ from utils.route_utils import mark_route_flags_from_folder
 from utils.settings_helper import (
     get_pricetar_listing_url,
     is_pro_enabled,
+    is_recording_mode,
 )
 
 try:
     from ui.utils.draggable_file_icon import DraggableFileIconWidget
 except ImportError:
     from desktop.ui.utils.draggable_file_icon import DraggableFileIconWidget  # type: ignore
+
+try:
+    from utils.win_browser_helper import bring_browser_to_front
+except ImportError:
+    from desktop.utils.win_browser_helper import bring_browser_to_front  # type: ignore
+
+_PRICETAR_BROWSER_TITLE_KEYWORDS = ["pricetar", "プライスター"]
 from services.keepa_service import KeepaService
 from services.ocr_service import OCRService
 from services.purchase_cost_calc import (
@@ -1910,6 +1918,12 @@ class SinglePurchaseInputDialog(QDialog):
                 enriched[col] = ""
 
         supplier_code = str(preview.get("仕入先", "") or "").strip()
+        if supplier_code and inv:
+            inv._ensure_missing_stores_registered(
+                [(supplier_code, supplier_code)],
+                show_message=False,
+            )
+
         store_not_found: List[str] = []
         if supplier_code:
             resolved = self.store_db.resolve_supplier_for_sku(supplier_code)
@@ -2097,6 +2111,49 @@ class InventoryWidget(QWidget):
         self.matching_btn = None
         self.setup_ui()
     
+    def _close_db_connection(self, db: Any) -> None:
+        if db is None:
+            return
+        conn = getattr(db, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            db.conn = None
+
+    def reinit_databases(self) -> None:
+        """撮影モード切替後にDB接続を差し替える。"""
+        for attr in (
+            "store_db",
+            "inventory_db",
+            "route_snapshot_db",
+            "product_db",
+            "product_purchase_db",
+            "route_visit_db",
+            "warranty_db",
+            "condition_template_db",
+            "route_db",
+        ):
+            self._close_db_connection(getattr(self, attr, None))
+        self.store_db = StoreDatabase()
+        self.inventory_db = InventoryDatabase()
+        self.route_snapshot_db = InventoryRouteSnapshotDatabase()
+        self.product_db = ProductDatabase()
+        self.product_purchase_db = ProductPurchaseDatabase()
+        self.route_visit_db = RouteVisitDatabase()
+        self.warranty_db = WarrantyDatabase()
+        from database.condition_template_db import ConditionTemplateDatabase
+        from database.route_db import RouteDatabase
+        self.condition_template_db = ConditionTemplateDatabase()
+        self.route_db = RouteDatabase()
+        self.inventory_data = None
+        self.filtered_data = None
+        if hasattr(self, "data_table"):
+            self.update_table()
+        if hasattr(self, "generate_sku_btn"):
+            self.generate_sku_btn.setEnabled(False)
+
     def set_route_summary_widget(self, widget):
         self.route_summary_widget = widget
         # ルート登録側に本番/開発どちらの仕入管理ウィジェットかを伝える
@@ -2327,6 +2384,7 @@ class InventoryWidget(QWidget):
         listing_top_row.setSpacing(12)
 
         self.listing_csv_drag_icon = DraggableFileIconWidget()
+        self.listing_csv_drag_icon.set_browser_title_keywords(_PRICETAR_BROWSER_TITLE_KEYWORDS)
         self.listing_csv_drag_icon.set_tooltip_prefix(
             "①「ブラウザで開く」→ ②このアイコンをドラッグしてCSVのドロップ欄へ"
         )
@@ -2431,6 +2489,11 @@ class InventoryWidget(QWidget):
         self.listing_drop_hint.setText(
             "ブラウザでプライスターを開きました。"
             "左のCSVアイコンをドラッグしてドロップ欄へ送ってください。"
+            "（ドラッグ中はアプリが一時的に最小化されます）"
+        )
+        QTimer.singleShot(
+            900,
+            lambda: bring_browser_to_front(_PRICETAR_BROWSER_TITLE_KEYWORDS),
         )
 
     def _open_last_listing_csv_folder(self) -> None:
@@ -3153,6 +3216,142 @@ class InventoryWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "単品仕入エラー", f"単品仕入の追加に失敗しました:\n{str(e)}")
 
+    def _ensure_missing_stores_registered(
+        self,
+        entries: List[tuple],
+        route_data: Optional[Dict[str, Any]] = None,
+        *,
+        show_message: bool = True,
+    ):
+        """店舗マスタに無い店舗コードを、ファイルのコード・店舗名のまま登録する。"""
+        if not entries or not self.store_db:
+            return None
+        try:
+            try:
+                from services.store_master_auto_register import (
+                    ensure_stores_in_master,
+                    resolve_route_from_template,
+                )
+            except ImportError:
+                from desktop.services.store_master_auto_register import (  # type: ignore
+                    ensure_stores_in_master,
+                    resolve_route_from_template,
+                )
+
+            route_data = route_data or {}
+            combo_name = ""
+            if self.route_summary_widget:
+                try:
+                    combo_name = self.route_summary_widget.route_code_combo.currentText().strip()
+                except Exception:
+                    pass
+
+            route_code, affiliated = resolve_route_from_template(
+                self.store_db,
+                route_data,
+                combo_route_name=combo_name,
+            )
+
+            result = ensure_stores_in_master(
+                self.store_db,
+                entries,
+                route_code=route_code,
+                affiliated_route_name=affiliated,
+                fetch_google=True,
+            )
+
+            if show_message and result.added > 0:
+                msg = f"店舗マスタに {result.added} 件を新規登録しました。"
+                if affiliated:
+                    msg += f"\n所属ルート: {affiliated}"
+                if result.google_ok or result.google_failed:
+                    msg += (
+                        f"\nGoogle Maps 情報: 取得成功 {result.google_ok} 件"
+                        f" / 未取得 {result.google_failed} 件"
+                    )
+                if result.errors:
+                    msg += f"\n\n注意:\n" + "\n".join(result.errors[:3])
+                    if len(result.errors) > 3:
+                        msg += f"\n…他 {len(result.errors) - 3} 件"
+                QMessageBox.information(self, "店舗マスタ自動登録", msg)
+            return result
+        except Exception as exc:
+            print(f"店舗マスタ自動登録エラー: {exc}")
+            return None
+
+    def _collect_store_entries_from_route_visits(
+        self, visits: List[Dict[str, Any]]
+    ) -> List[tuple]:
+        exclude = {"出発時刻", "帰宅時刻", "往路高速代", "復路高速代"}
+        entries: List[tuple] = []
+        for visit in visits or []:
+            code = str(visit.get("store_code") or "").strip()
+            name = str(visit.get("store_name") or "").strip()
+            if code and code not in exclude:
+                entries.append((code, name or code))
+        return entries
+
+    def _collect_store_entries_from_inventory(self) -> List[tuple]:
+        """仕入データの仕入先列とルート情報から店舗コード・店舗名を収集。"""
+        exclude = {"出発時刻", "帰宅時刻", "往路高速代", "復路高速代"}
+        name_by_code: Dict[str, str] = {}
+
+        if self.route_summary_widget:
+            try:
+                for visit in self.route_summary_widget.get_store_visits_data():
+                    code = str(visit.get("store_code") or "").strip()
+                    name = str(visit.get("store_name") or "").strip()
+                    if code and code not in exclude:
+                        if name:
+                            name_by_code[code] = name
+                        else:
+                            name_by_code.setdefault(code, code)
+            except Exception:
+                pass
+
+        if hasattr(self, "route_template_table"):
+            try:
+                for row in range(self.route_template_table.rowCount()):
+                    code_item = self.route_template_table.item(row, 1)
+                    name_item = self.route_template_table.item(row, 2)
+                    code = code_item.text().strip() if code_item else ""
+                    name = name_item.text().strip() if name_item else ""
+                    if code and code not in exclude:
+                        if name:
+                            name_by_code[code] = name
+                        else:
+                            name_by_code.setdefault(code, code)
+            except Exception:
+                pass
+
+        if self.inventory_data is not None and "仕入先" in self.inventory_data.columns:
+            for val in self.inventory_data["仕入先"].dropna().unique():
+                code = str(val).strip()
+                if code and code not in exclude and code.lower() not in ("nan", "none"):
+                    name_by_code.setdefault(code, code)
+
+        return [(code, name_by_code.get(code) or code) for code in sorted(name_by_code)]
+
+    def _auto_register_stores_from_route_template(self):
+        if not self.route_summary_widget:
+            return
+        exclude = {"出発時刻", "帰宅時刻", "往路高速代", "復路高速代"}
+        visits = self.route_summary_widget.get_store_visits_data()
+        filtered = [v for v in visits if v.get("store_code") not in exclude]
+        entries = self._collect_store_entries_from_route_visits(filtered)
+        route_data = self.route_summary_widget.get_route_data()
+        self._ensure_missing_stores_registered(entries, route_data)
+
+    def _auto_register_stores_from_inventory(self, *, show_message: bool = True):
+        entries = self._collect_store_entries_from_inventory()
+        route_data = {}
+        if self.route_summary_widget:
+            try:
+                route_data = self.route_summary_widget.get_route_data()
+            except Exception:
+                pass
+        self._ensure_missing_stores_registered(entries, route_data, show_message=show_message)
+
     def _get_last_csv_import_folder(self) -> str:
         """直近の CSV 取込で開いたフォルダ（存在する場合のみ）。"""
         from pathlib import Path
@@ -3182,6 +3381,7 @@ class InventoryWidget(QWidget):
             except Exception:
                 pass
             self.refresh_route_template_view()
+            self._auto_register_stores_from_route_template()
             # route_template_status は削除済み（読み込み完了メッセージは表示しない）
         except Exception as e:
             QMessageBox.critical(self, "テンプレート読込エラー", f"テンプレートの読み込みに失敗しました:\n{e}")
@@ -4083,6 +4283,8 @@ class InventoryWidget(QWidget):
         取り込んだデータ一覧のSKUが「未実装」の行について、
         商品DBタブの仕入DBに仕入れ日・ASINを確認してマッチする物はSKUを取得して設定する
         """
+        if is_recording_mode():
+            return
         if self.inventory_data is None or len(self.inventory_data) == 0:
             return
         
@@ -4159,6 +4361,8 @@ class InventoryWidget(QWidget):
         商品DB（仕入スナップショット・products）から、同一仕入日時・ASINのSKUを1件返す。
         単品仕入ダイアログのSKU生成で、テーブルに載せる前の重複防止に使用。
         """
+        if is_recording_mode():
+            return None
         purchase_date = (purchase_date or "").strip()
         asin = (asin or "").strip()
         if not purchase_date or not asin:
@@ -4689,6 +4893,9 @@ class InventoryWidget(QWidget):
             
             # SKU自動マッチング処理（商品DBから仕入れ日・ASINで検索）
             self._auto_match_sku_from_product_db()
+
+            # 仕入先に未登録店舗があれば店舗マスタへ自動登録（Google Maps 情報付き）
+            self._auto_register_stores_from_inventory()
             
             # テーブルの更新
             self.update_table()
@@ -6176,6 +6383,9 @@ class InventoryWidget(QWidget):
         try:
             # 仕入DBに同じ仕入時間・同じASINがある場合はそこからSKUを入力（重複登録防止）
             self._auto_match_sku_from_product_db()
+
+            # 仕入先の未登録店舗を店舗マスタへ反映（警告防止・Google Maps 情報付き）
+            self._auto_register_stores_from_inventory(show_message=False)
             
             # データを辞書形式に変換（除外商品を除く）
             all_list = self.filtered_data.to_dict('records')
@@ -6217,9 +6427,16 @@ class InventoryWidget(QWidget):
             unique_warnings = []
             if store_not_found_warnings:
                 unique_warnings = list(set(store_not_found_warnings))
-                warning_msg = f"以下の仕入れ先コードに対応する店舗が見つかりませんでした:\n{', '.join(unique_warnings[:5])}"
+                warning_msg = (
+                    "以下の仕入先コードに対応する店舗が見つかりませんでした:\n"
+                    f"{', '.join(unique_warnings[:5])}"
+                )
                 if len(unique_warnings) > 5:
                     warning_msg += f"\n他 {len(unique_warnings) - 5}件..."
+                warning_msg += (
+                    "\n\n店舗マスタに未登録のコードです。"
+                    "設定 → 店舗マスタで登録するか、ルート照合で使った店舗コードか確認してください。"
+                )
                 QMessageBox.warning(self, "店舗情報警告", warning_msg)
             
             # SKUテンプレート用の日付（任意指定）。未指定ならNoneのまま＝当日扱い。
@@ -7037,18 +7254,21 @@ class InventoryWidget(QWidget):
             clean_data = self.inventory_data.fillna('')
             purchase_data = clean_data.to_dict(orient="records")
             
-            # APIクライアント確認
-            if not self.api_client:
-                QMessageBox.warning(self, "エラー", "APIクライアントが初期化されていません")
-                return
-            
-            # API呼び出し
+            # 照合処理（デスクトップと同一 DB を直接参照）
             QMessageBox.information(self, "処理中", "照合処理を実行しています...")
-            result = self.api_client.inventory_match_stores_from_data(
-                purchase_data=purchase_data,
-                route_summary_id=route_id,
-                time_tolerance_minutes=tolerance
+            from services.inventory_store_matching_runner import (
+                InventoryStoreMatchingError,
+                match_stores_from_purchase_data_local,
             )
+            try:
+                result = match_stores_from_purchase_data_local(
+                    purchase_data=purchase_data,
+                    route_summary_id=route_id,
+                    time_tolerance_minutes=tolerance,
+                )
+            except InventoryStoreMatchingError as e:
+                QMessageBox.warning(self, "エラー", str(e))
+                return
             
             # 結果を仕入管理ウィジェットに反映
             if result.get('status') == 'success':

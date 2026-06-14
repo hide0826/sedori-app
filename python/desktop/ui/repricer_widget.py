@@ -21,6 +21,13 @@ try:
     from ui.utils.draggable_file_icon import DraggableFileIconWidget
 except ImportError:
     from desktop.ui.utils.draggable_file_icon import DraggableFileIconWidget  # type: ignore
+
+try:
+    from utils.win_browser_helper import bring_browser_to_front
+except ImportError:
+    from desktop.utils.win_browser_helper import bring_browser_to_front  # type: ignore
+
+_PRICETAR_BROWSER_TITLE_KEYWORDS = ["pricetar", "プライスター"]
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
@@ -401,6 +408,7 @@ class RepricerWidget(QWidget):
         pricerstar_top_row.setSpacing(12)
 
         self.pricerstar_csv_drag_icon = DraggableFileIconWidget()
+        self.pricerstar_csv_drag_icon.set_browser_title_keywords(_PRICETAR_BROWSER_TITLE_KEYWORDS)
         self.pricerstar_csv_drag_icon.set_tooltip_prefix(
             "①「ブラウザで開く」→ ②このアイコンをドラッグしてCSVのドロップ欄へ"
         )
@@ -946,6 +954,11 @@ class RepricerWidget(QWidget):
         self.pricerstar_drop_hint.setText(
             "ブラウザでプライスターを開きました。"
             "左のCSVアイコンをドラッグしてドロップ欄へ送ってください。"
+            "（ドラッグ中はアプリが一時的に最小化されます）"
+        )
+        QTimer.singleShot(
+            900,
+            lambda: bring_browser_to_front(_PRICETAR_BROWSER_TITLE_KEYWORDS),
         )
 
     def _open_last_saved_csv_folder(self) -> None:

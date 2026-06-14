@@ -110,7 +110,25 @@ class HIRIOApplication:
             raise
         
         self.api_client = APIClient()
+        try:
+            from utils.db_paths import get_hirio_db_path
+        except ImportError:
+            from desktop.utils.db_paths import get_hirio_db_path  # type: ignore
+        try:
+            get_hirio_db_path()
+        except Exception as e:
+            QMessageBox.critical(
+                None,
+                "データベースエラー",
+                "データベースファイルの修復に失敗しました。\n\n"
+                f"{e}\n\n"
+                "・HIRIO をすべて終了してから再起動してください\n"
+                "・バックアップがあれば data フォルダの hirio.db を復元してください",
+            )
+            raise
         self.main_window = MainWindow(self.api_client)
+        if hasattr(self.main_window, "update_recording_mode_ui"):
+            self.main_window.update_recording_mode_ui()
         self.main_window.show()
         install_copy_context_menu(self.app)
         install_combobox_wheel_guard(self.app)

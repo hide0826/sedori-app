@@ -1,3 +1,35 @@
+## 2026-06-14: 照合処理修正・DB復旧支援・店舗マスタ自動登録
+
+- **タスク:** 仕入管理の照合/SKU周りの不具合修正、撮影モード・DB破損対策、バックアップからの復元支援、取込時の店舗マスタ自動登録
+- **状況:** 完了（本番DBはユーザーが HIRIOold から手動復元済み）
+- **変更点:**
+  - **照合処理（PySide6 500 エラー）**
+    - `python/services/route_matching_service.py`, `python/services/inventory_store_matching.py`: API/デスクトップ共通の PySide6 非依存ロジック
+    - `python/routers/inventory.py`: `services` 経由に変更、撮影モード時は `recording/hirio.db` 参照（`python/utils/server_db_paths.py`）
+    - `python/desktop/ui/inventory_widget.py`, `route_summary_widget.py`: 照合を API ではなく同一 DB 直接参照に変更
+  - **撮影モード・DB 破損対策**
+    - `python/desktop/utils/db_paths.py`, `db_bootstrap.py`, `recording_mode_service.py`
+    - `python/desktop/main.py`, `settings_widget.py`, `main_window.py`, `inventory_widget.py`: 撮影モード即時反映、起動時 DB 検証
+  - **店舗マスタ自動登録（取込時）**
+    - `python/desktop/services/store_master_auto_register.py`: 未登録店舗を Google Maps 情報付きで登録（既存店舗は不変更）
+    - `python/desktop/ui/inventory_widget.py`: CSV取込・ルートテンプレ読込時に自動実行
+    - `python/desktop/ui/route_summary_widget.py`: テンプレ 2 行目・ファイル名からルート名読込、新規店舗を所属ルートに紐付け
+    - `python/desktop/database/store_db.py`: ルート訪問由来の店舗補完ヘルパー
+  - **復元支援**
+    - `python/desktop/scripts/restore_from_hirio_backup.py`: HIRIOold 等から `hirio.db` 復元用スクリプト
+    - `python/desktop/services/inventory_store_matching_runner.py`: デスクトップ向け re-export
+  - **その他**
+    - 各 DB クラス: `db_paths.get_hirio_db_path()` 経由でパス一元化
+    - プライスター手動運用・ドラッグ改善（前回コミット以降の UI 調整含む）
+- **動作確認:**
+  - 照合処理: 撮影/本番 DB 不一致解消、ローカル照合で route_id 解決
+  - 復元: バックアップ `hirio.db` から店舗 242 件・ルート 25 件を復元（`hirio_product_purchase.db` は未変更）
+  - 店舗自動登録: ルートテンプレ読込で未登録店舗＋所属ルート名（例: 町田相模原ルート → M1）を設定
+- **Git:**
+  - feat(desktop): 照合処理修正・DB復旧支援・店舗マスタ自動登録
+
+---
+
 ## 2026-06-11: プライスター連携を手動ワークフローに統一
 
 - **タスク:** 仕入管理・価格改定のプライスター自動送信を廃止し、ブラウザ＋ドラッグ運用に一本化

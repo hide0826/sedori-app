@@ -56,8 +56,11 @@ class InventoryRouteSnapshotDatabase:
 
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
-            base_dir = Path(__file__).parent.parent
-            db_path = str(base_dir / "data" / "hirio_inventory_route.db")
+            try:
+                from utils.db_paths import get_inventory_route_db_path
+            except ImportError:
+                from desktop.utils.db_paths import get_inventory_route_db_path  # type: ignore
+            db_path = get_inventory_route_db_path()
         self.db_path = db_path
         self.conn: Optional[sqlite3.Connection] = None
         self._ensure_dir()

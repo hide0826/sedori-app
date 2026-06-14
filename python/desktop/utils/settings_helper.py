@@ -66,3 +66,12 @@ def is_pro_enabled() -> bool:
     開発段階ではデフォルトでTrue（ON）です。
     """
     return _settings().value("pro/enabled", True, type=bool)
+
+
+def is_recording_mode() -> bool:
+    """撮影モード（デモ）が有効か。ON時は仮想DBのみに読み書きする。"""
+    return _settings().value("recording/enabled", False, type=bool)
+
+
+def set_recording_mode_enabled_flag(enabled: bool) -> None:
+    _settings().setValue("recording/enabled", bool(enabled))

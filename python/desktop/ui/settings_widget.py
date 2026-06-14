@@ -296,6 +296,30 @@ class SettingsWidget(QWidget):
         self.pro_enabled_cb.toggled.connect(self._on_pro_toggled)
         pro_layout.addWidget(self.pro_enabled_cb, 0, 0, 1, 2)
         layout.addWidget(pro_group)
+
+        recording_group = QGroupBox("撮影モード（デモ）")
+        recording_layout = QVBoxLayout(recording_group)
+        self.recording_mode_cb = QCheckBox("撮影モードを有効にする")
+        self.recording_mode_cb.setToolTip(
+            "デモ・撮影用です。\n"
+            "ON: 仕入・古物台帳などは仮想DBにのみ保存され、本番データには反映されません。\n"
+            "過去の仕入リストからSKUが自動入力されることもありません。\n"
+            "OFF: 仮想DBのデータは削除されます。"
+        )
+        recording_layout.addWidget(self.recording_mode_cb)
+        self.recording_mode_status_label = QLabel("")
+        self.recording_mode_status_label.setWordWrap(True)
+        recording_layout.addWidget(self.recording_mode_status_label)
+        recording_note = QLabel(
+            "チェックを入れるとすぐ反映されます（「設定を保存」ボタンは不要）。"
+            "右下ステータスバーに「● 撮影モード」と表示されます。"
+        )
+        recording_note.setWordWrap(True)
+        recording_note.setStyleSheet("color: #666;")
+        recording_layout.addWidget(recording_note)
+        layout.addWidget(recording_group)
+        self._recording_mode_loading = False
+        self.recording_mode_cb.toggled.connect(self._on_recording_toggled)
         
         # パフォーマンス設定
         perf_group = QGroupBox("パフォーマンス設定")
@@ -738,6 +762,103 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         """3-6-9版チェック変更時に即QSettingsへ保存（保存ボタンなしで他タブに反映）"""
         self.settings.setValue("pro/enabled", checked)
 
+    def _sync_recording_mode_status_label(self) -> None:
+        if not hasattr(self, "recording_mode_status_label"):
+            return
+        try:
+            from utils.settings_helper import is_recording_mode
+        except ImportError:
+            from desktop.utils.settings_helper import is_recording_mode  # type: ignore
+        if is_recording_mode():
+            self.recording_mode_status_label.setText("現在: 撮影モード ON（仮想DB使用中）")
+            self.recording_mode_status_label.setStyleSheet("color: #e53935; font-weight: bold;")
+        else:
+            self.recording_mode_status_label.setText("現在: 撮影モード OFF（本番DB）")
+            self.recording_mode_status_label.setStyleSheet("color: #888;")
+
+    def _notify_recording_mode_changed(self) -> None:
+        self.settings_changed.emit(self.get_current_settings())
+
+    def _commit_recording_mode_change(self, new_recording: bool) -> bool:
+        """撮影モードON/OFFを確定。キャンセル時はチェックを戻した値を返す。"""
+        try:
+            from utils.settings_helper import is_recording_mode, set_recording_mode_enabled_flag
+            from services.recording_mode_service import set_recording_mode_enabled
+        except ImportError:
+            from desktop.utils.settings_helper import (  # type: ignore
+                is_recording_mode,
+                set_recording_mode_enabled_flag,
+            )
+            from desktop.services.recording_mode_service import set_recording_mode_enabled  # type: ignore
+
+        previous_recording = is_recording_mode()
+        if new_recording == previous_recording:
+            return new_recording
+
+        if new_recording and not previous_recording:
+            reply = QMessageBox.question(
+                self,
+                "撮影モードを有効にしますか？",
+                "仮想DBが新規作成されます。\n"
+                "このモード中の仕入・古物台帳の保存は本番DBに反映されません。\n\n"
+                "続行しますか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return previous_recording
+        elif not new_recording and previous_recording:
+            reply = QMessageBox.question(
+                self,
+                "撮影モードを終了しますか？",
+                "仮想DBに保存したデータはすべて削除されます。\n"
+                "本番DBのデータは変更されません。\n\n"
+                "続行しますか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return previous_recording
+
+        try:
+            set_recording_mode_enabled_flag(new_recording)
+            set_recording_mode_enabled(new_recording, previous_recording)
+        except Exception as e:
+            set_recording_mode_enabled_flag(previous_recording)
+            QMessageBox.critical(
+                self,
+                "撮影モードエラー",
+                "仮想DBの作成に失敗しました。\n\n"
+                f"{e}\n\n"
+                "アプリを再起動してから再度お試しください。",
+            )
+            return previous_recording
+        self.settings.setValue("recording/enabled", new_recording)
+        self.settings.sync()
+        return new_recording
+
+    def _on_recording_toggled(self, checked: bool) -> None:
+        """撮影モードチェック変更時に即反映（3-6-9版と同様）。"""
+        if getattr(self, "_recording_mode_loading", False):
+            return
+        try:
+            from utils.settings_helper import is_recording_mode
+        except ImportError:
+            from desktop.utils.settings_helper import is_recording_mode  # type: ignore
+        before = is_recording_mode()
+        final = self._commit_recording_mode_change(checked)
+        if final != checked:
+            self.recording_mode_cb.blockSignals(True)
+            self.recording_mode_cb.setChecked(final)
+            self.recording_mode_cb.blockSignals(False)
+        self._sync_recording_mode_status_label()
+        if final != before:
+            self._notify_recording_mode_changed()
+        else:
+            main = self.window()
+            if main is not None and hasattr(main, "update_recording_mode_ui"):
+                main.update_recording_mode_ui()
+
     def browse_directory(self, line_edit):
         """ディレクトリ選択ダイアログ"""
         directory = QFileDialog.getExistingDirectory(
@@ -1013,6 +1134,10 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         )
         # 3-6-9版（開発段階ではデフォルトON）
         self.pro_enabled_cb.setChecked(self.settings.value("pro/enabled", True, type=bool))
+        self._recording_mode_loading = True
+        self.recording_mode_cb.setChecked(self.settings.value("recording/enabled", False, type=bool))
+        self._recording_mode_loading = False
+        self._sync_recording_mode_status_label()
         try:
             from utils.gemini_model_helper import resolve_gemini_flash_model
         except ImportError:
@@ -1029,6 +1154,15 @@ PySide6 バージョン: {__import__('PySide6').__version__}
     def save_settings(self):
         """設定の保存"""
         try:
+            final_recording = self._commit_recording_mode_change(
+                self.recording_mode_cb.isChecked()
+            )
+            if final_recording != self.recording_mode_cb.isChecked():
+                self.recording_mode_cb.blockSignals(True)
+                self.recording_mode_cb.setChecked(final_recording)
+                self.recording_mode_cb.blockSignals(False)
+            self._sync_recording_mode_status_label()
+
             # API設定
             self.settings.setValue("api/url", self.api_url_edit.text())
             self.settings.setValue("api/timeout", self.timeout_spin.value())
@@ -1171,6 +1305,8 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         if hasattr(self, "gemini_model_label"):
             self.gemini_model_label.setText(resolve_gemini_flash_model())
         self.pro_enabled_cb.setChecked(True)  # 開発段階ではデフォルトON
+        self.recording_mode_cb.setChecked(False)
+        self._sync_recording_mode_status_label()
         
     def get_current_settings(self):
         """現在の設定を辞書で取得"""
@@ -1230,5 +1366,8 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             },
             "pro": {
                 "enabled": self.pro_enabled_cb.isChecked(),
+            },
+            "recording": {
+                "enabled": self.recording_mode_cb.isChecked(),
             }
         }

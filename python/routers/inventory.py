@@ -14,8 +14,11 @@ import json
 from pathlib import Path
 
 from services.inventory_service import InventoryService
-from desktop.database.route_db import RouteDatabase
-from desktop.services.route_matching_service import RouteMatchingService
+from services.inventory_store_matching import (
+    InventoryStoreMatchingError,
+    match_stores_from_purchase_data,
+)
+from utils.server_db_paths import get_hirio_db_path_for_api
 from schemas.inventory_schemas import (
     SKUGenerationRequest,
     SKUGenerationResponse,
@@ -29,6 +32,7 @@ from schemas.inventory_schemas import (
 # generate_sku, convert_condition, detect_q_tag, split_by_comment, generate_listing_csv_content
 
 router = APIRouter(prefix="/api/inventory", tags=["inventory"])
+
 
 @router.get("/health")
 async def health_check():
@@ -155,57 +159,20 @@ async def match_stores_with_route(
             supplier_col = "仕入先"
             df[supplier_col] = ""
 
-        # ルート訪問詳細
-        route_db = RouteDatabase()
-        route_summary = route_db.get_route_summary(route_summary_id)
-        if not route_summary:
-            raise HTTPException(status_code=400, detail="指定ルートが見つかりません")
-        
-        store_visits = route_db.get_store_visits_by_route(route_summary_id)
-        if not store_visits:
-            raise HTTPException(status_code=400, detail="指定ルートに店舗訪問詳細がありません")
-
-        # ルート日付を取得して店舗IN/OUT時間に結合（既存データがHH:MM形式の場合）
-        route_date = route_summary.get('route_date', '')
-        if route_date:
-            for visit in store_visits:
-                in_time = visit.get('store_in_time', '')
-                out_time = visit.get('store_out_time', '')
-                
-                # HH:MM形式（日付なし）の場合、ルート日付を結合
-                if in_time and ':' in in_time and len(in_time.split(' ')) == 1:
-                    # すでに日付が含まれていない場合のみ結合
-                    visit['store_in_time'] = f"{route_date} {in_time}:00" if ':' in in_time else in_time
-                if out_time and ':' in out_time and len(out_time.split(' ')) == 1:
-                    # すでに日付が含まれていない場合のみ結合
-                    visit['store_out_time'] = f"{route_date} {out_time}:00" if ':' in out_time else out_time
-
-        # 照合
-        items = df.to_dict(orient="records")
-        matcher = RouteMatchingService()
-        matched = matcher.match_store_code_by_time_and_profit(
-            purchase_items=items,
-            store_visits=store_visits,
-            time_tolerance_minutes=time_tolerance_minutes
+        result = match_stores_from_purchase_data(
+            purchase_data=df.to_dict(orient="records"),
+            route_summary_id=route_summary_id,
+            time_tolerance_minutes=time_tolerance_minutes,
+            db_path=get_hirio_db_path_for_api(),
         )
-
-        # DataFrameへ反映（順序対応）
-        # インデックスをリセットして0から始まる連番に保証
-        df = df.reset_index(drop=True)
-        matched_rows = 0
-        for idx, res in enumerate(matched):
-            code = res.get("matched_store_code")
-            if code:
-                # ilocを使うか、リセット済みインデックスを使う
-                df.at[idx, supplier_col] = code
-                matched_rows += 1
-
-        preview = df.head(10).to_dict(orient="records")
+        preview = result["data"][:10]
         return {
             "status": "success",
-            "stats": {**stats, "matched_rows": matched_rows},
-            "preview": preview
+            "stats": {**stats, "matched_rows": result["stats"]["matched_rows"]},
+            "preview": preview,
         }
+    except InventoryStoreMatchingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -266,84 +233,14 @@ async def match_stores_from_data(
     CSVファイルではなく、フロントエンドから送信されたJSONデータを処理
     """
     try:
-        # JSONデータをDataFrameに変換
-        df = pd.DataFrame(purchase_data)
-        
-        # 仕入日時カラムの推定
-        purchase_date_candidates = ["仕入れ日", "purchaseDate", "purchase_date"]
-        purchase_date_col = next((c for c in purchase_date_candidates if c in df.columns), None)
-        if not purchase_date_col:
-            raise HTTPException(status_code=400, detail="仕入れ日カラムが見つかりません")
-        
-        # 仕入先カラム（なければ作成）
-        supplier_candidates = ["仕入先", "supplier"]
-        supplier_col = next((c for c in supplier_candidates if c in df.columns), None)
-        if not supplier_col:
-            supplier_col = "仕入先"
-            df[supplier_col] = ""
-        
-        # ルート訪問詳細取得
-        route_db = RouteDatabase()
-        route_summary = route_db.get_route_summary(route_summary_id)
-        if not route_summary:
-            raise HTTPException(status_code=400, detail="指定ルートが見つかりません")
-        
-        store_visits = route_db.get_store_visits_by_route(route_summary_id)
-        if not store_visits:
-            raise HTTPException(status_code=400, detail="指定ルートに店舗訪問詳細がありません")
-        
-        # ルート日付を取得して店舗IN/OUT時間に結合（既存データがHH:MM形式の場合）
-        route_date = route_summary.get('route_date', '')
-        if route_date:
-            for visit in store_visits:
-                in_time = visit.get('store_in_time', '')
-                out_time = visit.get('store_out_time', '')
-                
-                # HH:MM形式（日付なし）の場合、ルート日付を結合
-                if in_time and ':' in in_time and len(in_time.split(' ')) == 1:
-                    # すでに日付が含まれていない場合のみ結合
-                    visit['store_in_time'] = f"{route_date} {in_time}:00" if ':' in in_time else in_time
-                if out_time and ':' in out_time and len(out_time.split(' ')) == 1:
-                    # すでに日付が含まれていない場合のみ結合
-                    visit['store_out_time'] = f"{route_date} {out_time}:00" if ':' in out_time else out_time
-        
-        # 照合処理
-        items = df.to_dict(orient="records")
-        matcher = RouteMatchingService()
-        matched = matcher.match_store_code_by_time_and_profit(
-            purchase_items=items,
-            store_visits=store_visits,
-            time_tolerance_minutes=time_tolerance_minutes
+        return match_stores_from_purchase_data(
+            purchase_data=purchase_data,
+            route_summary_id=route_summary_id,
+            time_tolerance_minutes=time_tolerance_minutes,
+            db_path=get_hirio_db_path_for_api(),
         )
-        
-        # DataFrameへ反映
-        df = df.reset_index(drop=True)
-        matched_rows = 0
-        for idx, res in enumerate(matched):
-            code = res.get("matched_store_code")
-            if code:
-                df.at[idx, supplier_col] = code
-                matched_rows += 1
-        
-        # 結果をJSON化（全データ）
-        # NaN値をNoneに置換してJSONシリアライズ可能にする
-        df = df.fillna('')
-        result_data = df.to_dict(orient="records")
-        
-        # NaN値が残っている場合はNoneに置換
-        for record in result_data:
-            for key, value in record.items():
-                if isinstance(value, float) and math.isnan(value):
-                    record[key] = None
-        
-        return {
-            "status": "success",
-            "stats": {
-                "total_rows": len(df),
-                "matched_rows": matched_rows
-            },
-            "data": result_data  # 全データを返却
-        }
+    except InventoryStoreMatchingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

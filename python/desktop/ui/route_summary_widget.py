@@ -31,6 +31,7 @@ except ImportError:
     WEBENGINE_AVAILABLE = False
 import pandas as pd
 from pathlib import Path
+import re
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import sys
@@ -1919,6 +1920,33 @@ class RouteSummaryWidget(QWidget):
             "修正してから、再度「ルートテンプレ読込」を実行してください。",
         )
 
+    def _parse_route_name_from_template_filename(self, file_path: str) -> str:
+        """route_template_ルート名_YYYYMMDD.xlsx 形式からルート名を抽出。"""
+        stem = Path(file_path).stem
+        m = re.match(r"route_template_(.+)_(\d{8})$", stem, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+        return ""
+
+    def _set_route_name_from_template(self, route_name: str, file_path: str = "") -> None:
+        """テンプレートから読んだルート名を route_data とコンボボックスに反映。"""
+        route_name = (route_name or "").strip()
+        if not route_name and file_path:
+            route_name = self._parse_route_name_from_template_filename(file_path)
+        if not route_name:
+            return
+        if not hasattr(self, "route_data") or not self.route_data:
+            self.route_data = {}
+        self.route_data["route_name"] = route_name
+        self.route_data["route_name_display"] = route_name
+        self.update_route_codes()
+        idx = self.route_code_combo.findText(route_name)
+        if idx >= 0:
+            self.route_code_combo.setCurrentIndex(idx)
+        else:
+            self.route_code_combo.addItem(route_name)
+            self.route_code_combo.setCurrentText(route_name)
+
     def _load_excel_template(self, file_path: str):
         """Excelテンプレートファイルを読み込む"""
         try:
@@ -1951,15 +1979,19 @@ class RouteSummaryWidget(QWidget):
                     else:
                         route_date = str(date_value)
             
-            # 2行目: ルート
+            # 2行目: ルート（表示名＝所属ルート名）
             route_label = visit_sheet.cell(row=2, column=1).value
+            route_name_from_file = ""
             if route_label and ('ルート' in str(route_label) or 'route' in str(route_label).lower()):
                 route_value = visit_sheet.cell(row=2, column=2).value
                 if route_value:
-                    route_code = str(route_value).strip()
+                    route_name_from_file = str(route_value).strip()
             
             # ルート情報を設定
+            if not hasattr(self, 'route_data') or not self.route_data:
+                self.route_data = {}
             if route_date:
+                self.route_data['route_date'] = route_date
                 try:
                     if isinstance(route_date, str):
                         route_date_obj = datetime.strptime(route_date, '%Y-%m-%d').date()
@@ -1969,16 +2001,7 @@ class RouteSummaryWidget(QWidget):
                 except Exception:
                     pass
             
-            if route_code:
-                # ルートコードをコンボボックスに設定
-                self.update_route_codes()
-                idx = self.route_code_combo.findText(route_code)
-                if idx >= 0:
-                    self.route_code_combo.setCurrentIndex(idx)
-                else:
-                    # 見つからない場合は追加
-                    self.route_code_combo.addItem(route_code)
-                    self.route_code_combo.setCurrentText(route_code)
+            self._set_route_name_from_template(route_name_from_file, file_path)
             
             # 店舗訪問詳細を読み込み（3行目がヘッダー、4行目以降がデータ）
             visits = []
@@ -2131,7 +2154,8 @@ class RouteSummaryWidget(QWidget):
                         value = parts[1].strip() if len(parts) > 1 else ''
                         if key == 'ルート日付':
                             route_data['route_date'] = value
-                        elif key == 'ルートコード':
+                        elif key in ('ルートコード', 'ルート名', 'ルート'):
+                            route_data['route_name'] = value
                             route_data['route_code'] = value
                         elif key == '出発時間':
                             route_data['departure_time'] = value
@@ -2172,19 +2196,15 @@ class RouteSummaryWidget(QWidget):
                 except Exception:
                     pass
             
-            if 'route_code' in route_data:
-                self.update_route_codes()
-                route_code = route_data['route_code']
-                idx = self.route_code_combo.findText(route_code)
-                if idx >= 0:
-                    self.route_code_combo.setCurrentIndex(idx)
-                else:
-                    self.route_code_combo.addItem(route_code)
-                    self.route_code_combo.setCurrentText(route_code)
-            
-            # 出発時刻・帰宅時刻・往路高速代・復路高速代をroute_dataに保存
             if not hasattr(self, 'route_data') or not self.route_data:
                 self.route_data = {}
+
+            route_name_from_file = (
+                str(route_data.get('route_name') or route_data.get('route_code') or '').strip()
+            )
+            self._set_route_name_from_template(route_name_from_file, file_path)
+            if route_date_str:
+                self.route_data['route_date'] = route_date_str
             
             if 'departure_time' in route_data:
                 dep_time = route_data['departure_time']
@@ -2489,13 +2509,21 @@ class RouteSummaryWidget(QWidget):
             clean_data = inventory_data.fillna('')
             purchase_data = clean_data.to_dict(orient="records")
             
-            # API呼び出し
+            # 照合処理（デスクトップと同一 DB を直接参照）
             QMessageBox.information(self, "処理中", "照合処理を実行しています...")
-            result = self.api_client.inventory_match_stores_from_data(
-                purchase_data=purchase_data,
-                route_summary_id=self.current_route_id,
-                time_tolerance_minutes=tolerance
+            from services.inventory_store_matching_runner import (
+                InventoryStoreMatchingError,
+                match_stores_from_purchase_data_local,
             )
+            try:
+                result = match_stores_from_purchase_data_local(
+                    purchase_data=purchase_data,
+                    route_summary_id=self.current_route_id,
+                    time_tolerance_minutes=tolerance,
+                )
+            except InventoryStoreMatchingError as e:
+                QMessageBox.warning(self, "エラー", str(e))
+                return
             
             # 結果を仕入管理ウィジェットに反映
             if result.get('status') == 'success':
@@ -3255,10 +3283,21 @@ class RouteSummaryWidget(QWidget):
         elif ' ' not in str(return_time) and route_date:
             # HH:MM形式の場合はルート日付と結合
             return_time = f"{route_date} {return_time}:00"
+
+        route_name = ""
+        if hasattr(self, 'route_data') and self.route_data:
+            route_name = (
+                str(self.route_data.get('route_name') or '')
+                or str(self.route_data.get('route_name_display') or '')
+            ).strip()
+        if not route_name:
+            route_name = self.route_code_combo.currentText().strip()
         
         return {
             'route_date': route_date,
             'route_code': self.get_selected_route_code(),
+            'route_name': route_name,
+            'route_name_display': route_name,
             'departure_time': departure_time,
             'return_time': return_time,
             'toll_fee_outbound': toll_fee_outbound if toll_fee_outbound else 0,
