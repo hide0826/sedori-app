@@ -50,6 +50,11 @@ try:
         RECEIPT_PRICE_DIFFERENCE_TOLERANCE,
         is_acceptable_price_difference,
     )
+    from services.receipt_sku_linking import (
+        build_manual_candidate_entries,
+        collect_link_skus_for_receipt,
+        sort_receipts_for_bulk_matching,
+    )
 except Exception:
     # 明示的パス指定のフォールバック
     from desktop.services.receipt_service import ReceiptService
@@ -59,6 +64,11 @@ except Exception:
         RECEIPT_MUTATES_PURCHASE_DB_PRICE,
         RECEIPT_PRICE_DIFFERENCE_TOLERANCE,
         is_acceptable_price_difference,
+    )
+    from desktop.services.receipt_sku_linking import (
+        build_manual_candidate_entries,
+        collect_link_skus_for_receipt,
+        sort_receipts_for_bulk_matching,
     )
 from database.receipt_db import ReceiptDatabase
 from database.inventory_db import InventoryDatabase
@@ -1029,8 +1039,44 @@ class ReceiptWidget(QWidget):
         self._workflow_post_step = 8
         self._sync_post_rename_action_buttons()
 
-    def _sync_post_rename_action_buttons(self) -> None:
-        """⑦GCS / ⑧確定ボタンの有効状態とツールチップを同期。"""
+    def _is_batch_ocr_busy(self) -> bool:
+        """全件OCRの一括処理が実行中か"""
+        return bool(getattr(self, "batch_running", False))
+
+    def _sync_action_buttons_state(self) -> None:
+        """ワークフローボタン群の有効/無効を同期（全件OCR中ロック + リネーム/GCSゲート）"""
+        ocr_busy = self._is_batch_ocr_busy()
+        ocr_busy_tip = "全件OCR実行中は使用できません。完了するまでお待ちください。"
+
+        locked_during_ocr = (
+            "folder_btn",
+            "bulk_match_btn",
+            "bulk_rename_btn",
+            "verify_btn",
+            "delete_all_btn",
+            "default_folder_btn",
+            "save_receipt_snapshot_btn",
+            "load_receipt_snapshot_btn",
+            "process_btn",
+        )
+        for attr in locked_during_ocr:
+            btn = getattr(self, attr, None)
+            if btn is None:
+                continue
+            btn.setEnabled(not ocr_busy)
+            if ocr_busy:
+                btn.setToolTip(ocr_busy_tip)
+
+        if hasattr(self, "batch_btn") and self.batch_btn:
+            self.batch_btn.setEnabled(not ocr_busy)
+            if ocr_busy:
+                self.batch_btn.setToolTip("全件OCRを実行中です…")
+
+        for table_attr in ("receipt_table", "warranty_table"):
+            table = getattr(self, table_attr, None)
+            if table is not None:
+                table.setEnabled(not ocr_busy)
+
         rename_done = bool(getattr(self, "_bulk_rename_completed", False))
         gcs_done = bool(getattr(self, "_gcs_upload_completed", False))
         rename_gate_tip = (
@@ -1042,23 +1088,37 @@ class ReceiptWidget(QWidget):
             "GCS URL が仕入DBに反映される前に確定すると、レシート画像リンクが正しく保存されません。"
         )
         if hasattr(self, "gcs_upload_btn") and self.gcs_upload_btn:
-            self.gcs_upload_btn.setEnabled(rename_done)
-            self.gcs_upload_btn.setToolTip(
-                "レシート一覧の全件をGCSにアップロードします"
-                if rename_done
-                else rename_gate_tip
-            )
+            self.gcs_upload_btn.setEnabled(rename_done and not ocr_busy)
+            if ocr_busy:
+                self.gcs_upload_btn.setToolTip(ocr_busy_tip)
+            else:
+                self.gcs_upload_btn.setToolTip(
+                    "レシート一覧の全件をGCSにアップロードします"
+                    if rename_done
+                    else rename_gate_tip
+                )
         if hasattr(self, "confirm_btn") and self.confirm_btn:
             in_progress = bool(getattr(self, "_confirm_in_progress", False))
-            confirm_enabled = rename_done and gcs_done and not in_progress
+            confirm_enabled = rename_done and gcs_done and not in_progress and not ocr_busy
             self.confirm_btn.setEnabled(confirm_enabled)
-            if rename_done and gcs_done:
-                confirm_tip = "レシートと仕入DBの紐付けを確定します"
+            if ocr_busy:
+                self.confirm_btn.setToolTip(ocr_busy_tip)
+            elif rename_done and gcs_done:
+                self.confirm_btn.setToolTip("レシートと仕入DBの紐付けを確定します")
             elif rename_done:
-                confirm_tip = gcs_gate_tip
+                self.confirm_btn.setToolTip(gcs_gate_tip)
             else:
-                confirm_tip = rename_gate_tip
-            self.confirm_btn.setToolTip(confirm_tip)
+                self.confirm_btn.setToolTip(rename_gate_tip)
+
+        if not ocr_busy and hasattr(self, "delete_row_btn") and self.delete_row_btn:
+            has_selection = False
+            if hasattr(self, "receipt_table") and self.receipt_table:
+                has_selection = len(self.receipt_table.selectedItems()) > 0
+            self.delete_row_btn.setEnabled(has_selection)
+
+    def _sync_post_rename_action_buttons(self) -> None:
+        """⑦GCS / ⑧確定ボタンの有効状態とツールチップを同期。"""
+        self._sync_action_buttons_state()
 
     def _require_bulk_rename_before_post_actions(self, action_label: str) -> bool:
         """GCS / 確定の前に一括リネーム済みか確認。未完了なら False。"""
@@ -1112,6 +1172,14 @@ class ReceiptWidget(QWidget):
 
     def _run_action_with_status(self, action_name: str, action_func):
         """押したボタン名をワークフロー表示に反映してから処理を実行"""
+        if action_name != "全件OCR" and self._is_batch_ocr_busy():
+            QMessageBox.information(
+                self,
+                action_name,
+                "「全件OCR」実行中は他の操作を行えません。\n"
+                "OCRが完了するまでお待ちください。",
+            )
+            return
         step = _RECEIPT_ACTION_TO_PIPELINE_STEP.get(action_name)
         self._workflow_post_step = None
         try:
@@ -1128,9 +1196,10 @@ class ReceiptWidget(QWidget):
             if post_step is not None:
                 self._workflow_active_step = post_step
                 self._workflow_post_step = None
-            elif step is not None:
+            elif step is not None and not self._is_batch_ocr_busy():
                 self._workflow_active_step = step
-            self._update_workflow_status("ワークフロー: 待機", emphasize=False)
+            if not self._is_batch_ocr_busy():
+                self._update_workflow_status("ワークフロー: 待機", emphasize=False)
     
     def setup_receipt_list_simple(self):
         """レシート一覧セクション（シンプル版）"""
@@ -1361,6 +1430,11 @@ class ReceiptWidget(QWidget):
     
     def set_default_folder(self):
         """デフォルトフォルダを設定"""
+        if self._is_batch_ocr_busy():
+            QMessageBox.information(
+                self, "デフォルトフォルダ設定", "全件OCR実行中は設定を変更できません。"
+            )
+            return
         # 現在のデフォルトフォルダまたは現在のフォルダを初期値として使用
         initial_dir = None
         if self.default_folder and self.default_folder.exists():
@@ -1455,6 +1529,11 @@ class ReceiptWidget(QWidget):
     
     def process_selected_file(self):
         """OCRキューから最初のファイルを処理（フォルダ選択後）"""
+        if self._is_batch_ocr_busy():
+            QMessageBox.information(
+                self, "OCR処理", "全件OCR実行中は単体OCRを開始できません。"
+            )
+            return
         if not self.ocr_queue:
             QMessageBox.information(self, "情報", "処理する画像がありません。先に「フォルダ選択」を行ってください。")
             return
@@ -1474,12 +1553,15 @@ class ReceiptWidget(QWidget):
         self.batch_running = True
         self.batch_total_count = len(self.ocr_queue)
         self.batch_processed_count = 0
+        self._sync_action_buttons_state()
+        self._update_workflow_status("ワークフロー: 全件OCR実行中", emphasize=True)
         self._process_next_in_queue()
 
     def _process_next_in_queue(self):
         """OCRキューから次の1枚を取り出して処理"""
         if not self.ocr_queue:
             self.batch_running = False
+            self._sync_action_buttons_state()
             if hasattr(self, "folder_label"):
                 self.folder_label.setText(f"{str(self.current_folder)} - 一括OCR完了")
             # 全件OCR完了後は次の工程③（一括マッチング）へ
@@ -3160,6 +3242,142 @@ class ReceiptWidget(QWidget):
 
         self.on_receipt_selection_changed()
 
+    def _find_receipt_table_row(self, receipt_id: int) -> Optional[int]:
+        """レシート一覧テーブルで receipt_id に対応する行番号を返す。"""
+        if not hasattr(self, "receipt_table") or receipt_id is None:
+            return None
+        id_str = str(receipt_id)
+        for row in range(self.receipt_table.rowCount()):
+            item = self.receipt_table.item(row, 0)
+            if item and item.text() == id_str:
+                return row
+        return None
+
+    def _apply_receipt_difference_cell(self, row: int, difference: Any) -> None:
+        """差額列（8列目）だけを更新する。"""
+        diff_val = None
+        if difference is not None:
+            try:
+                diff_val = int(round(float(difference)))
+            except (ValueError, TypeError):
+                diff_val = None
+        if diff_val is not None:
+            if is_acceptable_price_difference(diff_val):
+                difference_item = QTableWidgetItem("OK")
+                difference_item.setForeground(QColor("#4CAF50"))
+            else:
+                difference_item = QTableWidgetItem(f"¥{diff_val:,}")
+                if diff_val > 0:
+                    difference_item.setForeground(QColor("#FF6B6B"))
+                else:
+                    difference_item.setForeground(QColor("#4CAF50"))
+            self.receipt_table.setItem(row, 8, difference_item)
+        else:
+            self.receipt_table.setItem(row, 8, QTableWidgetItem(""))
+
+    def _patch_receipt_table_row(self, receipt_id: int, updates: Dict[str, Any]) -> bool:
+        """レシート一覧の該当行だけを更新（全件 refresh を避ける）。"""
+        row = self._find_receipt_table_row(receipt_id)
+        if row is None:
+            return False
+        existing = self.receipt_db.get_receipt(receipt_id) or {}
+        merged = {**existing, **updates}
+        self.receipt_table.blockSignals(True)
+        try:
+            if "purchase_date" in updates:
+                self.receipt_table.setItem(
+                    row, 4, QTableWidgetItem(str(merged.get("purchase_date") or ""))
+                )
+            if "store_name_raw" in updates or "store_code" in updates:
+                store_code = merged.get("store_code") or ""
+                store_label = self._format_store_code_label(
+                    store_code, merged.get("store_name_raw") or ""
+                )
+                self.receipt_table.setItem(
+                    row,
+                    5,
+                    QTableWidgetItem(store_label or (merged.get("store_name_raw") or "")),
+                )
+                store_item = QTableWidgetItem(store_label)
+                store_item.setData(Qt.UserRole, store_code)
+                self.receipt_table.setItem(row, 9, store_item)
+            if "phone_number" in updates:
+                self.receipt_table.setItem(
+                    row, 6, QTableWidgetItem(str(merged.get("phone_number") or ""))
+                )
+            if "total_amount" in updates:
+                self.receipt_table.setItem(
+                    row, 7, QTableWidgetItem(str(merged.get("total_amount") or ""))
+                )
+            if "price_difference" in updates:
+                self._apply_receipt_difference_cell(row, merged.get("price_difference"))
+                diff = merged.get("price_difference")
+                try:
+                    diff_val = int(round(float(diff))) if diff is not None else None
+                except (ValueError, TypeError):
+                    diff_val = None
+                if diff_val is not None and is_acceptable_price_difference(diff_val):
+                    store_code = merged.get("store_code") or ""
+                    store_label = self._format_store_code_label(
+                        store_code, merged.get("store_name_raw") or ""
+                    )
+                    if store_label:
+                        self.receipt_table.setItem(row, 5, QTableWidgetItem(store_label))
+            if "registration_number" in updates:
+                self.receipt_table.setItem(
+                    row, 10, QTableWidgetItem(str(merged.get("registration_number") or ""))
+                )
+            if "linked_skus" in updates:
+                linked_skus_text = merged.get("linked_skus") or ""
+                linked_skus = (
+                    [s.strip() for s in linked_skus_text.split(",") if s.strip()]
+                    if linked_skus_text
+                    else []
+                )
+                sku_display = ", ".join(linked_skus) if linked_skus else ""
+                self.receipt_table.setItem(row, 11, QTableWidgetItem(sku_display))
+        finally:
+            self.receipt_table.blockSignals(False)
+        return True
+
+    def _build_purchase_sku_index(
+        self, purchase_records: List[Dict[str, Any]]
+    ) -> Dict[str, Dict[str, Any]]:
+        """SKU → 仕入レコードの辞書（O(1) 参照用）。"""
+        index: Dict[str, Dict[str, Any]] = {}
+        for record in purchase_records or []:
+            sku = str(record.get("SKU") or record.get("sku") or "").strip()
+            if sku:
+                index[sku] = record
+        return index
+
+    def _defer_after_receipt_manual_save(
+        self,
+        *,
+        affected_skus: List[str],
+        save_snapshot: bool,
+        purchase_records: List[Dict[str, Any]],
+    ) -> None:
+        """保存後の重い処理（仕入DBテーブル再描画・スナップショット）を非同期で実行。"""
+        def _run() -> None:
+            pw = self.product_widget
+            if not pw:
+                return
+            records = getattr(pw, "purchase_all_records", None) or purchase_records
+            try:
+                pw.sync_purchase_master_from_records()
+                if affected_skus and getattr(pw, "_purchase_table_full_master_built", False):
+                    pw.refresh_purchase_table_if_built()
+                if save_snapshot and hasattr(pw, "purchase_db"):
+                    snapshot_name = (
+                        f"レシート編集_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    )
+                    pw.purchase_db.save_snapshot(snapshot_name, records)
+            except Exception as exc:
+                logger.warning("レシート手動保存の遅延同期に失敗: %s", exc)
+
+        QTimer.singleShot(0, _run)
+
     def on_receipt_selection_changed(self):
         """レシート表の選択変更を監視"""
         if not hasattr(self, 'delete_row_btn'):
@@ -3596,6 +3814,9 @@ class ReceiptWidget(QWidget):
     
     def delete_all_receipts(self):
         """レシート情報をクリア"""
+        if self._is_batch_ocr_busy():
+            QMessageBox.information(self, "クリア", "全件OCR実行中はクリアできません。")
+            return
         if QMessageBox.warning(
             self,
             "確認",
@@ -3612,6 +3833,43 @@ class ReceiptWidget(QWidget):
         QMessageBox.information(self, "クリア完了", f"{deleted} 件のレシートをクリアしました。")
 
     # ===== 一括処理 =====
+    def _populate_candidate_sku_list(
+        self,
+        candidate_skus_list: QListWidget,
+        receipt: Dict[str, Any],
+        existing_skus: set,
+        *,
+        purchase_date_str: Optional[str] = None,
+        purchase_time_str: Optional[str] = None,
+        store_code: Optional[str] = None,
+    ) -> None:
+        """手動調整: 仕入DB候補SKUを店舗コード一致→同日の順でリストに表示"""
+        candidate_skus_list.clear()
+        if not self.product_widget:
+            return
+        purchase_records = getattr(self.product_widget, "purchase_all_records", [])
+        if not purchase_records:
+            return
+        receipt_ctx = dict(receipt)
+        if purchase_date_str:
+            receipt_ctx["purchase_date"] = purchase_date_str
+        if purchase_time_str is not None:
+            receipt_ctx["purchase_time"] = purchase_time_str
+        if store_code is not None:
+            receipt_ctx["store_code"] = store_code
+        entries = build_manual_candidate_entries(
+            receipt_ctx,
+            purchase_records,
+            set(existing_skus),
+            purchase_date_str=purchase_date_str,
+            store_code=store_code,
+        )
+        for entry in entries:
+            candidate_skus_list.addItem(entry["display_text"])
+            list_item = candidate_skus_list.item(candidate_skus_list.count() - 1)
+            if list_item:
+                list_item.setData(Qt.UserRole, entry["sku"])
+
     def bulk_match_receipts(self):
         """一覧に表示されている全レシートに対してマッチング候補を一括適用"""
         if not self.product_widget:
@@ -3623,11 +3881,12 @@ class ReceiptWidget(QWidget):
             QMessageBox.warning(self, "警告", "仕入DBにデータがありません。")
             return
         # 現在のレシート一覧・保証書一覧に対応するレシートのみ取得
-        receipts = self._get_current_receipts_from_tables()
+        receipts = sort_receipts_for_bulk_matching(self._get_current_receipts_from_tables())
         print(f"[一括マッチング] 取得したレシート数（現在の一覧）: {len(receipts)}")
         updated = 0
         skipped_no_candidates = 0
         skipped_no_updates = 0
+        used_skus: set[str] = set()
         for receipt in receipts:
             try:
                 candidates = self.matching_service.find_match_candidates(
@@ -3688,153 +3947,22 @@ class ReceiptWidget(QWidget):
                     except Exception:
                         pass
                 
-                # 紐付き候補SKUを取得
-                # 1. 画像ファイル名で紐付けられたSKU（既に画像ファイル名がある場合）
-                file_path = receipt.get('file_path') or ""
-                image_file_name = Path(file_path).stem if file_path else ""  # 拡張子なしのファイル名
-                candidate_skus = []
-                if image_file_name and purchase_records:
-                    for record in purchase_records:
-                        record_receipt_id = record.get('レシートID') or record.get('receipt_id', '')
-                        if record_receipt_id == image_file_name:
-                            sku = record.get('SKU') or record.get('sku', '')
-                            if sku and sku.strip() and sku not in candidate_skus:
-                                candidate_skus.append(sku.strip())
-                
-                # 2. 日付と店舗コードで紐付けられたSKU（レシートIDがない場合のフォールバック）
-                # レシート時間より前の時間に登録されたSKUを取得
-                if not candidate_skus and purchase_records:
-                    purchase_date = receipt.get('purchase_date') or ""
-                    purchase_time = receipt.get('purchase_time') or ""  # HH:MM形式
-                    store_code_for_match = matched_store_code or receipt.get('store_code') or ""
-                    # 店舗コードのみを取得（表示ラベルから抽出）
-                    if store_code_for_match and " " in store_code_for_match:
-                        store_code_for_match = store_code_for_match.split(" ")[0]
-                    
-                    if purchase_date and store_code_for_match:
-                        # レシートの日時をdatetimeオブジェクトに変換（比較用）
-                        receipt_datetime = None
-                        if purchase_time:
-                            try:
-                                from datetime import datetime
-                                # 日付と時刻を結合してdatetimeオブジェクトを作成
-                                date_str = purchase_date.replace("/", "-")
-                                datetime_str = f"{date_str} {purchase_time}"
-                                receipt_datetime = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M")
-                            except Exception:
-                                pass
-                        
-                        # レシートの日付を正規化（yyyy-MM-dd形式に統一）
-                        try:
-                            from datetime import datetime
-                            # レシート日付をdatetimeオブジェクトに変換（日付のみ）
-                            receipt_date_obj = None
-                            if "/" in purchase_date:
-                                receipt_date_obj = datetime.strptime(purchase_date, "%Y/%m/%d").date()
-                            elif "-" in purchase_date:
-                                receipt_date_obj = datetime.strptime(purchase_date[:10], "%Y-%m-%d").date()
-                        except Exception:
-                            receipt_date_obj = None
-                        
-                        for record in purchase_records:
-                            record_date = record.get('仕入れ日') or record.get('purchase_date', '')
-                            if not record_date:
-                                continue
-                            
-                            # 仕入DBの日付を正規化して比較
-                            try:
-                                from datetime import datetime
-                                record_date_str = str(record_date).strip()
-                                
-                                # 時刻が含まれている場合は日付部分のみを取得
-                                if " " in record_date_str:
-                                    record_date_str = record_date_str.split(" ")[0]
-                                if "T" in record_date_str:
-                                    record_date_str = record_date_str.split("T")[0]
-                                
-                                # 日付をdateオブジェクトに変換
-                                record_date_obj = None
-                                if "/" in record_date_str:
-                                    record_date_obj = datetime.strptime(record_date_str[:10].replace("/", "-"), "%Y-%m-%d").date()
-                                elif "-" in record_date_str:
-                                    record_date_obj = datetime.strptime(record_date_str[:10], "%Y-%m-%d").date()
-                                
-                                # 日付が一致しない場合はスキップ
-                                if receipt_date_obj and record_date_obj and receipt_date_obj != record_date_obj:
-                                    continue
-                                
-                                # 日付が一致するか、または日付比較ができない場合は文字列比較
-                                date_matches = False
-                                if receipt_date_obj and record_date_obj:
-                                    date_matches = (receipt_date_obj == record_date_obj)
-                                else:
-                                    # フォールバック: 文字列比較
-                                    normalized_receipt_date = purchase_date.replace("-", "/")
-                                    normalized_record_date = str(record_date).replace("-", "/")
-                                    date_matches = normalized_receipt_date[:10] in normalized_record_date[:10]
-                                
-                                # 仕入DBでは「仕入先」カラムに店舗コードが格納されている
-                                record_store_code = record.get('仕入先') or record.get('店舗コード') or record.get('store_code', '')
-                                # 店舗コードのみを取得（表示ラベルから抽出）
-                                if record_store_code and " " in str(record_store_code):
-                                    record_store_code = str(record_store_code).split(" ")[0]
-                                
-                                # 日付と店舗コードが一致する場合
-                                if date_matches and record_store_code == store_code_for_match:
-                                    # レシート時間より前の時間に登録されたSKUのみを取得
-                                    sku = record.get('SKU') or record.get('sku', '')
-                                    if not sku or not sku.strip():
-                                        continue
-                                    sku = sku.strip()
-                                    
-                                    # 時刻比較が必要な場合のみ実行
-                                    should_add = True
-                                    if receipt_datetime:
-                                        # created_atが存在する場合、時刻比較を行う
-                                        record_created_at = record.get('created_at') or record.get('登録日時') or ""
-                                        if record_created_at:
-                                            try:
-                                                from datetime import datetime
-                                                # created_atをdatetimeオブジェクトに変換
-                                                record_dt = None
-                                                if isinstance(record_created_at, str):
-                                                    # 文字列の場合、複数の形式に対応
-                                                    record_created_at_clean = str(record_created_at).strip()
-                                                    if 'T' in record_created_at_clean:
-                                                        # ISO形式: "2024-12-05T10:30:00" または "2024-12-05T10:30:00Z"
-                                                        if record_created_at_clean.endswith('Z'):
-                                                            record_created_at_clean = record_created_at_clean[:-1]
-                                                        if len(record_created_at_clean) >= 19:
-                                                            record_dt = datetime.strptime(record_created_at_clean[:19], "%Y-%m-%dT%H:%M:%S")
-                                                    elif ' ' in record_created_at_clean:
-                                                        # "YYYY-MM-DD HH:MM:SS"形式
-                                                        if len(record_created_at_clean) >= 19:
-                                                            record_dt = datetime.strptime(record_created_at_clean[:19], "%Y-%m-%d %H:%M:%S")
-                                                else:
-                                                    # datetimeオブジェクトの場合
-                                                    record_dt = record_created_at
-                                                
-                                                # レシート時間より前の時間に登録されたSKUのみを追加
-                                                if record_dt:
-                                                    should_add = (record_dt < receipt_datetime)
-                                            except Exception as e:
-                                                # 時刻比較に失敗した場合は、日付と店舗コードが一致するSKUを全て追加
-                                                should_add = True
-                                    
-                                    if should_add and sku not in candidate_skus:
-                                        candidate_skus.append(sku)
-                            except Exception:
-                                # 日付比較に失敗した場合はスキップ
-                                continue
-                
-                # 紐付き候補SKUを更新（既存のlinked_skusに追加、重複を避ける）
+                # 紐付き候補SKU（レシート時刻より前・使用済みSKU除外・同一店舗は早いレシートから）
+                file_path = receipt.get("file_path") or receipt.get("original_file_path") or ""
+                image_file_name = Path(file_path).stem if file_path else ""
+                candidate_skus = collect_link_skus_for_receipt(
+                    receipt,
+                    purchase_records,
+                    used_skus,
+                    store_code=matched_store_code or receipt.get("store_code"),
+                    image_file_name=image_file_name,
+                )
+
+                # 紐付き候補SKUを更新
                 if candidate_skus:
-                    existing_skus_text = receipt.get('linked_skus', '') or ''
-                    existing_skus = [s.strip() for s in existing_skus_text.split(',') if s.strip()] if existing_skus_text else []
-                    # 既存のSKUと候補SKUをマージ（重複を避ける）
-                    merged_skus = list(set(existing_skus + candidate_skus))
-                    updates["linked_skus"] = ','.join(merged_skus)
-                    sku_total = self._compute_linked_sku_total(merged_skus, purchase_records)
+                    used_skus.update(candidate_skus)
+                    updates["linked_skus"] = ",".join(candidate_skus)
+                    sku_total = self._compute_linked_sku_total(candidate_skus, purchase_records)
                     receipt_total = receipt.get('total_amount') or 0
                     try:
                         receipt_total = int(receipt_total) if receipt_total else 0
@@ -4579,6 +4707,9 @@ class ReceiptWidget(QWidget):
     
     def reprocess_ocr_for_receipt(self, receipt_id: int, receipt: Dict[str, Any]):
         """選択されたレシートに対してOCR処理を再実行"""
+        if self._is_batch_ocr_busy():
+            QMessageBox.information(self, "OCR処理", "全件OCR実行中は再OCRできません。")
+            return
         image_path = receipt.get('file_path') or receipt.get('original_file_path')
         if not image_path:
             QMessageBox.warning(self, "警告", "画像ファイルパスが見つかりません。")
@@ -5718,142 +5849,27 @@ class ReceiptWidget(QWidget):
         candidate_skus_list.setSelectionMode(QListWidget.MultiSelection)
         sku_layout.addWidget(QLabel("仕入DBの候補SKU:"))
         sku_layout.addWidget(candidate_skus_list)
-        
-        # 時刻情報を取得する関数
-        def get_time_from_record(record):
-            """レコードから時刻情報を取得"""
-            time_str = "時刻不明"
-            purchase_date_str = record.get('仕入れ日') or record.get('purchase_date') or ""
-            if purchase_date_str:
-                try:
-                    from datetime import datetime
-                    purchase_date_str_clean = str(purchase_date_str).strip()
-                    if ' ' in purchase_date_str_clean:
-                        try:
-                            dt = datetime.strptime(purchase_date_str_clean, "%Y/%m/%d %H:%M")
-                            time_str = dt.strftime("%Y/%m/%d %H:%M")
-                        except:
-                            try:
-                                dt = datetime.strptime(purchase_date_str_clean, "%Y-%m-%d %H:%M")
-                                time_str = dt.strftime("%Y/%m/%d %H:%M")
-                            except:
-                                pass
-                except Exception:
-                    pass
-            return time_str
-        
+
         def load_candidate_skus():
-            """候補SKUを読み込む"""
-            candidate_skus_list.clear()
-            if not self.product_widget:
-                return
-            purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
-            if not purchase_records:
-                return
-            
-            file_path = receipt.get('file_path', '')
-            image_file_name = Path(file_path).stem if file_path else ''
+            existing_skus = set()
+            for i in range(linked_skus_list.count()):
+                item = linked_skus_list.item(i)
+                if not item:
+                    continue
+                sku = item.data(Qt.UserRole)
+                if sku:
+                    existing_skus.add(str(sku))
             purchase_date_val = date_edit.date()
-            purchase_date_str = purchase_date_val.toString("yyyy-MM-dd") if purchase_date_val.isValid() else ''
-            store_code_val = store_name_combo.currentData() or ''
-            
-            existing_skus = {linked_skus_list.item(i).data(Qt.UserRole) for i in range(linked_skus_list.count()) if linked_skus_list.item(i)}
-            
-            # 1. 画像ファイル名で紐付けられたSKU（優先）
-            if image_file_name:
-                for record in purchase_records:
-                    record_receipt_id = record.get('レシートID') or record.get('receipt_id', '')
-                    if record_receipt_id == image_file_name:
-                        sku = record.get('SKU') or record.get('sku', '')
-                        if sku and sku.strip() and sku.strip() not in existing_skus:
-                            time_str = get_time_from_record(record)
-                            product_name = record.get('商品名') or record.get('product_name') or record.get('title') or ''
-                            price = record.get('仕入れ価格') or record.get('仕入価格') or record.get('purchase_price') or record.get('cost', 0)
-                            quantity = record.get('仕入れ個数') or record.get('仕入個数') or record.get('quantity') or record.get('数量', 1)
-                            try:
-                                price = float(price) if price else 0
-                                quantity = float(quantity) if quantity else 1
-                            except (ValueError, TypeError):
-                                price = 0
-                                quantity = 1
-                            total_amount = price * quantity
-                            
-                            if product_name:
-                                display_text = f"{sku.strip()} - {product_name} - ¥{int(total_amount):,} - ({time_str})"
-                            else:
-                                display_text = f"{sku.strip()} - ¥{int(total_amount):,} - ({time_str})"
-                            
-                            item = candidate_skus_list.addItem(display_text)
-                            list_item = candidate_skus_list.item(candidate_skus_list.count() - 1)
-                            if list_item:
-                                list_item.setData(Qt.UserRole, sku.strip())
-                            existing_skus.add(sku.strip())
-            
-            # 2. 日付と店舗コードで紐付けられたSKU
-            if purchase_date_str and store_code_val:
-                store_code_clean = str(store_code_val).strip()
-                if " " in store_code_clean:
-                    store_code_clean = store_code_clean.split(" ")[0]
-                
-                try:
-                    from datetime import datetime
-                    receipt_date_obj = datetime.strptime(purchase_date_str, "%Y-%m-%d").date()
-                    
-                    for record in purchase_records:
-                        record_date = record.get('仕入れ日') or record.get('purchase_date', '')
-                        if not record_date:
-                            continue
-                        
-                        try:
-                            record_date_str = str(record_date).strip()
-                            if " " in record_date_str:
-                                record_date_str = record_date_str.split(" ")[0]
-                            if "T" in record_date_str:
-                                record_date_str = record_date_str.split("T")[0]
-                            
-                            record_date_obj = None
-                            if "/" in record_date_str:
-                                record_date_obj = datetime.strptime(record_date_str[:10].replace("/", "-"), "%Y-%m-%d").date()
-                            elif "-" in record_date_str:
-                                record_date_obj = datetime.strptime(record_date_str[:10], "%Y-%m-%d").date()
-                            
-                            if receipt_date_obj and record_date_obj and receipt_date_obj != record_date_obj:
-                                continue
-                            
-                            record_store_code = record.get('仕入先') or record.get('店舗コード') or record.get('store_code', '')
-                            if record_store_code and " " in str(record_store_code):
-                                record_store_code = str(record_store_code).split(" ")[0]
-                            
-                            if record_date_obj == receipt_date_obj and record_store_code == store_code_clean:
-                                sku = record.get('SKU') or record.get('sku', '')
-                                if sku and sku.strip() and sku.strip() not in existing_skus:
-                                    time_str = get_time_from_record(record)
-                                    product_name = record.get('商品名') or record.get('product_name') or record.get('title') or ''
-                                    price = record.get('仕入れ価格') or record.get('仕入価格') or record.get('purchase_price') or record.get('cost', 0)
-                                    quantity = record.get('仕入れ個数') or record.get('仕入個数') or record.get('quantity') or record.get('数量', 1)
-                                    try:
-                                        price = float(price) if price else 0
-                                        quantity = float(quantity) if quantity else 1
-                                    except (ValueError, TypeError):
-                                        price = 0
-                                        quantity = 1
-                                    total_amount = price * quantity
-                                    
-                                    if product_name:
-                                        display_text = f"{sku.strip()} - {product_name} - ¥{int(total_amount):,} - ({time_str})"
-                                    else:
-                                        display_text = f"{sku.strip()} - ¥{int(total_amount):,} - ({time_str})"
-                                    
-                                    item = candidate_skus_list.addItem(display_text)
-                                    list_item = candidate_skus_list.item(candidate_skus_list.count() - 1)
-                                    if list_item:
-                                        list_item.setData(Qt.UserRole, sku.strip())
-                                    existing_skus.add(sku.strip())
-                        except Exception:
-                            continue
-                except Exception:
-                    pass
-        
+            purchase_date_str = purchase_date_val.toString("yyyy-MM-dd") if purchase_date_val.isValid() else None
+            store_code_val = store_name_combo.currentData() or store_name_combo.currentText() or ""
+            self._populate_candidate_sku_list(
+                candidate_skus_list,
+                receipt,
+                existing_skus,
+                purchase_date_str=purchase_date_str,
+                store_code=store_code_val,
+            )
+
         load_candidate_skus()
         
         # 日付や店舗コードが変更されたときに候補SKUを再読み込み
@@ -7148,204 +7164,43 @@ class ReceiptWidget(QWidget):
             
             # 候補SKUを読み込み
             def load_candidate_skus():
-                candidate_skus_list.clear()
-                if not self.product_widget:
-                    return
-                purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
-                if not purchase_records:
-                    return
-                
-                file_path = receipt_data.get('file_path', '') if receipt_data else ''
-                image_file_name = Path(file_path).stem if file_path else ''  # 拡張子なしのファイル名
-                purchase_date = receipt_data.get('purchase_date', '') if receipt_data else ''
-                store_code = receipt_data.get('store_code', '') if receipt_data else ''
-                
-                existing_skus = {linked_skus_list.item(i).text() for i in range(linked_skus_list.count())}
-                
-                # 1. 画像ファイル名で紐付けられたSKU（優先）
-                if image_file_name:
-                    for record in purchase_records:
-                        record_receipt_id = record.get('レシートID') or record.get('receipt_id', '')
-                        if record_receipt_id == image_file_name:
-                            sku = record.get('SKU') or record.get('sku', '')
-                            if sku and sku.strip() and sku not in existing_skus:
-                                # 時刻情報を取得
-                                time_str = get_time_from_record(record)
-                                # 商品名を取得
-                                product_name = record.get('商品名') or record.get('product_name') or record.get('title') or ''
-                                # 金額を取得
-                                price = record.get('仕入れ価格') or record.get('仕入価格') or record.get('purchase_price') or record.get('cost', 0)
-                                quantity = record.get('仕入れ個数') or record.get('仕入個数') or record.get('quantity') or record.get('数量', 1)
-                                try:
-                                    price = float(price) if price else 0
-                                    quantity = float(quantity) if quantity else 1
-                                except (ValueError, TypeError):
-                                    price = 0
-                                    quantity = 1
-                                total_amount = price * quantity
-                                
-                                # 表示テキストを作成（SKUコードを必ず含める）
-                                if product_name:
-                                    display_text = f"{sku.strip()} - {product_name} - ¥{int(total_amount):,} - ({time_str})"
-                                else:
-                                    display_text = f"{sku.strip()} - ¥{int(total_amount):,} - ({time_str})"
-                                
-                                item = candidate_skus_list.addItem(display_text)
-                                # UserRoleにSKUを保存
-                                list_item = candidate_skus_list.item(candidate_skus_list.count() - 1)
-                                if list_item:
-                                    list_item.setData(Qt.UserRole, sku.strip())
-                                existing_skus.add(sku.strip())
-                
-                # 2. 日付と店舗コードで紐付けられたSKU（画像ファイル名がない場合のフォールバック）
-                # レシート時間より前の時間に登録されたSKUを取得
-                if purchase_date and store_code and (not image_file_name or candidate_skus_list.count() == 0):
-                    # 店舗コードのみを取得（表示ラベルから抽出）
-                    store_code_clean = str(store_code).strip()
-                    if " " in store_code_clean:
-                        store_code_clean = store_code_clean.split(" ")[0]
-                    
-                    # レシートの日時をdatetimeオブジェクトに変換（比較用）
-                    purchase_time = receipt_data.get('purchase_time', '') if receipt_data else ''
-                    receipt_datetime = None
-                    if purchase_time:
-                        try:
-                            from datetime import datetime
-                            # 日付と時刻を結合してdatetimeオブジェクトを作成
-                            date_str = purchase_date.replace("/", "-")
-                            datetime_str = f"{date_str} {purchase_time}"
-                            receipt_datetime = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M")
-                        except Exception:
-                            pass
-                    
-                    # レシートの日付を正規化（yyyy-MM-dd形式に統一）
-                    try:
-                        from datetime import datetime
-                        # レシート日付をdatetimeオブジェクトに変換（日付のみ）
-                        receipt_date_obj = None
-                        if "/" in purchase_date:
-                            receipt_date_obj = datetime.strptime(purchase_date, "%Y/%m/%d").date()
-                        elif "-" in purchase_date:
-                            receipt_date_obj = datetime.strptime(purchase_date[:10], "%Y-%m-%d").date()
-                    except Exception:
-                        receipt_date_obj = None
-                    
-                    for record in purchase_records:
-                        record_date = record.get('仕入れ日') or record.get('purchase_date', '')
-                        if not record_date:
-                            continue
-                        
-                        # 仕入DBの日付を正規化して比較
-                        try:
-                            from datetime import datetime
-                            record_date_str = str(record_date).strip()
-                            # 時刻が含まれている場合は日付部分のみを取得
-                            if " " in record_date_str:
-                                record_date_str = record_date_str.split(" ")[0]
-                            if "T" in record_date_str:
-                                record_date_str = record_date_str.split("T")[0]
-                            
-                            # 日付をdateオブジェクトに変換
-                            record_date_obj = None
-                            if "/" in record_date_str:
-                                record_date_obj = datetime.strptime(record_date_str[:10].replace("/", "-"), "%Y-%m-%d").date()
-                            elif "-" in record_date_str:
-                                record_date_obj = datetime.strptime(record_date_str[:10], "%Y-%m-%d").date()
-                            
-                            # 日付が一致しない場合はスキップ
-                            if receipt_date_obj and record_date_obj and receipt_date_obj != record_date_obj:
-                                continue
-                            
-                            # 日付が一致するか、または日付比較ができない場合は文字列比較
-                            date_matches = False
-                            if receipt_date_obj and record_date_obj:
-                                date_matches = (receipt_date_obj == record_date_obj)
-                            else:
-                                # フォールバック: 文字列比較
-                                normalized_receipt_date = purchase_date.replace("-", "/")
-                                normalized_record_date = str(record_date).replace("-", "/")
-                                date_matches = normalized_receipt_date[:10] in normalized_record_date[:10]
-                            
-                            # 仕入DBでは「仕入先」カラムに店舗コードが格納されている
-                            record_store_code = record.get('仕入先') or record.get('店舗コード') or record.get('store_code', '')
-                            # 店舗コードのみを取得（表示ラベルから抽出）
-                            if record_store_code and " " in str(record_store_code):
-                                record_store_code = str(record_store_code).split(" ")[0]
-                            
-                            # 日付と店舗コードが一致する場合
-                            if date_matches and record_store_code == store_code_clean:
-                                # レシート時間より前の時間に登録されたSKUのみを取得
-                                sku = record.get('SKU') or record.get('sku', '')
-                                if not sku or not sku.strip():
-                                    continue
-                                sku = sku.strip()
-                                
-                                # 時刻比較が必要な場合のみ実行
-                                should_add = True
-                                if receipt_datetime:
-                                    # created_atが存在する場合、時刻比較を行う
-                                    record_created_at = record.get('created_at') or record.get('登録日時') or ""
-                                    if record_created_at:
-                                        try:
-                                            from datetime import datetime
-                                            # created_atをdatetimeオブジェクトに変換
-                                            record_dt = None
-                                            if isinstance(record_created_at, str):
-                                                # 文字列の場合、複数の形式に対応
-                                                record_created_at_clean = str(record_created_at).strip()
-                                                if 'T' in record_created_at_clean:
-                                                    # ISO形式: "2024-12-05T10:30:00" または "2024-12-05T10:30:00Z"
-                                                    if record_created_at_clean.endswith('Z'):
-                                                        record_created_at_clean = record_created_at_clean[:-1]
-                                                    if len(record_created_at_clean) >= 19:
-                                                        record_dt = datetime.strptime(record_created_at_clean[:19], "%Y-%m-%dT%H:%M:%S")
-                                                elif ' ' in record_created_at_clean:
-                                                    # "YYYY-MM-DD HH:MM:SS"形式
-                                                    if len(record_created_at_clean) >= 19:
-                                                        record_dt = datetime.strptime(record_created_at_clean[:19], "%Y-%m-%d %H:%M:%S")
-                                            else:
-                                                # datetimeオブジェクトの場合
-                                                record_dt = record_created_at
-                                            
-                                            # レシート時間より前の時間に登録されたSKUのみを追加
-                                            if record_dt:
-                                                should_add = (record_dt < receipt_datetime)
-                                        except Exception as e:
-                                            # 時刻比較に失敗した場合は、日付と店舗コードが一致するSKUを全て追加
-                                            should_add = True
-                                
-                                if should_add and sku not in existing_skus:
-                                    # 時刻情報を取得
-                                    time_str = get_time_from_record(record)
-                                    # 商品名を取得
-                                    product_name = record.get('商品名') or record.get('product_name') or record.get('title') or ''
-                                    # 金額を取得
-                                    price = record.get('仕入れ価格') or record.get('仕入価格') or record.get('purchase_price') or record.get('cost', 0)
-                                    quantity = record.get('仕入れ個数') or record.get('仕入個数') or record.get('quantity') or record.get('数量', 1)
-                                    try:
-                                        price = float(price) if price else 0
-                                        quantity = float(quantity) if quantity else 1
-                                    except (ValueError, TypeError):
-                                        price = 0
-                                        quantity = 1
-                                    total_amount = price * quantity
-                                    
-                                    # 表示テキストを作成（SKUコードを必ず含める）
-                                    if product_name:
-                                        display_text = f"{sku} - {product_name} - ¥{int(total_amount):,} - ({time_str})"
-                                    else:
-                                        display_text = f"{sku} - ¥{int(total_amount):,} - ({time_str})"
-                                    
-                                    item = candidate_skus_list.addItem(display_text)
-                                    # UserRoleにSKUを保存
-                                    list_item = candidate_skus_list.item(candidate_skus_list.count() - 1)
-                                    if list_item:
-                                        list_item.setData(Qt.UserRole, sku)
-                                    existing_skus.add(sku)
-                        except Exception:
-                            # 日付比較に失敗した場合はスキップ
-                            continue
-            
+                existing_skus: set[str] = set()
+                for i in range(linked_skus_list.count()):
+                    item = linked_skus_list.item(i)
+                    if not item:
+                        continue
+                    sku = item.data(Qt.UserRole)
+                    if sku:
+                        existing_skus.add(str(sku))
+                    else:
+                        text = item.text()
+                        if " - " in text:
+                            existing_skus.add(text.split(" - ")[0].strip())
+                        elif text.strip():
+                            existing_skus.add(text.strip())
+
+                receipt_ctx = dict(receipt_data or {})
+                purchase_date_str = receipt_ctx.get("purchase_date")
+                purchase_time_str = receipt_ctx.get("purchase_time") or ""
+                store_code_val = receipt_ctx.get("store_code") or ""
+                try:
+                    date_val = date_edit.date()
+                    if date_val.isValid():
+                        purchase_date_str = date_val.toString("yyyy-MM-dd")
+                    purchase_time_str = time_edit.text().strip()
+                    store_code_val = store_code_display.text().strip()
+                except (NameError, AttributeError):
+                    pass
+
+                self._populate_candidate_sku_list(
+                    candidate_skus_list,
+                    receipt_ctx,
+                    existing_skus,
+                    purchase_date_str=purchase_date_str,
+                    purchase_time_str=purchase_time_str,
+                    store_code=store_code_val,
+                )
+
             load_candidate_skus()
             
             # レシートIDが変更されたときに候補SKUを再読み込み
@@ -7766,200 +7621,216 @@ class ReceiptWidget(QWidget):
             
             def save_changes():
                 """変更を保存"""
-                updates = {}
-                
-                # 種別と科目
-                account_title = account_title_combo.currentText()
-                if account_title:
-                    updates['account_title'] = account_title
-                
-                # 科目が「仕入」かどうかを判定
-                is_purchase = account_title and account_title.strip() == "仕入"
-                
-                # 日付
-                date = date_edit.date()
-                updates['purchase_date'] = date.toString("yyyy/MM/dd")
-                
-                # 時刻
-                time_str = time_edit.text().strip()
-                if time_str:
-                    updates['purchase_time'] = time_str
-                
-                # 店舗名（プルダウンから選択した店舗コード＋店舗名）
-                selected_store_code = store_name_combo.currentData()
-                selected_store_label = store_name_combo.currentText()
-                if selected_store_code:
-                    updates['store_code'] = selected_store_code
-                    # 店舗名（生）は店舗マスタまたは経費先から取得
-                    store_name_raw = None
-                    try:
-                        store = self.store_db.get_store_by_code(selected_store_code)
-                        if store:
-                            store_name_raw = (store.get('store_name') or '').strip()
-                        if not store_name_raw:
-                            dest = self.store_db.get_expense_destination_by_code(selected_store_code)
-                            if dest:
-                                store_name_raw = (dest.get('name') or '').strip()
-                        if not store_name_raw:
-                            # ラベルから店舗名を抽出（「CODE 店舗名」形式 → 店舗名部分）
-                            if selected_store_label.startswith(selected_store_code):
-                                store_name_raw = selected_store_label[len(selected_store_code):].strip()
-                            else:
-                                store_name_raw = selected_store_label.strip()
-                        if store_name_raw:
-                            updates['store_name_raw'] = store_name_raw
-                    except Exception:
-                        if selected_store_label.startswith(selected_store_code):
-                            updates['store_name_raw'] = selected_store_label[len(selected_store_code):].strip()
-                        else:
-                            updates['store_name_raw'] = selected_store_label.strip()
-                
-                # 電話番号
-                phone = phone_edit.text().strip()
-                if phone:
-                    updates['phone_number'] = phone
-                
-                # 登録番号
-                registration_number = registration_edit.text().strip()
-                if registration_number:
-                    updates['registration_number'] = registration_number
-                
-                # 合計
+                save_btn.setEnabled(False)
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
                 try:
-                    total = int(total_edit.text()) if total_edit.text().strip() else None
-                    if total is not None:
-                        updates['total_amount'] = total
-                except ValueError:
-                    pass
+                    updates = {}
+                    linked_skus: List[str] = []
+                    sku_price_updates: Dict[str, int] = {}
+                    save_snapshot = False
+                    affected_skus: set[str] = set()
+                    purchase_records: List[Dict[str, Any]] = []
+                    sku_to_record: Dict[str, Dict[str, Any]] = {}
+                    if self.product_widget:
+                        purchase_records = list(
+                            getattr(self.product_widget, "purchase_all_records", []) or []
+                        )
+                        sku_to_record = self._build_purchase_sku_index(purchase_records)
                 
-                # 値引
-                try:
-                    discount = int(discount_edit.text()) if discount_edit.text().strip() else None
-                    if discount is not None:
-                        updates['discount_amount'] = discount
-                except ValueError:
-                    pass
+                    # 種別と科目
+                    account_title = account_title_combo.currentText()
+                    if account_title:
+                        updates['account_title'] = account_title
                 
-                # 紐付けSKUと差額計算は「仕入」科目の場合のみ処理
-                if is_purchase:
-                    # 紐付けSKU（UserRoleからSKUを取得）
-                    linked_skus = []
-                    sku_price_updates = {}  # SKUと価格のマッピング（仕入DB更新用）
-                    for i in range(linked_skus_list.count()):
-                        item = linked_skus_list.item(i)
-                        if item:
-                            sku = item.data(Qt.UserRole)
-                            if not sku:
-                                # UserRoleがない場合は表示テキストからSKUを抽出
-                                text = item.text()
-                                if " - " in text:
-                                    sku = text.split(" - ")[0].strip()
-                                else:
-                                    sku = text.strip()
-                            
-                            if sku:
-                                linked_skus.append(sku)
-                                # 価格を取得（UserRole + 1に保存されている場合）
-                                new_price = item.data(Qt.UserRole + 1)
-                                if new_price is None:
-                                    # UserRole + 1にない場合は表示テキストから抽出
-                                    text = item.text()
-                                    if " - ¥" in text:
-                                        try:
-                                            price_str = text.split(" - ¥")[1].replace(",", "").strip()
-                                            new_price = int(price_str)
-                                        except (ValueError, IndexError):
-                                            new_price = None
-                                
-                                if new_price is not None:
-                                    sku_price_updates[sku] = new_price
-                    
-                    updates['linked_skus'] = ','.join(linked_skus) if linked_skus else None
-                    
-                    # 差額を再計算（表示テキストから直接合計金額を取得：再計算後の価格を反映）
-                    sku_total = 0
-                    for i in range(linked_skus_list.count()):
-                        item = linked_skus_list.item(i)
-                        if item:
-                            # 表示テキストから合計金額を抽出（再計算後の価格が反映されている）
-                            text = item.text()
-                            total_amount = 0
-                            
-                            if " - ¥" in text:
-                                try:
-                                    # 「 - ¥金額 - (時刻)」または「 - ¥金額」形式から金額を抽出
-                                    price_part = text.split(" - ¥")[1]
-                                    # 時刻部分を除去（「 - (時刻)」がある場合）
-                                    if " - (" in price_part:
-                                        price_str = price_part.split(" - (")[0].replace(",", "").strip()
-                                    else:
-                                        price_str = price_part.replace(",", "").strip()
-                                    total_amount = int(price_str)
-                                except (ValueError, IndexError):
-                                    total_amount = 0
-                            elif "¥" in text:
-                                # フォールバック: 「¥金額」形式を直接検索
-                                try:
-                                    price_parts = text.split("¥")
-                                    if len(price_parts) > 1:
-                                        price_str = price_parts[1].split()[0].replace(",", "").strip()
-                                        total_amount = int(price_str)
-                                except (ValueError, IndexError):
-                                    total_amount = 0
-                            
-                            sku_total += total_amount
-                    
-                    # レシートの合計金額を取得
-                    receipt_total = updates.get('total_amount')
-                    if receipt_total is None:
+                    # 科目が「仕入」かどうかを判定
+                    is_purchase = account_title and account_title.strip() == "仕入"
+                
+                    # 日付
+                    date = date_edit.date()
+                    updates['purchase_date'] = date.toString("yyyy/MM/dd")
+                
+                    # 時刻
+                    time_str = time_edit.text().strip()
+                    if time_str:
+                        updates['purchase_time'] = time_str
+                
+                    # 店舗名（プルダウンから選択した店舗コード＋店舗名）
+                    selected_store_code = store_name_combo.currentData()
+                    selected_store_label = store_name_combo.currentText()
+                    if selected_store_code:
+                        updates['store_code'] = selected_store_code
+                        # 店舗名（生）は店舗マスタまたは経費先から取得
+                        store_name_raw = None
                         try:
-                            receipt_total = int(total_edit.text()) if total_edit.text().strip() else 0
-                        except ValueError:
-                            receipt_total = 0
-                    
-                    # 値引きを考慮
-                    discount = updates.get('discount_amount', 0)
-                    if discount is None:
-                        discount = 0
-                    receipt_total_after_discount = receipt_total - discount
-                    
-                    # 差額を計算（SKU合計 - レシート合計（値引き後））
-                    difference = sku_total - receipt_total_after_discount
-                    # 実差額を保存（一覧では ±30円以内を「OK」表示。仕入DBの金額は変更しない）
-                    updates['price_difference'] = int(difference)
-                else:
-                    # 科目が「仕入」以外の場合は紐付けSKUをクリアし、差額は0（OK表示）にする
-                    updates['linked_skus'] = None
-                    updates['price_difference'] = 0
+                            store = self.store_db.get_store_by_code(selected_store_code)
+                            if store:
+                                store_name_raw = (store.get('store_name') or '').strip()
+                            if not store_name_raw:
+                                dest = self.store_db.get_expense_destination_by_code(selected_store_code)
+                                if dest:
+                                    store_name_raw = (dest.get('name') or '').strip()
+                            if not store_name_raw:
+                                # ラベルから店舗名を抽出（「CODE 店舗名」形式 → 店舗名部分）
+                                if selected_store_label.startswith(selected_store_code):
+                                    store_name_raw = selected_store_label[len(selected_store_code):].strip()
+                                else:
+                                    store_name_raw = selected_store_label.strip()
+                            if store_name_raw:
+                                updates['store_name_raw'] = store_name_raw
+                        except Exception:
+                            if selected_store_label.startswith(selected_store_code):
+                                updates['store_name_raw'] = selected_store_label[len(selected_store_code):].strip()
+                            else:
+                                updates['store_name_raw'] = selected_store_label.strip()
                 
-                # 仕入DBの価格を更新し、見込み利益・損益分岐点・利益率・ROIを再計算（科目が「仕入」かつポリシー許可時のみ）
-                if (
-                    RECEIPT_MUTATES_PURCHASE_DB_PRICE
-                    and is_purchase
-                    and sku_price_updates
-                    and self.product_widget
-                ):
+                    # 電話番号
+                    phone = phone_edit.text().strip()
+                    if phone:
+                        updates['phone_number'] = phone
+                
+                    # 登録番号
+                    registration_number = registration_edit.text().strip()
+                    if registration_number:
+                        updates['registration_number'] = registration_number
+                
+                    # 合計
                     try:
-                        purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
-                        updated_count = 0
-                        for record in purchase_records:
-                            sku = record.get('SKU') or record.get('sku', '')
-                            if sku and sku.strip() and sku.strip() in sku_price_updates:
-                                new_price = sku_price_updates[sku.strip()]
+                        total = int(total_edit.text()) if total_edit.text().strip() else None
+                        if total is not None:
+                            updates['total_amount'] = total
+                    except ValueError:
+                        pass
+                
+                    # 値引
+                    try:
+                        discount = int(discount_edit.text()) if discount_edit.text().strip() else None
+                        if discount is not None:
+                            updates['discount_amount'] = discount
+                    except ValueError:
+                        pass
+                
+                    # 紐付けSKUと差額計算は「仕入」科目の場合のみ処理
+                    if is_purchase:
+                        # 紐付けSKU（UserRoleからSKUを取得）
+                        linked_skus = []
+                        sku_price_updates = {}  # SKUと価格のマッピング（仕入DB更新用）
+                        for i in range(linked_skus_list.count()):
+                            item = linked_skus_list.item(i)
+                            if item:
+                                sku = item.data(Qt.UserRole)
+                                if not sku:
+                                    # UserRoleがない場合は表示テキストからSKUを抽出
+                                    text = item.text()
+                                    if " - " in text:
+                                        sku = text.split(" - ")[0].strip()
+                                    else:
+                                        sku = text.strip()
+                            
+                                if sku:
+                                    sku = str(sku).strip()
+                                    linked_skus.append(sku)
+                                    affected_skus.add(sku)
+                                    # 価格を取得（UserRole + 1に保存されている場合）
+                                    new_price = item.data(Qt.UserRole + 1)
+                                    if new_price is None:
+                                        # UserRole + 1にない場合は表示テキストから抽出
+                                        text = item.text()
+                                        if " - ¥" in text:
+                                            try:
+                                                price_str = text.split(" - ¥")[1].replace(",", "").strip()
+                                                new_price = int(price_str)
+                                            except (ValueError, IndexError):
+                                                new_price = None
+                                    
+                                    if new_price is not None:
+                                        sku_price_updates[sku] = new_price
+                    
+                        updates['linked_skus'] = ','.join(linked_skus) if linked_skus else None
+                    
+                        # 差額を再計算（表示テキストから直接合計金額を取得：再計算後の価格を反映）
+                        sku_total = 0
+                        for i in range(linked_skus_list.count()):
+                            item = linked_skus_list.item(i)
+                            if item:
+                                # 表示テキストから合計金額を抽出（再計算後の価格が反映されている）
+                                text = item.text()
+                                total_amount = 0
+                            
+                                if " - ¥" in text:
+                                    try:
+                                        # 「 - ¥金額 - (時刻)」または「 - ¥金額」形式から金額を抽出
+                                        price_part = text.split(" - ¥")[1]
+                                        # 時刻部分を除去（「 - (時刻)」がある場合）
+                                        if " - (" in price_part:
+                                            price_str = price_part.split(" - (")[0].replace(",", "").strip()
+                                        else:
+                                            price_str = price_part.replace(",", "").strip()
+                                        total_amount = int(price_str)
+                                    except (ValueError, IndexError):
+                                        total_amount = 0
+                                elif "¥" in text:
+                                    # フォールバック: 「¥金額」形式を直接検索
+                                    try:
+                                        price_parts = text.split("¥")
+                                        if len(price_parts) > 1:
+                                            price_str = price_parts[1].split()[0].replace(",", "").strip()
+                                            total_amount = int(price_str)
+                                    except (ValueError, IndexError):
+                                        total_amount = 0
+                            
+                                sku_total += total_amount
+                    
+                        # レシートの合計金額を取得
+                        receipt_total = updates.get('total_amount')
+                        if receipt_total is None:
+                            try:
+                                receipt_total = int(total_edit.text()) if total_edit.text().strip() else 0
+                            except ValueError:
+                                receipt_total = 0
+                    
+                        # 値引きを考慮
+                        discount = updates.get('discount_amount', 0)
+                        if discount is None:
+                            discount = 0
+                        receipt_total_after_discount = receipt_total - discount
+                    
+                        # 差額を計算（SKU合計 - レシート合計（値引き後））
+                        difference = sku_total - receipt_total_after_discount
+                        # 実差額を保存（一覧では ±30円以内を「OK」表示。仕入DBの金額は変更しない）
+                        updates['price_difference'] = int(difference)
+                    else:
+                        # 科目が「仕入」以外の場合は紐付けSKUをクリアし、差額は0（OK表示）にする
+                        updates['linked_skus'] = None
+                        updates['price_difference'] = 0
+                
+                    # 仕入DBの価格を更新し、見込み利益・損益分岐点・利益率・ROIを再計算（科目が「仕入」かつポリシー許可時のみ）
+                    if (
+                        RECEIPT_MUTATES_PURCHASE_DB_PRICE
+                        and is_purchase
+                        and sku_price_updates
+                        and self.product_widget
+                    ):
+                        try:
+                            updated_count = 0
+                            pending_product_upserts: Dict[str, Dict[str, Any]] = {}
+                            for sku, new_price in sku_price_updates.items():
+                                record = sku_to_record.get(sku)
+                                if not record:
+                                    continue
                                 # 仕入れ価格を更新
                                 record['仕入れ価格'] = new_price
-                                
+                            
                                 # 見込み利益・損益分岐点・利益率・ROIを再計算
                                 planned_price = record.get('販売予定価格') or record.get('planned_price') or 0
                                 try:
                                     planned_price = float(planned_price) if planned_price else 0
                                 except (ValueError, TypeError):
                                     planned_price = 0
-                                
+                            
                                 # 見込み利益 = 販売予定価格 - 仕入れ価格
                                 expected_profit = planned_price - new_price if planned_price > 0 else 0
                                 record['見込み利益'] = expected_profit
-                                
+                            
                                 other_cost = record.get('その他費用') or record.get('other_cost') or 0
                                 try:
                                     other_cost = float(other_cost) if other_cost else 0
@@ -7970,114 +7841,113 @@ class ReceiptWidget(QWidget):
                                     record["損益分岐点"] = round(be, 2)
                                 else:
                                     record["損益分岐点"] = new_price + other_cost
-                                
+                            
                                 # 利益率 = (見込み利益 / 販売予定価格) * 100
                                 if planned_price > 0:
                                     expected_margin = (expected_profit / planned_price) * 100
                                 else:
                                     expected_margin = 0.0
                                 record['想定利益率'] = round(expected_margin, 2)
-                                
+                            
                                 # ROI = (見込み利益 / 仕入れ価格) * 100
                                 if new_price > 0:
                                     expected_roi = (expected_profit / new_price) * 100
                                 else:
                                     expected_roi = 0.0
                                 record['想定ROI'] = round(expected_roi, 2)
-                                
-                                # 実際のDBに保存（ProductDatabaseのproductsテーブル）
+                            
+                                # ProductDatabase 更新は後でまとめて実行
                                 if hasattr(self.product_widget, 'db'):
-                                    try:
-                                        # 既存のレコードを取得
-                                        existing = self.product_widget.db.get_by_sku(sku.strip())
-                                        if existing:
-                                            # 既存レコードを更新
-                                            db_record = dict(existing)
-                                            db_record['purchase_price'] = new_price
-                                            # 他のフィールドも保持
-                                            self.product_widget.db.upsert(db_record)
-                                        else:
-                                            # 新規レコードを作成（最小限の情報）
-                                            db_record = {
-                                                'sku': sku.strip(),
-                                                'purchase_price': new_price,
-                                            }
-                                            self.product_widget.db.upsert(db_record)
-                                    except Exception as e:
-                                        QMessageBox.warning(self, "警告", f"SKU {sku.strip()} のDB更新中にエラーが発生しました: {str(e)}")
-                                
+                                    existing = self.product_widget.db.get_by_sku(sku)
+                                    if existing:
+                                        db_record = dict(existing)
+                                        db_record['purchase_price'] = new_price
+                                        pending_product_upserts[sku] = db_record
+                                    else:
+                                        pending_product_upserts[sku] = {
+                                            'sku': sku,
+                                            'purchase_price': new_price,
+                                        }
+                            
                                 updated_count += 1
 
-                        # 仕入DBの変更をスナップショットとして保存
-                        if updated_count > 0 and hasattr(self.product_widget, 'purchase_db'):
-                            try:
-                                from datetime import datetime
-                                snapshot_name = f"レシート編集_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                                self.product_widget.purchase_db.save_snapshot(snapshot_name, purchase_records)
-                            except Exception as e:
-                                QMessageBox.warning(self, "警告", f"スナップショットの保存中にエラーが発生しました: {str(e)}")
-                    except Exception as e:
-                        QMessageBox.warning(self, "警告", f"仕入DBの更新中にエラーが発生しました: {str(e)}")
+                            if pending_product_upserts and hasattr(self.product_widget, 'db'):
+                                for sku, db_record in pending_product_upserts.items():
+                                    try:
+                                        self.product_widget.db.upsert(db_record)
+                                    except Exception as e:
+                                        QMessageBox.warning(
+                                            self,
+                                            "警告",
+                                            f"SKU {sku} のDB更新中にエラーが発生しました: {str(e)}",
+                                        )
 
-                # 店舗マスタ側に登録番号を反映（store_code があり、まだ登録番号が空の場合）
-                try:
-                    selected_store_code = updates.get('store_code') or receipt_data.get('store_code') or ''
-                    reg_no = updates.get('registration_number') or receipt_data.get('registration_number') or ''
-                    if selected_store_code and reg_no:
-                        store = self.store_db.get_store_by_code(selected_store_code)
-                        if store and not store.get('registration_number'):
-                            # 既存の登録番号が空のときのみ更新
-                            self.store_db.update_registration_number(store.get('id'), reg_no)
-                except Exception as e:
-                    print(f"[レシート情報編集] 登録番号の店舗マスタ反映エラー: {e}")
-                
-                # レシート画像を仕入DBに反映（科目が「仕入」でSKUが紐付けられている場合）
-                if is_purchase and linked_skus and self.product_widget:
+                            if updated_count > 0:
+                                save_snapshot = True
+                        except Exception as e:
+                            QMessageBox.warning(self, "警告", f"仕入DBの更新中にエラーが発生しました: {str(e)}")
+
+                    # 店舗マスタ側に登録番号を反映（store_code があり、まだ登録番号が空の場合）
                     try:
-                        # レシート情報から画像ファイル名を取得
-                        receipt_info = self.receipt_db.get_receipt(receipt_id)
-                        if receipt_info:
-                            # 画像ファイルパスを取得（original_file_pathを優先、なければfile_path）
-                            file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path', '')
-                            if file_path:
-                                from pathlib import Path
-                                image_file = Path(file_path)
-                                if image_file.exists():
-                                    # ファイル名（拡張子なし）を取得（表示用）
-                                    image_file_name = image_file.stem
+                        selected_store_code = updates.get('store_code') or receipt_data.get('store_code') or ''
+                        reg_no = updates.get('registration_number') or receipt_data.get('registration_number') or ''
+                        if selected_store_code and reg_no:
+                            store = self.store_db.get_store_by_code(selected_store_code)
+                            if store and not store.get('registration_number'):
+                                # 既存の登録番号が空のときのみ更新
+                                self.store_db.update_registration_number(store.get('id'), reg_no)
+                    except Exception as e:
+                        print(f"[レシート情報編集] 登録番号の店舗マスタ反映エラー: {e}")
+                
+                    # レシート画像を仕入DBに反映（科目が「仕入」でSKUが紐付けられている場合）
+                    if is_purchase and linked_skus and self.product_widget:
+                        try:
+                            # レシート情報から画像ファイル名を取得
+                            receipt_info = self.receipt_db.get_receipt(receipt_id)
+                            if receipt_info:
+                                # 画像ファイルパスを取得（original_file_pathを優先、なければfile_path）
+                                file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path', '')
+                                if file_path:
+                                    image_file = Path(file_path)
+                                    if image_file.exists():
+                                        # ファイル名（拡張子なし）を取得（表示用）
+                                        image_file_name = image_file.stem
+                                        resolved_path = str(image_file.resolve())
                                     
-                                    # 各SKUに対してレシート画像を反映
-                                    purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
-                                    for sku in linked_skus:
-                                        for record in purchase_records:
-                                            record_sku = str(record.get('SKU') or record.get('sku') or '').strip()
-                                            if record_sku == sku:
-                                                # レシート画像を更新
-                                                record['レシート画像'] = image_file_name
-                                                record['レシート画像パス'] = str(image_file.resolve())
-                                                
-                                                # ProductDatabaseにも反映（永続化）
+                                        # 各SKUに対してレシート画像を反映
+                                        for sku in linked_skus:
+                                            record = sku_to_record.get(sku)
+                                            if not record:
+                                                continue
+                                            record['レシート画像'] = image_file_name
+                                            record['レシート画像パス'] = resolved_path
+                                            affected_skus.add(sku)
+                                        
+                                            if hasattr(self.product_widget, 'db'):
                                                 product = self.product_widget.db.get_by_sku(sku)
                                                 if product:
                                                     product['receipt_id'] = image_file_name
                                                     self.product_widget.db.upsert(product)
-                                                break
-                    except Exception as e:
-                        QMessageBox.warning(self, "警告", f"レシート画像の反映中にエラーが発生しました: {str(e)}")
+                        except Exception as e:
+                            QMessageBox.warning(self, "警告", f"レシート画像の反映中にエラーが発生しました: {str(e)}")
                 
-                # DB更新
-                if updates and receipt_id:
-                    self.receipt_db.update_receipt(receipt_id, updates)
-                    # 仕入DBの変更を反映（product_widgetのテーブルを更新）
-                    if self.product_widget and hasattr(self.product_widget, 'populate_purchase_table'):
-                        purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
-                        self.product_widget.populate_purchase_table(purchase_records)
-                    # レシート一覧を更新（差額も再計算される）
-                    self.refresh_receipt_list()
-                    QMessageBox.information(self, "完了", "変更を保存しました。")
-                    # ウインドウは閉じない（変更を保存しても閉じない）
-                else:
-                    QMessageBox.information(self, "情報", "変更がありません。")
+                    # DB更新
+                    if updates and receipt_id:
+                        self.receipt_db.update_receipt(receipt_id, updates)
+                        if not self._patch_receipt_table_row(receipt_id, updates):
+                            self.refresh_receipt_list(offer_date_repair=False)
+                        self._defer_after_receipt_manual_save(
+                            affected_skus=sorted(affected_skus),
+                            save_snapshot=save_snapshot,
+                            purchase_records=purchase_records,
+                        )
+                        QMessageBox.information(self, "完了", "変更を保存しました。")
+                        # ウインドウは閉じない（変更を保存しても閉じない）
+                    else:
+                        QMessageBox.information(self, "情報", "変更がありません。")
+                finally:
+                    save_btn.setEnabled(True)
+                    QApplication.restoreOverrideCursor()
             
             # 再計算ボタンと保存ボタンを横並びに配置
             button_layout = QHBoxLayout()
@@ -9022,6 +8892,7 @@ class ReceiptWidget(QWidget):
                                     # ファイル名（拡張子なし）を保存（表示用）
                                     # 実際のファイルパスはreceipt_dbから検索できる
                                     record['レシート画像'] = image_file_name
+                                    record['レシート画像パス'] = str(image_file.resolve())
                                     # レシート画像URLを保存
                                     if receipt_image_url:
                                         record['レシート画像URL'] = receipt_image_url
@@ -9337,12 +9208,14 @@ class ReceiptWidget(QWidget):
                 if hasattr(self.product_widget, 'update_table'):
                     current_step += 1
                     progress.setValue(current_step)
-                    progress.setLabelText("確定処理中... (後処理: 仕入テーブル更新を予約)")
+                    progress.setLabelText("確定処理中... (後処理: 仕入テーブル更新)")
                     QCoreApplication.processEvents()
-                    # NOTE:
-                    # update_table() は全体再構築が重く、UIフリーズの主因になりやすい。
-                    # 確定処理中はDB保存完了を優先し、表示更新は次回タブ表示/手動更新時に委ねる。
-                    setattr(self.product_widget, "_pending_purchase_refresh", True)
+                    try:
+                        self.product_widget.sync_purchase_master_from_records()
+                    except Exception:
+                        pass
+                    pw_ref = self.product_widget
+                    QTimer.singleShot(0, pw_ref.refresh_purchase_table_if_built)
                 perf_marks["purchase_refresh_deferred"] = perf_counter()
                 print(f"[PERF] purchase_refresh_deferred={perf_marks['purchase_refresh_deferred'] - perf_marks.get('save_purchase_snapshot', perf_marks.get('warranty_reflect', perf_t0)):.3f}s")
             else:
@@ -9743,6 +9616,7 @@ class ReceiptWidget(QWidget):
             for sku in linked_skus:
                 receipt_updates[sku] = {
                     "receipt_id": image_file_name,
+                    "receipt_image_path": str(image_file.resolve()),
                     "receipt_image_url": receipt_image_url,
                 }
         checkpoints["receipt_collect"] = perf_counter()
@@ -9808,25 +9682,31 @@ class ReceiptWidget(QWidget):
             if sku:
                 purchase_map[sku] = record
 
+        patches_by_sku: Dict[str, Dict[str, Any]] = {}
         for sku in target_skus_all:
-            rec = purchase_map.get(sku)
-            if not rec:
-                continue
+            patch: Dict[str, Any] = {}
             ru = receipt_updates.get(sku)
             wu = warranty_updates.get(sku)
             if ru:
-                rec['レシート画像'] = ru.get("receipt_id", "")
+                patch['レシート画像'] = ru.get("receipt_id", "")
+                if ru.get("receipt_image_path"):
+                    patch['レシート画像パス'] = ru["receipt_image_path"]
                 if ru.get("receipt_image_url"):
-                    rec['レシート画像URL'] = ru["receipt_image_url"]
-                updated_count += 1
+                    patch['レシート画像URL'] = ru["receipt_image_url"]
             if wu:
                 if wu.get("warranty_image"):
-                    rec['保証書画像'] = wu["warranty_image"]
+                    patch['保証書画像'] = wu["warranty_image"]
                 if wu.get("warranty_period_days") is not None:
-                    rec['保証期間'] = wu["warranty_period_days"]
+                    patch['保証期間'] = wu["warranty_period_days"]
                 if wu.get("warranty_until"):
-                    rec['保証最終日'] = wu["warranty_until"]
-                warranty_updated_count += 1
+                    patch['保証最終日'] = wu["warranty_until"]
+            if patch:
+                patches_by_sku[sku] = patch
+
+        updated_count = pw.patch_purchase_records_by_sku_map(patches_by_sku)
+        warranty_updated_count = sum(
+            1 for sku in target_skus_all if sku in warranty_updates
+        )
 
         # DataFrame更新（SKU -> indexの逆引き）
         def build_df_index_map(df):
@@ -9853,6 +9733,10 @@ class ReceiptWidget(QWidget):
                     if 'レシート画像' not in inv_df.columns:
                         inv_df['レシート画像'] = ''
                     inv_df.at[i, 'レシート画像'] = ru.get("receipt_id", "")
+                    if ru.get("receipt_image_path"):
+                        if 'レシート画像パス' not in inv_df.columns:
+                            inv_df['レシート画像パス'] = ''
+                        inv_df.at[i, 'レシート画像パス'] = ru["receipt_image_path"]
                     if ru.get("receipt_image_url"):
                         if 'レシート画像URL' not in inv_df.columns:
                             inv_df['レシート画像URL'] = ''
@@ -9877,6 +9761,10 @@ class ReceiptWidget(QWidget):
                     if 'レシート画像' not in fil_df.columns:
                         fil_df['レシート画像'] = ''
                     fil_df.at[i, 'レシート画像'] = ru.get("receipt_id", "")
+                    if ru.get("receipt_image_path"):
+                        if 'レシート画像パス' not in fil_df.columns:
+                            fil_df['レシート画像パス'] = ''
+                        fil_df.at[i, 'レシート画像パス'] = ru["receipt_image_path"]
                     if ru.get("receipt_image_url"):
                         if 'レシート画像URL' not in fil_df.columns:
                             fil_df['レシート画像URL'] = ''
@@ -10039,11 +9927,8 @@ class ReceiptWidget(QWidget):
                     self.product_widget.save_purchase_snapshot()
                 except Exception:
                     pass
-            if hasattr(self.product_widget, 'update_table'):
-                try:
-                    setattr(self.product_widget, "_pending_purchase_refresh", True)
-                except Exception:
-                    pass
+            pw_ref = self.product_widget
+            QTimer.singleShot(0, pw_ref.refresh_purchase_table_if_built)
 
         if hasattr(self, 'evidence_widget'):
             try:

@@ -2486,8 +2486,60 @@ class ProductWidget(QWidget):
         else:
             self.update_purchase_count_label()
 
+    def patch_purchase_records_by_sku_map(
+        self, patches_by_sku: Dict[str, Dict[str, Any]]
+    ) -> int:
+        """SKU単位で仕入レコード（all/master/filtered）にフィールドを反映する。"""
+        if not patches_by_sku:
+            return 0
+        updated = 0
+        list_names = (
+            "purchase_all_records",
+            "purchase_all_records_master",
+            "purchase_records",
+        )
+        for sku, patch in patches_by_sku.items():
+            sku = str(sku or "").strip()
+            if not sku or not patch:
+                continue
+            touched = False
+            for lst_name in list_names:
+                lst = getattr(self, lst_name, None) or []
+                for record in lst:
+                    record_sku = str(record.get("SKU") or record.get("sku") or "").strip()
+                    if record_sku != sku:
+                        continue
+                    for key, value in patch.items():
+                        if value is not None:
+                            record[key] = value
+                    touched = True
+                    break
+            if touched:
+                updated += 1
+        return updated
+
+    def sync_purchase_master_from_records(self) -> None:
+        """purchase_all_records の変更を master に同期（確定・レシート編集後用）。"""
+        records = getattr(self, "purchase_all_records", None)
+        if not records:
+            return
+        self.purchase_all_records_master = copy.deepcopy(records)
+        if self._purchase_search_filters_active():
+            self.filter_purchase_records()
+        else:
+            self.purchase_records = copy.deepcopy(records)
+
+    def refresh_purchase_table_if_built(self) -> None:
+        """仕入DBテーブルが構築済みなら再描画する。"""
+        if not getattr(self, "_purchase_table_full_master_built", False):
+            return
+        records = getattr(self, "purchase_all_records", None) or []
+        self.populate_purchase_table(records)
+
     def save_purchase_snapshot(self):
         """現在の仕入データをスナップショットとして保存"""
+        # 確定処理等で all_records のみ更新されている場合に備え、保存前に master を同期
+        self.sync_purchase_master_from_records()
         master = getattr(self, "purchase_all_records_master", None) or getattr(
             self, "purchase_all_records", None
         )
@@ -3778,14 +3830,8 @@ class ProductWidget(QWidget):
             if not str(row.get("販売チャネル") or "").strip():
                 row["販売チャネル"] = "Amazon"
 
-            resolved_receipt_url = self._resolve_receipt_image_url(row)
-            if resolved_receipt_url:
-                row["レシート画像URL"] = resolved_receipt_url
-            receipt_key = str(row.get("レシート画像") or "").strip()
-            if receipt_key:
-                resolved_receipt_path = self._resolve_receipt_file_path(row, receipt_key)
-                if resolved_receipt_path:
-                    row["レシート画像パス"] = resolved_receipt_path
+            # レシート画像は証憑管理の linked_skus 紐付けがある SKU のみ反映
+            self._sync_receipt_fields_from_voucher_link(row)
 
             self._sync_purchase_status_norm(row)
             augmented.append(row)
@@ -3795,6 +3841,8 @@ class ProductWidget(QWidget):
         """仕入DBテーブルにレコードを反映"""
         from pathlib import Path
         records = records or []
+        for record in records:
+            self._sync_receipt_fields_from_voucher_link(record)
         augment_purchase_cost_records(records)
 
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -3921,12 +3969,16 @@ class ProductWidget(QWidget):
                         item.setToolTip(full_text)
                     item.setData(Qt.UserRole, full_text)
                 elif header == "レシート画像":
-                    receipt_image_str = "" if value is None else str(value)
-                    display_text = receipt_image_str
+                    receipt_image_str = "" if value is None else str(value).strip()
+                    display_text = ""
                     resolved_path = None
-                    if receipt_image_str:
-                        item = QTableWidgetItem("")
-                        item.setFlags(item.flags() | Qt.ItemIsEnabled)
+                    item = QTableWidgetItem("")
+                    item.setFlags(item.flags() | Qt.ItemIsEnabled)
+                    saved_path = str(record.get("レシート画像パス") or "").strip()
+                    if saved_path and Path(saved_path).is_file():
+                        resolved_path = str(Path(saved_path).resolve())
+                        display_text = resolved_path
+                    elif receipt_image_str:
                         file_path = self._resolve_receipt_file_path(record, receipt_image_str)
                         if file_path:
                             file_path_obj = Path(file_path)
@@ -3938,20 +3990,23 @@ class ProductWidget(QWidget):
                                 resolved_path = str(file_path)
                                 display_text = resolved_path
                                 record["レシート画像パス"] = file_path
-                        item.setText(display_text)
-                        if display_text.strip():
-                            item.setToolTip(display_text)
-                        if resolved_path:
-                            item.setData(Qt.UserRole, resolved_path)
-                        elif receipt_image_str:
-                            item.setData(Qt.UserRole, receipt_image_str)
+                    item.setText(display_text)
+                    if display_text.strip():
+                        item.setToolTip(display_text)
+                    if resolved_path:
+                        item.setData(Qt.UserRole, resolved_path)
+                    elif receipt_image_str:
+                        item.setData(Qt.UserRole, receipt_image_str)
+                    if display_text.strip() or receipt_image_str:
                         item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
-                    else:
-                        item = QTableWidgetItem("")
                 elif header == "レシート画像URL":
-                    receipt_image_url_str = self._resolve_receipt_image_url(
-                        record, "" if value is None else str(value)
-                    )
+                    receipt_image_url_str = str(
+                        record.get("レシート画像URL")
+                        or record.get("receipt_image_url")
+                        or ("" if value is None else str(value))
+                    ).strip()
+                    if receipt_image_url_str and self._is_placeholder_url(receipt_image_url_str):
+                        receipt_image_url_str = ""
                     if receipt_image_url_str:
                         record["レシート画像URL"] = receipt_image_url_str
                     item = QTableWidgetItem(receipt_image_url_str)
@@ -4690,6 +4745,103 @@ class ProductWidget(QWidget):
             return text
         return text[:limit] + "..."
 
+    def _extract_yyyymmdd_from_text(self, text: str) -> Optional[str]:
+        """文字列先頭付近の YYYYMMDD を抽出"""
+        text = str(text or "").strip()
+        m = re.match(r"^(\d{4})[-/]?(\d{2})[-/]?(\d{2})", text)
+        if m:
+            return f"{m.group(1)}{m.group(2)}{m.group(3)}"
+        m = re.match(r"^(\d{8})", text)
+        if m:
+            return m.group(1)
+        return None
+
+    def _receipt_key_matches_purchase_record(
+        self, row: Dict[str, Any], receipt_key: str
+    ) -> bool:
+        """確定済みレシート識別子が仕入SKU/仕入日と整合するか（誤自動紐付け除外用）"""
+        receipt_key = self._receipt_image_lookup_key(receipt_key)
+        if not receipt_key:
+            return False
+        receipt_date = self._extract_yyyymmdd_from_text(receipt_key)
+        if not receipt_date:
+            return True
+
+        sku = str(row.get("SKU") or row.get("sku") or "").strip()
+        sku_date = self._extract_yyyymmdd_from_text(sku)
+        if sku_date and abs(int(sku_date) - int(receipt_date)) <= 1:
+            return True
+
+        purchase_date = str(row.get("仕入れ日") or row.get("purchase_date") or "").strip()
+        purchase_yyyymmdd = self._extract_yyyymmdd_from_text(purchase_date)
+        if purchase_yyyymmdd and abs(int(purchase_yyyymmdd) - int(receipt_date)) <= 1:
+            return True
+        return False
+
+    def _get_voucher_linked_receipt_info(self, sku: str) -> Optional[Dict[str, Any]]:
+        """証憑管理で linked_skus に含まれる SKU のレシート情報を返す。"""
+        sku = str(sku or "").strip()
+        if not sku:
+            return None
+        try:
+            info = self.receipt_db.find_by_linked_sku(sku)
+        except Exception:
+            return None
+        if not info:
+            return None
+        linked = {
+            s.strip()
+            for s in str(info.get("linked_skus") or "").split(",")
+            if s.strip()
+        }
+        if sku not in linked:
+            return None
+        return info
+
+    def _sync_receipt_fields_from_voucher_link(self, row: Dict[str, Any]) -> None:
+        """仕入レコードのレシート関連列を同期（証憑紐付け優先、確定済みデータは保持）。"""
+        sku = str(row.get("SKU") or row.get("sku") or "").strip()
+        clear_keys = ("レシート画像", "レシート画像パス", "レシート画像URL")
+
+        voucher_info = self._get_voucher_linked_receipt_info(sku) if sku else None
+        if voucher_info:
+            fp = str(
+                voucher_info.get("original_file_path") or voucher_info.get("file_path") or ""
+            ).strip()
+            stem = Path(fp).stem if fp else ""
+            row["レシート画像"] = stem
+            if fp and Path(fp).is_file():
+                row["レシート画像パス"] = str(Path(fp).resolve())
+            else:
+                row["レシート画像パス"] = ""
+            row["レシート画像URL"] = str(
+                voucher_info.get("gcs_url") or voucher_info.get("image_url") or ""
+            ).strip()
+            return
+
+        receipt_key = str(
+            row.get("レシート画像") or row.get("receipt_id") or ""
+        ).strip()
+        saved_path = str(row.get("レシート画像パス") or row.get("receipt_image_path") or "").strip()
+        saved_url = str(
+            row.get("レシート画像URL") or row.get("receipt_image_url") or ""
+        ).strip()
+
+        if receipt_key and self._receipt_key_matches_purchase_record(row, receipt_key):
+            if saved_path and Path(saved_path).is_file():
+                row["レシート画像パス"] = str(Path(saved_path).resolve())
+            else:
+                resolved = self._resolve_receipt_file_path(row, receipt_key)
+                row["レシート画像パス"] = resolved or saved_path
+            if saved_url and not self._is_placeholder_url(saved_url):
+                row["レシート画像URL"] = saved_url
+            else:
+                row["レシート画像URL"] = self._resolve_receipt_image_url(row, saved_url)
+            return
+
+        for key in clear_keys:
+            row[key] = ""
+
     @staticmethod
     def _is_placeholder_url(url: Any) -> bool:
         """省略表示や未入力の URL プレースホルダーか判定"""
@@ -4729,32 +4881,141 @@ class ProductWidget(QWidget):
         self._receipt_info_by_key_cache[lookup] = info
         return info
 
+    _RECEIPT_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff")
+
+    def _receipt_local_search_roots(self) -> List[Path]:
+        """証憑管理のデフォルトフォルダ等、ローカルレシート探索の起点"""
+        roots: List[Path] = []
+        seen: set[str] = set()
+
+        def add(path: Path) -> None:
+            if not path:
+                return
+            key = str(path)
+            if key in seen:
+                return
+            seen.add(key)
+            if path.exists():
+                roots.append(path)
+
+        try:
+            s = QSettings("HIRIO", "SedoriDesktopApp")
+            default = str(s.value("receipt/default_folder", "") or "").strip()
+            if default:
+                dp = Path(default)
+                add(dp)
+                if dp.parent.exists():
+                    add(dp.parent)
+                if dp.parent.parent.exists():
+                    add(dp.parent.parent)
+        except Exception:
+            pass
+        return roots
+
+    def _receipt_stems_for_local_search(self, record: Dict[str, Any], receipt_key: str) -> List[str]:
+        """ローカル探索用のファイル名（拡張子なし）候補"""
+        stems: List[str] = []
+        seen: set[str] = set()
+
+        def add(name: str) -> None:
+            stem = Path(str(name or "").strip()).stem
+            if stem and stem not in seen:
+                seen.add(stem)
+                stems.append(stem)
+
+        add(self._receipt_image_lookup_key(receipt_key))
+        for url_key in ("レシート画像URL", "receipt_image_url"):
+            url = str(record.get(url_key) or "").strip()
+            if not url:
+                continue
+            if "receipts/" in url:
+                add(url.split("receipts/", 1)[-1].split("?")[0])
+            elif url.lower().startswith("http"):
+                add(Path(url).name)
+        return stems
+
+    @classmethod
+    def _try_receipt_file_in_dir(cls, directory: Path, stem: str) -> Optional[str]:
+        if not directory.is_dir() or not stem:
+            return None
+        for ext in cls._RECEIPT_IMAGE_EXTS:
+            for candidate in (directory / f"{stem}{ext}", directory / f"{stem}{ext.upper()}"):
+                if candidate.is_file():
+                    return str(candidate.resolve())
+        return None
+
+    def _search_local_receipt_file(self, record: Dict[str, Any], receipt_key: str) -> Optional[str]:
+        """デフォルトフォルダ等からレシートファイルを完全一致（stem）で探す。"""
+        receipt_key = str(receipt_key or "").strip()
+        if not receipt_key:
+            return None
+        stems = self._receipt_stems_for_local_search(record, receipt_key)
+        if not stems:
+            return None
+
+        for root in self._receipt_local_search_roots():
+            for stem in stems:
+                for search_dir in (root, root / "レシート画像"):
+                    hit = self._try_receipt_file_in_dir(search_dir, stem)
+                    if hit:
+                        return hit
+
+            if not root.is_dir():
+                continue
+            try:
+                for route_dir in root.iterdir():
+                    if not route_dir.is_dir():
+                        continue
+                    receipt_dir = route_dir / "レシート画像"
+                    for stem in stems:
+                        hit = self._try_receipt_file_in_dir(receipt_dir, stem)
+                        if hit:
+                            return hit
+            except OSError:
+                pass
+        return None
+
     def _resolve_receipt_file_path(self, record: Dict[str, Any], receipt_key: str) -> Optional[str]:
-        """レシート画像のローカルファイルパスを解決"""
+        """レシート画像のローカルファイルパスを解決（証憑紐付け済みの識別子のみ）。"""
+        receipt_key = str(receipt_key or "").strip()
         lookup = self._receipt_image_lookup_key(receipt_key)
         candidates = [
             record.get("レシート画像パス"),
             record.get("receipt_image_path"),
-            self._receipt_file_path_cache.get(receipt_key),
-            self._receipt_file_path_cache.get(lookup) if lookup else None,
         ]
+        if lookup:
+            candidates.extend([
+                self._receipt_file_path_cache.get(receipt_key),
+                self._receipt_file_path_cache.get(lookup),
+            ])
         for src in candidates:
             if src:
                 path_text = str(src).strip()
-                if path_text:
-                    self._receipt_file_path_cache[lookup or receipt_key] = path_text
-                    return path_text
+                if path_text and Path(path_text).is_file():
+                    resolved = str(Path(path_text).resolve())
+                    cache_key = lookup or receipt_key
+                    if cache_key:
+                        self._receipt_file_path_cache[cache_key] = resolved
+                    return resolved
+        if not receipt_key:
+            return None
         info = self._find_receipt_info_for_key(receipt_key)
         if info:
             file_path = info.get("original_file_path") or info.get("file_path")
             if file_path:
                 path_text = str(file_path).strip()
-                self._receipt_file_path_cache[lookup or receipt_key] = path_text
-                return path_text
+                if Path(path_text).is_file():
+                    resolved = str(Path(path_text).resolve())
+                    self._receipt_file_path_cache[lookup or receipt_key] = resolved
+                    return resolved
+        found = self._search_local_receipt_file(record, receipt_key)
+        if found:
+            self._receipt_file_path_cache[lookup or receipt_key] = found
+            return found
         return None
 
     def _resolve_receipt_image_url(self, record: Dict[str, Any], current: Any = "") -> str:
-        """レシート画像URLを products / レシートDB から補完"""
+        """レシート画像URLを返す（証憑紐付け済みレコードのみ補完）。"""
         url = str(
             current
             or record.get("レシート画像URL")
@@ -4764,38 +5025,31 @@ class ProductWidget(QWidget):
         if url and not self._is_placeholder_url(url):
             return url
 
-        sku = str(record.get("SKU") or record.get("sku") or "").strip()
-        if sku:
-            try:
-                product = self.db.get_by_sku(sku)
-            except Exception:
-                product = None
-            if product:
-                product_url = str(product.get("receipt_image_url") or "").strip()
-                if product_url and not self._is_placeholder_url(product_url):
-                    return product_url
-
         receipt_key = str(
             record.get("レシート画像")
             or record.get("receipt_id")
             or record.get("receipt_image")
             or ""
         ).strip()
-        info = self._find_receipt_info_for_key(receipt_key) if receipt_key else None
-        if not info and sku:
-            try:
-                info = self.receipt_db.find_by_linked_sku(sku)
-            except Exception:
-                info = None
-        if info:
-            for key in ("gcs_url", "image_url"):
-                candidate = str(info.get(key) or "").strip()
-                if candidate and not self._is_placeholder_url(candidate):
-                    return candidate
         if receipt_key:
+            info = self._find_receipt_info_for_key(receipt_key)
+            if info:
+                for key in ("gcs_url", "image_url"):
+                    candidate = str(info.get(key) or "").strip()
+                    if candidate and not self._is_placeholder_url(candidate):
+                        return candidate
             inferred = self._infer_gcs_receipt_url(receipt_key)
             if inferred and not self._is_placeholder_url(inferred):
                 return inferred
+
+        sku = str(record.get("SKU") or record.get("sku") or "").strip()
+        if sku:
+            info = self._get_voucher_linked_receipt_info(sku)
+            if info:
+                for key in ("gcs_url", "image_url"):
+                    candidate = str(info.get(key) or "").strip()
+                    if candidate and not self._is_placeholder_url(candidate):
+                        return candidate
         return ""
 
     @staticmethod

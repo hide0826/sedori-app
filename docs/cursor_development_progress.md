@@ -1,3 +1,30 @@
+## 2026-06-14 証憑紐付け改善・手動保存高速化・レシート画像表示厳格化
+
+- **目的**: 証憑ワークフローの誤紐付け防止、手動調整保存の体感速度改善、確定済みデータと現行証憑の両立。
+- **一括マッチング / 手動調整**（`receipt_sku_linking.py` 新規, `receipt_widget.py`）
+  - レシート時刻前SKU・店舗ごと時刻順・使用済みSKU除外を共通モジュール化。
+  - 手動調整候補: 店舗コード一致 → 同日。
+  - `tests/test_receipt_sku_linking.py` 追加。
+- **OCR中ロック**（`receipt_widget.py`）
+  - 全件OCR中は他操作（マッチング・GCS・確定等）をブロック。
+- **手動保存高速化**（`receipt_widget.py`）
+  - レシート行パッチ更新、仕入DB再描画・スナップショットを `QTimer` 遅延実行。
+- **確定 → 仕入DB同期**（`receipt_widget.py`, `product_widget.py`）
+  - `sync_purchase_master_from_records`, `patch_purchase_records_by_sku_map`, `refresh_purchase_table_if_built`。
+  - 確定時に master コピーへ反映してからスナップショット保存。
+- **レシート画像表示**（`product_widget.py`）
+  - 優先: 証憑 `linked_skus` → 確定済み `レシート画像`（日付整合あり）→ 未紐付けは空。
+  - 部分一致ファイル探索を廃止（誤って別ルート画像が付く不具合を修正）。
+- **変更ファイル**:
+  - `python/desktop/services/receipt_sku_linking.py`（新規）
+  - `python/desktop/tests/test_receipt_sku_linking.py`（新規）
+  - `python/desktop/ui/receipt_widget.py`
+  - `python/desktop/ui/product_widget.py`
+  - `development_history.md`
+  - `docs/cursor_development_progress.md`
+- **リポジトリ**: sedori-app.github
+- **Git**: feat(desktop): 証憑紐付け改善とレシート画像表示の厳格化
+
 ## 2026-06-14 証憑ワークフローゲート・仕入DBレシート表示・ルート訪問順修正
 
 - **目的**: 証憑確定前のリンク切れ防止、仕入DBでのレシートURL/パス確認性向上、ルートテンプレ・スポット仕入の表示不整合解消。
