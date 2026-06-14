@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QPushButton, QGroupBox, QFormLayout, QLineEdit, QDialog, QDialogButtonBox,
     QMessageBox, QLabel, QTabWidget, QHeaderView, QFileDialog, QMenu, QApplication,
     QAbstractItemView, QComboBox, QProgressDialog, QCheckBox, QToolButton, QScrollArea, QFrame,
-    QSizePolicy,
+    QSizePolicy, QStyledItemDelegate,
 )
 from PySide6.QtGui import QDrag, QPixmap, QDesktopServices, QCursor, QColor
 
@@ -221,6 +221,17 @@ class SortableDateItem(QTableWidgetItem):
         return super().__lt__(other)
 
 
+class PurchaseFullTextItemDelegate(QStyledItemDelegate):
+    """パス/URL列を ... 省略せず、UserRole のフル値で描画する。"""
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        option.textElideMode = Qt.TextElideMode.ElideNone
+        full = index.data(Qt.ItemDataRole.UserRole)
+        if full is not None and str(full).strip():
+            option.text = str(full).strip()
+
+
 class DraggableTableWidget(QTableWidget):
     """ドラッグアンドドロップ対応のQTableWidget"""
     
@@ -259,13 +270,13 @@ class DraggableTableWidget(QTableWidget):
         if header:
             header_text = header.text()
             if header_text == "レシート画像" or header_text == "保証書画像":
-                image_name = item.text().strip()
-                if image_name:
+                image_path = (item.data(Qt.UserRole) or item.text() or "").strip()
+                if image_path:
                     # ドラッグデータを作成
                     drag = QDrag(self)
                     mime_data = QMimeData()
                     # テキストデータとして画像名を設定
-                    mime_data.setText(image_name)
+                    mime_data.setText(image_path)
                     drag.setMimeData(mime_data)
                     # ドラッグを開始
                     drag.exec_(Qt.CopyAction)
@@ -477,6 +488,32 @@ class ProductEditDialog(QDialog):
 
 PRODUCT_NAME_DISPLAY_LIMIT = 50
 
+# 仕入DB: フルパス／URL を UserRole に保持する列
+_PURCHASE_FILE_PATH_COLUMNS = frozenset({
+    "レシート画像", "保証書画像",
+    "画像1", "画像2", "画像3", "画像4", "画像5", "画像6",
+})
+_PURCHASE_URL_COLUMNS = frozenset({
+    "レシート画像URL",
+    "画像URL1", "画像URL2", "画像URL3", "画像URL4", "画像URL5", "画像URL6",
+})
+_PURCHASE_FULLTEXT_MIN_COLUMN_WIDTH = 320
+
+
+def _purchase_table_cell_full_text(
+    header: str,
+    item: Optional[QTableWidgetItem],
+    fallback: str = "",
+) -> str:
+    """セル表示が切れていても UserRole のフル値を優先して返す。"""
+    if item is None:
+        return fallback
+    if header in _PURCHASE_FILE_PATH_COLUMNS or header in _PURCHASE_URL_COLUMNS:
+        full = item.data(Qt.UserRole)
+        if full is not None and str(full).strip():
+            return str(full).strip()
+    return fallback if fallback else item.text()
+
 
 class ProductWidget(QWidget):
     """商品データ＋仕入/販売DBタブ"""
@@ -507,6 +544,7 @@ class ProductWidget(QWidget):
         self._purchase_table_full_master_built: bool = False
         # レシート/保証書 DBルックアップキャッシュ（ファイル名→解決パス）
         self._receipt_file_path_cache: Dict[str, Optional[str]] = {}
+        self._receipt_info_by_key_cache: Dict[str, Optional[Dict[str, Any]]] = {}
         self._warranty_sku_path_cache: Dict[str, Optional[str]] = {}
         # 重いデータ読み込みが完了しているかどうか
         self._initial_data_loaded: bool = False
@@ -1924,20 +1962,30 @@ class ProductWidget(QWidget):
                     full = cell_item.data(Qt.UserRole)
                     if full is not None and str(full).strip():
                         value = str(full).strip()
-                if header == "商品名" and cell_item:
+                elif header == "商品名" and cell_item:
+                    full = cell_item.data(Qt.UserRole)
+                    if full is not None and str(full).strip():
+                        value = str(full).strip()
+                elif header == "レシート画像" and cell_item:
+                    file_path = cell_item.data(Qt.UserRole)
+                    if file_path:
+                        from pathlib import Path
+                        file_path_obj = Path(str(file_path))
+                        receipt_image_path = (
+                            str(file_path_obj.resolve())
+                            if file_path_obj.exists()
+                            else str(file_path)
+                        )
+                        value = file_path_obj.name or str(file_path)
+                elif header in _PURCHASE_FILE_PATH_COLUMNS and cell_item:
+                    full = cell_item.data(Qt.UserRole)
+                    if full is not None and str(full).strip():
+                        value = str(full).strip()
+                elif header in _PURCHASE_URL_COLUMNS and cell_item:
                     full = cell_item.data(Qt.UserRole)
                     if full is not None and str(full).strip():
                         value = str(full).strip()
                 row_data[header] = value
-                
-                # レシート画像列の場合は、UserRoleに保存されているファイルパスも取得
-                if header == "レシート画像" and cell_item:
-                    file_path = cell_item.data(Qt.UserRole)
-                    if file_path:
-                        from pathlib import Path
-                        file_path_obj = Path(file_path)
-                        if file_path_obj.exists() or file_path:
-                            receipt_image_path = str(file_path) if isinstance(file_path, str) else str(file_path_obj.resolve())
 
             if not base_rec:
                 key = _make_key(row_data)
@@ -3730,6 +3778,15 @@ class ProductWidget(QWidget):
             if not str(row.get("販売チャネル") or "").strip():
                 row["販売チャネル"] = "Amazon"
 
+            resolved_receipt_url = self._resolve_receipt_image_url(row)
+            if resolved_receipt_url:
+                row["レシート画像URL"] = resolved_receipt_url
+            receipt_key = str(row.get("レシート画像") or "").strip()
+            if receipt_key:
+                resolved_receipt_path = self._resolve_receipt_file_path(row, receipt_key)
+                if resolved_receipt_path:
+                    row["レシート画像パス"] = resolved_receipt_path
+
             self._sync_purchase_status_norm(row)
             augmented.append(row)
         return augment_purchase_cost_records(augmented)
@@ -3865,50 +3922,51 @@ class ProductWidget(QWidget):
                     item.setData(Qt.UserRole, full_text)
                 elif header == "レシート画像":
                     receipt_image_str = "" if value is None else str(value)
-                    item = QTableWidgetItem(receipt_image_str)
+                    display_text = receipt_image_str
+                    resolved_path = None
                     if receipt_image_str:
+                        item = QTableWidgetItem("")
                         item.setFlags(item.flags() | Qt.ItemIsEnabled)
-                        # レコードまたはキャッシュにパスがあればDBルックアップ不要
-                        file_path = (
-                            record.get('レシート画像パス')
-                            or record.get('receipt_image_path')
-                            or self._receipt_file_path_cache.get(receipt_image_str)
-                        )
-                        if file_path is None:
-                            # キャッシュにない場合のみDBを検索（1回だけ）
-                            receipt_info = self.receipt_db.find_by_file_name(receipt_image_str)
-                            if receipt_info:
-                                file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path')
-                            self._receipt_file_path_cache[receipt_image_str] = file_path  # None でもキャッシュ
+                        file_path = self._resolve_receipt_file_path(record, receipt_image_str)
                         if file_path:
                             file_path_obj = Path(file_path)
                             if file_path_obj.exists():
                                 resolved_path = str(file_path_obj.resolve())
-                                item.setToolTip(f"クリックで画像を開く\n{file_path}")
-                                item.setData(Qt.UserRole, resolved_path)
-                                record['レシート画像パス'] = resolved_path
+                                display_text = resolved_path
+                                record["レシート画像パス"] = resolved_path
                             else:
-                                item.setToolTip(f"レシート画像: {receipt_image_str}\n（ファイルが見つかりません: {file_path}）")
-                                item.setData(Qt.UserRole, file_path)
-                                record['レシート画像パス'] = file_path
-                        else:
-                            item.setToolTip("レシート画像: " + receipt_image_str + "\n（レシートDBに見つかりません）")
+                                resolved_path = str(file_path)
+                                display_text = resolved_path
+                                record["レシート画像パス"] = file_path
+                        item.setText(display_text)
+                        if display_text.strip():
+                            item.setToolTip(display_text)
+                        if resolved_path:
+                            item.setData(Qt.UserRole, resolved_path)
+                        elif receipt_image_str:
                             item.setData(Qt.UserRole, receipt_image_str)
                         item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
+                    else:
+                        item = QTableWidgetItem("")
                 elif header == "レシート画像URL":
-                    receipt_image_url_str = "" if value is None else str(value)
+                    receipt_image_url_str = self._resolve_receipt_image_url(
+                        record, "" if value is None else str(value)
+                    )
+                    if receipt_image_url_str:
+                        record["レシート画像URL"] = receipt_image_url_str
                     item = QTableWidgetItem(receipt_image_url_str)
                     if receipt_image_url_str:
                         item.setFlags(item.flags() | Qt.ItemIsEnabled)
-                        item.setToolTip(f"ダブルクリックでブラウザで表示\n{receipt_image_url_str}")
-                        # URLをUserRoleに保存
+                        item.setToolTip(receipt_image_url_str)
                         item.setData(Qt.UserRole, receipt_image_url_str)
                     else:
                         item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
                 elif header == "保証書画像":
                     warranty_image_str = "" if value is None else str(value)
-                    item = QTableWidgetItem(warranty_image_str)
+                    display_text = warranty_image_str
+                    warranty_file_path = None
                     if warranty_image_str:
+                        item = QTableWidgetItem("")
                         item.setFlags(item.flags() | Qt.ItemIsEnabled)
                         sku_for_warranty = str(record.get('SKU') or record.get('sku') or '')
                         # キャッシュ優先（ファイル名キー→レシートDB、SKUキー→保証書DB）
@@ -3934,15 +3992,19 @@ class ProductWidget(QWidget):
                         if warranty_file_path:
                             file_path_obj = Path(warranty_file_path)
                             if file_path_obj.exists():
-                                item.setToolTip(f"クリックで画像を開く\n{warranty_file_path}")
-                                item.setData(Qt.UserRole, str(file_path_obj.resolve()))
+                                display_text = str(file_path_obj.resolve())
+                                item.setData(Qt.UserRole, display_text)
                             else:
-                                item.setToolTip(f"保証書画像: {warranty_image_str}\n（ファイルが見つかりません: {warranty_file_path}）")
+                                display_text = str(warranty_file_path)
                                 item.setData(Qt.UserRole, warranty_file_path)
                         else:
-                            item.setToolTip("保証書画像: " + warranty_image_str + "\n（ファイルパスが見つかりません）")
                             item.setData(Qt.UserRole, warranty_image_str)
+                        item.setText(display_text)
+                        if display_text.strip():
+                            item.setToolTip(display_text)
                         item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
+                    else:
+                        item = QTableWidgetItem("")
                 elif header and header.startswith("画像") and header[2:].isdigit():
                     image_path = value or ""
                     if image_path:
@@ -3950,11 +4012,11 @@ class ProductWidget(QWidget):
                         if resolved:
                             image_path = resolved
                             record[header] = resolved
-                        image_name = Path(image_path).name
-                        item = QTableWidgetItem(image_name)
-                        item.setData(Qt.UserRole, image_path)
-                        exists = Path(image_path).is_file()
-                        tip = f"クリックで画像を開く\n{image_path}"
+                        display_path = str(image_path)
+                        item = QTableWidgetItem(display_path)
+                        item.setData(Qt.UserRole, display_path)
+                        exists = Path(display_path).is_file()
+                        tip = display_path
                         if not exists:
                             tip += "\n（ファイル未検出・画像管理フォルダ内を再探索します）"
                         item.setToolTip(tip)
@@ -3968,8 +4030,10 @@ class ProductWidget(QWidget):
                     # 画像URL列の処理
                     image_url = value or ""
                     if image_url:
-                        item = QTableWidgetItem(str(image_url))
-                        item.setToolTip(f"画像URL: {image_url}\n（クリックでブラウザ表示）")
+                        url_text = str(image_url)
+                        item = QTableWidgetItem(url_text)
+                        item.setToolTip(url_text)
+                        item.setData(Qt.UserRole, url_text)
                         # 編集モードに入らないようにする（ダブルクリックで文字列編集させない）
                         item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                     else:
@@ -4389,6 +4453,7 @@ class ProductWidget(QWidget):
         
         # 列幅のみを復元（リサイズモードは変更しない）
         restore_table_column_widths(self.purchase_table, "ProductWidget/PurchaseTableColumnWidths")
+        self._apply_purchase_fulltext_columns(columns)
         
         # ステータス理由列の編集時の処理を接続（既存の接続を解除してから接続）
         status_reason_col_idx = None
@@ -4624,6 +4689,145 @@ class ProductWidget(QWidget):
         if len(text) <= limit:
             return text
         return text[:limit] + "..."
+
+    @staticmethod
+    def _is_placeholder_url(url: Any) -> bool:
+        """省略表示や未入力の URL プレースホルダーか判定"""
+        text = str(url or "").strip()
+        if not text:
+            return True
+        lowered = text.lower()
+        if lowered in ("https://...", "http://...", "https://…", "http://…"):
+            return True
+        if text.endswith("...") or text.endswith("…"):
+            return True
+        if text.startswith("http") and len(text) <= 15 and "..." in text:
+            return True
+        return False
+
+    @staticmethod
+    def _receipt_image_lookup_key(text: str) -> str:
+        """レシートDB検索用キー（フルパスならファイル名 stem）"""
+        t = str(text or "").strip()
+        if not t:
+            return ""
+        if "\\" in t or "/" in t:
+            return Path(t).stem
+        return t
+
+    def _find_receipt_info_for_key(self, receipt_key: str) -> Optional[Dict[str, Any]]:
+        lookup = self._receipt_image_lookup_key(receipt_key)
+        if not lookup:
+            return None
+        if lookup in self._receipt_info_by_key_cache:
+            return self._receipt_info_by_key_cache[lookup]
+        info = None
+        try:
+            info = self.receipt_db.find_by_file_name(lookup)
+        except Exception:
+            info = None
+        self._receipt_info_by_key_cache[lookup] = info
+        return info
+
+    def _resolve_receipt_file_path(self, record: Dict[str, Any], receipt_key: str) -> Optional[str]:
+        """レシート画像のローカルファイルパスを解決"""
+        lookup = self._receipt_image_lookup_key(receipt_key)
+        candidates = [
+            record.get("レシート画像パス"),
+            record.get("receipt_image_path"),
+            self._receipt_file_path_cache.get(receipt_key),
+            self._receipt_file_path_cache.get(lookup) if lookup else None,
+        ]
+        for src in candidates:
+            if src:
+                path_text = str(src).strip()
+                if path_text:
+                    self._receipt_file_path_cache[lookup or receipt_key] = path_text
+                    return path_text
+        info = self._find_receipt_info_for_key(receipt_key)
+        if info:
+            file_path = info.get("original_file_path") or info.get("file_path")
+            if file_path:
+                path_text = str(file_path).strip()
+                self._receipt_file_path_cache[lookup or receipt_key] = path_text
+                return path_text
+        return None
+
+    def _resolve_receipt_image_url(self, record: Dict[str, Any], current: Any = "") -> str:
+        """レシート画像URLを products / レシートDB から補完"""
+        url = str(
+            current
+            or record.get("レシート画像URL")
+            or record.get("receipt_image_url")
+            or ""
+        ).strip()
+        if url and not self._is_placeholder_url(url):
+            return url
+
+        sku = str(record.get("SKU") or record.get("sku") or "").strip()
+        if sku:
+            try:
+                product = self.db.get_by_sku(sku)
+            except Exception:
+                product = None
+            if product:
+                product_url = str(product.get("receipt_image_url") or "").strip()
+                if product_url and not self._is_placeholder_url(product_url):
+                    return product_url
+
+        receipt_key = str(
+            record.get("レシート画像")
+            or record.get("receipt_id")
+            or record.get("receipt_image")
+            or ""
+        ).strip()
+        info = self._find_receipt_info_for_key(receipt_key) if receipt_key else None
+        if not info and sku:
+            try:
+                info = self.receipt_db.find_by_linked_sku(sku)
+            except Exception:
+                info = None
+        if info:
+            for key in ("gcs_url", "image_url"):
+                candidate = str(info.get(key) or "").strip()
+                if candidate and not self._is_placeholder_url(candidate):
+                    return candidate
+        if receipt_key:
+            inferred = self._infer_gcs_receipt_url(receipt_key)
+            if inferred and not self._is_placeholder_url(inferred):
+                return inferred
+        return ""
+
+    @staticmethod
+    def _infer_gcs_receipt_url(receipt_key: str) -> str:
+        """レシート識別子から GCS URL を推定（DB 未登録時のフォールバック）。"""
+        key = ProductWidget._receipt_image_lookup_key(receipt_key)
+        if not key:
+            return ""
+        if key.lower().startswith("http"):
+            return key
+        if re.match(r"^\d{4}-\d{2}-\d{2}-", key) or key.startswith("PXL_"):
+            return f"https://storage.googleapis.com/hirio-images-main/receipts/{key}.jpg"
+        return ""
+
+    def _purchase_fulltext_column_indices(self, columns: List[str]) -> List[int]:
+        return [
+            i for i, name in enumerate(columns)
+            if name in _PURCHASE_FILE_PATH_COLUMNS or name in _PURCHASE_URL_COLUMNS
+        ]
+
+    def _apply_purchase_fulltext_columns(self, columns: List[str]) -> None:
+        """パス/URL列の省略表示を無効化し、列幅の最小値を確保する。"""
+        indices = self._purchase_fulltext_column_indices(columns)
+        if not indices:
+            return
+        delegate = PurchaseFullTextItemDelegate(self.purchase_table)
+        header = self.purchase_table.horizontalHeader()
+        self.purchase_table.setTextElideMode(Qt.TextElideMode.ElideNone)
+        for col_idx in indices:
+            self.purchase_table.setItemDelegateForColumn(col_idx, delegate)
+            if header.sectionSize(col_idx) < _PURCHASE_FULLTEXT_MIN_COLUMN_WIDTH:
+                header.resizeSection(col_idx, _PURCHASE_FULLTEXT_MIN_COLUMN_WIDTH)
     
     def _update_row_color_by_status(self, row: int, status: str):
         """ステータスに応じて行の背景色・文字色を設定"""
@@ -4915,13 +5119,18 @@ class ProductWidget(QWidget):
                 self.purchase_table.editItem(item)
             return
         if header_text == "レシート画像URL":
-            # レシート画像URL列をダブルクリックしたときはブラウザで開く
             item = self.purchase_table.item(row, col)
             if not item:
                 return
-            url = (item.text() or "").strip()
-            if not url:
-                QMessageBox.information(self, "情報", "レシート画像URLが設定されていません。")
+            url = _purchase_table_cell_full_text(header_text, item, item.text() or "").strip()
+            if not url or self._is_placeholder_url(url):
+                QMessageBox.information(
+                    self,
+                    "情報",
+                    "レシート画像URLが設定されていません。\n"
+                    "（スナップショットに https://... とだけ保存されている場合は、"
+                    "商品DBまたはレシートDBからURLを補完できませんでした）",
+                )
                 return
             qurl = QUrl(url)
             if not qurl.isValid():
@@ -4931,12 +5140,11 @@ class ProductWidget(QWidget):
                 QMessageBox.warning(self, "警告", f"ブラウザでURLを開けませんでした:\n{url}")
             return
         if header_text.startswith("画像URL"):
-            # 画像URL列をクリックしたときはブラウザで開く
             item = self.purchase_table.item(row, col)
             if not item:
                 return
-            url = (item.text() or "").strip()
-            if not url:
+            url = _purchase_table_cell_full_text(header_text, item, item.text() or "").strip()
+            if not url or self._is_placeholder_url(url):
                 QMessageBox.information(self, "情報", "画像URLが設定されていません。")
                 return
             qurl = QUrl(url)
@@ -4950,88 +5158,60 @@ class ProductWidget(QWidget):
             item = self.purchase_table.item(row, col)
             if not item:
                 return
-            
-            receipt_image_name = item.text().strip()
-            if not receipt_image_name:
+
+            receipt_label = (item.text() or "").strip()
+            if not receipt_label:
                 QMessageBox.information(self, "情報", "レシート画像が設定されていません。")
                 return
-            
-            # ファイルパスを取得（UserRoleに保存されている）
+
+            record: Dict[str, Any] = {}
+            row_id = None
+            if row < len(getattr(self, "_purchase_table_row_ids_by_index", [])):
+                row_id = self._purchase_table_row_ids_by_index[row]
+            if row_id is not None and row_id in getattr(self, "_purchase_row_map", {}):
+                record = self._purchase_row_map[row_id]
+
             file_path = item.data(Qt.UserRole)
-            
-            # UserRoleにファイルパスがない、またはファイルが存在しない場合は、テキストから再検索
-            file_path_found = False
             if file_path:
-                file_path_obj = Path(file_path)
-                # ファイルパスが存在するか確認
-                if file_path_obj.exists() and file_path_obj.is_file():
-                    file_path_found = True
-                else:
-                    # UserRoleに保存されている値がファイル名の可能性があるので、再検索
-                    file_path = None
-            
-            # 再検索が必要な場合
-            receipt_info = None
-            if not file_path_found:
-                receipt_info = self.receipt_db.find_by_file_name(receipt_image_name)
-                if receipt_info:
-                    # original_file_pathを優先、なければfile_path
-                    file_path = receipt_info.get('original_file_path') or receipt_info.get('file_path')
-                    
-                    # レシートDBからファイルパスが見つかった場合、レコードに保存して次回から使えるようにする
-                    if file_path and hasattr(self, 'purchase_all_records') and self.purchase_all_records:
-                        # SKU列のインデックスを取得
-                        sku_col_idx = None
-                        if "SKU" in self.purchase_columns:
-                            sku_col_idx = self.purchase_columns.index("SKU")
-                        
-                        if sku_col_idx is not None:
-                            sku_item = self.purchase_table.item(row, sku_col_idx)
-                            if sku_item:
-                                sku_val = (sku_item.text() or "").strip()
-                                if sku_val:
-                                    # purchase_all_recordsを更新
-                                    for rec in self.purchase_all_records:
-                                        rec_sku = (rec.get("SKU") or rec.get("sku") or "").strip()
-                                        if rec_sku == sku_val:
-                                            # レシート画像パスを保存
-                                            rec['レシート画像パス'] = str(file_path)
-                                            # UserRoleも更新
-                                            item.setData(Qt.UserRole, str(file_path))
-                                            break
-            
+                file_path = str(file_path).strip()
+                path_obj = Path(file_path)
+                if not (path_obj.exists() and path_obj.is_file()):
+                    file_path = self._resolve_receipt_file_path(record, receipt_label) or file_path
+            else:
+                file_path = self._resolve_receipt_file_path(record, receipt_label)
+
+            receipt_info = self._find_receipt_info_for_key(receipt_label)
+
             if file_path:
                 image_file = Path(file_path)
                 if image_file.exists() and image_file.is_file():
-                    # OSのデフォルトアプリで画像を開く
+                    if record:
+                        record["レシート画像パス"] = str(image_file.resolve())
+                    item.setData(Qt.UserRole, str(image_file.resolve()))
                     file_url = QUrl.fromLocalFile(str(image_file.absolute()))
                     if not QDesktopServices.openUrl(file_url):
                         QMessageBox.warning(self, "警告", f"画像ファイルを開けませんでした:\n{file_path}")
-                else:
-                    # ファイルが存在しない場合の詳細メッセージ
-                    if receipt_info:
-                        QMessageBox.warning(
-                            self, "警告",
-                            f"レシート画像のファイルが見つかりません:\n\n"
-                            f"ファイル名: {receipt_image_name}\n"
-                            f"ファイルパス: {file_path}\n\n"
-                            f"レシートDBには登録されていますが、\n"
-                            f"ファイルが削除されているか、\n"
-                            f"パスが変更されている可能性があります。"
-                        )
-                    else:
-                        QMessageBox.warning(
-                            self, "警告",
-                            f"レシート画像が見つかりません:\n\n"
-                            f"ファイル名: {receipt_image_name}\n\n"
-                            f"レシートDBに登録されていない可能性があります。"
-                        )
-            else:
-                QMessageBox.information(
-                    self, "情報",
-                    f"レシート画像の情報を取得できませんでした:\n\n"
-                    f"ファイル名: {receipt_image_name}"
+                    return
+
+            lookup_key = self._receipt_image_lookup_key(receipt_label)
+            if receipt_info:
+                QMessageBox.warning(
+                    self, "警告",
+                    f"レシート画像のファイルが見つかりません:\n\n"
+                    f"識別子: {lookup_key}\n"
+                    f"DB上のパス: {receipt_info.get('original_file_path') or receipt_info.get('file_path')}\n\n"
+                    f"レシートDBには登録されていますが、\n"
+                    f"ファイルが削除されているか、\n"
+                    f"パスが変更されている可能性があります。",
                 )
+            else:
+                QMessageBox.warning(
+                    self, "警告",
+                    f"レシート画像が見つかりません:\n\n"
+                    f"識別子: {lookup_key}\n\n"
+                    f"レシートDBに未登録、または識別子が一致しない可能性があります。",
+                )
+            return
         elif header_text == "保証書画像":
             item = self.purchase_table.item(row, col)
             if not item:
@@ -5305,21 +5485,21 @@ class ProductWidget(QWidget):
                 item = self.purchase_table.item(row, col)
                 if not item:
                     return None
-                # SKU は省略表示される可能性があるので、UserRole にフル値があればそれを優先する
-                if header.upper() == "SKU":
-                    full = item.data(Qt.UserRole)
-                    if full is not None and str(full).strip():
-                        return str(full).strip()
+                # SKU・パス・URL列は UserRole のフル値を優先
+                if header.upper() == "SKU" or header in _PURCHASE_FILE_PATH_COLUMNS or header in _PURCHASE_URL_COLUMNS:
+                    return _purchase_table_cell_full_text(header, item, item.text() if item else "")
                 return item.text() if item else None
             for key in keys:
                 if header.upper() == key.upper():
                     item = self.purchase_table.item(row, col)
                     if not item:
                         return None
-                    if header.upper() == "SKU":
-                        full = item.data(Qt.UserRole)
-                        if full is not None and str(full).strip():
-                            return str(full).strip()
+                    if (
+                        header.upper() == "SKU"
+                        or header in _PURCHASE_FILE_PATH_COLUMNS
+                        or header in _PURCHASE_URL_COLUMNS
+                    ):
+                        return _purchase_table_cell_full_text(header, item, item.text() if item else "")
                     return item.text() if item else None
         return None
 

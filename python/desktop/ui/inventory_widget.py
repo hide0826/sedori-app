@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QSplitter, QMessageBox, QFrame,
     QCheckBox, QSpinBox, QDateEdit, QFileDialog,
     QDialog, QDialogButtonBox, QSizePolicy, QInputDialog, QProgressDialog,
-    QPlainTextEdit, QScrollArea, QFormLayout, QTimeEdit,
+    QPlainTextEdit, QScrollArea, QFormLayout,
     QToolButton, QApplication, QAbstractItemView,
 )
 from PySide6.QtCore import Qt, QDate, QTime, QDateTime, Signal, QSettings, QThread, QTimer
@@ -649,16 +649,18 @@ class SpotPurchaseDialog(QDialog):
         self.store_code_edit.setReadOnly(True)
         self.store_code_edit.setPlaceholderText("店舗名を選択すると自動で入ります")
         layout.addRow("店舗コード:", self.store_code_edit)
-        # IN/OUT時間（自由入力）
-        self.in_time_edit = QTimeEdit()
-        self.in_time_edit.setDisplayFormat("HH:mm")
-        self.in_time_edit.setTime(QTime.currentTime())
-        self.in_time_edit.timeChanged.connect(self._update_auto_fields)
+        # IN/OUT時間（HH:mm をキーボードで直接入力）
+        now = QTime.currentTime()
+        default_time = f"{now.hour():02d}:{now.minute():02d}"
+        self.in_time_edit = QLineEdit(default_time)
+        self.in_time_edit.setPlaceholderText("例: 10:30")
+        self.in_time_edit.setMaximumWidth(80)
+        self.in_time_edit.textChanged.connect(self._update_auto_fields)
         layout.addRow("IN時間:", self.in_time_edit)
-        self.out_time_edit = QTimeEdit()
-        self.out_time_edit.setDisplayFormat("HH:mm")
-        self.out_time_edit.setTime(QTime.currentTime())
-        self.out_time_edit.timeChanged.connect(self._update_auto_fields)
+        self.out_time_edit = QLineEdit(default_time)
+        self.out_time_edit.setPlaceholderText("例: 11:45")
+        self.out_time_edit.setMaximumWidth(80)
+        self.out_time_edit.textChanged.connect(self._update_auto_fields)
         layout.addRow("OUT時間:", self.out_time_edit)
         # 仕入CSVから自動計算される項目（表示用＋微調整可）
         self.stay_minutes_edit = QLineEdit()
@@ -704,22 +706,38 @@ class SpotPurchaseDialog(QDialog):
         code = self.store_combo.currentData()
         self.store_code_edit.setText(code or "")
         self._update_auto_fields()
+
+    @staticmethod
+    def _parse_hhmm(text: str) -> Optional[QTime]:
+        """HH:mm または H:mm 形式の時刻文字列を QTime に変換"""
+        text = (text or "").strip()
+        if not text:
+            return None
+        parts = text.split(":")
+        if len(parts) != 2:
+            return None
+        try:
+            h = int(parts[0])
+            m = int(parts[1])
+            if 0 <= h < 24 and 0 <= m < 60:
+                return QTime(h, m)
+        except ValueError:
+            return None
+        return None
     
     def _update_auto_fields(self):
         """仕入CSVから該当店舗の想定粗利・仕入れ点数を集計し、IN/OUTから滞在(分)を計算"""
         code = self.store_code_edit.text().strip()
         stay_min = 0
-        try:
-            in_t = self.in_time_edit.time()
-            out_t = self.out_time_edit.time()
+        in_t = self._parse_hhmm(self.in_time_edit.text())
+        out_t = self._parse_hhmm(self.out_time_edit.text())
+        if in_t and out_t:
             in_min = in_t.hour() * 60 + in_t.minute()
             out_min = out_t.hour() * 60 + out_t.minute()
             if out_min >= in_min:
                 stay_min = out_min - in_min
             else:
                 stay_min = (24 * 60 - in_min) + out_min
-        except Exception:
-            pass
         self.stay_minutes_edit.setText(str(stay_min))
         gross = 0
         count = 0
@@ -740,12 +758,16 @@ class SpotPurchaseDialog(QDialog):
         return self.date_edit.date()
     
     def get_in_time_str(self) -> str:
-        t = self.in_time_edit.time()
-        return f"{t.hour():02d}:{t.minute():02d}"
+        t = self._parse_hhmm(self.in_time_edit.text())
+        if t:
+            return f"{t.hour():02d}:{t.minute():02d}"
+        return self.in_time_edit.text().strip()
     
     def get_out_time_str(self) -> str:
-        t = self.out_time_edit.time()
-        return f"{t.hour():02d}:{t.minute():02d}"
+        t = self._parse_hhmm(self.out_time_edit.text())
+        if t:
+            return f"{t.hour():02d}:{t.minute():02d}"
+        return self.out_time_edit.text().strip()
     
     def accept(self):
         store_name = self.store_combo.currentText().strip()
@@ -755,6 +777,16 @@ class SpotPurchaseDialog(QDialog):
         code = self.store_code_edit.text().strip()
         if not code:
             QMessageBox.warning(self, "入力エラー", "店舗コードが取得できません。")
+            return
+        if not self._parse_hhmm(self.in_time_edit.text()):
+            QMessageBox.warning(
+                self, "入力エラー", "IN時間を HH:mm 形式で入力してください。（例: 10:30）"
+            )
+            return
+        if not self._parse_hhmm(self.out_time_edit.text()):
+            QMessageBox.warning(
+                self, "入力エラー", "OUT時間を HH:mm 形式で入力してください。（例: 11:45）"
+            )
             return
         super().accept()
     
@@ -3144,30 +3176,37 @@ class InventoryWidget(QWidget):
             # 店舗訪問テーブルを1行にリセットしてスポット行を追加
             table = self.route_summary_widget.store_visits_table
             table.setRowCount(0)
-            row = 0
-            table.insertRow(row)
-            order_item = QTableWidgetItem("1")
-            order_item.setFlags(order_item.flags() & ~Qt.ItemIsEditable)
-            table.setItem(row, 0, order_item)
-            table.setItem(row, 1, QTableWidgetItem(store_code))
-            table.setItem(row, 2, QTableWidgetItem(store_name))
-            table.setItem(row, 3, QTableWidgetItem(in_time))
-            table.setItem(row, 4, QTableWidgetItem(out_time))
-            table.setItem(row, 5, QTableWidgetItem(str(stay_min)))
-            table.setItem(row, 6, QTableWidgetItem(""))
-            table.setItem(row, 7, QTableWidgetItem(""))
-            table.setItem(row, 8, QTableWidgetItem(""))
-            star_widget = StarRatingWidget(table, rating=0.0, star_size=14)
-            star_widget.rating_changed.connect(lambda rating, r=row: self.route_summary_widget.on_star_rating_changed(r, rating))
-            table.setCellWidget(row, 9, star_widget)
-            # メモ列は店舗マスタの備考を反映
+            table.insertRow(0)
             memo_text = ""
             if store_code:
                 store_info = self.store_db.get_store_by_code(store_code)
                 if store_info:
                     custom_fields = store_info.get("custom_fields", {})
                     memo_text = custom_fields.get("notes", "")
-            table.setItem(row, 10, QTableWidgetItem(memo_text))
+            try:
+                gross = str(int(dlg.gross_profit_edit.text() or 0))
+            except ValueError:
+                gross = "0"
+            try:
+                qty = str(int(dlg.item_count_edit.text() or 0))
+            except ValueError:
+                qty = "0"
+            self.route_summary_widget._fill_visit_table_row(
+                0,
+                store_code=store_code,
+                store_name=store_name,
+                in_time=in_time,
+                out_time=out_time,
+                stay=str(stay_min),
+                travel="",
+                profit=gross,
+                qty=qty,
+                rating=float(dlg.rating_spin.value()),
+                notes=memo_text,
+                include_checked=True,
+                visit_order="1",
+                order_editable=False,
+            )
             # ルートを保存して route_summaries / store_visit_details に反映
             self.route_summary_widget.save_data()
             # 仕入管理側のルート情報表示を最新状態に更新
@@ -3439,17 +3478,24 @@ class InventoryWidget(QWidget):
             
             # 出発時刻・帰宅時間・往路高速代・復路高速代を店舗訪問情報から除外
             # これらの情報はルート全体の情報であり、個別の店舗訪問情報として扱うべきではない
-            filtered_visits = []
+            raw_visits: List[Dict[str, Any]] = []
             exclude_store_codes = ['出発時刻', '帰宅時刻', '往路高速代', '復路高速代']
             for visit in visits:
                 store_code = visit.get('store_code', '')
-                # 店舗コードが除外対象でない場合のみ追加
                 if store_code not in exclude_store_codes:
-                    filtered_visits.append(visit)
-            
-            # メモ欄があれば店舗マスタの備考欄に保存・追記
-            self._save_memos_to_store_master(filtered_visits)
-            
+                    raw_visits.append(visit)
+
+            # メモ欄があれば店舗マスタの備考欄に保存・追記（未訪問店舗も含む）
+            self._save_memos_to_store_master(raw_visits)
+
+            # 実訪問（IN/OUT 両方あり）のみ表示し、IN 時刻順に訪問順を揃える
+            route_date = route_data.get('route_date', '')
+            try:
+                from desktop.services.route_visit_normalize import prepare_actual_visits_for_display
+            except ImportError:
+                from services.route_visit_normalize import prepare_actual_visits_for_display  # type: ignore
+            filtered_visits = prepare_actual_visits_for_display(raw_visits, route_date)
+
             self.populate_route_template_table(filtered_visits)
             route_code = route_data.get('route_code', '')
             route_date = route_data.get('route_date', '')

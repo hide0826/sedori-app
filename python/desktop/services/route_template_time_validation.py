@@ -65,8 +65,7 @@ def collect_route_template_time_issues(
             store_issues.append(f"・{label}: 到着時刻(IN)のみ入力（店舗の出発時刻 OUT が空）")
         elif out_ok and not in_ok:
             store_issues.append(f"・{label}: 出発時刻(OUT)のみ入力（到着時刻 IN が空）")
-        elif not in_ok and not out_ok:
-            store_issues.append(f"・{label}: 到着・出発時刻がともに未入力")
+        # IN・OUT とも未入力は未訪問店舗のため警告しない
 
     if store_issues:
         issues.append(

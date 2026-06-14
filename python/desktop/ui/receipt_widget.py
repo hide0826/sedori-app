@@ -510,6 +510,9 @@ class ReceiptWidget(QWidget):
         self._workflow_emphasize = False
         self._workflow_active_step: Optional[int] = None
         self._workflow_post_step: Optional[int] = None
+        # ⑤一括リネーム完了後のみ ⑦GCS / ⑧確定 を許可
+        self._bulk_rename_completed: bool = False
+        self._gcs_upload_completed: bool = False
         
         self.setup_ui()
         
@@ -1005,6 +1008,85 @@ class ReceiptWidget(QWidget):
         action_outer.addLayout(aux_layout)
 
         self.layout.addWidget(action_group)
+        self._reset_post_rename_workflow_gate()
+
+    def _reset_post_rename_workflow_gate(self) -> None:
+        """ワークフロー初期化時: ⑦GCS / ⑧確定を無効化する。"""
+        self._bulk_rename_completed = False
+        self._gcs_upload_completed = False
+        self._sync_post_rename_action_buttons()
+
+    def _mark_bulk_rename_completed(self) -> None:
+        """一括リネーム完了後に GCSアップロードを有効化（確定は GCS 完了後）。"""
+        self._bulk_rename_completed = True
+        self._gcs_upload_completed = False
+        self._workflow_post_step = 6
+        self._sync_post_rename_action_buttons()
+
+    def _mark_gcs_upload_completed(self) -> None:
+        """GCSアップロード完了後に 確定 を有効化する。"""
+        self._gcs_upload_completed = True
+        self._workflow_post_step = 8
+        self._sync_post_rename_action_buttons()
+
+    def _sync_post_rename_action_buttons(self) -> None:
+        """⑦GCS / ⑧確定ボタンの有効状態とツールチップを同期。"""
+        rename_done = bool(getattr(self, "_bulk_rename_completed", False))
+        gcs_done = bool(getattr(self, "_gcs_upload_completed", False))
+        rename_gate_tip = (
+            "先に「一括リネーム」（⑤）を実行してください。"
+            "リネーム前のファイル名のまま確定するとリンク切れの原因になります。"
+        )
+        gcs_gate_tip = (
+            "先に「GCSアップロード」（⑦）を実行してください。"
+            "GCS URL が仕入DBに反映される前に確定すると、レシート画像リンクが正しく保存されません。"
+        )
+        if hasattr(self, "gcs_upload_btn") and self.gcs_upload_btn:
+            self.gcs_upload_btn.setEnabled(rename_done)
+            self.gcs_upload_btn.setToolTip(
+                "レシート一覧の全件をGCSにアップロードします"
+                if rename_done
+                else rename_gate_tip
+            )
+        if hasattr(self, "confirm_btn") and self.confirm_btn:
+            in_progress = bool(getattr(self, "_confirm_in_progress", False))
+            confirm_enabled = rename_done and gcs_done and not in_progress
+            self.confirm_btn.setEnabled(confirm_enabled)
+            if rename_done and gcs_done:
+                confirm_tip = "レシートと仕入DBの紐付けを確定します"
+            elif rename_done:
+                confirm_tip = gcs_gate_tip
+            else:
+                confirm_tip = rename_gate_tip
+            self.confirm_btn.setToolTip(confirm_tip)
+
+    def _require_bulk_rename_before_post_actions(self, action_label: str) -> bool:
+        """GCS / 確定の前に一括リネーム済みか確認。未完了なら False。"""
+        if getattr(self, "_bulk_rename_completed", False):
+            return True
+        QMessageBox.information(
+            self,
+            action_label,
+            "「一括リネーム」（⑤）を実行してから "
+            f"「{action_label}」を行ってください。\n\n"
+            "リネーム前に GCS アップロードや確定を行うと、"
+            "仕入DBのレシート画像リンクが古いファイル名のまま残り、"
+            "リンク切れの原因になります。",
+        )
+        return False
+
+    def _require_gcs_upload_before_confirm(self) -> bool:
+        """確定の前に GCSアップロード済みか確認。未完了なら False。"""
+        if getattr(self, "_gcs_upload_completed", False):
+            return True
+        QMessageBox.information(
+            self,
+            "確定",
+            "「GCSアップロード」（⑦）を実行してから「確定」を行ってください。\n\n"
+            "GCS URL が仕入DBに反映される前に確定すると、"
+            "レシート画像のリンクが正しく保存されません。",
+        )
+        return False
 
     def _sync_workflow_status_label(self) -> None:
         """ワークフロー: 〜 と ①〜⑧ 手順を1行の HTML で表示する。"""
@@ -1356,6 +1438,7 @@ class ReceiptWidget(QWidget):
         )
         if not folder:
             return
+        self._reset_post_rename_workflow_gate()
         self.current_folder = Path(folder)
         
         # OCRキューを更新
@@ -1387,6 +1470,7 @@ class ReceiptWidget(QWidget):
         if self.batch_running:
             QMessageBox.information(self, "情報", "すでに一括OCR処理を実行中です。")
             return
+        self._reset_post_rename_workflow_gate()
         self.batch_running = True
         self.batch_total_count = len(self.ocr_queue)
         self.batch_processed_count = 0
@@ -1728,21 +1812,15 @@ class ReceiptWidget(QWidget):
                     f"店舗コード: {candidate.store_code}\n"
                     f"アイテム数: {candidate.items_count}"
                 )
-                if hasattr(self, 'confirm_btn'):
-                    self.confirm_btn.setEnabled(True)
             else:
                 if hasattr(self, 'match_result_label'):
                     self.match_result_label.setText(
                     f"マッチ候補あり（差額: {diff}円）\n"
                     f"確認してください。"
                 )
-                if hasattr(self, 'confirm_btn'):
-                    self.confirm_btn.setEnabled(True)
         else:
             if hasattr(self, 'match_result_label'):
                 self.match_result_label.setText("マッチする候補が見つかりませんでした。")
-            if hasattr(self, 'confirm_btn'):
-                self.confirm_btn.setEnabled(True)
     
     def confirm_receipt(self):
         """レシートを確定（学習も実行）"""
@@ -3228,6 +3306,8 @@ class ReceiptWidget(QWidget):
 
     def show_gcs_upload_dialog(self):
         """GCSアップロードダイアログを表示"""
+        if not self._require_bulk_rename_before_post_actions("GCSアップロード"):
+            return
         # GCSアップロードユーティリティを動的に読み込む（画像管理タブと同じ方式）
         try:
             upload_func, auth_func, lifecycle_func, gcs_available, find_existing_func = self._load_gcs_uploader()
@@ -3420,9 +3500,11 @@ class ReceiptWidget(QWidget):
         existing_count = 0  # 既存ファイルから取得した件数
         error_count = 0
         error_messages = []
+        upload_cancelled = False
         
         for i, receipt in enumerate(receipts):
             if progress.wasCanceled():
+                upload_cancelled = True
                 break
             
             progress.setValue(i)
@@ -3509,6 +3591,8 @@ class ReceiptWidget(QWidget):
         
         # レシート一覧を更新
         self.refresh_receipt_list()
+        if not upload_cancelled:
+            self._mark_gcs_upload_completed()
     
     def delete_all_receipts(self):
         """レシート情報をクリア"""
@@ -3523,6 +3607,7 @@ class ReceiptWidget(QWidget):
         deleted = self.receipt_db.delete_all_receipts()
         self.reset_form()
         self.refresh_receipt_list()
+        self._reset_post_rename_workflow_gate()
         self._update_workflow_status("ワークフロー: 未実行", emphasize=False)
         QMessageBox.information(self, "クリア完了", f"{deleted} 件のレシートをクリアしました。")
 
@@ -3532,6 +3617,7 @@ class ReceiptWidget(QWidget):
         if not self.product_widget:
             QMessageBox.warning(self, "警告", "仕入DBへの参照がありません。")
             return
+        self._reset_post_rename_workflow_gate()
         purchase_records = self._get_purchase_records()
         if not purchase_records:
             QMessageBox.warning(self, "警告", "仕入DBにデータがありません。")
@@ -4158,6 +4244,7 @@ class ReceiptWidget(QWidget):
         
         # レシート一覧を更新
         self.refresh_receipt_list()
+        self._mark_bulk_rename_completed()
     
     def detect_and_update_renamed_files(self):
         """リネーム済みファイルを検出してデータベースを更新"""
@@ -8772,6 +8859,10 @@ class ReceiptWidget(QWidget):
     
     def confirm_receipt_linkage(self):
         """確定ボタン: レシート管理で紐付けられた画像ファイル名を仕入DBのSKUに設定"""
+        if not self._require_bulk_rename_before_post_actions("確定"):
+            return
+        if not self._require_gcs_upload_before_confirm():
+            return
         from time import perf_counter
         if getattr(self, "_confirm_in_progress", False):
             print("[WARN] confirm_receipt_linkage is already running. skip duplicated call.")
@@ -9577,11 +9668,7 @@ class ReceiptWidget(QWidget):
             perf_t_end = perf_counter()
             print(f"[PERF] confirm_receipt_linkage total={perf_t_end - perf_t0:.3f}s")
             self._confirm_in_progress = False
-            if hasattr(self, "confirm_btn") and self.confirm_btn:
-                try:
-                    self.confirm_btn.setEnabled(True)
-                except Exception:
-                    pass
+            self._sync_post_rename_action_buttons()
 
     def _confirm_receipt_linkage_optimized(self):
         """確定処理の高速化版（処理対象の事前集約・検索マップ化で待ち時間を削減）"""

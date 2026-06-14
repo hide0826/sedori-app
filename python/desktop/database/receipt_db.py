@@ -201,6 +201,28 @@ class ReceiptDatabase:
         
         return None
 
+    def find_by_linked_sku(self, sku: str) -> Optional[Dict[str, Any]]:
+        """linked_skus / sku 列から SKU に紐づくレシートを検索"""
+        sku = str(sku or "").strip()
+        if not sku:
+            return None
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM receipts
+            WHERE sku = ?
+               OR linked_skus = ?
+               OR linked_skus LIKE ?
+               OR linked_skus LIKE ?
+               OR linked_skus LIKE ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (sku, sku, f"{sku},%", f"%,{sku},%", f"%,{sku}"),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
     def update_receipt(self, receipt_id: int, updates: Dict[str, Any]) -> bool:
         if not updates:
             return False

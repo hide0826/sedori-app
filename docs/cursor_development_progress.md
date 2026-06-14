@@ -1,3 +1,31 @@
+## 2026-06-14 証憑ワークフローゲート・仕入DBレシート表示・ルート訪問順修正
+
+- **目的**: 証憑確定前のリンク切れ防止、仕入DBでのレシートURL/パス確認性向上、ルートテンプレ・スポット仕入の表示不整合解消。
+- **証憑管理**（`receipt_widget.py`）
+  - **⑤一括リネーム** 完了まで **⑦GCSアップロード** / **⑧確定** を無効化（ボタン + 処理冒頭ガード）。
+  - **⑦GCSアップロード** 完了まで **⑧確定** を無効化（キャンセル時は未完了扱い）。
+  - フォルダ選択・一括OCR・一括マッチング・クリアでゲート再ロック。リネーム再実行時は GCS も再実行必須。
+- **仕入DB**（`product_widget.py`, `receipt_db.py`）
+  - レシート/保証書/画像列をフルパス表示。URL列は省略なし描画 + ツールチップ + `UserRole` 保存。
+  - レシートDB から SKU 連携で GCS URL 補完（`find_by_linked_sku`）。
+- **仕入管理**（`inventory_widget.py`）
+  - スポット仕入 IN/OUT を `HH:mm` 直接入力に変更。
+  - ルート表 IN/OUT 列ズレ修正（`_fill_visit_table_row` 統一）。
+  - ルートテンプレ読込: IN/OUT 両方ある店舗のみ、IN 時刻順で訪問順再計算。
+- **共通**（`route_visit_normalize.py`, `route_template_time_validation.py`）
+  - `filter_actual_visits`, `prepare_actual_visits_for_display` 追加。IN/OUT 両方空は警告除外。
+- **変更ファイル**:
+  - `python/desktop/ui/receipt_widget.py`
+  - `python/desktop/ui/product_widget.py`
+  - `python/desktop/ui/inventory_widget.py`
+  - `python/desktop/database/receipt_db.py`
+  - `python/desktop/services/route_visit_normalize.py`
+  - `python/desktop/services/route_template_time_validation.py`
+  - `development_history.md`
+  - `docs/cursor_development_progress.md`
+- **リポジトリ**: sedori-app.github
+- **Git**: feat(desktop): 証憑ワークフローゲートと仕入DBレシート表示改善
+
 ## 2026-06-11 プライスター連携を手動ワークフローに統一（自動送信廃止）
 
 - **目的**: アプリ内ブラウザによるプライスター自動アップロードはログイン・モーダル等で不安定なため廃止し、「ブラウザで開く＋CSVドラッグ」に一本化。

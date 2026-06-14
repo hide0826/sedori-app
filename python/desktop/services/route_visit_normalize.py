@@ -155,6 +155,36 @@ def normalize_route_visits(
     return ordered
 
 
+def filter_actual_visits(
+    visits: List[Dict[str, Any]],
+    route_date: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """IN・OUT が両方ある実訪問のみ抽出（route_visit_logs と同基準）。"""
+    if not visits:
+        return []
+
+    resolved_date = (route_date or "").strip()
+    if not resolved_date:
+        for v in visits:
+            d = str(v.get("route_date") or "").strip()
+            if d:
+                resolved_date = d
+                break
+
+    return [deepcopy(v) for v in visits if _is_sortable_visit(v, resolved_date)]
+
+
+def prepare_actual_visits_for_display(
+    visits: List[Dict[str, Any]],
+    route_date: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """実訪問のみ抽出し、IN 時刻順に visit_order / 滞在 / 移動を再計算する。"""
+    actual = filter_actual_visits(visits, route_date)
+    if not actual:
+        return []
+    return normalize_route_visits(actual, route_date)
+
+
 def repair_all_route_visits_in_db(db: Any) -> int:
     """
     route_visit_logs の全ルートを走査し、訪問順・移動時間を補正して上書き保存する。
