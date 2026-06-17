@@ -13,7 +13,7 @@ import calendar
 from datetime import datetime, date
 from pathlib import Path
 from contextlib import contextmanager
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Iterable
 import copy
 
 from PySide6.QtCore import Qt, QMimeData, QUrl, QSettings, QTimer
@@ -2518,6 +2518,33 @@ class ProductWidget(QWidget):
                 updated += 1
         return updated
 
+    def sync_purchase_master_records_for_skus(self, skus: Iterable[str]) -> int:
+        """変更したSKUのみ master / purchase_records に同期（全件 deepcopy を避ける）。"""
+        sku_set = {str(s).strip() for s in skus if str(s).strip()}
+        if not sku_set:
+            return 0
+        all_recs = getattr(self, "purchase_all_records", None) or []
+        src_by_sku: Dict[str, Dict[str, Any]] = {}
+        for record in all_recs:
+            sku = str(record.get("SKU") or record.get("sku") or "").strip()
+            if sku:
+                src_by_sku[sku] = record
+        updated = 0
+        for lst_name in ("purchase_all_records_master", "purchase_records"):
+            lst = getattr(self, lst_name, None)
+            if not lst:
+                continue
+            for i, record in enumerate(lst):
+                sku = str(record.get("SKU") or record.get("sku") or "").strip()
+                if sku not in sku_set:
+                    continue
+                src = src_by_sku.get(sku)
+                if not src:
+                    continue
+                lst[i] = dict(src)
+                updated += 1
+        return updated
+
     def sync_purchase_master_from_records(self) -> None:
         """purchase_all_records の変更を master に同期（確定・レシート編集後用）。"""
         records = getattr(self, "purchase_all_records", None)
@@ -2536,10 +2563,11 @@ class ProductWidget(QWidget):
         records = getattr(self, "purchase_all_records", None) or []
         self.populate_purchase_table(records)
 
-    def save_purchase_snapshot(self):
+    def save_purchase_snapshot(self, *, skip_master_sync: bool = False):
         """現在の仕入データをスナップショットとして保存"""
         # 確定処理等で all_records のみ更新されている場合に備え、保存前に master を同期
-        self.sync_purchase_master_from_records()
+        if not skip_master_sync:
+            self.sync_purchase_master_from_records()
         master = getattr(self, "purchase_all_records_master", None) or getattr(
             self, "purchase_all_records", None
         )
@@ -3021,6 +3049,43 @@ class ProductWidget(QWidget):
         item.setFlags(item.flags() & ~Qt.ItemIsEditable)
         return item
 
+    def _make_purchase_receipt_image_table_item(
+        self, record: Dict[str, Any]
+    ) -> QTableWidgetItem:
+        """レシート編集後など、レシート画像列セルを1件分だけ再構築する。"""
+        value = self._get_record_value(record, ["レシート画像"])
+        receipt_image_str = "" if value is None else str(value).strip()
+        display_text = ""
+        resolved_path = None
+        item = QTableWidgetItem("")
+        item.setFlags(item.flags() | Qt.ItemIsEnabled)
+        saved_path = str(record.get("レシート画像パス") or "").strip()
+        if saved_path and Path(saved_path).is_file():
+            resolved_path = str(Path(saved_path).resolve())
+            display_text = resolved_path
+        elif receipt_image_str:
+            file_path = self._resolve_receipt_file_path(record, receipt_image_str)
+            if file_path:
+                file_path_obj = Path(file_path)
+                if file_path_obj.exists():
+                    resolved_path = str(file_path_obj.resolve())
+                    display_text = resolved_path
+                    record["レシート画像パス"] = resolved_path
+                else:
+                    resolved_path = str(file_path)
+                    display_text = resolved_path
+                    record["レシート画像パス"] = file_path
+        item.setText(display_text)
+        if display_text.strip():
+            item.setToolTip(display_text)
+        if resolved_path:
+            item.setData(Qt.UserRole, resolved_path)
+        elif receipt_image_str:
+            item.setData(Qt.UserRole, receipt_image_str)
+        if display_text.strip() or receipt_image_str:
+            item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
+        return item
+
     def _refresh_purchase_repricing_table_cells_for_record(
         self, record: Dict[str, Any]
     ) -> None:
@@ -3040,6 +3105,7 @@ class ProductWidget(QWidget):
             "Amazon手数料",
             "出荷費用",
             "費用合計",
+            "仕入れ価格",
             "見込み利益",
             "損益分岐点",
             "想定利益率",
@@ -3070,6 +3136,13 @@ class ProductWidget(QWidget):
                     else:
                         text = "" if value is None else str(value).strip()
                         self.purchase_table.setItem(row, col, QTableWidgetItem(text))
+                if "レシート画像" in self.purchase_columns:
+                    col = self.purchase_columns.index("レシート画像")
+                    self.purchase_table.setItem(
+                        row,
+                        col,
+                        self._make_purchase_receipt_image_table_item(master_rec),
+                    )
         finally:
             self.purchase_table.setUpdatesEnabled(True)
             self.purchase_table.viewport().update()

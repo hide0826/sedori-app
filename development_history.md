@@ -1,3 +1,26 @@
+## 2026-06-17 (続): 証憑管理レシート編集「変更を保存」の高速化
+
+- **タスク:** 証憑管理タブ → レシート・領収書・保証書 → レシート情報編集で「変更を保存」が1分以上かかる問題の解消
+- **状況:** 完了
+- **原因:**
+  - 保存後に仕入DB全件 `deepcopy`（`sync_purchase_master_from_records`）
+  - 仕入DBテーブル全行再描画（`populate_purchase_table`）
+  - 完了ダイアログ表示中に上記が実行され UI が長時間ブロック
+- **変更点:**
+  - **`product_widget.py`**
+    - `sync_purchase_master_records_for_skus`: 変更SKUのみ master / purchase_records に同期
+    - `save_purchase_snapshot(skip_master_sync=True)`: 同期済み時は二重の全件コピーをスキップ
+    - `_make_purchase_receipt_image_table_item` + 該当行セル部分更新（仕入れ価格・利益系・レシート画像列）
+  - **`receipt_widget.py`**
+    - `_defer_after_receipt_manual_save`: 全テーブル再描画を廃止し紐付けSKU行のみ更新
+    - スナップショットは 50ms 後の別タイマーで非同期実行
+    - 完了メッセージを先に表示し、重い処理はダイアログ後にバックグラウンド実行
+- **動作確認:** 画像管理の手動紐付けと同様、紐付けSKU数件の保存は数秒以内を想定
+- **Git:**
+  - feat(desktop): 証憑管理レシート編集の保存処理を高速化
+
+---
+
 ## 2026-06-17: 画像管理のJAN表示改善・仕入DB候補UI・紐付け高速化・Amazonドラッグ改善・データバックアップ
 
 - **タスク:** 画像管理タブのJANグループ/仕入DB候補の色分け、手動紐付けの遅延解消、画像登録タブのAmazonアップロード用ドラッグ改善、設定画面のデータバックアップ機能

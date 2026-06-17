@@ -3386,27 +3386,38 @@ class ReceiptWidget(QWidget):
         *,
         affected_skus: List[str],
         save_snapshot: bool,
-        purchase_records: List[Dict[str, Any]],
     ) -> None:
-        """保存後の重い処理（仕入DBテーブル再描画・スナップショット）を非同期で実行。"""
-        def _run() -> None:
+        """保存後の仕入DB同期・テーブル部分更新・スナップショットを非同期で実行。"""
+        skus = list(affected_skus)
+
+        def _sync_and_refresh() -> None:
             pw = self.product_widget
-            if not pw:
+            if not pw or not skus:
                 return
-            records = getattr(pw, "purchase_all_records", None) or purchase_records
             try:
-                pw.sync_purchase_master_from_records()
-                if affected_skus and getattr(pw, "_purchase_table_full_master_built", False):
-                    pw.refresh_purchase_table_if_built()
-                if save_snapshot and hasattr(pw, "purchase_db"):
-                    snapshot_name = (
-                        f"レシート編集_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                    )
-                    pw.purchase_db.save_snapshot(snapshot_name, records)
+                pw.sync_purchase_master_records_for_skus(skus)
+                if getattr(pw, "_purchase_table_full_master_built", False):
+                    for sku in skus:
+                        record = pw._purchase_record_by_sku(sku)
+                        if record:
+                            pw._refresh_purchase_repricing_table_cells_for_record(record)
             except Exception as exc:
                 logger.warning("レシート手動保存の遅延同期に失敗: %s", exc)
 
-        QTimer.singleShot(0, _run)
+        def _save_snapshot() -> None:
+            if not save_snapshot:
+                return
+            pw = self.product_widget
+            if not pw:
+                return
+            try:
+                pw.save_purchase_snapshot(skip_master_sync=True)
+            except Exception as exc:
+                logger.warning("レシート手動保存のスナップショット保存に失敗: %s", exc)
+
+        QTimer.singleShot(0, _sync_and_refresh)
+        if save_snapshot:
+            QTimer.singleShot(50, _save_snapshot)
 
     def on_receipt_selection_changed(self):
         """レシート表の選択変更を監視"""
@@ -7966,12 +7977,11 @@ class ReceiptWidget(QWidget):
                         self.receipt_db.update_receipt(receipt_id, updates)
                         if not self._patch_receipt_table_row(receipt_id, updates):
                             self.refresh_receipt_list(offer_date_repair=False)
+                        QMessageBox.information(self, "完了", "変更を保存しました。")
                         self._defer_after_receipt_manual_save(
                             affected_skus=sorted(affected_skus),
                             save_snapshot=save_snapshot,
-                            purchase_records=purchase_records,
                         )
-                        QMessageBox.information(self, "完了", "変更を保存しました。")
                         # ウインドウは閉じない（変更を保存しても閉じない）
                     else:
                         QMessageBox.information(self, "情報", "変更がありません。")
