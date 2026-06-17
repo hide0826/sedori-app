@@ -27,16 +27,23 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QSplitter, QGroupBox, QFormLayout,
     QFileDialog, QMessageBox, QSizePolicy, QTextEdit, QProgressDialog,
     QInputDialog, QMenu, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
-    QTabWidget, QSpinBox, QComboBox, QFrame, QFileIconProvider
+    QTabWidget, QSpinBox, QComboBox, QFrame, QFileIconProvider, QStyledItemDelegate, QStyle,
+    QStyleOptionViewItem,
 )
 from PySide6.QtGui import (
     QPixmap, QFont, QDrag, QDropEvent, QImageReader, QImage, QDesktopServices, QCursor,
-    QColor, QBrush,
+    QColor, QBrush, QPainter,
 )
 from PIL import Image, ImageOps
 
 from desktop.utils.ui_utils import save_table_header_state, restore_table_header_state
 from desktop.utils.route_utils import mark_route_flags_from_folder
+from desktop.ui.utils.draggable_file_icon import DraggableFileIconWidget
+
+try:
+    from utils.win_browser_helper import bring_browser_to_front
+except ImportError:
+    from desktop.utils.win_browser_helper import bring_browser_to_front  # type: ignore
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -95,10 +102,25 @@ _REGISTRATION_ACTION_TO_PIPELINE_STEP = {
     "Amazonアップロードページを開く": 4,
 }
 
-# 仕入DB未紐付けのJANグループ・候補行のハイライト色
+# Amazon Seller Central（出品ファイルアップロード）のブラウザタイトル検索用
+_AMAZON_UPLOAD_BROWSER_TITLE_KEYWORDS = [
+    "seller central",
+    "セラーセントラル",
+    "sellercentral",
+    "amazon seller",
+]
+
+# JAN不明グループ・仕入DB未紐付け候補行のハイライト色
 _UNLINKED_HIGHLIGHT_BG = QColor("#ffc107")
 _UNLINKED_HIGHLIGHT_FG = QColor("#1a1a1a")
 _PURCHASE_IMAGE_COLUMNS = [f"画像{i}" for i in range(1, 7)]
+
+
+def _normalize_jan_for_match(value: Any) -> str:
+    jan = str(value or "").strip()
+    if jan.endswith(".0"):
+        jan = jan[:-2]
+    return "".join(c for c in jan if c.isdigit()).upper()
 
 
 def _normalize_image_path(path: str) -> str:
@@ -123,6 +145,91 @@ def _apply_unlinked_item_style(item: QTreeWidgetItem) -> None:
     for col in range(item.columnCount()):
         item.setBackground(col, brush_bg)
         item.setForeground(col, brush_fg)
+
+
+def _record_jan_matches_group(record: Dict[str, Any], group_jan: str) -> bool:
+    """仕入レコードのJANがJANグループのJANと一致するか"""
+    if not group_jan or group_jan == "unknown":
+        return False
+    record_jan = _normalize_jan_for_match(
+        record.get("JAN") or record.get("jan") or record.get("JANコード")
+    )
+    group_norm = _normalize_jan_for_match(group_jan)
+    return bool(record_jan and group_norm and record_jan == group_norm)
+
+
+def _candidate_is_known_linked_product(
+    record: Dict[str, Any],
+    linked_session_jans: set[str],
+) -> bool:
+    """
+    画像一覧のJANグループで既にJAN+商品名が紐付いている商品か。
+    （例: 4543112593023 - 天装戦隊ゴセイジャー… のようなグループ）
+    """
+    record_jan = _normalize_jan_for_match(
+        record.get("JAN") or record.get("jan") or record.get("JANコード")
+    )
+    if not record_jan or record_jan not in linked_session_jans:
+        return False
+    title = str(
+        record.get("商品名") or record.get("product_name") or record.get("title") or ""
+    ).strip()
+    return bool(title)
+
+
+def _candidate_should_highlight_in_dialog(
+    record: Dict[str, Any],
+    linked_session_jans: set[str],
+) -> bool:
+    """仕入DB候補で黄色表示するか（既知の紐付け商品以外）"""
+    return not _candidate_is_known_linked_product(record, linked_session_jans)
+
+
+class _PurchaseCandidateItemDelegate(QStyledItemDelegate):
+    """仕入DB候補テーブル専用。行ごとの黄色ハイライトをグローバルQSSに負けず描画する。"""
+
+    _DEFAULT_BG = QColor("#2b2b2b")
+    _DEFAULT_FG = QColor("#ffffff")
+    _SELECTED_BG = QColor("#0078d4")
+    _SELECTED_FG = QColor("#ffffff")
+
+    def __init__(self, host: "PurchaseCandidateDialog", parent=None):
+        super().__init__(parent)
+        self._host = host
+
+    def _row_should_highlight(self, row: int) -> bool:
+        rows = getattr(self._host, "_highlight_candidate_rows", None)
+        return row in rows if rows is not None else False
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
+        painter.save()
+        rect = option.rect
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        highlighted = self._row_should_highlight(index.row())
+
+        if selected:
+            painter.fillRect(rect, self._SELECTED_BG)
+            text_color = self._SELECTED_FG
+        elif highlighted:
+            painter.fillRect(rect, _UNLINKED_HIGHLIGHT_BG)
+            text_color = _UNLINKED_HIGHLIGHT_FG
+        else:
+            painter.fillRect(rect, self._DEFAULT_BG)
+            text_color = self._DEFAULT_FG
+
+        painter.setPen(text_color)
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        elided = painter.fontMetrics().elidedText(
+            text,
+            Qt.TextElideMode.ElideRight,
+            max(0, rect.width() - 16),
+        )
+        painter.drawText(
+            rect.adjusted(8, 0, -8, 0),
+            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+            elided,
+        )
+        painter.restore()
 
 
 def _format_status_prefix_html(text: str, emphasize: bool) -> str:
@@ -289,6 +396,7 @@ class PurchaseCandidateDialog(QDialog):
         base_dt: datetime,
         candidates: List[Dict[str, Any]],
         group_image_paths: Optional[List[str]] = None,
+        linked_session_jans: Optional[set[str]] = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -298,7 +406,9 @@ class PurchaseCandidateDialog(QDialog):
         self.group_image_paths = {
             _normalize_image_path(p) for p in (group_image_paths or []) if p
         }
+        self.linked_session_jans = linked_session_jans or set()
         self.selected_record: Optional[Dict[str, Any]] = None
+        self._highlight_candidate_rows: set[int] = set()
         self.setup_ui()
 
     def setup_ui(self):
@@ -316,7 +426,8 @@ class PurchaseCandidateDialog(QDialog):
             jan_text = "（JAN不明）"
         info_label = QLabel(
             f"JANグループ: {jan_text}\n"
-            f"基準日時: {self.base_dt.strftime('%Y/%m/%d %H:%M:%S')} 付近の仕入データ候補を表示しています。"
+            f"基準日時: {self.base_dt.strftime('%Y/%m/%d %H:%M:%S')} 付近の仕入データ候補を表示しています。\n"
+            "黄色の行は、画像一覧でJAN・商品名がまだ紐付いていない商品の候補です。"
         )
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
@@ -330,6 +441,29 @@ class PurchaseCandidateDialog(QDialog):
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setAlternatingRowColors(False)
+        self.table.setItemDelegate(_PurchaseCandidateItemDelegate(self, self.table))
+        self.table.setStyleSheet(
+            "QTableWidget {"
+            "  background-color: #2b2b2b;"
+            "  color: #ffffff;"
+            "  gridline-color: #444444;"
+            "  border: 1px solid #555555;"
+            "  alternate-background-color: #2b2b2b;"
+            "}"
+            "QTableWidget::item {"
+            "  padding: 4px 8px;"
+            "  border: none;"
+            "  background: transparent;"
+            "  color: transparent;"
+            "}"
+            "QHeaderView::section {"
+            "  background-color: #3c3c3c;"
+            "  color: #ffffff;"
+            "  border: 1px solid #555555;"
+            "  padding: 4px 8px;"
+            "}"
+        )
         self.table.cellDoubleClicked.connect(self.on_cell_double_clicked)
         layout.addWidget(self.table)
 
@@ -346,6 +480,7 @@ class PurchaseCandidateDialog(QDialog):
         layout.addLayout(btn_layout)
 
     def populate_table(self):
+        self._highlight_candidate_rows = set()
         self.table.setRowCount(len(self.candidates))
         for row, record in enumerate(self.candidates):
             diff = record.get("_date_diff", "")
@@ -363,19 +498,21 @@ class PurchaseCandidateDialog(QDialog):
             store = str(record.get("仕入先") or record.get("store_name") or "")
             price = str(record.get("仕入れ価格") or record.get("purchase_price") or "")
 
+            if _candidate_should_highlight_in_dialog(record, self.linked_session_jans):
+                self._highlight_candidate_rows.add(row)
+
             values = [diff, purchase_date, sku, asin, jan, title, store, price]
-            is_linked = _record_has_any_image_paths(record, self.group_image_paths)
             for col, val in enumerate(values):
                 item = QTableWidgetItem(str(val))
                 if col == 5 and title:
                     item.setToolTip(title)
-                if not is_linked:
-                    item.setBackground(QBrush(_UNLINKED_HIGHLIGHT_BG))
-                    item.setForeground(QBrush(_UNLINKED_HIGHLIGHT_FG))
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.table.setItem(row, col, item)
 
             # 行全体に元レコードを紐付け
             self.table.item(row, 0).setData(Qt.UserRole, record)
+
+        self.table.viewport().update()
 
     def on_cell_double_clicked(self, row: int, column: int):
         item = self.table.item(row, 0)
@@ -464,83 +601,6 @@ class ImageListWidget(QListWidget):
         drag = QDrag(self)
         drag.setMimeData(mime_data)
         drag.exec_(supportedActions)
-
-
-class DraggableAmazonTemplateWidget(QLabel):
-    """Amazonアップロード用：書き出したExcelをブラウザへドラッグするアイコン"""
-
-    def __init__(self, file_path: str = "", parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self._file_path = ""
-        self._drag_start_pos = None
-        self.setAlignment(Qt.AlignCenter)
-        self.setFixedSize(80, 80)
-        self.setCursor(QCursor(Qt.OpenHandCursor))
-        self.setStyleSheet(
-            "border: 2px dashed #ffc107; border-radius: 8px; background-color: #3a3520;"
-        )
-        if file_path:
-            self.set_file_path(file_path)
-        else:
-            self.clear_file()
-
-    def set_file_path(self, file_path: str) -> None:
-        self._file_path = str(file_path or "").strip()
-        if not self._file_path or not os.path.isfile(self._file_path):
-            self.clear_file()
-            return
-        provider = QFileIconProvider()
-        icon = provider.icon(QFileInfo(self._file_path))
-        pixmap = icon.pixmap(56, 56)
-        self.setPixmap(pixmap)
-        file_name = Path(self._file_path).name
-        self.setToolTip(
-            "①「Amazonアップロードページを開く」を押す\n"
-            "②このアイコンをドラッグしてブラウザのドロップ欄へ\n\n"
-            f"{file_name}\n{self._file_path}"
-        )
-        self.setEnabled(True)
-
-    def clear_file(self) -> None:
-        self._file_path = ""
-        self.clear()
-        self.setToolTip("")
-        self.setEnabled(False)
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.LeftButton:
-            self._drag_start_pos = event.position().toPoint()
-            self.setCursor(QCursor(Qt.ClosedHandCursor))
-        super().mousePressEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:
-        self.setCursor(QCursor(Qt.OpenHandCursor))
-        super().mouseReleaseEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:
-        if not (event.buttons() & Qt.LeftButton):
-            return
-        if self._drag_start_pos is None:
-            return
-        if (
-            event.position().toPoint() - self._drag_start_pos
-        ).manhattanLength() < QApplication.startDragDistance():
-            return
-        if not self._file_path or not os.path.isfile(self._file_path):
-            return
-
-        mime_data = QMimeData()
-        mime_data.setUrls([QUrl.fromLocalFile(self._file_path)])
-        mime_data.setText(self._file_path)
-        drag = QDrag(self)
-        drag.setMimeData(mime_data)
-        pixmap = self.pixmap()
-        if pixmap and not pixmap.isNull():
-            drag.setPixmap(
-                pixmap.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            )
-        drag.exec(Qt.CopyAction)
-        self._drag_start_pos = None
 
 
 class RegistrationTableWidget(QTableWidget):
@@ -739,6 +799,79 @@ class ImageManagerWidget(QWidget):
             except Exception:
                 return False
         return any(_record_has_any_image_paths(rec, image_paths) for rec in all_records)
+
+    def _group_has_jan_in_purchase_db(
+        self,
+        group: JanGroup,
+        all_records: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
+        """仕入DBに同一JANの商品レコードが存在するか（商品名表示と同じ基準）"""
+        if not group or group.jan == "unknown":
+            return False
+        jan_norm = _normalize_jan_for_match(group.jan)
+        if not jan_norm:
+            return False
+        if all_records is None:
+            if not self.product_widget:
+                return False
+            self._ensure_product_widget_data_loaded()
+            try:
+                all_records = self.product_widget.get_all_purchase_records()
+            except Exception:
+                return False
+        for record in all_records:
+            record_jan = _normalize_jan_for_match(
+                record.get("JAN") or record.get("jan") or record.get("JANコード")
+            )
+            if record_jan and record_jan == jan_norm:
+                return True
+        return False
+
+    def _should_highlight_jan_group(
+        self,
+        group: JanGroup,
+        all_records: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
+        """JANグループを黄色表示するか（JAN不明、または仕入DBに商品未紐付け）"""
+        if not group or group.jan == "unknown":
+            return True
+        if self._is_group_linked_to_purchase_db(group, all_records):
+            return False
+        if self._group_has_jan_in_purchase_db(group, all_records):
+            return False
+        return True
+
+    def _collect_linked_jan_codes_from_groups(self) -> set[str]:
+        """画像一覧でJAN+商品名が紐付いているJANグループのJANコード集合"""
+        purchase_records: Optional[List[Dict[str, Any]]] = None
+        if self.product_widget:
+            try:
+                self._ensure_product_widget_data_loaded()
+                purchase_records = self.product_widget.get_all_purchase_records()
+            except Exception:
+                purchase_records = None
+        linked: set[str] = set()
+        for group in self.jan_groups:
+            if self._group_has_jan_in_purchase_db(group, purchase_records):
+                norm = _normalize_jan_for_match(group.jan)
+                if norm:
+                    linked.add(norm)
+        return linked
+
+    def _finalize_purchase_db_after_image_link(self) -> None:
+        """
+        画像パス更新後の永続化（メモリ同期＋スナップショット）。
+        仕入DBタブのテーブルは構築済みのときだけ再描画する（未表示時の全行再描画を避けて高速化）。
+        """
+        if not self.product_widget:
+            return
+        pw = self.product_widget
+        try:
+            pw.sync_purchase_master_from_records()
+            pw.save_purchase_snapshot()
+            pw.refresh_purchase_table_if_built()
+        except Exception as e:
+            logger.warning(f"仕入DBの保存後更新に失敗しました: {e}")
 
     def _ensure_product_widget_data_loaded(self, full: bool = False) -> None:
         """
@@ -1576,11 +1709,10 @@ class ImageManagerWidget(QWidget):
             purchase_records: Optional[List[Dict[str, Any]]] = None
             if self.product_widget:
                 try:
-                    self._ensure_product_widget_data_loaded()
                     purchase_records = self.product_widget.get_all_purchase_records()
                 except Exception:
                     purchase_records = None
-            
+
             for group in self.jan_groups:
                 # 親ノード（JANグループ）
                 if group.jan != "unknown":
@@ -1594,8 +1726,8 @@ class ImageManagerWidget(QWidget):
                 title_text = f" - {title}" if title else ""
                 parent_item = QTreeWidgetItem([f"{jan_text}{title_text} ({len(group.images)}枚)"])
                 parent_item.setData(0, Qt.UserRole, group)
-                is_unlinked = not self._is_group_linked_to_purchase_db(group, purchase_records)
-                if is_unlinked:
+                needs_highlight = self._should_highlight_jan_group(group, purchase_records)
+                if needs_highlight:
                     _apply_unlinked_item_style(parent_item)
                 self.tree_widget.addTopLevelItem(parent_item)
                 
@@ -1609,12 +1741,12 @@ class ImageManagerWidget(QWidget):
                         flag = self.first_image_flags.get(record.path, True)
                         child_item.setFlags(child_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                         child_item.setCheckState(0, Qt.Checked if flag else Qt.Unchecked)
-                        if not is_unlinked:
-                            # テキストは白字にして見やすくする（未紐付け時は黄色背景＋黒字）
+                        if not needs_highlight:
+                            # テキストは白字にして見やすくする（要確認グループは黄色背景＋黒字）
                             child_item.setForeground(0, Qt.white)
                         # 状態を保存
                         self.first_image_flags[record.path] = flag
-                    if is_unlinked:
+                    if needs_highlight:
                         _apply_unlinked_item_style(child_item)
                     child_item.setData(0, Qt.UserRole, record.path)
                     parent_item.addChild(child_item)
@@ -2040,7 +2172,14 @@ class ImageManagerWidget(QWidget):
                     base_dt = selected_capture_dt
 
                     # SKU候補選択ダイアログを表示
-                    dialog = PurchaseCandidateDialog(current_group, base_dt, sku_candidates, parent=self)
+                    dialog = PurchaseCandidateDialog(
+                        current_group,
+                        base_dt,
+                        sku_candidates,
+                        group_image_paths=self._group_image_paths(current_group),
+                        linked_session_jans=self._collect_linked_jan_codes_from_groups(),
+                        parent=self,
+                    )
                     if dialog.exec_() == QDialog.Accepted and dialog.selected_record:
                         selected_record = dialog.selected_record
                         target_sku = str(
@@ -2057,7 +2196,10 @@ class ImageManagerWidget(QWidget):
                                     all_records,
                                     skip_existing=True,
                                     target_sku=target_sku,
+                                    defer_table_refresh_and_snapshot=True,
                                 )
+                                if success:
+                                    self._finalize_purchase_db_after_image_link()
                                 if success and added_count > 0 and record_snapshot:
                                     # 画像登録タブ用の一覧に1件追加
                                     self.add_registration_entry(record_snapshot)
@@ -2108,8 +2250,10 @@ class ImageManagerWidget(QWidget):
             if self.product_widget:
                 purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
                 for record in purchase_records:
-                    record_jan = str(record.get("JAN") or record.get("jan") or "").strip()
-                    if record_jan.upper() == jan.upper():
+                    record_jan = _normalize_jan_for_match(
+                        record.get("JAN") or record.get("jan") or record.get("JANコード")
+                    )
+                    if record_jan and record_jan == _normalize_jan_for_match(jan):
                         title = (
                             record.get("商品名") or
                             record.get("product_name") or
@@ -2788,7 +2932,16 @@ class ImageManagerWidget(QWidget):
         amazon_drop_layout.setContentsMargins(12, 10, 12, 10)
         amazon_drop_layout.setSpacing(12)
 
-        self.amazon_template_drag_icon = DraggableAmazonTemplateWidget()
+        self.amazon_template_drag_icon = DraggableFileIconWidget()
+        self.amazon_template_drag_icon.setStyleSheet(
+            "border: 2px dashed #ffc107; border-radius: 8px; background-color: #3a3520;"
+        )
+        self.amazon_template_drag_icon.set_browser_title_keywords(
+            _AMAZON_UPLOAD_BROWSER_TITLE_KEYWORDS
+        )
+        self.amazon_template_drag_icon.set_tooltip_prefix(
+            "①「Amazonアップロードページを開く」→ ②このアイコンをドラッグしてドロップ欄へ"
+        )
         amazon_drop_layout.addWidget(self.amazon_template_drag_icon)
 
         amazon_drop_text_col = QVBoxLayout()
@@ -5148,9 +5301,12 @@ class ImageManagerWidget(QWidget):
         self.amazon_upload_drop_filename.setText(path)
         self.amazon_upload_drop_panel.setVisible(True)
         self.amazon_upload_drop_hint.setText(
-            "①「Amazonアップロードページを開く」→ "
-            "②左のExcelアイコンをドラッグしてブラウザのドロップ欄へ"
+            "「Amazonアップロードページを開く」後、左のExcelアイコンをドラッグしてください"
         )
+
+    def _bring_amazon_upload_browser_to_front(self) -> None:
+        """ブラウザ起動後に Seller Central を前面へ（仕入管理の出品CSV生成と同様）。"""
+        bring_browser_to_front(_AMAZON_UPLOAD_BROWSER_TITLE_KEYWORDS)
 
     def _open_last_amazon_template_folder(self) -> None:
         """直近に書き出したAmazonテンプレートの保存フォルダを開く"""
@@ -5177,9 +5333,12 @@ class ImageManagerWidget(QWidget):
                 and hasattr(self, "amazon_upload_drop_panel")
             ):
                 self.amazon_upload_drop_panel.setVisible(True)
-                self.amazon_upload_drop_hint.setText(
-                    "ページを開きました → 左のExcelアイコンをドラッグしてドロップ欄へ"
-                )
+            self.amazon_upload_drop_hint.setText(
+                "ブラウザでアップロードページを開きました。"
+                "左のExcelアイコンをドラッグしてドロップ欄へ送ってください。"
+                "（ドラッグ中はブラウザが最前面に出ます）"
+            )
+            QTimer.singleShot(900, self._bring_amazon_upload_browser_to_front)
         except Exception as e:
             QMessageBox.critical(
                 self, "エラー",
@@ -5439,10 +5598,12 @@ class ImageManagerWidget(QWidget):
                         all_records,
                         skip_existing=False,  # 既存の画像を上書きする
                         target_sku=sku,
+                        defer_table_refresh_and_snapshot=True,
                     )
                     
                     if success and added_count > 0:
                         linked_count = added_count
+                        self._finalize_purchase_db_after_image_link()
                         # 画像登録タブに追加（Amazon画像更新ワークフロー用）
                         if record_snapshot:
                             self.add_registration_entry(record_snapshot)
@@ -5523,6 +5684,7 @@ class ImageManagerWidget(QWidget):
             base_dt,
             candidates,
             group_image_paths=self._group_image_paths(group),
+            linked_session_jans=self._collect_linked_jan_codes_from_groups(),
             parent=self,
         )
         if dialog.exec_() != QDialog.Accepted or not dialog.selected_record:
@@ -5546,19 +5708,30 @@ class ImageManagerWidget(QWidget):
 
         image_paths = [img.path for img in group.images]
 
+        progress = QProgressDialog("仕入DBへ紐付け中...", None, 0, 0, self)
+        progress.setWindowTitle("紐付け処理")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+
         try:
             all_records = self.product_widget.get_all_purchase_records()
-            # JANが空の場合でも一応処理を行う（update_image_paths_for_jan側で弾く可能性あり）
             success, added_count, record_snapshot = self.product_widget.update_image_paths_for_jan(
                 target_jan,
                 image_paths,
                 all_records,
                 skip_existing=True,
                 target_sku=target_sku or None,
+                defer_table_refresh_and_snapshot=True,
             )
         except Exception as e:
+            progress.close()
             QMessageBox.critical(self, "エラー", f"画像パスの紐付け中にエラーが発生しました:\n{e}")
             return
+        finally:
+            progress.close()
 
         if not success:
             QMessageBox.warning(
@@ -5570,8 +5743,12 @@ class ImageManagerWidget(QWidget):
             return
 
         if record_snapshot:
-            # 画像登録タブに追加（Amazon画像更新ワークフロー用）
-            self.add_registration_entry(record_snapshot)
+            self.add_registration_entry(
+                record_snapshot,
+                skip_barcode_classification=self._is_group_first_image_excluded(group),
+            )
+
+        self._finalize_purchase_db_after_image_link()
 
         # 必要であればJANグループのJANを仕入DB側のJANに合わせる
         if target_jan and group.jan != target_jan:
@@ -5585,15 +5762,23 @@ class ImageManagerWidget(QWidget):
             )
             if reply == QMessageBox.Yes:
                 for img_record in list(group.images):
-                    self.assign_image_to_jan(img_record.path, target_jan)
+                    self.assign_image_to_jan(
+                        img_record.path, target_jan, refresh_tree=False
+                    )
+                self.jan_groups = self.image_service.group_by_jan(self.image_records)
+                self._jan_title_cache.pop(target_jan, None)
 
+        try:
+            self._jan_title_cache.clear()
+        except Exception:
+            self._jan_title_cache = {}
+        self.update_tree_widget()
         msg = "仕入DBレコードと画像グループを紐付けました。"
         if added_count > 0:
             msg += f"\n新しく登録された画像数: {added_count}枚"
         else:
             msg += "\nすべての画像は既に仕入DB側に登録済みでした。"
 
-        self.update_tree_widget()
         QMessageBox.information(self, "完了", msg)
 
     def manual_link_by_purchase_date(self):

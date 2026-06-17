@@ -535,6 +535,36 @@ class ReceiptWidget(QWidget):
         # テーブルの列幅を復元
         restore_table_header_state(self.receipt_table, "ReceiptWidget/ReceiptTableHeaderState")
         restore_table_header_state(self.warranty_table, "ReceiptWidget/WarrantyTableHeaderState")
+
+    def _close_db_connection(self, db) -> None:
+        if db is None:
+            return
+        conn = getattr(db, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            db.conn = None
+
+    def reinit_databases(self) -> None:
+        """デモモード切替後にDB接続を差し替える。"""
+        for attr in (
+            "receipt_db",
+            "inventory_db",
+            "store_db",
+            "account_title_db",
+            "route_db",
+        ):
+            self._close_db_connection(getattr(self, attr, None))
+        self.receipt_db = ReceiptDatabase()
+        self.inventory_db = InventoryDatabase()
+        self.store_db = StoreDatabase()
+        self.account_title_db = AccountTitleDatabase()
+        self.route_db = RouteDatabase()
+        self.current_receipt_id = None
+        self.current_receipt_data = None
+        self._initial_data_loaded = False
     
     def save_settings(self):
         """ウィジェットの設定（テーブルの列幅など）を保存します。"""

@@ -164,6 +164,17 @@ class MainWindow(QMainWindow):
             save_all_table_column_widths()
         except Exception:
             pass
+
+        try:
+            from services.backup_service import run_auto_backup_on_exit
+        except ImportError:
+            from desktop.services.backup_service import run_auto_backup_on_exit  # type: ignore
+        try:
+            result = run_auto_backup_on_exit()
+            if result.success and result.zip_path:
+                print(f"[HIRIO] 終了時バックアップ: {result.zip_path}")
+        except Exception:
+            pass
         
         # FastAPIサーバーを停止
         self.stop_fastapi_server()
@@ -814,7 +825,7 @@ class MainWindow(QMainWindow):
         self.check_api_connection()
         
     def update_recording_mode_ui(self) -> None:
-        """撮影モード表示とウィンドウタイトルを更新する。"""
+        """デモモード表示とウィンドウタイトルを更新する。"""
         try:
             from utils.settings_helper import is_recording_mode
         except ImportError:
@@ -823,24 +834,55 @@ class MainWindow(QMainWindow):
         active = is_recording_mode()
         if hasattr(self, "recording_status_label"):
             if active:
-                self.recording_status_label.setText("● 撮影モード")
+                self.recording_status_label.setText("● デモモード")
                 self.recording_status_label.setVisible(True)
             else:
                 self.recording_status_label.clear()
                 self.recording_status_label.setVisible(False)
         base_title = "HIRIO - せどり業務統合システム"
-        self.setWindowTitle(f"{base_title} [撮影モード]" if active else base_title)
+        self.setWindowTitle(f"{base_title} [デモモード]" if active else base_title)
+
+    def close_all_database_connections_for_restore(self) -> None:
+        """バックアップ復元前に SQLite 接続を閉じる。"""
+        try:
+            from services.backup_service import close_db_connections_in_object
+        except ImportError:
+            from desktop.services.backup_service import close_db_connections_in_object  # type: ignore
+
+        if hasattr(self, "tab_widget"):
+            for i in range(self.tab_widget.count()):
+                widget = self.tab_widget.widget(i)
+                if widget is not None:
+                    close_db_connections_in_object(widget)
+        if hasattr(self, "settings_widget"):
+            close_db_connections_in_object(self.settings_widget)
 
     def apply_recording_mode_database_reload(self) -> None:
-        """撮影モード切替後に主要ウィジェットのDB接続を差し替える。"""
+        """デモモード切替後に主要ウィジェットのDB接続を差し替える。"""
         for widget_name in (
             "inventory_widget",
             "inventory_widget_dev",
             "product_widget",
+            "route_summary_widget",
+            "route_list_widget",
+            "purchase_ledger_widget",
+            "expense_ledger_widget",
+            "image_manager_widget",
+            "condition_template_widget",
+            "barcode_checker_widget",
+            "analysis_widget",
+            "settings_widget",
         ):
             widget = getattr(self, widget_name, None)
             if widget is not None and hasattr(widget, "reinit_databases"):
                 widget.reinit_databases()
+
+        evidence = getattr(self, "evidence_widget", None)
+        if evidence is not None:
+            receipt = getattr(evidence, "receipt_widget", None)
+            if receipt is not None and hasattr(receipt, "reinit_databases"):
+                receipt.reinit_databases()
+
         antique = getattr(self, "antique_widget", None)
         if antique is not None and hasattr(antique, "reload_ledger_rows"):
             antique.antique_data = []

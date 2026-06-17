@@ -15,12 +15,70 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QSpinBox, QCheckBox,
     QGroupBox, QTabWidget, QTextEdit, QFileDialog,
     QMessageBox, QComboBox, QSlider, QTableWidget,
-    QTableWidgetItem, QHeaderView, QDialog
+    QTableWidgetItem, QHeaderView, QDialog, QProgressDialog,
+    QApplication,
 )
-from PySide6.QtCore import Qt, QSettings, Signal
+from PySide6.QtCore import Qt, QSettings, Signal, QThread
 from PySide6.QtGui import QFont
 import json
+from datetime import datetime
 from pathlib import Path
+
+
+class _BackupWorker(QThread):
+    finished_with_result = Signal(object)
+
+    def __init__(
+        self,
+        dest_dir: Path,
+        *,
+        include_config: bool,
+        keep_count: int,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._dest_dir = dest_dir
+        self._include_config = include_config
+        self._keep_count = keep_count
+
+    def run(self) -> None:
+        try:
+            from services.backup_service import create_backup
+        except ImportError:
+            from desktop.services.backup_service import create_backup  # type: ignore
+        result = create_backup(
+            self._dest_dir,
+            include_config=self._include_config,
+            keep_count=self._keep_count,
+        )
+        self.finished_with_result.emit(result)
+
+
+class _RestoreWorker(QThread):
+    finished_with_result = Signal(object)
+
+    def __init__(
+        self,
+        zip_path: Path,
+        *,
+        include_config: bool,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._zip_path = zip_path
+        self._include_config = include_config
+
+    def run(self) -> None:
+        try:
+            from services.backup_service import restore_from_zip
+        except ImportError:
+            from desktop.services.backup_service import restore_from_zip  # type: ignore
+        result = restore_from_zip(
+            self._zip_path,
+            include_config_override=self._include_config,
+            close_connections=None,
+        )
+        self.finished_with_result.emit(result)
 
 
 class SettingsWidget(QWidget):
@@ -32,6 +90,9 @@ class SettingsWidget(QWidget):
         super().__init__()
         self.api_client = api_client
         self.settings = QSettings("HIRIO", "DesktopApp")
+        self._backup_worker: _BackupWorker | None = None
+        self._restore_worker: _RestoreWorker | None = None
+        self._backup_progress: QProgressDialog | None = None
         
         # UIの初期化
         self.setup_ui()
@@ -51,6 +112,7 @@ class SettingsWidget(QWidget):
         self.setup_display_tab(tab_widget)
         self.setup_advanced_tab(tab_widget)
         self.setup_db_settings_tab(tab_widget)
+        self.setup_backup_tab(tab_widget)
         self.setup_flea_market_settings_tab(tab_widget)
         self.setup_about_tab(tab_widget)
         
@@ -297,11 +359,11 @@ class SettingsWidget(QWidget):
         pro_layout.addWidget(self.pro_enabled_cb, 0, 0, 1, 2)
         layout.addWidget(pro_group)
 
-        recording_group = QGroupBox("撮影モード（デモ）")
+        recording_group = QGroupBox("デモモード")
         recording_layout = QVBoxLayout(recording_group)
-        self.recording_mode_cb = QCheckBox("撮影モードを有効にする")
+        self.recording_mode_cb = QCheckBox("デモモードを有効にする")
         self.recording_mode_cb.setToolTip(
-            "デモ・撮影用です。\n"
+            "デモ・説明用です。\n"
             "ON: 仕入・古物台帳などは仮想DBにのみ保存され、本番データには反映されません。\n"
             "過去の仕入リストからSKUが自動入力されることもありません。\n"
             "OFF: 仮想DBのデータは削除されます。"
@@ -312,7 +374,7 @@ class SettingsWidget(QWidget):
         recording_layout.addWidget(self.recording_mode_status_label)
         recording_note = QLabel(
             "チェックを入れるとすぐ反映されます（「設定を保存」ボタンは不要）。"
-            "右下ステータスバーに「● 撮影モード」と表示されます。"
+            "右下ステータスバーに「● デモモード」と表示されます。"
         )
         recording_note.setWordWrap(True)
         recording_note.setStyleSheet("color: #666;")
@@ -559,6 +621,346 @@ class SettingsWidget(QWidget):
         layout.addWidget(db_tabs)
         parent.addTab(db_widget, "店舗コード設定")
 
+    def reinit_databases(self) -> None:
+        """デモモード切替後に店舗マスタDB接続を差し替える。"""
+        if hasattr(self, "store_db"):
+            conn = getattr(self.store_db, "conn", None)
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                self.store_db.conn = None
+        from database.store_db import StoreDatabase
+        self.store_db = StoreDatabase()
+        if hasattr(self, "chain_mapping_table"):
+            self.load_chain_mappings()
+        if hasattr(self, "online_platform_db_widget") and hasattr(
+            self.online_platform_db_widget, "reload_data"
+        ):
+            self.online_platform_db_widget.reload_data()
+        if hasattr(self, "flea_market_widget") and hasattr(
+            self.flea_market_widget, "reload_data"
+        ):
+            self.flea_market_widget.reload_data()
+
+    def setup_backup_tab(self, parent):
+        """データバックアップタブ"""
+        backup_widget = QWidget()
+        layout = QVBoxLayout(backup_widget)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        info_label = QLabel(
+            "業務データ（DB・設定JSON）を ZIP でバックアップします。\n"
+            "保存先を Google Drive などの同期フォルダに指定すると、クラウドにも自動コピーできます。\n"
+            "※ 使用中の hirio.db を直接同期しないでください。完成した ZIP のみを同期してください。"
+        )
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        folder_group = QGroupBox("バックアップ保存先")
+        folder_layout = QGridLayout(folder_group)
+
+        folder_layout.addWidget(QLabel("フォルダ:"), 0, 0)
+        self.backup_folder_edit = QLineEdit()
+        self.backup_folder_edit.setPlaceholderText(
+            r"例: D:\Google Drive\マイドライブ\HIRIO_Backup"
+        )
+        folder_layout.addWidget(self.backup_folder_edit, 0, 1)
+
+        browse_btn = QPushButton("参照...")
+        browse_btn.clicked.connect(self._browse_backup_folder)
+        folder_layout.addWidget(browse_btn, 0, 2)
+
+        self.backup_auto_on_exit_cb = QCheckBox("アプリ終了時に自動バックアップ")
+        self.backup_auto_on_exit_cb.setToolTip(
+            "保存先フォルダが設定されている場合のみ、終了時に ZIP を作成します。"
+        )
+        folder_layout.addWidget(self.backup_auto_on_exit_cb, 1, 0, 1, 3)
+
+        folder_layout.addWidget(QLabel("保持するバックアップ数:"), 2, 0)
+        self.backup_keep_count_spin = QSpinBox()
+        self.backup_keep_count_spin.setRange(1, 30)
+        self.backup_keep_count_spin.setValue(7)
+        self.backup_keep_count_spin.setToolTip("古い ZIP は自動削除されます（最新 N 個を残す）")
+        folder_layout.addWidget(self.backup_keep_count_spin, 2, 1, 1, 2)
+
+        self.backup_include_config_cb = QCheckBox("config フォルダも含める（inventory_settings / reprice_rules）")
+        self.backup_include_config_cb.setChecked(True)
+        folder_layout.addWidget(self.backup_include_config_cb, 3, 0, 1, 3)
+
+        for widget in (
+            self.backup_folder_edit,
+            self.backup_auto_on_exit_cb,
+            self.backup_keep_count_spin,
+            self.backup_include_config_cb,
+        ):
+            if hasattr(widget, "editingFinished"):
+                widget.editingFinished.connect(self._save_backup_settings_to_qsettings)
+            if hasattr(widget, "toggled"):
+                widget.toggled.connect(self._save_backup_settings_to_qsettings)
+            if hasattr(widget, "valueChanged"):
+                widget.valueChanged.connect(self._save_backup_settings_to_qsettings)
+
+        layout.addWidget(folder_group)
+
+        action_group = QGroupBox("操作")
+        action_layout = QVBoxLayout(action_group)
+
+        btn_row = QHBoxLayout()
+        self.backup_now_btn = QPushButton("今すぐバックアップ")
+        self.backup_now_btn.clicked.connect(self._run_backup_now)
+        btn_row.addWidget(self.backup_now_btn)
+
+        self.backup_restore_btn = QPushButton("バックアップから復元...")
+        self.backup_restore_btn.clicked.connect(self._run_restore_from_backup)
+        btn_row.addWidget(self.backup_restore_btn)
+
+        refresh_btn = QPushButton("一覧を更新")
+        refresh_btn.clicked.connect(self._refresh_backup_status)
+        btn_row.addWidget(refresh_btn)
+        btn_row.addStretch()
+        action_layout.addLayout(btn_row)
+
+        self.backup_status_label = QLabel("バックアップ履歴を読み込んでいます...")
+        self.backup_status_label.setWordWrap(True)
+        self.backup_status_label.setStyleSheet("color: #9eb8d0;")
+        action_layout.addWidget(self.backup_status_label)
+
+        layout.addWidget(action_group)
+        layout.addStretch()
+        parent.addTab(backup_widget, "データバックアップ")
+
+    def _browse_backup_folder(self) -> None:
+        current = self.backup_folder_edit.text().strip()
+        start_dir = current if current else str(Path.home())
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "バックアップ保存先フォルダを選択",
+            start_dir,
+        )
+        if folder:
+            self.backup_folder_edit.setText(folder)
+            self._save_backup_settings_to_qsettings()
+            self._refresh_backup_status()
+
+    def _save_backup_settings_to_qsettings(self) -> None:
+        self.settings.setValue("backup/folder", self.backup_folder_edit.text().strip())
+        self.settings.setValue("backup/auto_on_exit", self.backup_auto_on_exit_cb.isChecked())
+        self.settings.setValue("backup/keep_count", self.backup_keep_count_spin.value())
+        self.settings.setValue("backup/include_config", self.backup_include_config_cb.isChecked())
+
+    def _get_backup_service(self):
+        try:
+            from services.backup_service import (
+                create_backup,
+                get_backup_folder,
+                list_backup_archives,
+                restore_from_zip,
+            )
+        except ImportError:
+            from desktop.services.backup_service import (  # type: ignore
+                create_backup,
+                get_backup_folder,
+                list_backup_archives,
+                restore_from_zip,
+            )
+        return create_backup, get_backup_folder, list_backup_archives, restore_from_zip
+
+    def _refresh_backup_status(self) -> None:
+        _, get_backup_folder, list_backup_archives, _ = self._get_backup_service()
+        folder_text = self.backup_folder_edit.text().strip() or get_backup_folder()
+        last_at = self.settings.value("backup/last_success_at", "")
+        last_path = self.settings.value("backup/last_success_path", "")
+
+        lines = []
+        if folder_text:
+            folder = Path(folder_text)
+            archives = list_backup_archives(folder) if folder.is_dir() else []
+            lines.append(f"保存先: {folder_text}")
+            if archives:
+                latest = archives[0]
+                lines.append(
+                    f"最新バックアップ: {latest.name} "
+                    f"({datetime.fromtimestamp(latest.stat().st_mtime).strftime('%Y-%m-%d %H:%M')})"
+                )
+                lines.append(f"保存件数: {len(archives)} 件")
+            else:
+                lines.append("保存済みバックアップ: なし")
+        else:
+            lines.append("保存先: 未設定")
+
+        if last_at:
+            lines.append(f"最終成功: {last_at}")
+        if last_path:
+            lines.append(f"最終ファイル: {last_path}")
+
+        self.backup_status_label.setText("\n".join(lines))
+
+    def _set_backup_busy(self, busy: bool, message: str = "") -> None:
+        self.backup_now_btn.setEnabled(not busy)
+        self.backup_restore_btn.setEnabled(not busy)
+        if busy:
+            self.backup_status_label.setText(message or "バックアップを作成しています。しばらくお待ちください...")
+            self.backup_status_label.setStyleSheet("color: #f0c674; font-weight: bold;")
+        else:
+            self.backup_status_label.setStyleSheet("color: #9eb8d0;")
+
+    def _show_backup_progress(self, title: str, label: str) -> QProgressDialog:
+        progress = QProgressDialog(label, None, 0, 0, self)
+        progress.setWindowTitle(title)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.show()
+        QApplication.processEvents()
+        return progress
+
+    def _run_backup_now(self) -> None:
+        if self._backup_worker is not None and self._backup_worker.isRunning():
+            QMessageBox.information(self, "バックアップ", "バックアップ処理が実行中です。")
+            return
+
+        self._save_backup_settings_to_qsettings()
+
+        folder_text = self.backup_folder_edit.text().strip()
+        if not folder_text:
+            QMessageBox.warning(
+                self,
+                "バックアップ",
+                "バックアップ保存先フォルダを指定してください。",
+            )
+            return
+
+        dest = Path(folder_text)
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            QMessageBox.critical(
+                self,
+                "バックアップ",
+                f"保存先フォルダを作成できませんでした:\n{e}",
+            )
+            return
+
+        self._set_backup_busy(True, "バックアップを作成しています。DBのサイズによっては数分かかることがあります...")
+        self._backup_progress = self._show_backup_progress(
+            "バックアップ",
+            "データをコピーして ZIP を作成しています...\n画面が一時的に固まって見えても処理は続いています。",
+        )
+
+        worker = _BackupWorker(
+            dest,
+            include_config=self.backup_include_config_cb.isChecked(),
+            keep_count=self.backup_keep_count_spin.value(),
+            parent=self,
+        )
+        worker.finished_with_result.connect(self._on_backup_worker_finished)
+        worker.finished.connect(worker.deleteLater)
+        self._backup_worker = worker
+        worker.start()
+
+    def _on_backup_worker_finished(self, result) -> None:
+        if self._backup_progress is not None:
+            self._backup_progress.close()
+            self._backup_progress = None
+
+        self._set_backup_busy(False)
+        self._backup_worker = None
+
+        if result.success:
+            try:
+                from services.backup_service import record_backup_success
+            except ImportError:
+                from desktop.services.backup_service import record_backup_success  # type: ignore
+            if result.zip_path is not None:
+                record_backup_success(result.zip_path)
+            QMessageBox.information(self, "バックアップ完了", result.message)
+            self._refresh_backup_status()
+        else:
+            QMessageBox.critical(self, "バックアップ失敗", result.message)
+            self._refresh_backup_status()
+
+    def _run_restore_from_backup(self) -> None:
+        if self._restore_worker is not None and self._restore_worker.isRunning():
+            QMessageBox.information(self, "復元", "復元処理が実行中です。")
+            return
+
+        zip_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "復元するバックアップ ZIP を選択",
+            self.backup_folder_edit.text().strip() or str(Path.home()),
+            "HIRIO Backup (*.zip)",
+        )
+        if not zip_path:
+            return
+
+        reply = QMessageBox.warning(
+            self,
+            "復元の確認",
+            "選択したバックアップで現在のデータを上書きします。\n"
+            "復元前に現在の data は自動で退避されます。\n\n"
+            "完了後はアプリの再起動が必要です。\n"
+            "続行しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        main_window = self.window()
+        if main_window is not None and hasattr(
+            main_window, "close_all_database_connections_for_restore"
+        ):
+            main_window.close_all_database_connections_for_restore()
+
+        self._set_backup_busy(True, "バックアップから復元しています。しばらくお待ちください...")
+        self._backup_progress = self._show_backup_progress(
+            "復元",
+            "バックアップを展開してデータを復元しています...",
+        )
+
+        worker = _RestoreWorker(
+            Path(zip_path),
+            include_config=self.backup_include_config_cb.isChecked(),
+            parent=self,
+        )
+        worker.finished_with_result.connect(self._on_restore_worker_finished)
+        worker.finished.connect(worker.deleteLater)
+        self._restore_worker = worker
+        worker.start()
+
+    def _on_restore_worker_finished(self, result) -> None:
+        if self._backup_progress is not None:
+            self._backup_progress.close()
+            self._backup_progress = None
+
+        self._set_backup_busy(False)
+        self._restore_worker = None
+
+        if not result.success:
+            QMessageBox.critical(self, "復元失敗", result.message)
+            self._refresh_backup_status()
+            return
+
+        extra = ""
+        if result.safety_backup_dir:
+            extra = f"\n\n退避先:\n{result.safety_backup_dir}"
+
+        restart_reply = QMessageBox.question(
+            self,
+            "復元完了",
+            result.message + extra + "\n\n今すぐアプリを終了して再起動しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        self._refresh_backup_status()
+        if restart_reply == QMessageBox.Yes:
+            QApplication.quit()
+
     def setup_flea_market_settings_tab(self, parent):
         """フリマ設定タブ（手数料率・AI出品文案）"""
         try:
@@ -770,17 +1172,17 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         except ImportError:
             from desktop.utils.settings_helper import is_recording_mode  # type: ignore
         if is_recording_mode():
-            self.recording_mode_status_label.setText("現在: 撮影モード ON（仮想DB使用中）")
+            self.recording_mode_status_label.setText("現在: デモモード ON（仮想DB使用中）")
             self.recording_mode_status_label.setStyleSheet("color: #e53935; font-weight: bold;")
         else:
-            self.recording_mode_status_label.setText("現在: 撮影モード OFF（本番DB）")
+            self.recording_mode_status_label.setText("現在: デモモード OFF（本番DB）")
             self.recording_mode_status_label.setStyleSheet("color: #888;")
 
     def _notify_recording_mode_changed(self) -> None:
         self.settings_changed.emit(self.get_current_settings())
 
     def _commit_recording_mode_change(self, new_recording: bool) -> bool:
-        """撮影モードON/OFFを確定。キャンセル時はチェックを戻した値を返す。"""
+        """デモモードON/OFFを確定。キャンセル時はチェックを戻した値を返す。"""
         try:
             from utils.settings_helper import is_recording_mode, set_recording_mode_enabled_flag
             from services.recording_mode_service import set_recording_mode_enabled
@@ -798,7 +1200,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         if new_recording and not previous_recording:
             reply = QMessageBox.question(
                 self,
-                "撮影モードを有効にしますか？",
+                "デモモードを有効にしますか？",
                 "仮想DBが新規作成されます。\n"
                 "このモード中の仕入・古物台帳の保存は本番DBに反映されません。\n\n"
                 "続行しますか？",
@@ -810,7 +1212,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         elif not new_recording and previous_recording:
             reply = QMessageBox.question(
                 self,
-                "撮影モードを終了しますか？",
+                "デモモードを終了しますか？",
                 "仮想DBに保存したデータはすべて削除されます。\n"
                 "本番DBのデータは変更されません。\n\n"
                 "続行しますか？",
@@ -827,7 +1229,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             set_recording_mode_enabled_flag(previous_recording)
             QMessageBox.critical(
                 self,
-                "撮影モードエラー",
+                "デモモードエラー",
                 "仮想DBの作成に失敗しました。\n\n"
                 f"{e}\n\n"
                 "アプリを再起動してから再度お試しください。",
@@ -838,7 +1240,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         return new_recording
 
     def _on_recording_toggled(self, checked: bool) -> None:
-        """撮影モードチェック変更時に即反映（3-6-9版と同様）。"""
+        """デモモードチェック変更時に即反映（3-6-9版と同様）。"""
         if getattr(self, "_recording_mode_loading", False):
             return
         try:
@@ -854,6 +1256,12 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self._sync_recording_mode_status_label()
         if final != before:
             self._notify_recording_mode_changed()
+            main = self.window()
+            if main is not None:
+                if hasattr(main, "update_recording_mode_ui"):
+                    main.update_recording_mode_ui()
+                if hasattr(main, "apply_recording_mode_database_reload"):
+                    main.apply_recording_mode_database_reload()
         else:
             main = self.window()
             if main is not None and hasattr(main, "update_recording_mode_ui"):
@@ -1150,7 +1558,20 @@ PySide6 バージョン: {__import__('PySide6').__version__}
 
         if hasattr(self, "flea_market_settings_widget"):
             self.flea_market_settings_widget.reload()
-        
+
+        if hasattr(self, "backup_folder_edit"):
+            self.backup_folder_edit.setText(self.settings.value("backup/folder", ""))
+            self.backup_auto_on_exit_cb.setChecked(
+                self.settings.value("backup/auto_on_exit", False, type=bool)
+            )
+            self.backup_keep_count_spin.setValue(
+                int(self.settings.value("backup/keep_count", 7) or 7)
+            )
+            self.backup_include_config_cb.setChecked(
+                self.settings.value("backup/include_config", True, type=bool)
+            )
+            self._refresh_backup_status()
+            
     def save_settings(self):
         """設定の保存"""
         try:
@@ -1233,6 +1654,9 @@ PySide6 バージョン: {__import__('PySide6').__version__}
 
             if hasattr(self, "flea_market_settings_widget"):
                 self.flea_market_settings_widget.save_all()
+
+            if hasattr(self, "backup_folder_edit"):
+                self._save_backup_settings_to_qsettings()
             
             # 設定変更シグナルを発火
             settings_dict = self.get_current_settings()

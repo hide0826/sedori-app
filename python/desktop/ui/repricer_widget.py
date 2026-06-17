@@ -954,7 +954,7 @@ class RepricerWidget(QWidget):
         self.pricerstar_drop_hint.setText(
             "ブラウザでプライスターを開きました。"
             "左のCSVアイコンをドラッグしてドロップ欄へ送ってください。"
-            "（ドラッグ中はアプリが一時的に最小化されます）"
+            "（ドラッグ中はブラウザが最前面に出ます）"
         )
         QTimer.singleShot(
             900,

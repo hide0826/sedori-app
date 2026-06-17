@@ -34,7 +34,7 @@ def is_recording_mode_without_pyside6() -> bool:
 
 
 def get_hirio_db_path_for_api() -> str:
-    """デスクトップと同じ DB を参照（撮影モード時は recording/hirio.db）。"""
+    """デスクトップと同じ DB を参照（デモモード時は recording/hirio.db）。"""
     data_dir = _desktop_data_dir()
     if is_recording_mode_without_pyside6():
         recording_db = data_dir / "recording" / "hirio.db"

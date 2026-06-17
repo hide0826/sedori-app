@@ -69,7 +69,7 @@ def is_pro_enabled() -> bool:
 
 
 def is_recording_mode() -> bool:
-    """撮影モード（デモ）が有効か。ON時は仮想DBのみに読み書きする。"""
+    """デモモードが有効か。ON時は仮想DBのみに読み書きする。"""
     return _settings().value("recording/enabled", False, type=bool)
 
 

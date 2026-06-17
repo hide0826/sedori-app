@@ -31,7 +31,8 @@ class DraggableFileIconWidget(QLabel):
         self._drag_start_pos = None
         self._tooltip_prefix = ""
         self._browser_title_keywords: List[str] = ["pricetar", "プライスター"]
-        self._minimize_host_on_drag = sys.platform == "win32"
+        # 最小化するとドラッグ元が失われドロップできなくなるため既定はオフ
+        self._minimize_host_on_drag = False
         self.setAlignment(Qt.AlignCenter)
         self.setFixedSize(80, 80)
         self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
@@ -68,8 +69,11 @@ class DraggableFileIconWidget(QLabel):
         file_name = Path(self._file_path).name
         prefix = f"{self._tooltip_prefix}\n\n" if self._tooltip_prefix else ""
         drag_note = ""
-        if self._minimize_host_on_drag and sys.platform == "win32":
-            drag_note = "\n（ドラッグ中はアプリが一時的に最小化されます）"
+        if sys.platform == "win32" and self._browser_title_keywords:
+            if self._minimize_host_on_drag:
+                drag_note = "\n（ドラッグ中はアプリが一時的に最小化されます）"
+            else:
+                drag_note = "\n（ドラッグ中はブラウザが最前面に出ます）"
         self.setToolTip(
             f"{prefix}"
             "このアイコンをドラッグしてドロップ先へ送れます"

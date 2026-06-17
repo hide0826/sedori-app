@@ -572,7 +572,7 @@ class ProductWidget(QWidget):
             db.conn = None
 
     def reinit_databases(self) -> None:
-        """撮影モード切替後にDB接続を差し替える。"""
+        """デモモード切替後にDB接続を差し替える。"""
         for attr in (
             "db",
             "warranty_db",

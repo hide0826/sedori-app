@@ -20,7 +20,7 @@ def get_recording_data_dir() -> Path:
 
 
 def get_recording_hirio_db_path() -> str:
-    """撮影モード専用 hirio.db（フラグ状態に依存しない）。"""
+    """デモモード専用 hirio.db（フラグ状態に依存しない）。"""
     return str(get_recording_data_dir() / "hirio.db")
 
 

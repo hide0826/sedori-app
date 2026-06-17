@@ -2155,7 +2155,7 @@ class InventoryWidget(QWidget):
             db.conn = None
 
     def reinit_databases(self) -> None:
-        """撮影モード切替後にDB接続を差し替える。"""
+        """デモモード切替後にDB接続を差し替える。"""
         for attr in (
             "store_db",
             "inventory_db",
@@ -2521,7 +2521,7 @@ class InventoryWidget(QWidget):
         self.listing_drop_hint.setText(
             "ブラウザでプライスターを開きました。"
             "左のCSVアイコンをドラッグしてドロップ欄へ送ってください。"
-            "（ドラッグ中はアプリが一時的に最小化されます）"
+            "（ドラッグ中はブラウザが最前面に出ます）"
         )
         QTimer.singleShot(
             900,

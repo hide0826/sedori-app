@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""撮影モード用の仮想DB作成・削除。"""
+"""デモモード用の仮想DB作成・削除。"""
 
 from __future__ import annotations
 
@@ -151,7 +151,7 @@ def ensure_recording_databases_if_needed(enabled: bool) -> None:
 
 
 def set_recording_mode_enabled(enabled: bool, previous: bool) -> None:
-    """撮影モードのON/OFFに応じて仮想DBを作成または削除する。"""
+    """デモモードのON/OFFに応じて仮想DBを作成または削除する。"""
     if enabled and not previous:
         delete_recording_databases()
         create_recording_databases()

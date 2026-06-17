@@ -138,7 +138,7 @@ def restore(source: Path, target_data: Path, include_all: bool, dry_run: bool) -
     recording_dir = target_data / "recording"
     if recording_dir.exists():
         print("\n[INFO] 撮影用 recording/ フォルダはそのまま残しています。")
-        print("       本番DBを確認するには設定で「撮影モード」を OFF にしてください。")
+        print("       本番DBを確認するには設定で「デモモード」を OFF にしてください。")
 
     print("\n[OK] 復元完了。HIRIO を起動して店舗マスタを確認してください。")
     return 0

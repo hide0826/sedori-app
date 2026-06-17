@@ -321,6 +321,28 @@ class RouteSummaryWidget(QWidget):
         self.map_view = None
         
         self.setup_ui()
+
+    def _close_db_connection(self, db) -> None:
+        if db is None:
+            return
+        conn = getattr(db, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            db.conn = None
+
+    def reinit_databases(self) -> None:
+        """デモモード切替後にDB接続を差し替える。"""
+        for attr in ("route_db", "store_db", "route_visit_db"):
+            self._close_db_connection(getattr(self, attr, None))
+        self.route_db = RouteDatabase()
+        self.store_db = StoreDatabase()
+        self.route_visit_db = RouteVisitDatabase()
+        self.current_route_id = None
+        self.route_data = {}
+        self.store_visits = []
     
     def setup_ui(self):
         """UIの設定"""
