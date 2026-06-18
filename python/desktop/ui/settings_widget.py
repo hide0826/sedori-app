@@ -405,6 +405,31 @@ class SettingsWidget(QWidget):
         self.auto_save_cb = QCheckBox("処理結果の自動保存を有効にする")
         self.auto_save_cb.setChecked(False)
         perf_layout.addWidget(self.auto_save_cb, 2, 0, 1, 2)
+
+        # 仕入DB段階読み込み（データベース管理タブの高速化。OFFで従来の全件一括描画）
+        self.purchase_incremental_cb = QCheckBox("仕入DBを段階読み込みする（推奨・大量データ向け）")
+        self.purchase_incremental_cb.setChecked(True)
+        self.purchase_incremental_cb.setToolTip(
+            "ON: 先頭100件だけ先に表示し、スクロールで追加読み込み\n"
+            "OFF: 従来どおり全行を一度に描画"
+        )
+        perf_layout.addWidget(self.purchase_incremental_cb, 3, 0, 1, 2)
+
+        perf_layout.addWidget(QLabel("仕入DB 1回の表示行数:"), 4, 0)
+        self.purchase_page_size_spin = QSpinBox()
+        self.purchase_page_size_spin.setRange(20, 500)
+        self.purchase_page_size_spin.setValue(100)
+        self.purchase_page_size_spin.setToolTip("テーブルに一度に追加する行数")
+        perf_layout.addWidget(self.purchase_page_size_spin, 4, 1)
+
+        perf_layout.addWidget(QLabel("仕入DB augmentバッチ:"), 5, 0)
+        self.purchase_augment_batch_spin = QSpinBox()
+        self.purchase_augment_batch_spin.setRange(20, 500)
+        self.purchase_augment_batch_spin.setValue(100)
+        self.purchase_augment_batch_spin.setToolTip(
+            "バックグラウンドで商品DB等を照会する件数（大きいほど一括だがUI負荷増）"
+        )
+        perf_layout.addWidget(self.purchase_augment_batch_spin, 5, 1)
         
         layout.addWidget(perf_group)
         
@@ -1502,6 +1527,15 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.max_rows_spin.setValue(int(self.settings.value("performance/max_rows", 1000)))
         self.batch_size_spin.setValue(int(self.settings.value("performance/batch_size", 50)))
         self.auto_save_cb.setChecked(self.settings.value("performance/auto_save", False, type=bool))
+        self.purchase_incremental_cb.setChecked(
+            self.settings.value("performance/purchase_incremental_render", True, type=bool)
+        )
+        self.purchase_page_size_spin.setValue(
+            int(self.settings.value("performance/purchase_page_size", 100))
+        )
+        self.purchase_augment_batch_spin.setValue(
+            int(self.settings.value("performance/purchase_augment_batch_size", 100))
+        )
         
         # ログ設定
         self.log_level_combo.setCurrentText(self.settings.value("log/level", "INFO"))
@@ -1605,6 +1639,18 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             self.settings.setValue("performance/max_rows", self.max_rows_spin.value())
             self.settings.setValue("performance/batch_size", self.batch_size_spin.value())
             self.settings.setValue("performance/auto_save", self.auto_save_cb.isChecked())
+            self.settings.setValue(
+                "performance/purchase_incremental_render",
+                self.purchase_incremental_cb.isChecked(),
+            )
+            self.settings.setValue(
+                "performance/purchase_page_size",
+                self.purchase_page_size_spin.value(),
+            )
+            self.settings.setValue(
+                "performance/purchase_augment_batch_size",
+                self.purchase_augment_batch_spin.value(),
+            )
             
             # ログ設定
             self.settings.setValue("log/level", self.log_level_combo.currentText())
@@ -1698,6 +1744,9 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.tooltip_enabled_cb.setChecked(True)
         self.max_rows_spin.setValue(1000)
         self.batch_size_spin.setValue(50)
+        self.purchase_incremental_cb.setChecked(True)
+        self.purchase_page_size_spin.setValue(100)
+        self.purchase_augment_batch_spin.setValue(100)
         self.auto_save_cb.setChecked(False)
         self.log_level_combo.setCurrentText("INFO")
         self.log_file_cb.setChecked(True)
@@ -1759,7 +1808,10 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             "performance": {
                 "max_rows": self.max_rows_spin.value(),
                 "batch_size": self.batch_size_spin.value(),
-                "auto_save": self.auto_save_cb.isChecked()
+                "auto_save": self.auto_save_cb.isChecked(),
+                "purchase_incremental_render": self.purchase_incremental_cb.isChecked(),
+                "purchase_page_size": self.purchase_page_size_spin.value(),
+                "purchase_augment_batch_size": self.purchase_augment_batch_spin.value(),
             },
             "log": {
                 "level": self.log_level_combo.currentText(),

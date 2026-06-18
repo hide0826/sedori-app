@@ -1,3 +1,25 @@
+## 2026-06-17 (続2): データベース管理タブ・仕入DBの段階読み込み
+
+- **タスク:** データベース管理タブ表示の高速化（先頭100件表示→スクロールで追加、augmentもバッチ化）
+- **状況:** 完了
+- **方針:** 設定でいつでも従来の全件一括描画に戻せる（`performance/purchase_incremental_render`）
+- **変更点:**
+  - **`purchase_table_incremental.py`（新規）** … ページサイズ・augmentバッチ・ON/OFF定数
+  - **`product_widget.py`**
+    - 件数がページサイズ超のとき merge のみ同期 → 先頭ページだけ augment/描画
+    - スクロール末尾で次ページを `append` 描画
+    - バックグラウンドで残り augment（他タブの `purchase_all_records` 参照は段階的に enriched）
+    - 一括TP・仕入DB保存前は `ensure_purchase_records_fully_augmented` / 全行同期描画
+    - `populate_purchase_table(..., force_full=True)` で従来動作に復帰
+  - **`settings_widget.py`** … 「仕入DBを段階読み込み」チェック、表示行数、augmentバッチ
+  - **`test_purchase_table_incremental.py`**
+- **動作確認:** データベース管理タブの初回表示が高速化、スクロールで行追加、他タブ連携OK（ユーザー確認済み）
+- **元に戻す方法:** 設定 → パフォーマンス → 「仕入DBを段階読み込み」のチェックを外して保存 → アプリ再起動
+- **Git:**
+  - feat(desktop): 仕入DB段階読み込みでデータベース管理タブを高速化
+
+---
+
 ## 2026-06-17 (続): 証憑管理レシート編集「変更を保存」の高速化
 
 - **タスク:** 証憑管理タブ → レシート・領収書・保証書 → レシート情報編集で「変更を保存」が1分以上かかる問題の解消

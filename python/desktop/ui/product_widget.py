@@ -552,6 +552,13 @@ class ProductWidget(QWidget):
         self._purchase_lookup_loaded: bool = False
         self._purchase_loaded: bool = False
         self._sales_loaded: bool = False
+        # 仕入DBテーブル段階読み込み（設定で無効化可能＝従来の全件描画に戻せる）
+        self._purchase_incremental_active: bool = False
+        self._purchase_incremental_display_records: List[Dict[str, Any]] = []
+        self._purchase_incremental_rendered: int = 0
+        self._purchase_incremental_loading_more: bool = False
+        self._purchase_augmented_through: int = 0
+        self._purchase_scroll_load_connected: bool = False
         self._products_loaded: bool = False
 
         self.setup_ui()
@@ -1384,6 +1391,8 @@ class ProductWidget(QWidget):
             QMessageBox.information(self, "情報", "仕入DBにデータがありません。")
             return
 
+        self.ensure_purchase_records_fully_augmented()
+
         reply = QMessageBox.question(
             self,
             "確認",
@@ -1529,6 +1538,8 @@ class ProductWidget(QWidget):
             QMessageBox.information(self, "情報", "仕入DBにデータがありません。")
             return
 
+        self.ensure_purchase_records_fully_augmented()
+
         try:
             from desktop.services.purchase_tp_autofill_369 import (
                 load_369_repricer_config,
@@ -1633,6 +1644,8 @@ class ProductWidget(QWidget):
         if not getattr(self, "purchase_all_records", None):
             QMessageBox.information(self, "情報", "仕入DBにデータがありません。")
             return
+
+        self.ensure_purchase_records_fully_augmented()
 
         try:
             from desktop.services.purchase_ladder_autofill_batch import (
@@ -1810,6 +1823,8 @@ class ProductWidget(QWidget):
         if reply != QMessageBox.Yes:
             return
 
+        self.ensure_purchase_records_fully_augmented()
+
         tp_keys = (
             "TP0", "tp0",
             "TP1", "tp1", "TA1", "ta1",
@@ -1904,6 +1919,9 @@ class ProductWidget(QWidget):
         if not hasattr(self, "purchase_columns") or not self.purchase_columns:
             QMessageBox.information(self, "情報", "保存する仕入DBデータがありません。")
             return
+
+        self._purchase_incremental_load_all_rows_sync()
+        self.ensure_purchase_records_fully_augmented()
 
         # テーブルの全行を走査して、現在表示されている内容から新しいレコードリストを構築する
         row_count = self.purchase_table.rowCount()
@@ -2470,6 +2488,14 @@ class ProductWidget(QWidget):
                 self.purchase_history_db,
                 include_db_only_rows=True,
             )
+        except Exception as e:
+            print(f"仕入DBデータのmergeエラー: {e}")
+
+        if self._purchase_incremental_render_enabled() and len(merged) > self._purchase_incremental_page_size():
+            self._load_purchase_data_incremental(merged)
+            return
+
+        try:
             records = self._augment_purchase_records(merged)
         except Exception as e:
             print(f"仕入DBデータのaugmentエラー: {e}")
@@ -2559,9 +2585,17 @@ class ProductWidget(QWidget):
     def refresh_purchase_table_if_built(self) -> None:
         """仕入DBテーブルが構築済みなら再描画する。"""
         if not getattr(self, "_purchase_table_full_master_built", False):
-            return
+            if not getattr(self, "_purchase_incremental_active", False):
+                return
         records = getattr(self, "purchase_all_records", None) or []
-        self.populate_purchase_table(records)
+        if (
+            self._purchase_incremental_render_enabled()
+            and len(records) > self._purchase_incremental_page_size()
+        ):
+            self.populate_purchase_table(records)
+        else:
+            self.populate_purchase_table(records, force_full=True)
+            self._purchase_table_full_master_built = bool(records)
 
     def save_purchase_snapshot(self, *, skip_master_sync: bool = False):
         """現在の仕入データをスナップショットとして保存"""
@@ -3149,6 +3183,7 @@ class ProductWidget(QWidget):
 
     def _invalidate_purchase_table_full_master(self) -> None:
         self._purchase_table_full_master_built = False
+        self._purchase_incremental_reset()
 
     def _sync_purchase_status_norm(self, record: Dict[str, Any]) -> str:
         """ステータスフィルタ用コードをレコードに反映（常に最新のステータスから計算）。"""
@@ -3367,37 +3402,49 @@ class ProductWidget(QWidget):
 
         master = self._purchase_master_records()
         filters_active = self._purchase_search_filters_active()
-
-        # 全件テーブルが未構築（行数が合わない）場合のみ repopulate
-        if not master or self.purchase_table.rowCount() != len(master):
-            filtered_records = self._compute_filtered_purchase_records()
-            self.purchase_records = filtered_records
-            self.populate_purchase_table(master if master else filtered_records)
-            # repopulate 後にフィルタがアクティブなら行の表示/非表示を適用
-            if filters_active and master:
-                visible_skus = {
-                    str(r.get("SKU") or r.get("sku") or "").strip()
-                    for r in self.purchase_records
-                    if str(r.get("SKU") or r.get("sku") or "").strip()
-                }
-                self._fast_set_row_visibility(visible_skus, show_all=False)
-            self.update_purchase_count_label()
-            return
-
-        # テーブルが全件構築済み → setRowHidden のみで切り替え（高速）
         filtered_records = self._compute_filtered_purchase_records()
         self.purchase_records = filtered_records
 
-        if filters_active:
-            visible_skus = {
-                str(r.get("SKU") or r.get("sku") or "").strip()
-                for r in filtered_records
-                if str(r.get("SKU") or r.get("sku") or "").strip()
-            }
-            self._fast_set_row_visibility(visible_skus, show_all=False)
-        else:
-            self._fast_set_row_visibility(set(), show_all=True)
+        can_fast_hide = (
+            bool(master)
+            and self._purchase_table_full_master_built
+            and self.purchase_table.rowCount() == len(master)
+            and not getattr(self, "_purchase_incremental_active", False)
+        )
 
+        if (
+            not filters_active
+            and getattr(self, "_purchase_incremental_active", False)
+            and self._purchase_incremental_rendered > 0
+            and len(self._purchase_incremental_display_records or []) == len(master)
+            and self.purchase_table.rowCount() > 0
+        ):
+            self.purchase_records = list(master) if master else []
+            self.update_purchase_count_label()
+            return
+
+        if can_fast_hide:
+            if filters_active:
+                visible_skus = {
+                    str(r.get("SKU") or r.get("sku") or "").strip()
+                    for r in filtered_records
+                    if str(r.get("SKU") or r.get("sku") or "").strip()
+                }
+                self._fast_set_row_visibility(visible_skus, show_all=False)
+            else:
+                self._fast_set_row_visibility(set(), show_all=True)
+            self.update_purchase_count_label()
+            return
+
+        display = filtered_records if filters_active else (master or filtered_records)
+        if (
+            self._purchase_incremental_render_enabled()
+            and len(display) > self._purchase_incremental_page_size()
+        ):
+            self.populate_purchase_table(display)
+        else:
+            self.populate_purchase_table(display, force_full=True)
+            self._purchase_table_full_master_built = bool(display)
         self.update_purchase_count_label()
 
     def clear_purchase_search(self):
@@ -3907,10 +3954,237 @@ class ProductWidget(QWidget):
             self._sync_receipt_fields_from_voucher_link(row)
 
             self._sync_purchase_status_norm(row)
+            row["_hirio_augmented"] = True
             augmented.append(row)
         return augment_purchase_cost_records(augmented)
 
-    def populate_purchase_table(self, records: List[Dict[str, Any]]):
+    def _augment_one_purchase_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """1件だけ augment（段階読み込み用）。"""
+        rows = self._augment_purchase_records([record])
+        return rows[0] if rows else dict(record)
+
+    def _ensure_purchase_records_augmented(self, start: int, end: int) -> None:
+        """指定範囲の仕入レコードを in-place で augment（済みはスキップ）。"""
+        master = getattr(self, "purchase_all_records", None) or []
+        if not master:
+            return
+        start = max(0, start)
+        end = min(end, len(master))
+        if start >= end:
+            return
+        changed = False
+        for i in range(start, end):
+            if master[i].get("_hirio_augmented"):
+                continue
+            aug = self._augment_one_purchase_record(master[i])
+            master[i].clear()
+            master[i].update(aug)
+            changed = True
+        if changed:
+            augment_purchase_cost_records(master[start:end])
+        if end > getattr(self, "_purchase_augmented_through", 0):
+            self._purchase_augmented_through = end
+
+    def ensure_purchase_records_fully_augmented(self) -> None:
+        """一括処理前に全件 augment を完了させる（段階読み込み中でも安全）。"""
+        total = len(getattr(self, "purchase_all_records", None) or [])
+        if total <= 0:
+            return
+        self._ensure_purchase_records_augmented(0, total)
+
+    def _purchase_incremental_render_enabled(self) -> bool:
+        try:
+            from desktop.services.purchase_table_incremental import is_incremental_render_enabled
+        except ImportError:
+            from services.purchase_table_incremental import is_incremental_render_enabled  # type: ignore
+        return is_incremental_render_enabled(getattr(self, "settings", None))
+
+    def _purchase_incremental_page_size(self) -> int:
+        try:
+            from desktop.services.purchase_table_incremental import get_page_size
+        except ImportError:
+            from services.purchase_table_incremental import get_page_size  # type: ignore
+        return get_page_size(getattr(self, "settings", None))
+
+    def _purchase_incremental_augment_batch_size(self) -> int:
+        try:
+            from desktop.services.purchase_table_incremental import get_augment_batch_size
+        except ImportError:
+            from services.purchase_table_incremental import get_augment_batch_size  # type: ignore
+        return get_augment_batch_size(getattr(self, "settings", None))
+
+    def _purchase_incremental_reset(self) -> None:
+        self._purchase_incremental_active = False
+        self._purchase_incremental_display_records = []
+        self._purchase_incremental_rendered = 0
+        self._purchase_incremental_loading_more = False
+
+    def _update_purchase_incremental_built_flag(self) -> None:
+        """段階描画の進捗に応じて _purchase_table_full_master_built を更新。"""
+        if not self._purchase_incremental_active:
+            return
+        display = self._purchase_incremental_display_records or []
+        master = self._purchase_master_records()
+        fully_rendered = self._purchase_incremental_rendered >= len(display)
+        is_full_master_view = (
+            len(display) == len(master)
+            and not self._purchase_search_filters_active()
+        )
+        self._purchase_table_full_master_built = bool(
+            fully_rendered and is_full_master_view and display
+        )
+
+    def _ensure_purchase_scroll_listener(self) -> None:
+        if self._purchase_scroll_load_connected:
+            return
+        if not hasattr(self, "purchase_table"):
+            return
+        bar = self.purchase_table.verticalScrollBar()
+        bar.valueChanged.connect(self._on_purchase_table_scroll)
+        self._purchase_scroll_load_connected = True
+
+    def _on_purchase_table_scroll(self, value: int) -> None:
+        if not self._purchase_incremental_active or self._purchase_incremental_loading_more:
+            return
+        try:
+            from desktop.services.purchase_table_incremental import SCROLL_LOAD_THRESHOLD_PX
+        except ImportError:
+            from services.purchase_table_incremental import SCROLL_LOAD_THRESHOLD_PX  # type: ignore
+        bar = self.purchase_table.verticalScrollBar()
+        if bar.maximum() - value > SCROLL_LOAD_THRESHOLD_PX:
+            return
+        self._purchase_incremental_load_more_rows()
+
+    def _schedule_background_augment(self) -> None:
+        """表示中のテーブルとは別に、メモリ上の残りレコードをバックグラウンド augment。"""
+        if not self._purchase_incremental_render_enabled():
+            return
+        total = len(getattr(self, "purchase_all_records", None) or [])
+        if self._purchase_augmented_through >= total:
+            return
+        QTimer.singleShot(20, self._run_background_augment_batch)
+
+    def _run_background_augment_batch(self) -> None:
+        if not self._purchase_incremental_render_enabled():
+            return
+        total = len(getattr(self, "purchase_all_records", None) or [])
+        start = self._purchase_augmented_through
+        if start >= total:
+            return
+        batch = self._purchase_incremental_augment_batch_size()
+        end = min(start + batch, total)
+        try:
+            self._ensure_purchase_records_augmented(start, end)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("仕入DBバックグラウンドaugment失敗: %s", exc)
+            return
+        if end < total:
+            QTimer.singleShot(20, self._run_background_augment_batch)
+
+    def _purchase_incremental_begin_display(self, records: List[Dict[str, Any]]) -> None:
+        """段階読み込み: 先頭ページのみテーブル描画。"""
+        records = records or []
+        self._purchase_incremental_active = True
+        self._purchase_incremental_display_records = records
+        total = len(records)
+        page = self._purchase_incremental_page_size()
+        first_end = min(page, total)
+        master = self._purchase_master_records()
+        col_source = master if master and len(master) >= total else records
+        self._ensure_purchase_records_augmented(0, first_end)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.purchase_table.setUpdatesEnabled(False)
+        try:
+            self._populate_purchase_table_impl(
+                records,
+                render_start=0,
+                render_end=first_end,
+                append=False,
+                column_scan_records=col_source,
+                finalize=(first_end >= total),
+            )
+        finally:
+            self.purchase_table.setUpdatesEnabled(True)
+            QApplication.restoreOverrideCursor()
+            self.purchase_table.viewport().repaint()
+            QApplication.processEvents()
+        self._purchase_incremental_rendered = first_end
+        self._update_purchase_incremental_built_flag()
+        self._ensure_purchase_scroll_listener()
+        if first_end < total:
+            self._schedule_background_augment()
+
+    def _purchase_incremental_load_more_rows(self) -> None:
+        """スクロール末尾で次のページをテーブルに追加。"""
+        if not self._purchase_incremental_active or self._purchase_incremental_loading_more:
+            return
+        display = self._purchase_incremental_display_records or []
+        total = len(display)
+        rendered = self._purchase_incremental_rendered
+        if rendered >= total:
+            return
+        self._purchase_incremental_loading_more = True
+        try:
+            page = self._purchase_incremental_page_size()
+            next_end = min(rendered + page, total)
+            self._ensure_purchase_records_augmented(rendered, next_end)
+            master = self._purchase_master_records()
+            col_source = master if master and len(master) >= total else display
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            self.purchase_table.setUpdatesEnabled(False)
+            try:
+                self._populate_purchase_table_impl(
+                    display,
+                    render_start=rendered,
+                    render_end=next_end,
+                    append=True,
+                    column_scan_records=col_source,
+                    finalize=(next_end >= total),
+                )
+            finally:
+                self.purchase_table.setUpdatesEnabled(True)
+                QApplication.restoreOverrideCursor()
+                self.purchase_table.viewport().repaint()
+                QApplication.processEvents()
+            self._purchase_incremental_rendered = next_end
+            self._update_purchase_incremental_built_flag()
+        except Exception as exc:
+            logging.getLogger(__name__).warning("仕入DB段階読み込み追加失敗: %s", exc)
+        finally:
+            self._purchase_incremental_loading_more = False
+
+    def _purchase_incremental_load_all_rows_sync(self) -> None:
+        """段階読み込み中でも保存・一括処理前にテーブルへ全行を描画する。"""
+        if not getattr(self, "_purchase_incremental_active", False):
+            return
+        display = self._purchase_incremental_display_records or []
+        guard = 0
+        while self._purchase_incremental_rendered < len(display) and guard < 10000:
+            self._purchase_incremental_load_more_rows()
+            guard += 1
+        self._update_purchase_incremental_built_flag()
+
+    def _load_purchase_data_incremental(self, merged: List[Dict[str, Any]]) -> None:
+        """merge 済みデータを段階 augment + 段階描画で読み込む。"""
+        base = [dict(r) for r in (merged or [])]
+        self.purchase_all_records_master = base
+        self.purchase_all_records = base
+        self.purchase_records = list(base)
+        self._purchase_augmented_through = 0
+        self._invalidate_purchase_table_full_master()
+        if not base:
+            self.populate_purchase_table([], force_full=True)
+            self.update_purchase_count_label()
+            return
+        self._purchase_incremental_begin_display(self.purchase_records)
+        if self._purchase_search_filters_active():
+            self.filter_purchase_records()
+        else:
+            self.update_purchase_count_label()
+
+    def populate_purchase_table(
+        self, records: List[Dict[str, Any]], *, force_full: bool = False
+    ):
         """仕入DBテーブルにレコードを反映"""
         from pathlib import Path
         records = records or []
@@ -3918,6 +4192,17 @@ class ProductWidget(QWidget):
             self._sync_receipt_fields_from_voucher_link(record)
         augment_purchase_cost_records(records)
 
+        use_incremental = (
+            not force_full
+            and self._purchase_incremental_render_enabled()
+            and len(records) > self._purchase_incremental_page_size()
+        )
+
+        if use_incremental:
+            self._purchase_incremental_begin_display(records)
+            return
+
+        self._purchase_incremental_reset()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self.purchase_table.setUpdatesEnabled(False)
         try:
@@ -3931,8 +4216,25 @@ class ProductWidget(QWidget):
             self.purchase_table.viewport().repaint()
             QApplication.processEvents()
 
-    def _populate_purchase_table_impl(self, records: List[Dict[str, Any]]):
+    def _populate_purchase_table_impl(
+        self,
+        records: List[Dict[str, Any]],
+        *,
+        render_start: int = 0,
+        render_end: int | None = None,
+        append: bool = False,
+        column_scan_records: List[Dict[str, Any]] | None = None,
+        finalize: bool = True,
+    ):
         from pathlib import Path
+        records = records or []
+        if render_end is None:
+            render_end = len(records)
+        render_start = max(0, min(render_start, len(records)))
+        render_end = max(render_start, min(render_end, len(records)))
+        slice_records = records[render_start:render_end]
+        scan_records = column_scan_records if column_scan_records is not None else records
+
         base_columns = list(self.inventory_columns)
         if not base_columns:
             base_columns = self._resolve_inventory_columns()
@@ -3963,7 +4265,7 @@ class ProductWidget(QWidget):
         })
         
         # レコードから追加の列を取得（既にcolumnsに含まれているもの・古物台帳用除外リストは除外）
-        for record in records:
+        for record in scan_records:
             for key in record.keys():
                 if key in _purchase_table_exclude_columns:
                     continue
@@ -3982,30 +4284,45 @@ class ProductWidget(QWidget):
         self.purchase_columns = columns
         # _row_id は下のループ内で欠けている行に採番する。採番前にマップを作るとキーが欠落し、
         # 編集時に row_map ミス→SKU先頭一致で別商品が開く不具合になるため、ここでは空にしてループ内で登録する。
-        self._purchase_row_map = {}
-        self._purchase_table_row_ids_by_index: List[Optional[int]] = []
+        if not append:
+            self._purchase_row_map = {}
+            self._purchase_table_row_ids_by_index: List[Optional[int]] = []
 
         # テーブル内容をクリアし、更新中はソート/シグナルを止める（穴あき防止）
-        self.purchase_table.blockSignals(True)
-        self.purchase_table.setSortingEnabled(False)
-        self.purchase_table.clearContents()
-        self.purchase_table.setRowCount(len(records))
-        self.purchase_table.setColumnCount(len(columns))
-        # 表示ラベルだけ「仕入先」→「店舗コード」に置き換え
-        display_columns = list(columns)
-        try:
-            idx = display_columns.index("仕入先")
-            display_columns[idx] = "店舗コード"
-        except ValueError:
-            pass
-        self.purchase_table.setHorizontalHeaderLabels(display_columns)
-        
-        # 列幅を変更可能にする設定（データ設定前に設定）
-        header = self.purchase_table.horizontalHeader()
-        for col_idx in range(len(columns)):
-            header.setSectionResizeMode(col_idx, QHeaderView.Interactive)
+        if not append:
+            self.purchase_table.blockSignals(True)
+            self.purchase_table.setSortingEnabled(False)
+            self.purchase_table.clearContents()
+            self.purchase_table.setRowCount(len(slice_records))
+            self.purchase_table.setColumnCount(len(columns))
+        else:
+            self.purchase_table.blockSignals(True)
+            self.purchase_table.setSortingEnabled(False)
+            base_append_row = self.purchase_table.rowCount()
+            self.purchase_table.setRowCount(base_append_row + len(slice_records))
 
-        for row, record in enumerate(records):
+        if not append:
+            base_row = 0
+        else:
+            base_row = self.purchase_table.rowCount() - len(slice_records)
+
+        if not append:
+            # 表示ラベルだけ「仕入先」→「店舗コード」に置き換え
+            display_columns = list(columns)
+            try:
+                idx = display_columns.index("仕入先")
+                display_columns[idx] = "店舗コード"
+            except ValueError:
+                pass
+            self.purchase_table.setHorizontalHeaderLabels(display_columns)
+
+            # 列幅を変更可能にする設定（データ設定前に設定）
+            header = self.purchase_table.horizontalHeader()
+            for col_idx in range(len(columns)):
+                header.setSectionResizeMode(col_idx, QHeaderView.Interactive)
+
+        for offset, record in enumerate(slice_records):
+            row = base_row + offset
             # レコードに行IDを付与（なければ採番し、型は int に揃える）
             if "_row_id" not in record or record.get("_row_id") is None:
                 record["_row_id"] = self._purchase_row_id_counter
@@ -4568,11 +4885,24 @@ class ProductWidget(QWidget):
                 # 自動設定に失敗してもアプリ全体には影響させない
                 pass
         
-        # すべての行の背景色を設定（ステータスに応じて）
-        for row in range(len(records)):
-            record = records[row]
+        # 追加・初回描画した行の背景色を設定（ステータスに応じて）
+        for offset, record in enumerate(slice_records):
+            row = base_row + offset
             status_value = str(record.get("ステータス") or record.get("status") or "ready")
             self._update_row_color_by_status(row, status_value)
+
+        if not finalize:
+            if not append:
+                if not hasattr(self, "purchase_view_mode"):
+                    self.purchase_view_mode = "all"
+                self._update_column_visibility()
+                restore_table_column_widths(
+                    self.purchase_table, "ProductWidget/PurchaseTableColumnWidths"
+                )
+            self.purchase_table.blockSignals(False)
+            self.purchase_table.setSortingEnabled(True)
+            self.purchase_table.viewport().update()
+            return
 
         # 各列をリサイズ可能に設定
         header = self.purchase_table.horizontalHeader()
