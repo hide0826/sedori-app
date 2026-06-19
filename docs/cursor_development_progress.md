@@ -1,3 +1,25 @@
+## 2026-06-18 TP0追従/維持分離・プリセット修正・利益計算フォールバック
+
+- **目的**: 3-6-9改定のTP0を追従・価格維持・下限固定に分離し、回転重視/利益重視プリセットの逆転を修正。仕入編集と一覧の利益率ズレを費用合計フォールバックで統一。
+- **TP0改定**（`repricer_tp_target.py`, `repricer_weekly.py`, `repricer_369_presets.py`, `repricer_settings_widget.py`）
+  - TP列: `TP0（価格維持）` / `TP0（追従）`、チェック: TP0追従・TP0下限固定
+  - プリセット: 回転=全追従、利益=全維持+下限固定、バランス=0-1維持・61-90追従。適用前サマリー確認
+  - API: `tp0_gradual_follow`, `tp0_floor_guard`, `repricer_preset_369`
+- **ドキュメント**（`docs/reprice_rules_guide.md`）
+  - 標準/3-6-9、アクション、TP帯、プリセット、TP0新仕様の初心者向けガイド
+- **仕入利益計算**（`purchase_cost_calc.py`, `purchase_channel_cost.py`, `purchase_row_edit_dialog.py`）
+  - `resolve_total_cost_for_fee_calc()`: 手数料未入力時は費用合計、なければ販売予定−仕入−見込み利益から逆算
+- **変更ファイル**:
+  - `python/utils/repricer_tp_target.py`, `python/desktop/utils/repricer_tp_target.py`（新規）
+  - `python/services/repricer_weekly.py`, `python/desktop/services/repricer_369_presets.py`
+  - `python/desktop/ui/repricer_settings_widget.py`, `python/routers/repricer.py`, `python/desktop/api/client.py`
+  - `docs/reprice_rules_guide.md`（新規）
+  - `python/desktop/services/purchase_cost_calc.py`, `purchase_channel_cost.py`, `purchase_row_edit_dialog.py`
+  - `python/desktop/services/test_purchase_cost_calc.py`
+  - `development_history.md`, `docs/cursor_development_progress.md`
+- **リポジトリ**: sedori-app.github
+- **Git**: feat(desktop): TP0追従/維持分離と仕入利益計算の費用合計フォールバック
+
 ## 2026-06-14 証憑紐付け改善・手動保存高速化・レシート画像表示厳格化
 
 - **目的**: 証憑ワークフローの誤紐付け防止、手動調整保存の体感速度改善、確定済みデータと現行証憑の両立。

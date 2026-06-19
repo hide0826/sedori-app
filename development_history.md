@@ -1,3 +1,20 @@
+## 2026-06-18 TP0追従/維持分離・プリセット修正・利益計算フォールバック
+
+- **タスク:** 3-6-9改定のTP0挙動整理、プリセット直感化、仕入編集と一覧の利益率一致
+- **状況:** 完了
+- **変更点:**
+  - **TP0分離** … `repricer_tp_target.py`（共通+デスクトップ）、`repricer_weekly.py` で追従・維持・下限固定を分離
+  - **設定UI** … `repricer_settings_widget.py`: TP列「TP0（価格維持）」「TP0（追従）」、チェック「TP0追従」「TP0下限固定」
+  - **369プリセット** … `repricer_369_presets.py`: 回転重視=全TP0追従、利益重視=全TP0維持+下限固定、バランス=0-1維持・2追従。適用前サマリー表示
+  - **API** … `repricer.py` / `client.py`: `tp0_gradual_follow`・`tp0_floor_guard`・`repricer_preset_369`
+  - **ドキュメント** … `docs/reprice_rules_guide.md`（改定ルール初心者向けガイド）
+  - **利益計算** … `purchase_cost_calc.py`: 手数料空欄時は費用合計フォールバック。`purchase_channel_cost.py`・`purchase_row_edit_dialog.py` で一覧と一致
+- **動作確認:** プリセットロジック確認、`test_purchase_cost_calc.py` 全件パス
+- **Git:**
+  - feat(desktop): TP0追従/維持分離と仕入利益計算の費用合計フォールバック
+
+---
+
 ## 2026-06-17 (続2): データベース管理タブ・仕入DBの段階読み込み
 
 - **タスク:** データベース管理タブ表示の高速化（先頭100件表示→スクロールで追加、augmentもバッチ化）

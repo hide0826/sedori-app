@@ -107,6 +107,51 @@ def test_sync_clears_wrong_total_without_profit():
     assert rec[COL_TOTAL_COST] == ""
 
 
+def test_resolve_total_cost_uses_stored_total_when_fees_blank():
+    from purchase_cost_calc import resolve_total_cost_for_fee_calc
+
+    rec = {
+        "仕入れ価格": 1100,
+        "販売予定価格": 3410,
+        "見込み利益": 1510,
+        COL_TOTAL_COST: 870,
+        COL_PLATFORM_FEE: "",
+        COL_SHIPPING: "",
+    }
+    total = resolve_total_cost_for_fee_calc(
+        rec,
+        platform_fee=0,
+        shipping_cost=0,
+        purchase_price=1100,
+        planned_price=3410,
+    )
+    assert total == 870
+    fields = recalculate_profit_fields(1100, 3410, 0, 0, total)
+    assert fields[COL_TOTAL_COST] == 870
+    assert fields["見込み利益"] == 1440
+    assert abs(fields["想定利益率"] - round(1440 / 3410 * 100, 2)) < 0.02
+
+
+def test_resolve_total_cost_infers_from_profit_when_no_stored_total():
+    from purchase_cost_calc import resolve_total_cost_for_fee_calc
+
+    rec = {
+        "仕入れ価格": 1100,
+        "販売予定価格": 3410,
+        "見込み利益": 1510,
+    }
+    total = resolve_total_cost_for_fee_calc(
+        rec,
+        platform_fee=0,
+        shipping_cost=0,
+        purchase_price=1100,
+        planned_price=3410,
+    )
+    assert total == 800
+    fields = recalculate_profit_fields(1100, 3410, 0, 0, total)
+    assert fields["見込み利益"] == 1510
+
+
 if __name__ == "__main__":
     test_infer_ignores_break_even()
     test_infer_from_profit()
@@ -119,4 +164,6 @@ if __name__ == "__main__":
     test_format_zero_as_empty()
     test_recalculate_infers_total_when_fees_zero()
     test_sync_clears_wrong_total_without_profit()
+    test_resolve_total_cost_uses_stored_total_when_fees_blank()
+    test_resolve_total_cost_infers_from_profit_when_no_stored_total()
     print("ok")

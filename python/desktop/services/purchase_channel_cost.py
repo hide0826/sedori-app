@@ -14,7 +14,7 @@ try:
         cell_has_numeric_value,
         fee_storage_value,
         migrate_record_keys,
-        read_fee_fields,
+        resolve_total_cost_for_fee_calc,
         recalculate_profit_fields,
         to_float,
     )
@@ -26,7 +26,7 @@ except ImportError:
         cell_has_numeric_value,
         fee_storage_value,
         migrate_record_keys,
-        read_fee_fields,
+        resolve_total_cost_for_fee_calc,
         recalculate_profit_fields,
         to_float,
     )
@@ -84,7 +84,13 @@ def apply_fee_values_to_record(
 ) -> Dict[str, Any]:
     """手数料内訳から費用合計・見込み利益・想定利益率/ROI を record に書き込む。"""
     migrate_record_keys(record)
-    total = max(0.0, float(platform_fee or 0)) + max(0.0, float(shipping_cost or 0))
+    total = resolve_total_cost_for_fee_calc(
+        record,
+        platform_fee=platform_fee,
+        shipping_cost=shipping_cost,
+        purchase_price=purchase_price,
+        planned_price=planned_price,
+    )
     fields = recalculate_profit_fields(
         purchase_price,
         planned_price,

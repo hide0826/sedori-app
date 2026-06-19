@@ -135,6 +135,9 @@ class RepriceConfig(BaseModel):
     default_profile: Optional[str] = "6"
     interval_days: Optional[int] = 7
     alerts: Dict[str, Any] = {}
+    repricer_preset_369: Optional[str] = "custom"
+    tp0_gradual_follow: Optional[bool] = False
+    tp0_floor_guard: Optional[bool] = False
     updated_at: Optional[datetime] = None
 
 
@@ -177,6 +180,9 @@ def get_config(mode: Optional[str] = Query(default="standard")):
                 "default_profile": config_data.get("default_profile", "6"),
                 "interval_days": config_data.get("interval_days", 7),
                 "alerts": config_data.get("alerts", {"enabled": True, "reason_prefix": "ALERT"}),
+                "repricer_preset_369": config_data.get("repricer_preset_369", "custom"),
+                "tp0_gradual_follow": config_data.get("tp0_gradual_follow", False),
+                "tp0_floor_guard": config_data.get("tp0_floor_guard", False),
                 "updated_at": config_data.get("updated_at"),
             }
         
@@ -221,6 +227,15 @@ def update_config(config: RepriceConfig = Body(...), mode: Optional[str] = Query
             existing_data["default_profile"] = payload.get("default_profile", existing_data.get("default_profile", "6"))
             existing_data["interval_days"] = payload.get("interval_days", existing_data.get("interval_days", 7))
             existing_data["alerts"] = payload.get("alerts", existing_data.get("alerts", {"enabled": True, "reason_prefix": "ALERT"}))
+            existing_data["repricer_preset_369"] = payload.get(
+                "repricer_preset_369", existing_data.get("repricer_preset_369", "custom")
+            )
+            existing_data["tp0_gradual_follow"] = payload.get(
+                "tp0_gradual_follow", existing_data.get("tp0_gradual_follow", False)
+            )
+            existing_data["tp0_floor_guard"] = payload.get(
+                "tp0_floor_guard", existing_data.get("tp0_floor_guard", False)
+            )
             existing_data["updated_at"] = payload.get("updated_at")
             output_data = existing_data
         else:

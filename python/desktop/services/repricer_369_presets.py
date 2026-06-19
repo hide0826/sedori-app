@@ -11,6 +11,14 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+try:
+    from utils.repricer_tp_target import TP0_FOLLOW, TP0_MAINTAIN
+except ImportError:
+    try:
+        from desktop.utils.repricer_tp_target import TP0_FOLLOW, TP0_MAINTAIN
+    except ImportError:
+        from repricer_tp_target import TP0_FOLLOW, TP0_MAINTAIN  # type: ignore
+
 PRESET_BALANCE = "balance"
 PRESET_TURNOVER = "turnover"
 PRESET_PROFIT = "profit"
@@ -60,6 +68,33 @@ def _tp_target_for_row_index(row_index: int, *, all_tp0: bool = False) -> str:
     return "tp3"
 
 
+def _tp0_target_for_turnover(row_index: int) -> str:
+    return TP0_FOLLOW
+
+
+def _tp0_target_for_profit(_row_index: int) -> str:
+    return TP0_MAINTAIN
+
+
+def _tp0_target_for_balance(row_index: int) -> str:
+    # 61〜90日帯のみ追従、それ以前は維持
+    return TP0_FOLLOW if row_index == 2 else TP0_MAINTAIN
+
+
+def _resolve_row_tp_target(
+    row_index: int,
+    *,
+    all_tp0: bool,
+    tp0_target_for_row: Callable[[int], str],
+) -> str:
+    if all_tp0:
+        return tp0_target_for_row(0)
+    base = _tp_target_for_row_index(row_index, all_tp0=False)
+    if base == "tp0":
+        return tp0_target_for_row(row_index)
+    return base
+
+
 def _akaji_balance(row_index: int) -> int:
     if row_index <= 5:
         return 5
@@ -89,10 +124,12 @@ def build_reprice_rules(
     akaji_for_row: Callable[[int], int],
     takane_percent: int = 1,
     all_tp0: bool = False,
+    tp0_target_for_row: Optional[Callable[[int], str]] = None,
     last_row_action: Optional[str] = None,
     last_row_trace: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """13行分の reprice_rules リストを組み立てる。"""
+    tp0_fn = tp0_target_for_row or (lambda _i: TP0_MAINTAIN)
     rules: List[Dict[str, Any]] = []
     for i, days_from in enumerate(DAYS_FROM_LIST):
         if days_from == 999:
@@ -106,7 +143,9 @@ def build_reprice_rules(
                 "days_from": days_from,
                 "action": row_action,
                 "value": row_trace,
-                "tp_target": _tp_target_for_row_index(i, all_tp0=all_tp0),
+                "tp_target": _resolve_row_tp_target(
+                    i, all_tp0=all_tp0, tp0_target_for_row=tp0_fn
+                ),
                 "akaji_drop_percent": akaji_for_row(i),
                 "takane_rise_percent": takane_percent,
             }
@@ -115,13 +154,14 @@ def build_reprice_rules(
 
 
 def build_profile_9_rules() -> List[Dict[str, Any]]:
-    """9ルール固定: 全期間 priceTrace / TP0 / akaji1% / takane1%。"""
+    """9ルール固定: 全期間 priceTrace / TP0維持 / akaji1% / takane1%。"""
     return build_reprice_rules(
         action="priceTrace",
         trace_value=1,
         akaji_for_row=lambda _i: 1,
         takane_percent=1,
         all_tp0=True,
+        tp0_target_for_row=lambda _i: TP0_MAINTAIN,
         last_row_action="priceTrace",
         last_row_trace=1,
     )
@@ -135,16 +175,63 @@ PRESETS_36: Dict[str, Dict[str, Any]] = {
     PRESET_BALANCE: {
         "tp_rates": {"tp0": 95.0, "tp1": 75.0, "tp2": 60.0, "tp3": 10.0},
         "akaji_for_row": _akaji_balance,
+        "tp0_target_for_row": _tp0_target_for_balance,
     },
     PRESET_TURNOVER: {
         "tp_rates": {"tp0": 90.0, "tp1": 65.0, "tp2": 50.0, "tp3": 5.0},
         "akaji_for_row": _akaji_turnover,
+        "tp0_target_for_row": _tp0_target_for_turnover,
     },
     PRESET_PROFIT: {
         "tp_rates": {"tp0": 95.0, "tp1": 80.0, "tp2": 65.0, "tp3": 15.0},
         "akaji_for_row": _akaji_profit,
+        "tp0_target_for_row": _tp0_target_for_profit,
     },
 }
+
+
+def tp0_gradual_follow_for_preset(preset_id: str) -> bool:
+    """共通設定の既定: 回転重視は追従ON。"""
+    return preset_id == PRESET_TURNOVER
+
+
+def tp0_floor_guard_for_preset(preset_id: str) -> bool:
+    """共通設定の既定: 利益重視のみ TP0 下限固定。"""
+    return preset_id == PRESET_PROFIT
+
+
+def build_preset_summary_text(preset_id: str) -> str:
+    """プリセット適用確認ダイアログ用の説明文。"""
+    if preset_id not in PRESETS_36:
+        return ""
+    spec = PRESETS_36[preset_id]
+    rates = spec["tp_rates"]
+    label = PRESET_LABELS[preset_id]
+    tp0_fn = spec["tp0_target_for_row"]
+    tp0_30 = "追従" if tp0_fn(0) == TP0_FOLLOW else "価格維持"
+    tp0_60 = "追従" if tp0_fn(1) == TP0_FOLLOW else "価格維持"
+    tp0_90 = "追従" if tp0_fn(2) == TP0_FOLLOW else "価格維持"
+    floor = "ON" if tp0_floor_guard_for_preset(preset_id) else "OFF"
+    lines = [
+        f"【{label}】",
+        "",
+        "■ TP保持率（3/6ルール共通）",
+        f"  TP0: {rates['tp0']:.0f}%  TP1: {rates['tp1']:.0f}%  "
+        f"TP2: {rates['tp2']:.0f}%  TP3: {rates['tp3']:.0f}%",
+        "",
+        "■ 〜90日（TP0帯）の価格の動き（ルール表）",
+        f"  1〜30日 … TP0（{tp0_30}）",
+        f"  31〜60日 … TP0（{tp0_60}）",
+        f"  61〜90日 … TP0（{tp0_90}）",
+        f"  TP0下限固定（共通） … {floor}",
+        "",
+        "■ 91日以降",
+        "  TP1 → TP2 → TP3 へ段階的に下げる",
+        "",
+        "■ 9ルール（固定）",
+        "  全期間 priceTrace / TP0（価格維持） / akaji1% / takane1%",
+    ]
+    return "\n".join(lines)
 
 
 def build_rule_profiles_for_preset(preset_id: str) -> Dict[str, Any]:
@@ -155,6 +242,7 @@ def build_rule_profiles_for_preset(preset_id: str) -> Dict[str, Any]:
         rules = build_reprice_rules(
             akaji_for_row=spec["akaji_for_row"],
             takane_percent=1,
+            tp0_target_for_row=spec["tp0_target_for_row"],
         )
         for profile_key in ("3", "6"):
             profiles[profile_key] = {
@@ -168,11 +256,6 @@ def build_rule_profiles_for_preset(preset_id: str) -> Dict[str, Any]:
     return profiles
 
 
-def tp0_floor_guard_for_preset(preset_id: str) -> bool:
-    """利益重視のみ TP0 を強制床（下回っていれば価格復帰）として扱う。"""
-    return preset_id == PRESET_PROFIT
-
-
 def apply_preset_to_config(config: Optional[Dict[str, Any]], preset_id: str) -> Dict[str, Any]:
     """既存設定を維持しつつ rule_profiles と repricer_preset_369 を更新。"""
     if preset_id not in PRESETS_36:
@@ -180,6 +263,7 @@ def apply_preset_to_config(config: Optional[Dict[str, Any]], preset_id: str) -> 
     cfg = dict(config or {})
     cfg["rule_profiles"] = build_rule_profiles_for_preset(preset_id)
     cfg["repricer_preset_369"] = preset_id
+    cfg["tp0_gradual_follow"] = tp0_gradual_follow_for_preset(preset_id)
     cfg["tp0_floor_guard"] = tp0_floor_guard_for_preset(preset_id)
     return cfg
 

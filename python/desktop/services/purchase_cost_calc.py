@@ -206,6 +206,41 @@ def sync_total_cost_field(record: Dict[str, Any]) -> Dict[str, Any]:
     return record
 
 
+def resolve_total_cost_for_fee_calc(
+    record: Mapping[str, Any],
+    *,
+    platform_fee: float,
+    shipping_cost: float,
+    purchase_price: float,
+    planned_price: float,
+) -> float:
+    """
+    利益再計算に使う費用合計を決める。
+    1. 手数料+出荷の内訳がある → その合計
+    2. 内訳が空 → レコードの費用合計
+    3. それも無い → 販売予定−仕入−見込み利益 から逆算
+    """
+    component = max(0.0, float(platform_fee or 0)) + max(0.0, float(shipping_cost or 0))
+    if component > 0:
+        return component
+    if isinstance(record, dict):
+        migrate_record_keys(record)
+    _, _, stored_total = read_fee_fields(record)
+    if stored_total > 0:
+        return stored_total
+    profit_raw = _first_float(record, _PROFIT_KEYS)
+    inferred = infer_total_cost(
+        purchase_price,
+        planned_price,
+        profit_raw,
+        0.0,
+        0.0,
+    )
+    if inferred is not None:
+        return float(inferred)
+    return 0.0
+
+
 def recalculate_profit_fields(
     purchase_price: float,
     planned_price: float,

@@ -764,6 +764,10 @@ class APIClient:
             cfg.setdefault("default_profile", "6")
             cfg.setdefault("interval_days", 7)
             cfg.setdefault("alerts", {"enabled": True, "reason_prefix": "ALERT"})
+            cfg.setdefault("repricer_preset_369", "custom")
+            preset = str(cfg.get("repricer_preset_369") or "").strip().lower()
+            cfg.setdefault("tp0_gradual_follow", preset == "turnover")
+            cfg.setdefault("tp0_floor_guard", preset == "profit")
         return cfg
 
     def _load_repricer_config_from_disk(self, mode: str = "standard") -> Dict[str, Any]:

@@ -31,7 +31,9 @@ try:
         PRESET_LABELS,
         apply_preset_to_config,
         batch_recalculate_auto_tp,
+        build_preset_summary_text,
     )
+    from desktop.utils.repricer_tp_target import TP_COMBO_OPTIONS
 except ImportError:
     from services.repricer_369_presets import (  # type: ignore
         PRESET_BALANCE,
@@ -41,7 +43,9 @@ except ImportError:
         PRESET_LABELS,
         apply_preset_to_config,
         batch_recalculate_auto_tp,
+        build_preset_summary_text,
     )
+    from utils.repricer_tp_target import TP_COMBO_OPTIONS  # type: ignore
 
 
 class NoWheelComboBox(QComboBox):
@@ -155,25 +159,36 @@ class RepricerSettingsWidget(QWidget):
             (PRESET_BALANCE, PRESET_LABELS[PRESET_BALANCE]),
         ):
             btn = QPushButton(label)
-            tooltip = (
+            btn.setToolTip(
                 "3ルール・6ルールにプリセットを適用します。\n"
-                "9ルールは特殊商品向け固定（全期間 priceTrace / TP0 / akaji1% / takane1%）。"
+                "9ルールは特殊商品向け固定。\n"
+                "クリック時にルール概要とTP0の扱いを表示します。"
             )
-            if preset_id == PRESET_PROFIT:
-                tooltip += (
-                    "\n\n利益重視: TP0帯で仕入DBのTP0を強制床にします。"
-                    "TP0未満の価格は改定時に復帰し、akajiもTP0未満になりません。"
-                )
-            btn.setToolTip(tooltip)
             btn.clicked.connect(lambda _c=False, pid=preset_id: self._apply_369_simple_preset(pid))
             self._preset_buttons[preset_id] = btn
             btn_row.addWidget(btn)
         btn_row.addStretch()
         preset_layout.addLayout(btn_row)
 
+        tp0_row = QHBoxLayout()
+        self.tp0_gradual_follow_cb = QCheckBox("TP0追従（旧tp0行の既定）")
+        self.tp0_gradual_follow_cb.setToolTip(
+            "ルール表で「TP0」とだけ書かれた行の既定動作。\n"
+            "「TP0（追従）」「TP0（価格維持）」を行ごとに選べばそちらが優先されます。"
+        )
+        self.tp0_floor_guard_cb = QCheckBox("TP0下限固定（TP0未満にしない）")
+        self.tp0_floor_guard_cb.setToolTip(
+            "価格・akaji が仕入DBのTP0を下回らないよう強制します。\n"
+            "利益重視プリセットでは ON が既定です。"
+        )
+        tp0_row.addWidget(self.tp0_gradual_follow_cb)
+        tp0_row.addWidget(self.tp0_floor_guard_cb)
+        tp0_row.addStretch()
+        preset_layout.addLayout(tp0_row)
+
         note = QLabel(
-            "利益重視: TP0帯は仕入DBのTP0を床（下回れば価格復帰・akajiもTP0以上）／"
-            "9ルール: 保持率95%固定・全期間 priceTrace・TP0・akaji1%・takane1%"
+            "回転重視: TP0帯は追従（段階的下げ）／利益重視: TP0帯は価格維持＋下限固定／"
+            "バランス: 1〜60日は維持・61〜90日は追従／9ルール: 全期間 TP0（価格維持）"
         )
         note.setStyleSheet("color: #888888; font-size: 11px;")
         note.setWordWrap(True)
@@ -199,13 +214,14 @@ class RepricerSettingsWidget(QWidget):
 
     def _apply_369_simple_preset(self, preset_id: str) -> None:
         preset_label = PRESET_LABELS.get(preset_id, preset_id)
+        summary = build_preset_summary_text(preset_id)
         confirm = QMessageBox.question(
             self,
             "プリセット適用",
-            f"「{preset_label}」を適用しますか？\n\n"
+            f"{summary}\n\n"
             "・3ルール / 6ルール … ルール表・TP保持率・akaji% を更新\n"
             "・9ルール … 特殊商品向け固定設定を適用\n\n"
-            "未保存の編集内容は上書きされます。",
+            "未保存の編集内容は上書きされます。適用しますか？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -232,6 +248,10 @@ class RepricerSettingsWidget(QWidget):
         self._active_preset_id = preset_id
         self.apply_369_config(new_cfg)
         self._refresh_preset_status_label()
+        if hasattr(self, "tp0_gradual_follow_cb"):
+            self.tp0_gradual_follow_cb.setChecked(bool(new_cfg.get("tp0_gradual_follow", False)))
+        if hasattr(self, "tp0_floor_guard_cb"):
+            self.tp0_floor_guard_cb.setChecked(bool(new_cfg.get("tp0_floor_guard", False)))
 
         recalc_msg = ""
         if recalc_auto:
@@ -442,7 +462,7 @@ class RepricerSettingsWidget(QWidget):
             (5, "カート価格")
         ]
 
-        tp_options = [("tp0", "TP0"), ("tp1", "TP1"), ("tp2", "TP2"), ("tp3", "TP3")]
+        tp_options = list(TP_COMBO_OPTIONS)
         akaji_percent_options = [(v, f"{v}%") for v in range(1, 11)]
         takane_percent_options = [(v, f"{v}%") for v in range(0, 11)]
         
@@ -652,14 +672,15 @@ class RepricerSettingsWidget(QWidget):
                 "reason_prefix": self.alert_prefix_edit.text().strip() or "ALERT",
             },
             "repricer_preset_369": self._active_preset_id or PRESET_CUSTOM,
+            "tp0_gradual_follow": (
+                self.tp0_gradual_follow_cb.isChecked()
+                if hasattr(self, "tp0_gradual_follow_cb")
+                else bool((self.config_data or {}).get("tp0_gradual_follow", False))
+            ),
             "tp0_floor_guard": (
-                True
-                if self._active_preset_id == PRESET_PROFIT
-                else (
-                    False
-                    if self._active_preset_id in (PRESET_TURNOVER, PRESET_BALANCE)
-                    else bool((self.config_data or {}).get("tp0_floor_guard", False))
-                )
+                self.tp0_floor_guard_cb.isChecked()
+                if hasattr(self, "tp0_floor_guard_cb")
+                else bool((self.config_data or {}).get("tp0_floor_guard", False))
             ),
         }
         return config
@@ -800,6 +821,11 @@ class RepricerSettingsWidget(QWidget):
         alerts = config.get("alerts", {}) or {}
         self.alert_enabled_check.setChecked(bool(alerts.get("enabled", True)))
         self.alert_prefix_edit.setText(str(alerts.get("reason_prefix", "ALERT")))
+
+        if hasattr(self, "tp0_gradual_follow_cb"):
+            self.tp0_gradual_follow_cb.setChecked(bool(config.get("tp0_gradual_follow", False)))
+        if hasattr(self, "tp0_floor_guard_cb"):
+            self.tp0_floor_guard_cb.setChecked(bool(config.get("tp0_floor_guard", False)))
     
     def on_error(self, error_message, action: str = ""):
         """エラー時の処理（古いワーカー結果は無視）"""
@@ -856,7 +882,14 @@ class RepricerSettingsWidget(QWidget):
                         # TP設定
                         tp_combo = table.cellWidget(i, 3)
                         if tp_combo:
-                            tp_target = str(rule.get("tp_target", "tp0")).lower()
+                            try:
+                                from desktop.utils.repricer_tp_target import normalize_legacy_tp_target
+                            except ImportError:
+                                from utils.repricer_tp_target import normalize_legacy_tp_target  # type: ignore
+                            tp_target = normalize_legacy_tp_target(
+                                str(rule.get("tp_target", "tp0")),
+                                self.config_data if isinstance(self.config_data, dict) else {},
+                            )
                             index = tp_combo.findData(tp_target)
                             if index >= 0:
                                 tp_combo.setCurrentIndex(index)

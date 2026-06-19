@@ -215,7 +215,10 @@ def _tp_band_from_days(days: int) -> Tuple[str, int, str]:
 
 def _tp_tier_index_from_key(tp_key: str) -> Optional[int]:
     mapping = {"tp0": 0, "tp1": 1, "tp2": 2, "tp3": 3}
-    return mapping.get(str(tp_key or "").strip().lower())
+    raw = str(tp_key or "").strip().lower()
+    if raw in ("tp0_maintain", "tp0_follow"):
+        return 0
+    return mapping.get(raw)
 
 
 def _format_trace_change_label(raw: Any) -> str:
@@ -1514,9 +1517,6 @@ class PurchaseRowEditDialog(QDialog):
             return
         platform = float(self._platform_fee_spin.value())
         shipping = float(self._shipping_cost_spin.value())
-        total = int(round(platform + shipping))
-        if self._total_cost_lbl is not None:
-            self._total_cost_lbl.setText(_format_price(total) if total > 0 else "-")
 
         fields = apply_fee_values_to_record(
             self.record,
@@ -1525,6 +1525,10 @@ class PurchaseRowEditDialog(QDialog):
             platform_fee=platform,
             shipping_cost=shipping,
         )
+        total = int(fields.get(COL_TOTAL_COST, 0) or 0)
+        if self._total_cost_lbl is not None:
+            self._total_cost_lbl.setText(_format_price(total) if total > 0 else "-")
+
         profit = float(fields.get("見込み利益", 0))
         self._current_profit_value = profit
         margin = float(fields.get("想定利益率", 0))
