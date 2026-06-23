@@ -1,3 +1,18 @@
+## 2026-06-19: カスタマー対応AI・SKU検索の仕入DB先行読み込みと画像取り違え防止
+
+- **タスク:** カスタマー対応AIタブで SKU 入力時に仕入DBの価格・コメント・画像を確実に表示（DB管理タブ未訪問でも動作）
+- **状況:** 完了
+- **変更点:**
+  - **`customer_support_widget.py`** … `_ensure_product_widget_data_loaded()` で `ensure_initial_data_loaded()` を呼び出し。`showEvent` でタブ表示時も再読み込み
+  - **`customer_support_sku_lookup.py`** … 該当 SKU 行を最優先。テーブル行＋メモリレコードをマージ。商品DB画像は空スロットのみ補完
+  - **`flea_market_record_utils.py`** … `extract_purchase_record_from_purchase_table()`、`_find_purchase_table_row_index()`、`resolve_record_product_images_preserve_sources()` を追加
+  - **`test_customer_support_sku_lookup.py`（新規）** … 別 SKU 画像の取り違え防止テスト
+- **動作確認:** `pytest desktop/tests/test_customer_support_sku_lookup.py` 3件パス
+- **Git:**
+  - fix(desktop): カスタマー対応AIのSKU検索を仕入DB行優先に強化
+
+---
+
 ## 2026-06-18 TP0追従/維持分離・プリセット修正・利益計算フォールバック
 
 - **タスク:** 3-6-9改定のTP0挙動整理、プリセット直感化、仕入編集と一覧の利益率一致

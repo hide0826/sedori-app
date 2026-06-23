@@ -228,6 +228,159 @@ def resolve_record_product_images(record: Dict[str, Any]) -> Dict[str, Any]:
     return record
 
 
+def _find_purchase_table_row_index(
+    product_widget: Any,
+    sku: str,
+    *,
+    row_id: Any = None,
+) -> Optional[int]:
+    """仕入DBテーブルで SKU（または _row_id）に一致する行番号を返す。"""
+    if product_widget is None or Qt is None:
+        return None
+    sku_key = (sku or "").strip()
+    table = getattr(product_widget, "purchase_table", None)
+    columns: List[str] = list(getattr(product_widget, "purchase_columns", None) or [])
+    if table is None or table.rowCount() == 0 or not columns:
+        return None
+
+    def _row_matches(row: int) -> bool:
+        if row_id is not None:
+            for c in range(table.columnCount()):
+                it = table.item(row, c)
+                if it is None:
+                    continue
+                rid = it.data(Qt.UserRole + 1)
+                try:
+                    if int(rid) == int(row_id):
+                        return True
+                except (TypeError, ValueError):
+                    continue
+        if sku_key:
+            for c, hdr in enumerate(columns):
+                if hdr.upper() != "SKU":
+                    continue
+                it = table.item(row, c)
+                if it is None:
+                    continue
+                cell_sku = it.data(Qt.UserRole)
+                if cell_sku is not None and str(cell_sku).strip():
+                    text = str(cell_sku).strip()
+                else:
+                    text = (it.text() or "").strip()
+                if text == sku_key:
+                    return True
+        return False
+
+    for row in range(table.rowCount()):
+        if _row_matches(row):
+            return row
+    return None
+
+
+_PURCHASE_TABLE_FILE_PATH_HEADERS = frozenset({
+    "レシート画像", "保証書画像",
+    "画像1", "画像2", "画像3", "画像4", "画像5", "画像6",
+})
+_PURCHASE_TABLE_URL_HEADERS = frozenset({
+    "レシート画像URL",
+    "画像URL1", "画像URL2", "画像URL3", "画像URL4", "画像URL5", "画像URL6",
+})
+
+
+def _purchase_table_cell_value(header: str, item: Any) -> str:
+    """仕入DBテーブルセルから UserRole 優先で値を取り出す。"""
+    if item is None:
+        return ""
+    if header == "SKU":
+        full = item.data(Qt.UserRole)
+        if full is not None and str(full).strip():
+            return str(full).strip()
+        return (item.text() or "").strip()
+    if header == "商品名":
+        full = item.data(Qt.UserRole)
+        if full is not None and str(full).strip():
+            return str(full).strip()
+        return (item.text() or "").strip()
+    if header in _PURCHASE_TABLE_FILE_PATH_HEADERS or header in _PURCHASE_TABLE_URL_HEADERS:
+        full = item.data(Qt.UserRole)
+        if full is not None and str(full).strip():
+            return str(full).strip()
+    return (item.text() or "").strip()
+
+
+def extract_purchase_record_from_purchase_table(
+    product_widget: Any,
+    sku: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    仕入DBテーブルの該当 SKU 行から全列を取り出す（UserRole のフルパスを優先）。
+    ソート後でも SKU 列の UserRole で正確に行を特定する。
+    """
+    if product_widget is None or Qt is None:
+        return None
+    sku_key = (sku or "").strip()
+    if not sku_key:
+        return None
+    table = getattr(product_widget, "purchase_table", None)
+    columns: List[str] = list(getattr(product_widget, "purchase_columns", None) or [])
+    if table is None or not columns:
+        return None
+
+    row_index = _find_purchase_table_row_index(product_widget, sku_key)
+    if row_index is None:
+        return None
+
+    row_id: Optional[int] = None
+    for c in range(table.columnCount()):
+        it = table.item(row_index, c)
+        if it is None:
+            continue
+        rid = it.data(Qt.UserRole + 1)
+        if rid is None:
+            continue
+        try:
+            row_id = int(rid)
+            break
+        except (TypeError, ValueError):
+            continue
+
+    base: Dict[str, Any] = {}
+    row_map = getattr(product_widget, "_purchase_row_map", None) or {}
+    if row_id is not None and row_id in row_map:
+        base = dict(row_map[row_id])
+
+    record: Dict[str, Any] = dict(base)
+    for col, header in enumerate(columns):
+        if not header or header == "経過日数":
+            continue
+        item = table.item(row_index, col)
+        value = _purchase_table_cell_value(header, item)
+        if value or header not in record:
+            record[header] = value
+
+    record["SKU"] = sku_key
+    record["sku"] = sku_key
+    return record
+
+
+def resolve_record_product_images_preserve_sources(record: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    レコード内の画像1〜6のみをフルパスへ解決する（商品DBで上書きしない）。
+    仕入DB行・テーブル由来の画像を他SKUの商品DB画像で置き換えないために使う。
+    """
+    for i in range(1, 7):
+        for key in _image_keys_for_slot(i):
+            raw = (record.get(key) or "").strip()
+            if not raw:
+                continue
+            resolved = resolve_local_image_path(raw, record)
+            if resolved:
+                record[f"画像{i}"] = resolved
+                record[f"image_{i}"] = resolved
+            break
+    return record
+
+
 def merge_record_image_paths_from_purchase_table(
     record: Dict[str, Any],
     product_widget: Any,
@@ -240,50 +393,24 @@ def merge_record_image_paths_from_purchase_table(
     if table is None or not columns:
         return record
 
-    target_row_id = record.get("_row_id")
     sku = (record.get("SKU") or record.get("sku") or "").strip()
+    target_row_id = record.get("_row_id")
+    row_index = _find_purchase_table_row_index(
+        product_widget, sku, row_id=target_row_id
+    )
+    if row_index is None:
+        return record
 
-    def _row_matches(row: int) -> bool:
-        if target_row_id is not None:
-            for c in range(table.columnCount()):
-                it = table.item(row, c)
-                if it is None:
-                    continue
-                rid = it.data(Qt.UserRole + 1)
-                try:
-                    if int(rid) == int(target_row_id):
-                        return True
-                except (TypeError, ValueError):
-                    continue
-        if sku:
-            for c, hdr in enumerate(columns):
-                if hdr.upper() != "SKU":
-                    continue
-                it = table.item(row, c)
-                if it is None:
-                    continue
-                cell_sku = it.data(Qt.UserRole)
-                if cell_sku is not None and str(cell_sku).strip():
-                    text = str(cell_sku).strip()
-                else:
-                    text = (it.text() or "").strip()
-                if text == sku:
-                    return True
-        return False
-
-    for row in range(table.rowCount()):
-        if not _row_matches(row):
+    for col, header in enumerate(columns):
+        if not (header.startswith("画像") and header[2:].isdigit()):
             continue
-        for col, header in enumerate(columns):
-            if not (header.startswith("画像") and header[2:].isdigit()):
-                continue
-            it = table.item(row, col)
-            if it is None:
-                continue
-            path = it.data(Qt.UserRole)
-            if path and str(path).strip():
-                record[header] = str(path).strip()
-        break
+        it = table.item(row_index, col)
+        if it is None:
+            continue
+        path = it.data(Qt.UserRole)
+        if path and str(path).strip():
+            record[header] = str(path).strip()
+            record[f"image_{header[2:]}"] = str(path).strip()
 
     return record
 

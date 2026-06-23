@@ -3,10 +3,13 @@
 """カスタマー対応AIタブ（チャット履歴サイドバー＋同一画面で完結）。"""
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QMouseEvent, QPixmap
@@ -214,6 +217,28 @@ class CustomerSupportWidget(QWidget):
     def set_product_widget(self, product_widget: Any) -> None:
         self.product_widget = product_widget
         self._refresh_sku_panel()
+
+    def _ensure_product_widget_data_loaded(self) -> None:
+        """
+        データベース管理タブを開かなくても仕入DB（purchase_all_records）を参照できるようにする。
+        テーブル描画まで行い、該当 SKU 行の UserRole（画像フルパス）を確実に取得する。
+        """
+        if not self.product_widget:
+            return
+        try:
+            pw = self.product_widget
+            if hasattr(pw, "ensure_initial_data_loaded"):
+                pw.ensure_initial_data_loaded()
+            elif hasattr(pw, "ensure_purchase_records_for_lookup"):
+                pw.ensure_purchase_records_for_lookup()
+        except Exception as e:
+            logger.warning("仕入DBの先行読み込みに失敗しました: %s", e)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._ensure_product_widget_data_loaded()
+        if self.sku_edit.text().strip():
+            self._refresh_sku_panel()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -462,6 +487,7 @@ class CustomerSupportWidget(QWidget):
             self.product_info_label.setText("SKUに一致する商品があればここに表示されます")
             self._set_image_links_placeholder("SKUを入力するとローカル画像リンクが表示されます")
             return
+        self._ensure_product_widget_data_loaded()
         ctx = lookup_sku_context(sku, product_widget=self.product_widget)
         self._current_product_context = ctx
         if ctx:

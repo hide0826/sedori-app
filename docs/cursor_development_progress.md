@@ -1,3 +1,24 @@
+## 2026-06-19 カスタマー対応AI・SKU検索の仕入DB先行読み込みと画像取り違え防止
+
+- **目的**: カスタマー対応AIタブで SKU 入力時に、データベース管理タブを開かなくても仕入情報を表示。同一 ASIN の別 SKU 画像を混ぜない。
+- **症状**: 起動直後は ASIN・商品名のみ表示され価格・画像が空。DB管理タブを一度開くと表示される。
+- **カスタマー対応AI**（`customer_support_widget.py`）
+  - SKU 検索前に `ProductWidget.ensure_initial_data_loaded()` で仕入DBテーブルまで構築。
+  - タブ表示時（`showEvent`）にも先行読み込み。
+- **SKU検索**（`customer_support_sku_lookup.py`, `flea_market_record_utils.py`）
+  - 優先順: 仕入DBテーブル該当 SKU 行（UserRole フルパス）→ `purchase_all_records` → SQLite（空欄のみ補完）。
+  - `extract_purchase_record_from_purchase_table()` でソート後も SKU 列 UserRole で行特定。
+  - `resolve_record_product_images_preserve_sources()` で商品DB画像による上書きを防止。
+- **テスト**（`test_customer_support_sku_lookup.py` 新規）: 同一 ASIN・別 SKU 画像の取り違え防止を検証（3件パス）。
+- **変更ファイル**:
+  - `python/desktop/ui/customer_support_widget.py`
+  - `python/desktop/services/customer_support_sku_lookup.py`
+  - `python/desktop/services/flea_market_record_utils.py`
+  - `python/desktop/tests/test_customer_support_sku_lookup.py`（新規）
+  - `development_history.md`, `docs/cursor_development_progress.md`
+- **リポジトリ**: sedori-app.github
+- **Git**: fix(desktop): カスタマー対応AIのSKU検索を仕入DB行優先に強化
+
 ## 2026-06-18 TP0追従/維持分離・プリセット修正・利益計算フォールバック
 
 - **目的**: 3-6-9改定のTP0を追従・価格維持・下限固定に分離し、回転重視/利益重視プリセットの逆転を修正。仕入編集と一覧の利益率ズレを費用合計フォールバックで統一。
