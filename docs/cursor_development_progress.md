@@ -1,3 +1,31 @@
+## 2026-06-23 画像管理リネーム安定化・連番振り直し・ブラウザ前面表示・ZIP一括撤回
+
+- **目的**: 画像リネーム（`20260613-HA-29-1545-3P-027_1.jpg` 形式）の信頼性向上、再確定時の仕入DB整合、Amazon/L/プライスターへのドラッグ時にブラウザが隠れないようにする。ZIP一括アップロードは不採用のため撤回。
+- **画像リネーム**（`amazon_image_naming.py`, `image_manager_widget.py`）
+  - 形式: `{SKU}_1.jpg`, `{SKU}_2.jpg` …（1枚目チェックON時は2枚目を `_1`）
+  - 右クリック「このグループを再リネーム」、全画像リネーム時の連番自動振り直し
+  - `PXL_*_1` 等のカメラ仮名をSKUと誤認しないよう判定強化
+  - 連番振り直し: UUID一時ファイル経由の2段階リネーム、失敗時ログ
+  - 確定処理: `_collect_image_paths_for_group` を撮影日時順に（画像1〜6のズレ防止）
+- **ZIP一括**: UI・`create_amazon_image_zip` 等を削除。Lファイル（GCS）→画像登録タブフローに復帰
+- **ブラウザ前面**（`win_browser_helper.py`, `draggable_file_icon.py`, `browser_front_scheduler.py`）
+  - ドラッグ開始時にブラウザ TOPMOST + HIRIO を背面へ
+  - ページ起動後 0.2〜5秒で複数回 `bring_browser_to_front`
+  - 価格改定・仕入出品CSVタブにも適用
+- **設定**（`settings_helper.py`, `settings_widget.py`）: 出品ファイル(L)アップロードURL（Seller Central）
+- **テスト**: `test_amazon_image_naming.py` 11件パス
+- **変更ファイル**:
+  - `python/desktop/utils/amazon_image_naming.py`（新規）
+  - `python/desktop/tests/test_amazon_image_naming.py`（新規）
+  - `python/desktop/ui/utils/browser_front_scheduler.py`（新規）
+  - `python/desktop/ui/image_manager_widget.py`
+  - `python/desktop/utils/win_browser_helper.py`
+  - `python/desktop/ui/utils/draggable_file_icon.py`
+  - `python/desktop/ui/inventory_widget.py`, `repricer_widget.py`, `settings_widget.py`
+  - `development_history.md`, `docs/cursor_development_progress.md`
+- **リポジトリ**: sedori-app.github
+- **Git**: fix(desktop): 画像管理リネーム安定化とブラウザ前面表示・ZIP一括撤回
+
 ## 2026-06-19 カスタマー対応AI・SKU検索の仕入DB先行読み込みと画像取り違え防止
 
 - **目的**: カスタマー対応AIタブで SKU 入力時に、データベース管理タブを開かなくても仕入情報を表示。同一 ASIN の別 SKU 画像を混ぜない。

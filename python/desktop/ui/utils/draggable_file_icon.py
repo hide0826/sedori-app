@@ -14,10 +14,17 @@ from PySide6.QtGui import QCursor, QDrag
 from PySide6.QtWidgets import QApplication, QFileIconProvider, QLabel
 
 try:
-    from utils.win_browser_helper import bring_browser_to_front, set_browser_topmost
+    from utils.win_browser_helper import (
+        bring_browser_to_front,
+        lower_qt_widget_to_back,
+        raise_qt_widget,
+        set_browser_topmost,
+    )
 except ImportError:
     from desktop.utils.win_browser_helper import (  # type: ignore
         bring_browser_to_front,
+        lower_qt_widget_to_back,
+        raise_qt_widget,
         set_browser_topmost,
     )
 
@@ -33,6 +40,7 @@ class DraggableFileIconWidget(QLabel):
         self._browser_title_keywords: List[str] = ["pricetar", "プライスター"]
         # 最小化するとドラッグ元が失われドロップできなくなるため既定はオフ
         self._minimize_host_on_drag = False
+        self._host_lowered_for_drag = False
         self.setAlignment(Qt.AlignCenter)
         self.setFixedSize(80, 80)
         self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
@@ -56,6 +64,35 @@ class DraggableFileIconWidget(QLabel):
     def set_minimize_host_on_drag(self, enabled: bool) -> None:
         """ドラッグ中に親ウィンドウを最小化する（Windows 向け）。"""
         self._minimize_host_on_drag = bool(enabled)
+
+    def _prepare_browser_for_drag(self) -> None:
+        if sys.platform != "win32" or not self._browser_title_keywords:
+            return
+        bring_browser_to_front(self._browser_title_keywords)
+        set_browser_topmost(self._browser_title_keywords, True)
+
+    def _lower_host_for_drag(self, host) -> None:
+        if sys.platform != "win32" or host is None:
+            return
+        if self._minimize_host_on_drag:
+            if not host.isMinimized():
+                host.showMinimized()
+            return
+        self._host_lowered_for_drag = lower_qt_widget_to_back(host)
+
+    def _restore_host_after_drag(self, host, host_was_minimized: bool, host_was_maximized: bool) -> None:
+        if sys.platform != "win32" or host is None:
+            return
+        if self._minimize_host_on_drag and not host_was_minimized:
+            if host_was_maximized:
+                host.showMaximized()
+            else:
+                host.showNormal()
+            host.raise_()
+            return
+        if self._host_lowered_for_drag:
+            raise_qt_widget(host)
+            self._host_lowered_for_drag = False
 
     def set_file_path(self, file_path: str) -> None:
         self._file_path = str(file_path or "").strip()
@@ -95,6 +132,8 @@ class DraggableFileIconWidget(QLabel):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_start_pos = event.position().toPoint()
             self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            if self._file_path and sys.platform == "win32" and self._browser_title_keywords:
+                self._prepare_browser_for_drag()
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
@@ -129,33 +168,15 @@ class DraggableFileIconWidget(QLabel):
         host_was_maximized = host.isMaximized() if host is not None else False
 
         if sys.platform == "win32" and self._browser_title_keywords:
-            bring_browser_to_front(self._browser_title_keywords)
-            set_browser_topmost(self._browser_title_keywords, True)
-
-        if (
-            sys.platform == "win32"
-            and self._minimize_host_on_drag
-            and host is not None
-            and not host_was_minimized
-        ):
-            host.showMinimized()
+            self._prepare_browser_for_drag()
+            self._lower_host_for_drag(host)
 
         try:
             drag.exec(Qt.DropAction.CopyAction)
         finally:
             if sys.platform == "win32" and self._browser_title_keywords:
                 set_browser_topmost(self._browser_title_keywords, False)
-            if (
-                sys.platform == "win32"
-                and self._minimize_host_on_drag
-                and host is not None
-                and not host_was_minimized
-            ):
-                if host_was_maximized:
-                    host.showMaximized()
-                else:
-                    host.showNormal()
-                host.raise_()
-                host.activateWindow()
+                bring_browser_to_front(self._browser_title_keywords)
+            self._restore_host_after_drag(host, host_was_minimized, host_was_maximized)
 
         self._drag_start_pos = None

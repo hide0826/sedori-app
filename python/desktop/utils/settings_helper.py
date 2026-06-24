@@ -48,6 +48,14 @@ def get_pricetar_repricing_url() -> str:
     return url or DEFAULT_PRICETAR_REPRICING_URL
 
 
+DEFAULT_AMAZON_BULK_IMAGE_UPLOAD_URL = (
+    "https://sellercentral-japan.amazon.com/imaging/upload"
+)
+DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL = (
+    "https://sellercentral-japan.amazon.com/product-search/bulk"
+)
+
+
 def get_amazon_fba_simulator_url() -> str:
     """
     設定タブ（詳細設定 → Amazon）の FBA料金シミュレーターURL を返します。
@@ -56,6 +64,27 @@ def get_amazon_fba_simulator_url() -> str:
     default_url = "https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP"
     url = str(_settings().value("amazon/fba_simulator_url", default_url) or default_url).strip()
     return url or default_url
+
+
+def get_amazon_bulk_image_upload_url() -> str:
+    """設定タブ（詳細設定 → Amazon）の一括商品画像アップロードURL。"""
+    url = str(
+        _settings().value("amazon/bulk_image_upload_url", DEFAULT_AMAZON_BULK_IMAGE_UPLOAD_URL)
+        or DEFAULT_AMAZON_BULK_IMAGE_UPLOAD_URL
+    ).strip()
+    return url or DEFAULT_AMAZON_BULK_IMAGE_UPLOAD_URL
+
+
+def get_amazon_inventory_loader_upload_url() -> str:
+    """設定タブ（詳細設定 → Amazon）の出品ファイル(L)アップロードURL。"""
+    url = str(
+        _settings().value(
+            "amazon/inventory_loader_upload_url",
+            DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
+        )
+        or DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL
+    ).strip()
+    return url or DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL
 
 
 def is_pro_enabled() -> bool:

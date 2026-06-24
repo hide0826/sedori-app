@@ -55,9 +55,9 @@ except ImportError:
     from desktop.ui.utils.draggable_file_icon import DraggableFileIconWidget  # type: ignore
 
 try:
-    from utils.win_browser_helper import bring_browser_to_front
+    from ui.utils.browser_front_scheduler import schedule_bring_browser_to_front
 except ImportError:
-    from desktop.utils.win_browser_helper import bring_browser_to_front  # type: ignore
+    from desktop.ui.utils.browser_front_scheduler import schedule_bring_browser_to_front  # type: ignore
 
 _PRICETAR_BROWSER_TITLE_KEYWORDS = ["pricetar", "プライスター"]
 from services.keepa_service import KeepaService
@@ -2523,9 +2523,9 @@ class InventoryWidget(QWidget):
             "左のCSVアイコンをドラッグしてドロップ欄へ送ってください。"
             "（ドラッグ中はブラウザが最前面に出ます）"
         )
-        QTimer.singleShot(
-            900,
-            lambda: bring_browser_to_front(_PRICETAR_BROWSER_TITLE_KEYWORDS),
+        schedule_bring_browser_to_front(
+            _PRICETAR_BROWSER_TITLE_KEYWORDS,
+            pin_topmost_until_ms=8000,
         )
 
     def _open_last_listing_csv_folder(self) -> None:

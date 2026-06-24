@@ -515,6 +515,20 @@ class SettingsWidget(QWidget):
         self.amazon_fba_simulator_url_edit.setPlaceholderText("https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP")
         self.amazon_fba_simulator_url_edit.setClearButtonEnabled(True)
         amazon_layout.addWidget(self.amazon_fba_simulator_url_edit, 1, 1)
+        amazon_layout.addWidget(QLabel("出品ファイル(L)アップロードURL:"), 2, 0)
+        self.amazon_inventory_loader_upload_url_edit = QLineEdit()
+        try:
+            from utils.settings_helper import DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL
+        except ImportError:
+            from desktop.utils.settings_helper import DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL
+        self.amazon_inventory_loader_upload_url_edit.setPlaceholderText(
+            DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL
+        )
+        self.amazon_inventory_loader_upload_url_edit.setClearButtonEnabled(True)
+        self.amazon_inventory_loader_upload_url_edit.setToolTip(
+            "画像登録タブの「Amazonアップロードページを開く」で使用します。"
+        )
+        amazon_layout.addWidget(self.amazon_inventory_loader_upload_url_edit, 3, 1)
         layout.addWidget(amazon_group)
 
         # プライスター（CSV出品・価格改定画面URL）
@@ -1560,14 +1574,22 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         )
         try:
             from utils.settings_helper import (
+                DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
                 DEFAULT_PRICETAR_LISTING_URL,
                 DEFAULT_PRICETAR_REPRICING_URL,
             )
         except ImportError:
             from desktop.utils.settings_helper import (
+                DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
                 DEFAULT_PRICETAR_LISTING_URL,
                 DEFAULT_PRICETAR_REPRICING_URL,
             )
+        self.amazon_inventory_loader_upload_url_edit.setText(
+            self.settings.value(
+                "amazon/inventory_loader_upload_url",
+                DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
+            )
+        )
         self.pricetar_listing_url_edit.setText(
             self.settings.value("pricetar/listing_url", DEFAULT_PRICETAR_LISTING_URL)
         )
@@ -1679,14 +1701,23 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             )
             try:
                 from utils.settings_helper import (
+                    DEFAULT_AMAZON_BULK_IMAGE_UPLOAD_URL,
+                    DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
                     DEFAULT_PRICETAR_LISTING_URL,
                     DEFAULT_PRICETAR_REPRICING_URL,
                 )
             except ImportError:
                 from desktop.utils.settings_helper import (
+                    DEFAULT_AMAZON_BULK_IMAGE_UPLOAD_URL,
+                    DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
                     DEFAULT_PRICETAR_LISTING_URL,
                     DEFAULT_PRICETAR_REPRICING_URL,
                 )
+            self.settings.setValue(
+                "amazon/inventory_loader_upload_url",
+                self.amazon_inventory_loader_upload_url_edit.text().strip()
+                or DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
+            )
             self.settings.setValue(
                 "pricetar/listing_url",
                 self.pricetar_listing_url_edit.text().strip() or DEFAULT_PRICETAR_LISTING_URL,
@@ -1761,14 +1792,17 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.amazon_fba_simulator_url_edit.setText("https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP")
         try:
             from utils.settings_helper import (
+                DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
                 DEFAULT_PRICETAR_LISTING_URL,
                 DEFAULT_PRICETAR_REPRICING_URL,
             )
         except ImportError:
             from desktop.utils.settings_helper import (
+                DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
                 DEFAULT_PRICETAR_LISTING_URL,
                 DEFAULT_PRICETAR_REPRICING_URL,
             )
+        self.amazon_inventory_loader_upload_url_edit.setText(DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL)
         self.pricetar_listing_url_edit.setText(DEFAULT_PRICETAR_LISTING_URL)
         self.pricetar_repricing_url_edit.setText(DEFAULT_PRICETAR_REPRICING_URL)
         try:
@@ -1835,6 +1869,7 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                 "seller_id": self.amazon_seller_id_edit.text().strip(),
                 "fba_simulator_url": self.amazon_fba_simulator_url_edit.text().strip()
                 or "https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP",
+                "inventory_loader_upload_url": self.amazon_inventory_loader_upload_url_edit.text().strip(),
             },
             "pricetar": {
                 "listing_url": self.pricetar_listing_url_edit.text().strip(),

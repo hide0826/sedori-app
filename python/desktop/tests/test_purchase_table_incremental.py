@@ -8,6 +8,8 @@ from services.purchase_table_incremental import (
     get_augment_batch_size,
     get_page_size,
     is_incremental_render_enabled,
+    purchase_record_purchase_timestamp,
+    sort_purchase_records_for_display,
 )
 
 
@@ -50,3 +52,16 @@ def test_page_size_clamped():
     assert get_page_size(s) == 20
     s2 = _FakeSettings({"performance/purchase_page_size": 9999})
     assert get_page_size(s2) == 500
+
+
+def test_sort_purchase_records_newest_first():
+    records = [
+        {"SKU": "old", "仕入れ日": "2025/5/22 10:00"},
+        {"SKU": "new", "仕入れ日": "2025/6/17 9:00"},
+        {"SKU": "mid", "仕入れ日": "2025/5/23 8:00"},
+    ]
+    ordered = sort_purchase_records_for_display(records)
+    assert [r["SKU"] for r in ordered] == ["new", "mid", "old"]
+    assert purchase_record_purchase_timestamp(ordered[0]) >= purchase_record_purchase_timestamp(
+        ordered[1]
+    )

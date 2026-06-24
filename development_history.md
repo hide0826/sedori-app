@@ -1,3 +1,31 @@
+## 2026-06-23: 画像管理リネーム安定化・連番振り直し・ブラウザ前面表示・ZIP一括撤回
+
+- **タスク:** 画像リネーム（`{SKU}_1` 形式）の不具合修正、再確定時のDB整合、ドラッグ時のブラウザ隠れ解消。ZIP一括は試行後撤回し Lファイル（GCS）フローへ復帰
+- **状況:** 完了
+- **症状:**
+  - リネーム後に `.hirio_rerename_*` 一時ファイルが残り画像が消える・3枚目に紐付く
+  - `PXL_20260620_1.jpg` を SKU `PXL_20260620` と誤認識
+  - ブラウザが HIRIO の背面に隠れドラッグできない
+- **変更点:**
+  - **`amazon_image_naming.py`（新規）** … `{SKU}_1` 形式のリネーム計画・連番振り直し判定。カメラ仮名（`PXL_` 等）をSKUから除外
+  - **`image_manager_widget.py`**
+    - 「このグループを再リネーム」（右クリック）… `_1` 欠落時の振り直し
+    - 全画像リネーム時も連番ずれグループを自動振り直し
+    - 確定処理の画像パス収集を撮影日時順に統一（DBの画像1〜6ズレ防止）
+    - 再リネーム2段階処理をUUID一時名＋第2段階検証に改善
+    - ZIP一括UI・処理を削除し「確定処理」のみに復帰
+  - **`win_browser_helper.py`** … `AttachThreadInput` + アプリ背面送り
+  - **`draggable_file_icon.py`** … ドラッグ時にブラウザ最前面＋ホストウィンドウ背面
+  - **`browser_front_scheduler.py`（新規）** … ブラウザ起動後の複数回フォアグラウンド化
+  - **`inventory_widget.py` / `repricer_widget.py`** … 上記スケジューラ適用
+  - **`settings_helper.py` / `settings_widget.py`** … 出品ファイル(L)アップロードURL設定（ZIP用URLは撤回）
+  - **`test_amazon_image_naming.py`（新規）** … 11件
+- **動作確認:** `pytest desktop/tests/test_amazon_image_naming.py` 11件パス、構文チェックOK
+- **Git:**
+  - fix(desktop): 画像管理リネーム安定化とブラウザ前面表示・ZIP一括撤回
+
+---
+
 ## 2026-06-19: カスタマー対応AI・SKU検索の仕入DB先行読み込みと画像取り違え防止
 
 - **タスク:** カスタマー対応AIタブで SKU 入力時に仕入DBの価格・コメント・画像を確実に表示（DB管理タブ未訪問でも動作）

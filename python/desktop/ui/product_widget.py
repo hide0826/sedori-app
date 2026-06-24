@@ -3985,6 +3985,51 @@ class ProductWidget(QWidget):
         if end > getattr(self, "_purchase_augmented_through", 0):
             self._purchase_augmented_through = end
 
+    def _ensure_display_records_augmented(
+        self, records: List[Dict[str, Any]], start: int, end: int
+    ) -> None:
+        """表示用リストの指定範囲を in-place で augment（段階描画と同じ順序）。"""
+        if not records:
+            return
+        start = max(0, start)
+        end = min(end, len(records))
+        if start >= end:
+            return
+        changed = False
+        for i in range(start, end):
+            if records[i].get("_hirio_augmented"):
+                continue
+            aug = self._augment_one_purchase_record(records[i])
+            records[i].clear()
+            records[i].update(aug)
+            changed = True
+        if changed:
+            augment_purchase_cost_records(records[start:end])
+
+    def _purchase_record_purchase_timestamp(self, record: Dict[str, Any]) -> float:
+        try:
+            from desktop.services.purchase_table_incremental import (
+                purchase_record_purchase_timestamp,
+            )
+        except ImportError:
+            from services.purchase_table_incremental import (  # type: ignore
+                purchase_record_purchase_timestamp,
+            )
+        return purchase_record_purchase_timestamp(record)
+
+    def _purchase_records_for_incremental_display(
+        self, records: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        try:
+            from desktop.services.purchase_table_incremental import (
+                sort_purchase_records_for_display,
+            )
+        except ImportError:
+            from services.purchase_table_incremental import (  # type: ignore
+                sort_purchase_records_for_display,
+            )
+        return sort_purchase_records_for_display(records)
+
     def ensure_purchase_records_fully_augmented(self) -> None:
         """一括処理前に全件 augment を完了させる（段階読み込み中でも安全）。"""
         total = len(getattr(self, "purchase_all_records", None) or [])
@@ -4055,6 +4100,25 @@ class ProductWidget(QWidget):
             return
         self._purchase_incremental_load_more_rows()
 
+    def _maybe_purchase_incremental_prefetch(self) -> None:
+        """
+        行数が少なくスクロールバーが出ない場合も次ページを先読みする。
+        （全件が画面に収まり末尾スクロールが発生しないケース対策）
+        """
+        if not self._purchase_incremental_active or self._purchase_incremental_loading_more:
+            return
+        display = self._purchase_incremental_display_records or []
+        if self._purchase_incremental_rendered >= len(display):
+            return
+        bar = self.purchase_table.verticalScrollBar()
+        try:
+            from desktop.services.purchase_table_incremental import SCROLL_LOAD_THRESHOLD_PX
+        except ImportError:
+            from services.purchase_table_incremental import SCROLL_LOAD_THRESHOLD_PX  # type: ignore
+        if bar.maximum() > SCROLL_LOAD_THRESHOLD_PX:
+            return
+        self._purchase_incremental_load_more_rows()
+
     def _schedule_background_augment(self) -> None:
         """表示中のテーブルとは別に、メモリ上の残りレコードをバックグラウンド augment。"""
         if not self._purchase_incremental_render_enabled():
@@ -4083,7 +4147,7 @@ class ProductWidget(QWidget):
 
     def _purchase_incremental_begin_display(self, records: List[Dict[str, Any]]) -> None:
         """段階読み込み: 先頭ページのみテーブル描画。"""
-        records = records or []
+        records = self._purchase_records_for_incremental_display(records or [])
         self._purchase_incremental_active = True
         self._purchase_incremental_display_records = records
         total = len(records)
@@ -4091,7 +4155,7 @@ class ProductWidget(QWidget):
         first_end = min(page, total)
         master = self._purchase_master_records()
         col_source = master if master and len(master) >= total else records
-        self._ensure_purchase_records_augmented(0, first_end)
+        self._ensure_display_records_augmented(records, 0, first_end)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self.purchase_table.setUpdatesEnabled(False)
         try:
@@ -4113,6 +4177,7 @@ class ProductWidget(QWidget):
         self._ensure_purchase_scroll_listener()
         if first_end < total:
             self._schedule_background_augment()
+        QTimer.singleShot(0, self._maybe_purchase_incremental_prefetch)
 
     def _purchase_incremental_load_more_rows(self) -> None:
         """スクロール末尾で次のページをテーブルに追加。"""
@@ -4127,7 +4192,7 @@ class ProductWidget(QWidget):
         try:
             page = self._purchase_incremental_page_size()
             next_end = min(rendered + page, total)
-            self._ensure_purchase_records_augmented(rendered, next_end)
+            self._ensure_display_records_augmented(display, rendered, next_end)
             master = self._purchase_master_records()
             col_source = master if master and len(master) >= total else display
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -4148,6 +4213,7 @@ class ProductWidget(QWidget):
                 QApplication.processEvents()
             self._purchase_incremental_rendered = next_end
             self._update_purchase_incremental_built_flag()
+            QTimer.singleShot(0, self._maybe_purchase_incremental_prefetch)
         except Exception as exc:
             logging.getLogger(__name__).warning("仕入DB段階読み込み追加失敗: %s", exc)
         finally:

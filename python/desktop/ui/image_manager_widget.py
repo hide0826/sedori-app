@@ -12,9 +12,10 @@ import os
 import json
 import re
 import io
+import uuid
 import concurrent.futures
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 import logging
 
@@ -39,11 +40,20 @@ from PIL import Image, ImageOps
 from desktop.utils.ui_utils import save_table_header_state, restore_table_header_state
 from desktop.utils.route_utils import mark_route_flags_from_folder
 from desktop.ui.utils.draggable_file_icon import DraggableFileIconWidget
-
+from desktop.ui.utils.browser_front_scheduler import schedule_bring_browser_to_front
+from utils.amazon_image_naming import (
+    extract_sku_from_image_path as _amazon_extract_sku_from_path,
+    infer_sku_from_sorted_images,
+    needs_amazon_sequence_rerename,
+    plan_amazon_rename_targets,
+    plan_amazon_rerename_targets,
+)
 try:
-    from utils.win_browser_helper import bring_browser_to_front
+    from utils.settings_helper import get_amazon_inventory_loader_upload_url
 except ImportError:
-    from desktop.utils.win_browser_helper import bring_browser_to_front  # type: ignore
+    from desktop.utils.settings_helper import (  # type: ignore
+        get_amazon_inventory_loader_upload_url,
+    )
 
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -108,6 +118,10 @@ _AMAZON_UPLOAD_BROWSER_TITLE_KEYWORDS = [
     "セラーセントラル",
     "sellercentral",
     "amazon seller",
+    "imaging",
+    "画像",
+    "アップロード",
+    "出品ファイル",
 ]
 
 # JAN不明グループ・仕入DB未紐付け候補行のハイライト色
@@ -1219,9 +1233,23 @@ class ImageManagerWidget(QWidget):
         emph = getattr(self, "_workflow_emphasize", False)
         step = getattr(self, "_workflow_active_step", None)
         prefix = _format_status_prefix_html(text, emph)
-        pipe = _format_workflow_pipeline_html(step)
+        pipe = _format_workflow_pipeline_html(step, _WORKFLOW_PIPELINE_SEGMENTS)
         sep = '<span style="color:#cccccc;">　</span>'
         self.workflow_status_label.setText(prefix + sep + pipe)
+
+    def _mark_route_images_completed_for_folders(self, *folder_paths: str | Path) -> None:
+        """フォルダ候補からルートサマリーの「画像」チェックをONにする（Lファイル書き込みと同様）。"""
+        seen: set[str] = set()
+        for raw in folder_paths:
+            folder = str(raw or "").strip()
+            if not folder or folder in seen:
+                continue
+            seen.add(folder)
+            try:
+                if mark_route_flags_from_folder(folder, images_completed=True):
+                    return
+            except Exception as e:
+                logger.warning(f"画像フラグ更新エラー ({folder}): {e}")
 
     def _update_workflow_status(self, text: str, emphasize: bool = False) -> None:
         """ワークフロー状態ラベルを更新（手順リストと1行に結合）"""
@@ -1353,6 +1381,7 @@ class ImageManagerWidget(QWidget):
             config['image_manager_lightweight_rename'] = self.lightweight_rename_checkbox.isChecked()
             config['image_manager_auto_correct_on_rename'] = self.auto_correct_rename_checkbox.isChecked()
             config['image_manager_auto_correct_preset'] = self._auto_correct_preset_id()
+            config.pop('image_manager_upload_mode', None)
 
             # 設定ファイルを保存
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2411,146 +2440,143 @@ class ImageManagerWidget(QWidget):
         
         return True
     
-    def rename_all_images(self):
-        """すべてのJANグループの画像をSKUベースで一括リネームする"""
-        if not any(g for g in self.jan_groups if g.jan != "unknown"):
-            QMessageBox.information(self, "情報", "リネーム対象のJANグループがありません。")
-            return
-
-        reply = QMessageBox.question(
-            self,
-            "リネーム確認",
-            "すべてのJANグループの画像をSKUベースでリネームしますか？\n（既にリネーム済みのファイルはスキップされます）",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+    def _sorted_group_images(self, group: JanGroup) -> List[ImageRecord]:
+        return sorted(
+            group.images,
+            key=lambda r: r.capture_dt if r.capture_dt else datetime.min,
         )
-        if reply != QMessageBox.Yes:
-            return
 
-        # 1. リネーム計画を作成
-        rename_operations = []  # List of (old_record, new_path_str)
-        failed_skus = set()
+    def _resolve_sku_for_jan_group(self, group: JanGroup) -> Optional[str]:
+        """JANグループに対応するSKUを仕入DB候補から選ぶ（撮影日時に最も近い仕入れ日を優先）。"""
+        if not group.jan or group.jan == "unknown":
+            return None
 
-        for group in self.jan_groups:
-            if group.jan == "unknown":
-                continue
+        image_capture_times = [
+            record.capture_dt for record in group.images if record.capture_dt
+        ]
+        base_capture_dt = min(image_capture_times) if image_capture_times else None
 
-            # 画像の撮影日時を取得（最も古い画像の日時を基準にする）
-            image_capture_times = []
-            for record in group.images:
-                if record.capture_dt:
-                    image_capture_times.append(record.capture_dt)
-            base_capture_dt = min(image_capture_times) if image_capture_times else None
-            
-            sku_candidates = self._search_sku_candidates_by_jan(group.jan)
-            if not sku_candidates or not (sku_candidates[0].get("SKU") or sku_candidates[0].get("sku")):
-                failed_skus.add(group.jan)
-                continue
-            
-            # 画像の撮影日時に近いSKUを選択
-            if base_capture_dt and len(sku_candidates) > 1:
-                # 各候補の仕入れ日と画像の撮影日時の差を計算
-                for candidate in sku_candidates:
-                    purchase_date_str = str(candidate.get("仕入れ日") or candidate.get("purchase_date") or "")
-                    if purchase_date_str:
-                        try:
-                            # 日付文字列をパース
-                            date_str_clean = purchase_date_str.strip()
-                            if " " in date_str_clean:
-                                date_part, time_part = date_str_clean.split(" ", 1)
-                                date_part = date_part.replace("/", "-")
-                                datetime_str = f"{date_part} {time_part}"
-                                try:
-                                    purchase_dt = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M")
-                                except:
-                                    purchase_dt = datetime.strptime(date_part, "%Y-%m-%d")
-                            else:
-                                date_part = date_str_clean.replace("/", "-")
+        sku_candidates = self._search_sku_candidates_by_jan(group.jan)
+        if not sku_candidates:
+            return None
+
+        sku = str(sku_candidates[0].get("SKU") or sku_candidates[0].get("sku") or "").strip()
+        if not sku:
+            return None
+
+        if base_capture_dt and len(sku_candidates) > 1:
+            for candidate in sku_candidates:
+                purchase_date_str = str(
+                    candidate.get("仕入れ日") or candidate.get("purchase_date") or ""
+                )
+                if purchase_date_str:
+                    try:
+                        date_str_clean = purchase_date_str.strip()
+                        if " " in date_str_clean:
+                            date_part, time_part = date_str_clean.split(" ", 1)
+                            date_part = date_part.replace("/", "-")
+                            datetime_str = f"{date_part} {time_part}"
+                            try:
+                                purchase_dt = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M")
+                            except Exception:
                                 purchase_dt = datetime.strptime(date_part, "%Y-%m-%d")
-                            
-                            # 画像の撮影日時との差を計算（絶対値）
-                            time_diff = abs((purchase_dt - base_capture_dt).total_seconds())
-                            candidate["_time_diff"] = time_diff
-                        except Exception:
-                            # パースに失敗した場合は大きな値を設定（優先度を下げる）
-                            candidate["_time_diff"] = float('inf')
-                    else:
-                        # 仕入れ日がない場合は大きな値を設定
-                        candidate["_time_diff"] = float('inf')
-                
-                # 時間差が小さい順にソート
-                sku_candidates.sort(key=lambda x: x.get("_time_diff", float('inf')))
-            
-            sku = sku_candidates[0].get("SKU") or sku_candidates[0].get("sku")
+                        else:
+                            date_part = date_str_clean.replace("/", "-")
+                            purchase_dt = datetime.strptime(date_part, "%Y-%m-%d")
+                        candidate["_time_diff"] = abs(
+                            (purchase_dt - base_capture_dt).total_seconds()
+                        )
+                    except Exception:
+                        candidate["_time_diff"] = float("inf")
+                else:
+                    candidate["_time_diff"] = float("inf")
+            sku_candidates.sort(key=lambda x: x.get("_time_diff", float("inf")))
+            sku = str(
+                sku_candidates[0].get("SKU") or sku_candidates[0].get("sku") or ""
+            ).strip()
 
-            # 撮影日時順にソートしてからリネーム
-            sorted_images = sorted(group.images, key=lambda r: r.capture_dt if r.capture_dt else datetime.min)
+        return sku or None
 
-            for i, record in enumerate(sorted_images):
-                original_path = Path(record.path)
-                extension = original_path.suffix
-                
-                # 既にリネーム済みかチェック
-                if re.match(f"^{re.escape(sku)}_\\d+{re.escape(extension)}$", original_path.name):
-                    continue
-                
-                new_name = f"{sku}_{i+1}{extension}"
-                new_path = original_path.parent / new_name
-                
-                if str(original_path) != str(new_path):
-                    rename_operations.append((record, str(new_path)))
+    def _build_rename_plan_for_group(
+        self, group: JanGroup, sku: str
+    ) -> List[Tuple[ImageRecord, str]]:
+        sorted_images = self._sorted_group_images(group)
+        exclude_first = self._is_group_first_image_excluded(group)
+        return plan_amazon_rename_targets(
+            sorted_images,
+            sku,
+            exclude_first=exclude_first,
+            path_getter=lambda r: r.path,
+        )
 
+    def _build_rerename_plan_for_group(
+        self, group: JanGroup, sku: str
+    ) -> List[Tuple[ImageRecord, str]]:
+        sorted_images = self._sorted_group_images(group)
+        exclude_first = self._is_group_first_image_excluded(group)
+        return plan_amazon_rerename_targets(
+            sorted_images,
+            sku,
+            exclude_first=exclude_first,
+            path_getter=lambda r: r.path,
+        )
+
+    def _resolve_sku_for_group_rerename(self, group: JanGroup) -> Optional[str]:
+        """再リネーム用に SKU を推定（仕入DB優先 → ファイル名）。"""
+        sku = self._resolve_sku_for_jan_group(group)
+        if sku:
+            return sku
+        sorted_images = self._sorted_group_images(group)
+        return infer_sku_from_sorted_images(sorted_images, path_getter=lambda r: r.path)
+
+    def _execute_rename_operations(
+        self, rename_operations: List[Tuple[ImageRecord, str]]
+    ) -> int:
         if not rename_operations:
-            QMessageBox.information(self, "情報", "リネーム対象のファイルはありませんでした。")
-            return
+            return 0
 
-        # 2. リネーム処理の実行
-        progress = QProgressDialog(self._rename_progress_label(), "キャンセル", 0, len(rename_operations), self)
+        progress = QProgressDialog(
+            self._rename_progress_label(), "キャンセル", 0, len(rename_operations), self
+        )
         progress.setWindowModality(Qt.WindowModal)
         progress.show()
 
         renamed_count = 0
-        new_records_map = {}  # old_path -> new_record
+        new_records_map: Dict[str, ImageRecord] = {}
 
         for i, (record, new_path_str) in enumerate(rename_operations):
             progress.setValue(i)
             if progress.wasCanceled():
                 break
-            
+
             old_path_str = record.path
             try:
                 self._rename_image_file(old_path_str, new_path_str)
 
-                # DBレコードを更新
                 db_record = self.image_db.get_by_file_path(old_path_str)
                 if db_record:
                     self.image_db.delete_by_file_path(old_path_str)
-                    db_record['file_path'] = new_path_str
+                    db_record["file_path"] = new_path_str
                     self.image_db.upsert(db_record)
 
-                # メモリ更新用のマップを作成
                 new_record_data = record._asdict()
-                new_record_data['path'] = new_path_str
+                new_record_data["path"] = new_path_str
                 new_records_map[old_path_str] = ImageRecord(**new_record_data)
-                
                 renamed_count += 1
             except Exception as e:
                 logger.error(f"リネームエラー: {old_path_str} -> {new_path_str}: {e}")
-                # エラーが出ても続行
-        
+
         progress.close()
 
-        # 3. メモリ上の`image_records`を更新
         if new_records_map:
-            updated_image_records = []
-            for record in self.image_records:
-                if record.path in new_records_map:
-                    updated_image_records.append(new_records_map[record.path])
+            updated_image_records: List[ImageRecord] = []
+            for rec in self.image_records:
+                if rec.path in new_records_map:
+                    updated_image_records.append(new_records_map[rec.path])
                 else:
-                    updated_image_records.append(record)
+                    updated_image_records.append(rec)
             self.image_records = updated_image_records
 
-            # 4. 1枚目画像のフラグもパス変更に合わせて更新
             if self.first_image_flags:
                 updated_flags: Dict[str, bool] = {}
                 for old_path, new_record in new_records_map.items():
@@ -2560,38 +2586,157 @@ class ImageManagerWidget(QWidget):
                     if p not in new_records_map:
                         updated_flags[p] = flag
                 self.first_image_flags = updated_flags
-        
-        # 5. UIの全体更新と結果報告
-        self.jan_groups = self.image_service.group_by_jan(self.image_records)
-        self.update_tree_widget()
-        self.update_image_list(self.image_records)
 
-        message = f"{renamed_count}件の画像をリネームしました。"
+            self.jan_groups = self.image_service.group_by_jan(self.image_records)
+            self.update_tree_widget()
+            self.update_image_list(self.image_records)
+
+        return renamed_count
+
+    def _execute_rerename_operations(
+        self, rename_operations: List[Tuple[ImageRecord, str]]
+    ) -> int:
+        """
+        連番振り直し用リネーム（_2→_1 等の衝突を避けるため一時名を経由）。
+        """
+        if not rename_operations:
+            return 0
+
+        staging: List[Tuple[ImageRecord, str, str]] = []
+        for record, final_path in rename_operations:
+            parent = Path(final_path).parent
+            token = uuid.uuid4().hex[:12]
+            temp_path = str(parent / f".hirio_rerename_{token}_{Path(record.path).name}")
+            staging.append((record, temp_path, final_path))
+
+        phase1_ops = [(record, temp_path) for record, temp_path, _ in staging]
+        renamed_count = self._execute_rename_operations(phase1_ops)
+        if renamed_count != len(phase1_ops):
+            logger.error(
+                "連番振り直しの第1段階が不完全です (%s/%s)",
+                renamed_count,
+                len(phase1_ops),
+            )
+            return renamed_count
+
+        path_to_record = {rec.path: rec for rec in self.image_records}
+        phase2_ops: List[Tuple[ImageRecord, str]] = []
+        for _record, temp_path, final_path in staging:
+            current = path_to_record.get(temp_path)
+            if current is None:
+                logger.error(f"連番振り直し第2段階: 一時ファイルが見つかりません: {temp_path}")
+                continue
+            phase2_ops.append((current, final_path))
+
+        if len(phase2_ops) != len(staging):
+            logger.error(
+                "連番振り直しの第2段階をスキップしました（一時ファイル %s 件が残る可能性があります）",
+                len(staging) - len(phase2_ops),
+            )
+            return renamed_count
+
+        return renamed_count + self._execute_rename_operations(phase2_ops)
+
+    def _collect_image_paths_for_group(self, group: JanGroup) -> List[str]:
+        """確定処理で仕入DBへ保存する画像パス（1枚目除外設定を反映）。"""
+        image_paths: List[str] = []
+        sorted_images = self._sorted_group_images(group)
+        for idx, img in enumerate(sorted_images):
+            img_path = img.path
+            if idx == 0 and self.first_image_flags.get(img_path, True):
+                continue
+            if not Path(img_path).exists():
+                db_record = self.image_db.get_by_file_path(img_path)
+                if db_record and db_record["file_path"] != img_path:
+                    img_path = db_record["file_path"]
+            image_paths.append(img_path)
+        return image_paths
+
+    def rename_all_images(self):
+        """すべてのJANグループの画像をSKUベース（{SKU}_1, _2…）で一括リネームする"""
+        if not any(g for g in self.jan_groups if g.jan != "unknown"):
+            QMessageBox.information(self, "情報", "リネーム対象のJANグループがありません。")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "リネーム確認",
+            "すべてのJANグループの画像をSKUベース（例: SKU_1.jpg, SKU_2.jpg）で"
+            "リネームしますか？\n\n"
+            "・1枚目チェックONのグループ → 2枚目を _1 に\n"
+            "・1枚目チェックOFFのグループ → 1枚目を _1 に\n"
+            "連番がずれているグループ（_1 欠落など）は自動で振り直します。\n"
+            "（既に {SKU}_数字 形式のファイルは通常リネームではスキップ）",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        failed_skus: set[str] = set()
+        rerename_count = 0
+        groups_needing_rerename: List[Tuple[JanGroup, str]] = []
+
+        for group in self.jan_groups:
+            if group.jan == "unknown":
+                continue
+
+            sku = self._resolve_sku_for_group_rerename(group)
+            if not sku:
+                failed_skus.add(group.jan)
+                continue
+
+            sorted_images = self._sorted_group_images(group)
+            exclude_first = self._is_group_first_image_excluded(group)
+            if needs_amazon_sequence_rerename(
+                sorted_images,
+                sku,
+                exclude_first=exclude_first,
+                path_getter=lambda r: r.path,
+            ):
+                groups_needing_rerename.append((group, sku))
+
+        for group, sku in groups_needing_rerename:
+            rerename_ops = self._build_rerename_plan_for_group(group, sku)
+            if rerename_ops:
+                rerename_count += self._execute_rerename_operations(rerename_ops)
+
+        rename_operations: List[Tuple[ImageRecord, str]] = []
+        for group in self.jan_groups:
+            if group.jan == "unknown":
+                continue
+
+            sku = self._resolve_sku_for_group_rerename(group)
+            if not sku:
+                continue
+
+            rename_operations.extend(self._build_rename_plan_for_group(group, sku))
+
+        renamed_count = 0
+        if rename_operations:
+            renamed_count = self._execute_rename_operations(rename_operations)
+
+        total_count = rerename_count + renamed_count
+        if total_count == 0:
+            QMessageBox.information(self, "情報", "リネーム対象のファイルはありませんでした。")
+            return
+
+        message = f"{total_count}件の画像をリネームしました。"
+        if rerename_count > 0:
+            message += f"\n（うち {rerename_count} 件は _1 欠落などの連番振り直し）"
         if failed_skus:
-            message += f"\n\n以下のJANコードに対応するSKUが見つからず、関連するグループはスキップされました:\n" + ", ".join(failed_skus)
+            message += (
+                "\n\n以下のJANコードに対応するSKUが見つからず、関連するグループはスキップされました:\n"
+                + ", ".join(failed_skus)
+            )
         QMessageBox.information(self, "完了", message)
 
     def _extract_sku_from_image_path(self, image_path: str) -> Optional[str]:
-        """
-        画像ファイル名からSKUを抽出する
-        
-        Args:
-            image_path: 画像ファイルのパス
-            
-        Returns:
-            抽出されたSKU、またはNone
-        """
-        try:
-            file_name = Path(image_path).stem  # 拡張子を除いたファイル名
-            # SKU_数字 の形式を想定（例: 20260124-SS-22-027_1）
-            match = re.match(r"^(.+?)_\d+$", file_name)
-            if match:
-                sku = match.group(1)
-                # SKUとして妥当かチェック（空でない、適切な長さなど）
-                if sku and len(sku) > 0:
-                    return sku
-        except Exception as e:
-            logger.debug(f"SKU抽出エラー ({image_path}): {e}")
+        """画像ファイル名からSKUを抽出（{SKU}_1 形式。Amazon形式も読み取り互換）。"""
+        sku = _amazon_extract_sku_from_path(image_path)
+        if sku:
+            return sku
+        logger.debug(f"SKU抽出できず: {image_path}")
         return None
 
     def _get_target_sku_for_group(self, group: JanGroup, all_records: List[Dict[str, Any]]) -> Optional[str]:
@@ -2712,23 +2857,7 @@ class ImageManagerWidget(QWidget):
                 QApplication.processEvents()
 
                 jan = group.jan
-                # リネーム後のパスを取得（group.imagesはリネーム後に更新されているはず）
-                # 念のため、ファイルが存在しない場合はimage_dbから最新のパスを取得
-                image_paths = []
-                for idx, img in enumerate(group.images):
-                    img_path = img.path
-                    # 各JANグループの1枚目画像はデフォルトで除外（チェックON時）
-                    if idx == 0 and self.first_image_flags.get(img_path, True):
-                        continue
-                    # ファイルが存在しない場合は、image_dbから最新のパスを取得
-                    if not Path(img_path).exists():
-                        # image_dbから最新のパスを取得（リネーム後のパスがDBに保存されている）
-                        db_record = self.image_db.get_by_file_path(img_path)
-                        if db_record and db_record['file_path'] != img_path:
-                            # DBにリネーム後のパスが保存されている場合
-                            img_path = db_record['file_path']
-                        # それでも存在しない場合は、元のパスを使用（エラーは後で検出される）
-                    image_paths.append(img_path)
+                image_paths = self._collect_image_paths_for_group(group)
 
                 if not image_paths:
                     continue
@@ -5191,9 +5320,11 @@ class ImageManagerWidget(QWidget):
 
             # ルートタブ側の「画像」チェックをONにする（対応するルートサマリーが判定できた場合）
             try:
-                from pathlib import Path as _Path
-                base_folder = _Path(file_path).parent
-                mark_route_flags_from_folder(base_folder, images_completed=True)
+                self._mark_route_images_completed_for_folders(
+                    Path(file_path).parent,
+                    self.current_directory,
+                    self.default_root_dir,
+                )
             except Exception as e:
                 # ルート判定に失敗しても致命的ではないのでログのみ
                 logger.warning(f"画像フラグ更新エラー: {e}")
@@ -5305,8 +5436,11 @@ class ImageManagerWidget(QWidget):
         )
 
     def _bring_amazon_upload_browser_to_front(self) -> None:
-        """ブラウザ起動後に Seller Central を前面へ（仕入管理の出品CSV生成と同様）。"""
-        bring_browser_to_front(_AMAZON_UPLOAD_BROWSER_TITLE_KEYWORDS)
+        """ブラウザ起動後に Seller Central を前面へ（読み込み待ちで複数回試行）。"""
+        schedule_bring_browser_to_front(
+            _AMAZON_UPLOAD_BROWSER_TITLE_KEYWORDS,
+            pin_topmost_until_ms=8000,
+        )
 
     def _open_last_amazon_template_folder(self) -> None:
         """直近に書き出したAmazonテンプレートの保存フォルダを開く"""
@@ -5324,7 +5458,7 @@ class ImageManagerWidget(QWidget):
 
     def open_amazon_upload_page(self):
         """Amazon Seller Centralの出品ファイルアップロードページをブラウザで開く"""
-        amazon_url = "https://sellercentral-japan.amazon.com/product-search/bulk"
+        amazon_url = get_amazon_inventory_loader_upload_url()
         try:
             QDesktopServices.openUrl(QUrl(amazon_url))
             if (
@@ -5364,6 +5498,13 @@ class ImageManagerWidget(QWidget):
             # SKUを指定してこのグループの画像をリネーム
             rename_with_sku_action = menu.addAction("SKUを指定してこのJANグループの画像をリネーム")
             rename_with_sku_action.triggered.connect(lambda: self.rename_images_for_group_with_sku(group))
+
+            rerename_action = menu.addAction("このグループを再リネーム")
+            rerename_action.setToolTip(
+                "_1 画像削除などで _2 から始まっている場合、"
+                "2枚目以降を _1, _2… に振り直します"
+            )
+            rerename_action.triggered.connect(lambda: self.rerename_images_for_group(group))
 
             menu.addSeparator()
 
@@ -5499,94 +5640,29 @@ class ImageManagerWidget(QWidget):
         reply = QMessageBox.question(
             self,
             "リネーム確認",
-            f"JANグループ「{group.jan}」の画像を\nSKU「{sku}」ベースの名前にリネームしますか？\n"
-            "（既にこのSKU名パターンでリネーム済みのファイルはスキップされます）",
+            f"JANグループ「{group.jan}」の画像を\nSKU「{sku}」ベース（SKU_1, SKU_2…）の名前にリネームしますか？\n"
+            "（既に {SKU}_数字 形式のファイルはスキップされます）",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
 
-        # 撮影日時順にソートしてリネーム順を決定
-        sorted_images = sorted(group.images, key=lambda r: r.capture_dt if r.capture_dt else datetime.min)
-
-        rename_operations: List[Tuple[ImageRecord, str]] = []
-        for i, record in enumerate(sorted_images):
-            original_path = Path(record.path)
-            extension = original_path.suffix
-
-            # 既にこのSKUパターンでリネーム済みならスキップ
-            if re.match(f"^{re.escape(sku)}_\\d+{re.escape(extension)}$", original_path.name):
-                continue
-
-            new_name = f"{sku}_{i + 1}{extension}"
-            new_path = original_path.parent / new_name
-            if str(original_path) != str(new_path):
-                rename_operations.append((record, str(new_path)))
+        rename_operations = self._build_rename_plan_for_group(group, sku)
 
         if not rename_operations:
             QMessageBox.information(self, "情報", "リネーム対象のファイルはありませんでした。")
             return
 
-        # 実際のリネーム処理
-        progress = QProgressDialog(self._rename_progress_label(), "キャンセル", 0, len(rename_operations), self)
-        progress.setWindowModality(Qt.WindowModal)
-        progress.show()
-
-        renamed_count = 0
-        new_records_map: Dict[str, ImageRecord] = {}
-
-        for i, (record, new_path_str) in enumerate(rename_operations):
-            progress.setValue(i)
-            if progress.wasCanceled():
-                break
-
-            old_path_str = record.path
-            try:
-                self._rename_image_file(old_path_str, new_path_str)
-
-                # DBレコードを更新
-                db_record = self.image_db.get_by_file_path(old_path_str)
-                if db_record:
-                    self.image_db.delete_by_file_path(old_path_str)
-                    db_record["file_path"] = new_path_str
-                    self.image_db.upsert(db_record)
-
-                # メモリ上のレコードを差し替え
-                new_record_data = record._asdict()
-                new_record_data["path"] = new_path_str
-                new_records_map[old_path_str] = ImageRecord(**new_record_data)
-
-                renamed_count += 1
-            except Exception as e:
-                logger.error(f"SKU指定リネームエラー: {old_path_str} -> {new_path_str}: {e}")
-
-        progress.close()
-
-        # image_records を更新
-        if new_records_map:
-            updated_image_records: List[ImageRecord] = []
-            for rec in self.image_records:
-                if rec.path in new_records_map:
-                    updated_image_records.append(new_records_map[rec.path])
-                else:
-                    updated_image_records.append(rec)
-            self.image_records = updated_image_records
-
-        # JANグループを再構築してUI反映
-        self.jan_groups = self.image_service.group_by_jan(self.image_records)
-        self.update_tree_widget()
-        self.update_image_list(self.image_records)
+        renamed_count = self._execute_rename_operations(rename_operations)
 
         # 仕入DBへの紐付け処理
         linked_count = 0
         if self.product_widget and group.jan != "unknown":
             try:
-                # リネーム後の新しい画像パスを取得（グループ内の全画像）
                 updated_group = next((g for g in self.jan_groups if g.jan == group.jan), None)
                 if updated_group:
-                    # リネーム後の新しいパスを取得
-                    new_image_paths = [img.path for img in updated_group.images]
+                    new_image_paths = self._collect_image_paths_for_group(updated_group)
                     
                     # 仕入DBの全レコードを取得
                     all_records = self.product_widget.get_all_purchase_records()
@@ -5615,6 +5691,96 @@ class ImageManagerWidget(QWidget):
         message = f"{renamed_count}件の画像をSKU「{sku}」でリネームしました。"
         if linked_count > 0:
             message += f"\n仕入DBのSKU「{sku}」に{linked_count}件の画像を紐付けました。"
+        QMessageBox.information(self, "完了", message)
+
+    def rerename_images_for_group(self, group: JanGroup):
+        """
+        _1 欠落などで連番がずれたグループを振り直す。
+        例: 2枚目が _2 のまま → _1、3枚目 _3 → _2 …
+        """
+        if not group or not group.images:
+            QMessageBox.information(self, "情報", "画像が含まれていないJANグループです。")
+            return
+
+        self._ensure_product_widget_data_loaded()
+
+        sorted_images = self._sorted_group_images(group)
+        exclude_first = self._is_group_first_image_excluded(group)
+        sku = self._resolve_sku_for_group_rerename(group)
+        if not sku:
+            QMessageBox.warning(
+                self,
+                "SKU不明",
+                "このグループから SKU を特定できませんでした。\n"
+                "先に「SKUを指定してリネーム」を実行するか、仕入DBに紐付けてください。",
+            )
+            return
+
+        if not needs_amazon_sequence_rerename(
+            sorted_images,
+            sku,
+            exclude_first=exclude_first,
+            path_getter=lambda r: r.path,
+        ):
+            first_slot_hint = "2枚目" if exclude_first else "1枚目"
+            QMessageBox.information(
+                self,
+                "再リネーム不要",
+                f"このグループは再リネームの対象ではありません。\n"
+                f"（{first_slot_hint}の画像が既に {sku}_1 になっているか、"
+                "SKU付きの商品画像がありません）",
+            )
+            return
+
+        first_slot_hint = "2枚目（1枚目はバーコード除外）" if exclude_first else "1枚目"
+        reply = QMessageBox.question(
+            self,
+            "再リネーム確認",
+            f"JANグループ「{group.jan}」の Amazon 画像名を振り直します。\n\n"
+            f"SKU: {sku}\n"
+            f"{first_slot_hint}を {sku}_1.jpg にし、以降を _2, _3… に並べ替えます。\n\n"
+            "実行しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        rename_operations = self._build_rerename_plan_for_group(group, sku)
+        if not rename_operations:
+            QMessageBox.information(self, "情報", "リネーム対象のファイルはありませんでした。")
+            return
+
+        renamed_count = self._execute_rerename_operations(rename_operations)
+
+        linked_count = 0
+        if self.product_widget and group.jan != "unknown":
+            try:
+                updated_group = next((g for g in self.jan_groups if g.jan == group.jan), None)
+                if updated_group:
+                    new_image_paths = self._collect_image_paths_for_group(updated_group)
+                    all_records = self.product_widget.get_all_purchase_records()
+                    success, added_count, record_snapshot = (
+                        self.product_widget.update_image_paths_for_jan(
+                            group.jan,
+                            new_image_paths,
+                            all_records,
+                            skip_existing=False,
+                            target_sku=sku,
+                            defer_table_refresh_and_snapshot=True,
+                        )
+                    )
+                    if success and added_count > 0:
+                        linked_count = added_count
+                        self._finalize_purchase_db_after_image_link()
+                        if record_snapshot:
+                            self.add_registration_entry(record_snapshot)
+            except Exception as e:
+                logger.error(f"再リネーム後の紐付けエラー: {e}")
+
+        message = f"{renamed_count}件の画像を再リネームしました（{sku}_1 から振り直し）。"
+        if linked_count > 0:
+            message += f"\n仕入DBの SKU「{sku}」に {linked_count} 件の画像を反映しました。"
         QMessageBox.information(self, "完了", message)
 
     def show_purchase_candidates_for_group(self, group: JanGroup):
@@ -5920,17 +6086,7 @@ class ImageManagerWidget(QWidget):
                 QApplication.processEvents()
 
                 jan = group.jan
-                image_paths: List[str] = []
-                for idx, img in enumerate(group.images):
-                    img_path = img.path
-                    # 各JANグループの1枚目画像はデフォルトで除外（チェックON時）※確定処理と同じ挙動
-                    if idx == 0 and self.first_image_flags.get(img_path, True):
-                        continue
-                    if not Path(img_path).exists():
-                        db_record = self.image_db.get_by_file_path(img_path)
-                        if db_record and db_record["file_path"] != img_path:
-                            img_path = db_record["file_path"]
-                    image_paths.append(img_path)
+                image_paths = self._collect_image_paths_for_group(group)
 
                 if not image_paths:
                     continue
