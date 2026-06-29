@@ -71,15 +71,7 @@ def resolve_route_from_template(
     if not route_name:
         return "", ""
 
-    route_code = store_db.get_route_code_by_name(route_name)
-    if not route_code:
-        route_code = route_name
-
-    try:
-        store_db.upsert_route(route_name, route_code)
-    except Exception:
-        pass
-
+    route_code = store_db.ensure_route_code(route_name)
     return route_code, route_name
 
 

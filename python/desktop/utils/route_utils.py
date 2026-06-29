@@ -163,7 +163,7 @@ def find_route_summary_from_folder(folder_path: str | Path) -> Optional[dict]:
             continue
 
         route_date, route_name = parsed
-        route_code = store_db.get_route_code_by_name(route_name) or route_name
+        route_code = store_db.ensure_route_code(route_name)
 
         route = _pick_route_for_date_and_name(
             route_db, store_db, route_date, route_name, route_code

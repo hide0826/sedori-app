@@ -153,6 +153,27 @@ def _create_ladder_checkbox_row(
 
 _SALES_CHANNEL_OPTIONS = ["Amazon", "メルカリ", "ヤフオク", "ラクマ", "その他"]
 _SHIPPING_METHOD_OPTIONS = ["FBA", "自己発送"]
+_CONDITION_OPTIONS = [
+    "新品",
+    "新品(新品)",
+    "中古(ほぼ新品)",
+    "中古(非常に良い)",
+    "中古(良い)",
+    "中古(可)",
+    "コレクター商品(ほぼ新品)",
+    "コレクター商品(非常に良い)",
+    "コレクター商品(良い)",
+    "コレクター商品(可)",
+    "再生品",
+]
+
+try:
+    from services.condition_labels import condition_code_from_value, normalize_condition_display
+except ImportError:
+    from desktop.services.condition_labels import (  # type: ignore
+        condition_code_from_value,
+        normalize_condition_display,
+    )
 
 # SKU 先頭日付の編集を禁止するステータス（内部コードおよび表示ラベル）
 _SKU_DATE_BLOCKED_STATUS_CODES = frozenset({"selling", "sold", "partially_sold"})
@@ -507,10 +528,18 @@ class PurchaseRowEditDialog(QDialog):
             sku_wrap = QWidget()
             sku_wrap.setLayout(sku_row)
             info_layout.addRow("SKU:", sku_wrap)
-        self._condition_label = QLabel(self._record_condition_label_text())
-        self._condition_label.setWordWrap(True)
-        self._condition_label.setMaximumWidth(340)
-        info_layout.addRow("コンディション:", self._condition_label)
+        self._condition_combo = QComboBox()
+        self._condition_combo.addItems(_CONDITION_OPTIONS)
+        condition_text = self._record_condition_label_text()
+        if condition_text == "-":
+            condition_text = ""
+        condition_display = normalize_condition_display(condition_text) if condition_text else ""
+        cond_idx = self._condition_combo.findText(condition_display)
+        if cond_idx < 0 and condition_display:
+            self._condition_combo.addItem(condition_display)
+            cond_idx = self._condition_combo.findText(condition_display)
+        self._condition_combo.setCurrentIndex(max(0, cond_idx))
+        info_layout.addRow("コンディション:", self._condition_combo)
 
         elapsed_text, elapsed_tip = format_elapsed_days_for_purchase_record(self.record)
         elapsed_lbl = QLabel(elapsed_text)
@@ -1616,6 +1645,13 @@ class PurchaseRowEditDialog(QDialog):
             elif str(self.record.get(src_key) or "").strip().lower() != TP_SOURCE_AUTO:
                 self.record[src_key] = TP_SOURCE_MANUAL
         repricing_enabled = bool(self._repricing_enabled_cb.isChecked())
+        condition = self._condition_combo.currentText().strip()
+        if condition:
+            self.record["コンディション"] = condition
+            self.record["condition"] = condition
+            condition_code = condition_code_from_value(condition)
+            if condition_code is not None:
+                self.record["condition_code"] = condition_code
         shipping_method = self._shipping_method_combo.currentText().strip() or "FBA"
         self.record["発送方法"] = shipping_method
         self.record["shippingMethod"] = shipping_method
@@ -1656,6 +1692,10 @@ class PurchaseRowEditDialog(QDialog):
                         "expected_margin": self.record.get("expected_margin"),
                         "expected_roi": self.record.get("expected_roi"),
                     }
+                    if condition:
+                        condition_code = condition_code_from_value(condition)
+                        if condition_code is not None:
+                            upsert_payload["condition_code"] = condition_code
                     self._product_widget.purchase_history_db.upsert(upsert_payload)
                 except Exception as e:
                     QMessageBox.warning(self, "反映", f"DB 保存でエラー: {e}")
@@ -1691,7 +1731,7 @@ class PurchaseRowEditDialog(QDialog):
         fee_line = " / ".join(fee_parts) if fee_parts else "手数料・出荷は未入力"
         msg = (
             "仕入DB（一覧・スナップショット）に反映しました。\n"
-            f"販売チャネル: {sales_channel} ／ 発送: {shipping_method}\n"
+            f"コンディション: {condition or '-'} ／ 販売チャネル: {sales_channel} ／ 発送: {shipping_method}\n"
             f"{fee_line} ／ 見込み利益: {profit:,}円\n"
         )
         if ladder_on:

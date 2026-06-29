@@ -886,29 +886,14 @@ class ProductWidget(QWidget):
         search_group = QGroupBox("検索")
         search_layout = QGridLayout()
         
-        # 日付検索
-        search_layout.addWidget(QLabel("日付:"), 0, 0)
-        self.purchase_search_date = QLineEdit()
-        self.purchase_search_date.setPlaceholderText("yyyy-mm-dd または yyyy/mm/dd")
-        search_layout.addWidget(self.purchase_search_date, 0, 1)
-        
-        # SKU検索
-        search_layout.addWidget(QLabel("SKU:"), 0, 2)
-        self.purchase_search_sku = QLineEdit()
-        self.purchase_search_sku.setPlaceholderText("SKUで検索")
-        search_layout.addWidget(self.purchase_search_sku, 0, 3)
-        
-        # ASIN検索
-        search_layout.addWidget(QLabel("ASIN:"), 0, 4)
-        self.purchase_search_asin = QLineEdit()
-        self.purchase_search_asin.setPlaceholderText("ASINで検索")
-        search_layout.addWidget(self.purchase_search_asin, 0, 5)
-
-        # JAN検索
-        search_layout.addWidget(QLabel("JAN:"), 0, 6)
-        self.purchase_search_jan = QLineEdit()
-        self.purchase_search_jan.setPlaceholderText("JANで検索")
-        search_layout.addWidget(self.purchase_search_jan, 0, 7)
+        # 統合キーワード検索（日付・SKU・ASIN・JAN・商品名）
+        search_layout.addWidget(QLabel("キーワード:"), 0, 0)
+        self.purchase_search_query = QLineEdit()
+        self.purchase_search_query.setPlaceholderText(
+            "日付・SKU・ASIN・JAN・商品名を部分一致で検索"
+        )
+        self.purchase_search_query.returnPressed.connect(self.filter_purchase_records)
+        search_layout.addWidget(self.purchase_search_query, 0, 1, 1, 7)
         
         # ステータスフィルタ（複数チェック・折りたたみ可能）
         status_filter_panel = self._build_purchase_status_collapsible_filter()
@@ -3196,13 +3181,7 @@ class ProductWidget(QWidget):
         return code
 
     def _purchase_search_filters_active(self) -> bool:
-        if self.purchase_search_date.text().strip():
-            return True
-        if self.purchase_search_sku.text().strip():
-            return True
-        if self.purchase_search_asin.text().strip():
-            return True
-        if self.purchase_search_jan.text().strip():
+        if self.purchase_search_query.text().strip():
             return True
         if self._purchase_status_filter_selected_codes():
             return True
@@ -3223,39 +3202,54 @@ class ProductWidget(QWidget):
         master = self._purchase_master_records()
         return bool(master) and self.purchase_table.rowCount() == len(master)
 
+    def _purchase_record_matches_unified_search(
+        self, record: Dict[str, Any], query: str
+    ) -> bool:
+        """1つのキーワードで日付・SKU・ASIN・JAN・商品名を部分一致検索（OR）。"""
+        q = (query or "").strip()
+        if not q:
+            return True
+        q_lower = q.lower()
+
+        for date_key in ("仕入れ日", "purchase_date", "出品日", "listed_date"):
+            date_val = str(record.get(date_key) or "").strip()
+            if date_val and self._date_matches(date_val, q):
+                return True
+            if date_val and q.isdigit() and len(q) >= 4:
+                normalized = self._normalize_date_for_search(date_val) or ""
+                if normalized and q in normalized.replace("-", ""):
+                    return True
+
+        for key_a, key_b in (("SKU", "sku"), ("ASIN", "asin"), ("JAN", "jan")):
+            val = str(record.get(key_a) or record.get(key_b) or "").strip()
+            if val and q_lower in val.lower():
+                return True
+
+        title = str(
+            record.get("商品名")
+            or record.get("product_name")
+            or record.get("title")
+            or record.get("product_title")
+            or ""
+        ).strip()
+        if title and q_lower in title.lower():
+            return True
+
+        return False
+
     def _compute_filtered_purchase_records(self) -> List[Dict[str, Any]]:
         """マスターから検索条件で絞り込み（ディープコピーしない）。"""
-        date_query = self.purchase_search_date.text().strip()
-        sku_query = self.purchase_search_sku.text().strip().lower()
-        asin_query = self.purchase_search_asin.text().strip().lower()
-        jan_query = self.purchase_search_jan.text().strip().lower()
+        keyword_query = self.purchase_search_query.text().strip()
         status_selected = self._purchase_status_filter_selected_codes()
         channel_selected = self._purchase_channel_filter_selected_codes()
 
         filtered_records = self._purchase_master_records()
 
-        if date_query:
+        if keyword_query:
             filtered_records = [
-                r for r in filtered_records
-                if self._date_matches(str(r.get("仕入れ日") or ""), date_query)
-            ]
-
-        if sku_query:
-            filtered_records = [
-                r for r in filtered_records
-                if sku_query in str(r.get("SKU") or r.get("sku") or "").lower()
-            ]
-
-        if asin_query:
-            filtered_records = [
-                r for r in filtered_records
-                if asin_query in str(r.get("ASIN") or r.get("asin") or "").lower()
-            ]
-
-        if jan_query:
-            filtered_records = [
-                r for r in filtered_records
-                if jan_query in str(r.get("JAN") or r.get("jan") or "").lower()
+                r
+                for r in filtered_records
+                if self._purchase_record_matches_unified_search(r, keyword_query)
             ]
 
         if status_selected:
@@ -3449,10 +3443,7 @@ class ProductWidget(QWidget):
 
     def clear_purchase_search(self):
         """検索条件をクリアして全件表示"""
-        self.purchase_search_date.clear()
-        self.purchase_search_sku.clear()
-        self.purchase_search_asin.clear()
-        self.purchase_search_jan.clear()
+        self.purchase_search_query.clear()
         self._reset_purchase_status_filter_checkboxes()
         self._reset_purchase_repricing_filter_checkboxes()
         master = self._purchase_master_records()
@@ -3467,6 +3458,9 @@ class ProductWidget(QWidget):
         self.update_purchase_count_label()
 
     _PURCHASE_ROW_EDIT_SYNC_KEYS = (
+        "コンディション",
+        "condition",
+        "condition_code",
         "TP0",
         "tp0",
         "TP1",

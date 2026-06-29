@@ -1,3 +1,23 @@
+## 2026-06-26: 店舗マスタルートコード修復・仕入DB編集・検索改善
+
+- **タスク:** 千葉幕張習志野ルート等でルート名がルートコードに入る不具合の修復と再発防止。仕入DB行編集のコンディションプルダウン化。仕入DB検索の統合キーワード化（商品名部分一致）
+- **状況:** 完了
+- **症状:**
+  - 店舗マスタでルートコード列に「千葉幕張習志野ルート」のようにルート名そのものが表示される
+  - 仕入DB行編集でコンディションが読み取り専用で変更できない
+  - 日付・SKU・ASIN・JANが別々の検索欄で、商品名検索がない
+- **変更点:**
+  - **`store_db.py`** … `ensure_route_code()` / `repair_invalid_route_codes()` / `generate_next_route_code()` を追加。起動時にルート名コピーの不正コードを R### へ自動修復
+  - **`store_master_auto_register.py` / `route_utils.py` / `route_summary_widget.py` / `store_master_widget.py`** … ルート名フォールバックを廃止し正式コード採番へ統一
+  - **`test_route_code_ensure.py`（新規）** … 5件
+  - **`purchase_row_edit_dialog.py`** … コンディションを QComboBox で編集可能に。反映時に `condition_code` も保存
+  - **`product_widget.py`** … 仕入行編集のコンディション同期キー追加。検索欄を「キーワード」1本化（日付・SKU・ASIN・JAN・商品名を部分一致OR検索）
+- **動作確認:** `pytest desktop/tests/test_route_code_ensure.py` 5件パス。千葉幕張習志野ルートは R046 に修復済み
+- **Git:**
+  - feat(desktop): ルートコード自動修復と仕入DBコンディション編集・統合検索
+
+---
+
 ## 2026-06-23: 画像管理リネーム安定化・連番振り直し・ブラウザ前面表示・ZIP一括撤回
 
 - **タスク:** 画像リネーム（`{SKU}_1` 形式）の不具合修正、再確定時のDB整合、ドラッグ時のブラウザ隠れ解消。ZIP一括は試行後撤回し Lファイル（GCS）フローへ復帰

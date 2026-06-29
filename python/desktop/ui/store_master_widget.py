@@ -263,10 +263,13 @@ class StoreEditDialog(QDialog):
                 self._clear_store_code_suggestions()
             return
         
-        # ルートコードを自動挿入
+        # ルートコードを自動挿入（未登録ルートは保存時に採番）
         route_code = self.db.get_route_code_by_name(route_name)
-        if route_code:
+        if route_code and not StoreDatabase.is_invalid_route_code(route_code, route_name):
             self.route_code_edit.setText(route_code)
+        elif route_code:
+            repaired = self.db.ensure_route_code(route_name)
+            self.route_code_edit.setText(repaired)
         else:
             self.route_code_edit.clear()
         
@@ -420,11 +423,16 @@ class StoreEditDialog(QDialog):
         """入力データを取得"""
         # 所属ルート名はQComboBoxから取得（編集可能なので現在のテキスト）
         route_name = self.affiliated_route_name_combo.currentText().strip()
+        route_code = self.route_code_edit.text().strip()
+        if route_name and (
+            not route_code or StoreDatabase.is_invalid_route_code(route_code, route_name)
+        ):
+            route_code = self.db.ensure_route_code(route_name)
         
         store_code = self._get_store_code_text()
         data = {
             'affiliated_route_name': route_name,
-            'route_code': self.route_code_edit.text().strip(),
+            'route_code': route_code,
             'store_code': store_code if store_code else None,
             'store_name': self.store_name_edit.text().strip(),
             'address': self.address_edit.text().strip(),
@@ -603,27 +611,9 @@ class RouteManagementDialog(QDialog):
     def _get_next_route_code(self) -> Optional[str]:
         """既存ルートから次のルートコードを採番（例: R001 → R002）"""
         try:
-            existing_routes = self.db.list_routes_with_store_count()
+            return self.db.generate_next_route_code()
         except Exception:
-            existing_routes = []
-        
-        max_code_num = 0
-        for route in existing_routes or []:
-            route_code_str = route.get('route_code', '') or ''
-            if not route_code_str:
-                continue
-            # ルートコードから数値部分を抽出（例: "R001" -> 1）
-            import re
-            match = re.search(r'(\d+)', route_code_str)
-            if match:
-                try:
-                    code_num = int(match.group(1))
-                except ValueError:
-                    continue
-                max_code_num = max(max_code_num, code_num)
-        
-        # まだ1件もない場合は R001 から開始
-        return f"R{max_code_num + 1:03d}"
+            return None
 
     def on_route_name_text_changed(self, text: str):
         """ルート名入力時にルートコードを自動で埋める（新規作成時のみ）"""

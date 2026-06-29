@@ -1348,9 +1348,7 @@ class RouteSummaryWidget(QWidget):
         """選択されたルートコードを取得"""
         route_name = self.route_code_combo.currentText().strip()
         if route_name:
-            # ルート名からルートコードを取得
-            route_code = self.store_db.get_route_code_by_name(route_name)
-            return route_code or route_name  # ルートコードが見つからない場合はルート名を返す
+            return self.store_db.ensure_route_code(route_name)
         return ""
 
     def _set_visit_row_checkbox(self, row: int, checked: bool = True) -> None:

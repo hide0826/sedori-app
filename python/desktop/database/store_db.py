@@ -391,6 +391,10 @@ class StoreDatabase:
         )
 
         conn.commit()
+        try:
+            self.repair_invalid_route_codes()
+        except Exception as exc:
+            print(f"ルートコード修復スキップ: {exc}")
     
     def close(self):
         """データベース接続を閉じる"""
@@ -1186,6 +1190,188 @@ class StoreDatabase:
         return [self._row_to_dict(row) for row in rows]
     
     # ==================== routes テーブル操作 ====================
+
+    @staticmethod
+    def is_invalid_route_code(
+        route_code: Optional[str],
+        route_name: Optional[str] = None,
+    ) -> bool:
+        """ルート名がそのままコードに入っているなど、不正なルートコードか判定する。"""
+        code = (route_code or "").strip()
+        name = (route_name or "").strip()
+        if not code:
+            return False
+        if name and code == name:
+            return True
+        return False
+
+    def _collect_existing_route_codes(self) -> set:
+        """routes / stores から使用中のルートコードを収集する。"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        codes: set = set()
+
+        cursor.execute(
+            "SELECT route_code FROM routes WHERE route_code IS NOT NULL AND route_code != ''"
+        )
+        for row in cursor.fetchall():
+            code = (row[0] or "").strip()
+            if code:
+                codes.add(code)
+
+        cursor.execute(
+            "SELECT route_code FROM stores WHERE route_code IS NOT NULL AND route_code != ''"
+        )
+        for row in cursor.fetchall():
+            raw = row[0] or ""
+            for part in str(raw).split(","):
+                code = part.strip()
+                if code:
+                    codes.add(code)
+        return codes
+
+    def generate_next_route_code(self) -> str:
+        """既存ルートから次のルートコードを採番（例: R001 → R002）。"""
+        existing_codes = self._collect_existing_route_codes()
+        max_code_num = 0
+        for route_code_str in existing_codes:
+            match = re.search(r"(\d+)", route_code_str)
+            if match:
+                try:
+                    max_code_num = max(max_code_num, int(match.group(1)))
+                except ValueError:
+                    continue
+
+        next_num = max_code_num + 1
+        while True:
+            candidate = f"R{next_num:03d}"
+            if candidate not in existing_codes:
+                return candidate
+            next_num += 1
+
+    def _replace_route_code_in_stores(
+        self,
+        old_code: str,
+        new_code: str,
+        route_name: Optional[str] = None,
+    ) -> None:
+        """店舗の route_code 列から旧コードを新コードへ置換する。"""
+        old_code = (old_code or "").strip()
+        new_code = (new_code or "").strip()
+        route_name = (route_name or "").strip()
+        if not old_code or not new_code or old_code == new_code:
+            return
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, route_code, affiliated_route_name FROM stores")
+        for row in cursor.fetchall():
+            store_id = row[0]
+            route_code_str = (row[1] or "").strip()
+            aff_name = (row[2] or "").strip()
+            codes = [c.strip() for c in route_code_str.split(",") if c.strip()]
+            changed = False
+            new_codes: List[str] = []
+
+            if codes:
+                for code in codes:
+                    if code == old_code or (
+                        route_name and aff_name == route_name and code == route_name
+                    ):
+                        new_codes.append(new_code)
+                        changed = True
+                    else:
+                        new_codes.append(code)
+            elif route_name and aff_name == route_name:
+                new_codes = [new_code]
+                changed = True
+
+            if changed:
+                deduped = list(dict.fromkeys(new_codes))
+                cursor.execute(
+                    "UPDATE stores SET route_code = ? WHERE id = ?",
+                    (",".join(deduped), store_id),
+                )
+        conn.commit()
+
+    def _update_related_route_code_refs(self, old_code: str, new_code: str) -> None:
+        """route_summaries / route_visit_logs のルートコードも追随更新する。"""
+        old_code = (old_code or "").strip()
+        new_code = (new_code or "").strip()
+        if not old_code or not new_code or old_code == new_code:
+            return
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        for table in ("route_summaries", "route_visit_logs"):
+            try:
+                cursor.execute(
+                    f"UPDATE {table} SET route_code = ? WHERE route_code = ?",
+                    (new_code, old_code),
+                )
+            except sqlite3.OperationalError:
+                pass
+        conn.commit()
+
+    def ensure_route_code(self, route_name: str) -> str:
+        """
+        ルート名に対応する正式なルートコードを返す。
+        未登録・ルート名コピー等の不正コードは R### 形式で自動採番して修復する。
+        """
+        route_name = (route_name or "").strip()
+        if not route_name:
+            return ""
+
+        existing = self.get_route_code_by_name(route_name)
+        if existing and not self.is_invalid_route_code(existing, route_name):
+            return existing
+
+        old_code = existing if existing else route_name
+        new_code = self.generate_next_route_code()
+        self.upsert_route(route_name, new_code)
+        self._replace_route_code_in_stores(old_code, new_code, route_name=route_name)
+        self._update_related_route_code_refs(old_code, new_code)
+        return new_code
+
+    def repair_invalid_route_codes(self) -> List[Dict[str, str]]:
+        """ルート名がそのままコードになっているデータを一括修復する。"""
+        route_names_to_fix: set = set()
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT route_name, route_code FROM routes")
+        for row in cursor.fetchall():
+            name = (row[0] or "").strip()
+            code = (row[1] or "").strip()
+            if name and self.is_invalid_route_code(code, name):
+                route_names_to_fix.add(name)
+
+        cursor.execute(
+            "SELECT DISTINCT affiliated_route_name, route_code FROM stores "
+            "WHERE affiliated_route_name IS NOT NULL AND affiliated_route_name != ''"
+        )
+        for row in cursor.fetchall():
+            name = (row[0] or "").strip()
+            raw_code = (row[1] or "").strip()
+            if not name:
+                continue
+            if self.is_invalid_route_code(raw_code, name):
+                route_names_to_fix.add(name)
+                continue
+            for part in raw_code.split(","):
+                if self.is_invalid_route_code(part.strip(), name):
+                    route_names_to_fix.add(name)
+                    break
+
+        repairs: List[Dict[str, str]] = []
+        for name in sorted(route_names_to_fix):
+            old_code = self.get_route_code_by_name(name) or name
+            new_code = self.ensure_route_code(name)
+            if old_code != new_code:
+                repairs.append(
+                    {"route_name": name, "old_code": old_code, "new_code": new_code}
+                )
+        return repairs
     
     def list_routes_with_store_count(self) -> List[Dict[str, Any]]:
         """
@@ -1369,22 +1555,8 @@ class StoreDatabase:
                     WHERE route_name = ?
                 """, (google_map_url, route_name))
             else:
-                # 新規ルートとして追加
-                # route_code を取得
-                cursor.execute("""
-                    SELECT DISTINCT route_code 
-                    FROM stores 
-                    WHERE affiliated_route_name = ? 
-                    LIMIT 1
-                """, (route_name,))
-                
-                route_code_row = cursor.fetchone()
-                if route_code_row:
-                    route_code = route_code_row[0]
-                    cursor.execute("""
-                        INSERT INTO routes (route_name, route_code, google_map_url)
-                        VALUES (?, ?, ?)
-                    """, (route_name, route_code, google_map_url))
+                route_code = self.ensure_route_code(route_name)
+                self.upsert_route(route_name, route_code, google_map_url)
             
             conn.commit()
             return True
