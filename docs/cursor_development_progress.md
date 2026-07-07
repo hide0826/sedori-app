@@ -1,3 +1,35 @@
+## 2026-07-07 価格改定リファクタ Phase 0〜3（テスト安全網・モジュール分割・UI分割）
+
+- **目的**: 価格改定まわりを慎重にリファクタ。挙動を変えずにテスト追加・重複解消・可読性向上。
+- **Phase 0: スナップショットテスト**（`python/tests/`）
+  - `test_repricer_weekly.py` … standard/369 モードの items スナップショット、日付抽出・3/6/9タグ単体テスト
+  - `test_repricer_utils_sync.py` … API正と desktop シムの一致検証
+  - `conftest.py` … 固定日付 `2025-03-15`、仕入DB隔離（monkeypatch）
+  - `fixtures/repricer_standard_expected.json`, `repricer_369_expected.json`
+  - **31 pytest グリーン**
+- **Phase 1: 重複ユーティリティ統合**
+  - 正: `python/utils/repricer_tp_target.py`, `repricer_ladder_core.py`
+  - desktop 側を re-export シム + `_repricer_canonical_loader.py` に置換
+  - `repricer_369_presets.py`, `repricer_settings_widget.py` の import フォールバック整理
+- **Phase 2: repricer_weekly 分割**
+  - `repricer_common.py` … 共通型・設定・前処理・SKU日付
+  - `repricer_purchase_db.py` … 仕入DB読み込み
+  - `repricer_standard.py` … 標準改定
+  - `repricer_369.py` … 3-6-9改定・月別ラダー
+  - `repricer_weekly.py` … 公開APIファサード
+- **Phase 3: repricer_widget UI 分割**
+  - `python/desktop/ui/repricer/` パッケージ（workflow/file_panel/preview/result mixin + support + widget）
+  - `repricer_widget.py` は後方互換シム
+  - **修正**: `@staticmethod` 欠落で SKU 同期失敗していた `file_panel_mixin._normalize_sku_text` を復元
+- **ドキュメント**: `docs/repricer_refactoring_plan_prompt.md`（Plan モード用プロンプト）
+- **変更ファイル（主要）**:
+  - `python/tests/test_repricer_weekly.py`, `test_repricer_utils_sync.py`, `conftest.py`, `fixtures/`
+  - `python/services/repricer_*.py`
+  - `python/desktop/ui/repricer/`, `repricer_widget.py`
+  - `python/desktop/utils/_repricer_canonical_loader.py`, `repricer_tp_target.py`, `repricer_ladder_core.py`
+  - `docs/repricer_refactoring_plan_prompt.md`
+- **Git**: refactor(repricer): Phase0-3 テスト安全網・モジュール分割・UI分割
+
 ## 2026-07-07 SKU生成の店舗コード修正・カスタマー対応AI対応方針追加
 
 - **目的**: 照合後の新店舗コード（BO-12 等）を SKU に正しく反映。カスタマー対応AIで曖昧な問い合わせへの対応方針を追加。

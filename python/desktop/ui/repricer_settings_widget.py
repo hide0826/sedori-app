@@ -33,7 +33,6 @@ try:
         batch_recalculate_auto_tp,
         build_preset_summary_text,
     )
-    from desktop.utils.repricer_tp_target import TP_COMBO_OPTIONS
 except ImportError:
     from services.repricer_369_presets import (  # type: ignore
         PRESET_BALANCE,
@@ -45,7 +44,8 @@ except ImportError:
         batch_recalculate_auto_tp,
         build_preset_summary_text,
     )
-    from utils.repricer_tp_target import TP_COMBO_OPTIONS  # type: ignore
+
+from utils.repricer_tp_target import TP_COMBO_OPTIONS, normalize_legacy_tp_target
 
 
 class NoWheelComboBox(QComboBox):
@@ -882,10 +882,6 @@ class RepricerSettingsWidget(QWidget):
                         # TP設定
                         tp_combo = table.cellWidget(i, 3)
                         if tp_combo:
-                            try:
-                                from desktop.utils.repricer_tp_target import normalize_legacy_tp_target
-                            except ImportError:
-                                from utils.repricer_tp_target import normalize_legacy_tp_target  # type: ignore
                             tp_target = normalize_legacy_tp_target(
                                 str(rule.get("tp_target", "tp0")),
                                 self.config_data if isinstance(self.config_data, dict) else {},

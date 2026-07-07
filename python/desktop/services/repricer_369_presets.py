@@ -11,13 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-try:
-    from utils.repricer_tp_target import TP0_FOLLOW, TP0_MAINTAIN
-except ImportError:
-    try:
-        from desktop.utils.repricer_tp_target import TP0_FOLLOW, TP0_MAINTAIN
-    except ImportError:
-        from repricer_tp_target import TP0_FOLLOW, TP0_MAINTAIN  # type: ignore
+from utils.repricer_tp_target import TP0_FOLLOW, TP0_MAINTAIN
 
 PRESET_BALANCE = "balance"
 PRESET_TURNOVER = "turnover"

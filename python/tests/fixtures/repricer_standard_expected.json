@@ -1,0 +1,29 @@
+[
+  {
+    "sku": "20250201-B0007RBX52-UM-1650-1",
+    "days": 42,
+    "action": "Trace変更",
+    "price": 4463,
+    "new_price": 4463,
+    "priceTrace": 0,
+    "new_priceTrace": 1
+  },
+  {
+    "sku": "20250201-B000LVNOKQ-UVG-330-1",
+    "days": 42,
+    "action": "Trace変更",
+    "price": 1120,
+    "new_price": 1120,
+    "priceTrace": 0,
+    "new_priceTrace": 1
+  },
+  {
+    "sku": "20250201-B000RGMGAY-UVG-550-1",
+    "days": 42,
+    "action": "Trace変更",
+    "price": 2971,
+    "new_price": 2971,
+    "priceTrace": 0,
+    "new_priceTrace": 1
+  }
+]

@@ -1,0 +1,38 @@
+[
+  {
+    "sku": "20250201-B0007RBX52-UM-1650-1",
+    "days": 42,
+    "action": "Trace変更",
+    "price": 4463,
+    "new_price": 4463,
+    "priceTrace": 0,
+    "new_priceTrace": 1,
+    "tp_floor": 2547,
+    "is_tp_floor_or_below": false,
+    "tp_reach_status": ""
+  },
+  {
+    "sku": "20250201-B000LVNOKQ-UVG-330-1",
+    "days": 42,
+    "action": "Trace変更",
+    "price": 1120,
+    "new_price": 1120,
+    "priceTrace": 0,
+    "new_priceTrace": 1,
+    "tp_floor": 720,
+    "is_tp_floor_or_below": false,
+    "tp_reach_status": ""
+  },
+  {
+    "sku": "20250201-B000RGMGAY-UVG-550-1",
+    "days": 42,
+    "action": "Trace変更",
+    "price": 2971,
+    "new_price": 2971,
+    "priceTrace": 0,
+    "new_priceTrace": 1,
+    "tp_floor": 1800,
+    "is_tp_floor_or_below": false,
+    "tp_reach_status": ""
+  }
+]

@@ -1,3 +1,23 @@
+## 2026-07-07: 価格改定リファクタ Phase 0〜3（テスト安全網・モジュール分割・UI分割）
+
+- **タスク:** 価格改定（`repricer_weekly` / `repricer_widget`）の慎重なリファクタ。物理バックアップ後に Phase 0〜3 を実施
+- **状況:** 完了
+- **Phase 0（テスト）:**
+  - `python/tests/test_repricer_weekly.py` 等を新規追加（31件パス）
+  - 固定日付・仕入DB隔離でスナップショット比較（standard / 369）
+- **Phase 1（重複解消）:**
+  - `repricer_tp_target` / `repricer_ladder_core` を `python/utils/` に統一、desktop はシム
+- **Phase 2（ロジック分割）:**
+  - `repricer_weekly.py` を `repricer_common` / `repricer_standard` / `repricer_369` / `repricer_purchase_db` に分割
+- **Phase 3（UI分割）:**
+  - `repricer_widget` を `ui/repricer/` パッケージ（mixin構成）へ分割
+  - 分割時に `@staticmethod` が抜け SKU 同期が失敗する不具合を `file_panel_mixin.py` で修正
+- **動作確認:** `pytest tests/test_repricer_weekly.py tests/test_repricer_utils_sync.py` 31件パス。デスクトップで CSV 選択・ステータス同期 OK
+- **Git:**
+  - refactor(repricer): Phase0-3 テスト安全網・モジュール分割・UI分割
+
+---
+
 ## 2026-07-07: SKU生成の店舗コード修正・カスタマー対応AI対応方針追加
 
 - **タスク:** 照合後に店舗コード（BO-12 等）が入っているのに SKU 生成で旧 supplier_code（C2-001）になる不具合を修正。カスタマー対応AIの対応方針に「より詳細な説明を要求」を追加
