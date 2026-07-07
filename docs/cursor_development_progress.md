@@ -1,3 +1,20 @@
+## 2026-07-07 SKU生成の店舗コード修正・カスタマー対応AI対応方針追加
+
+- **目的**: 照合後の新店舗コード（BO-12 等）を SKU に正しく反映。カスタマー対応AIで曖昧な問い合わせへの対応方針を追加。
+- **SKU生成**（`store_db.py`）
+  - 症状: 仕入先列が BO-12 でも SKU が C2-001 になる
+  - 原因: `_resolve_from_physical_store` が supplier_code（旧形式）を常に優先していた
+  - 修正: 仕入先列（fallback_code）を store_code / supplier_code と照合し、入力値をそのまま SKU トークンに使用
+- **カスタマー対応AI**（`gemini_customer_support_service.py`）
+  - 対応方針プルダウンに「より詳細な説明を要求」（`request_details`）を追加
+- **テスト**（`test_resolve_supplier_for_sku.py` 新規）: BO-12 維持・C2-016 互換・C2-001 検索の 3件パス
+- **変更ファイル**:
+  - `python/desktop/database/store_db.py`
+  - `python/desktop/services/gemini_customer_support_service.py`
+  - `python/desktop/tests/test_resolve_supplier_for_sku.py`（新規）
+  - `development_history.md`, `docs/cursor_development_progress.md`
+- **Git**: fix(desktop): SKU生成で照合済み店舗コードを維持、カスタマー対応AIに詳細説明要求方針を追加
+
 ## 2026-06-23 画像管理リネーム安定化・連番振り直し・ブラウザ前面表示・ZIP一括撤回
 
 - **目的**: 画像リネーム（`20260613-HA-29-1545-3P-027_1.jpg` 形式）の信頼性向上、再確定時の仕入DB整合、Amazon/L/プライスターへのドラッグ時にブラウザが隠れないようにする。ZIP一括アップロードは不採用のため撤回。

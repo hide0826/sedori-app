@@ -702,11 +702,25 @@ class StoreDatabase:
         )
 
     def _resolve_from_physical_store(self, physical: Dict[str, Any], fallback_code: str) -> Dict[str, Any]:
-        sku_code = (
-            (physical.get("supplier_code") or physical.get("store_code") or fallback_code) or ""
-        ).strip()
+        """実店舗マスタから SKU 用の店舗コードを解決する。
+
+        照合後の仕入先列（fallback_code）に入っているコードを優先する。
+        store_code（新店舗コード BO-12 等）と supplier_code（旧形式 C2-001 等）が
+        両方ある店舗でも、仕入先列の値をそのまま SKU に使う。
+        """
+        input_code = (fallback_code or "").strip()
+        store_code = (physical.get("store_code") or "").strip()
+        supplier_code = (physical.get("supplier_code") or "").strip()
+        if input_code and input_code in (store_code, supplier_code):
+            sku_code = input_code
+        elif store_code:
+            sku_code = store_code
+        elif supplier_code:
+            sku_code = supplier_code
+        else:
+            sku_code = input_code
         return {
-            "supplier_code": sku_code or fallback_code,
+            "supplier_code": sku_code,
             "store_name": (physical.get("store_name") or "").strip(),
             "store_id": physical.get("id"),
         }
