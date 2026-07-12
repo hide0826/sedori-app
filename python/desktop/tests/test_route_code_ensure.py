@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from database.store_db import StoreDatabase
+from desktop.database.store_db import StoreDatabase
 
 
 @pytest.fixture
@@ -74,7 +74,7 @@ def test_generate_next_route_code_skips_existing_codes(temp_store_db: StoreDatab
 
 
 def test_resolve_route_from_template_uses_formal_code(temp_store_db: StoreDatabase):
-    from services.store_master_auto_register import resolve_route_from_template
+    from desktop.services.store_master_auto_register import resolve_route_from_template
 
     route_code, route_name = resolve_route_from_template(
         temp_store_db,

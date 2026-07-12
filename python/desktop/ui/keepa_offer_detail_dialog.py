@@ -23,7 +23,11 @@ from PySide6.QtWidgets import (
 import os
 import sys
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+try:
+    from utils.ensure_desktop_sys_path import ensure_desktop_on_sys_path
+except ImportError:
+    from desktop.utils.ensure_desktop_sys_path import ensure_desktop_on_sys_path  # type: ignore
+ensure_desktop_on_sys_path()
 
 try:
     from services.keepa_service import KeepaOfferRow

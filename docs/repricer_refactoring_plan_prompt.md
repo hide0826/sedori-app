@@ -157,6 +157,75 @@
 
 ---
 
+### Phase 4: repricer パッケージの import 整理【リスク低】
+
+**前提**: Phase 0〜3 完了。31 pytest グリーン。
+
+**目的**: Phase 3 で分割した `ui/repricer/` 各 mixin にコピペされた try/except import を1か所に集約し、未使用 import を削除する。
+
+**やること**:
+1. `support.py` に共通 compat import を集約（DraggableFileIcon / browser_front_scheduler / KeepaService / validate_csv_file 等）
+2. 各 mixin から重複ブロックを削除し `support` から import
+3. `workflow_mixin.py` / `preview_mixin.py` の未使用 import を整理
+4. Phase 0 テスト + `from ui.repricer.widget import RepricerWidget` の import 確認
+
+**やらないこと**:
+- purchase_row_edit_dialog / purchase_ladder_autofill_batch のフォールバック整理（Phase 5 候補）
+- ロジック・UI レイアウトの変更
+
+**完了条件**:
+- pytest グリーン
+- デスクトップから RepricerWidget が import 可能
+
+---
+
+### Phase 5: 仕入DB連携ファイルの import 整理【リスク低】
+
+**前提**: Phase 0〜4 完了。手動確認 OK。
+
+**目的**: Phase 1 で残っていた仕入DB×改定まわりの try/except import フォールバックを1か所に集約する。
+
+**やること**:
+1. `desktop/utils/_purchase_repricer_imports.py` を新設（elapsed_days / repricer_ladder_table / settings_helper の互換レイヤー）
+2. 以下を compat 経由に変更:
+   - `purchase_repricing_summary.py`（相対 import）
+   - `purchase_ladder_autofill_batch.py`
+   - `purchase_row_edit_dialog.py`（改定関連 utils のみ）
+3. Phase 0 テスト + desktop / python 両方からの import 確認
+
+**やらないこと**:
+- purchase_row_edit_dialog 内の services / database フォールバック（別タスク）
+- product_widget 内の lazy import フォールバック
+
+**完了条件**:
+- pytest グリーン
+- `utils.*` / `desktop.utils.*` 両パスから import 可能
+
+---
+
+### Phase 6: 仕入DBダイアログ・product_widget の import 整理【リスク低】
+
+**前提**: Phase 0〜5 完了。
+
+**目的**: `purchase_row_edit_dialog` の services フォールバックと、改定連携の lazy import を compat レイヤーに集約する。
+
+**やること**:
+1. `desktop/utils/_desktop_import_compat.py` … services / database / summarize（循環回避のため UI は含めない）
+2. `desktop/utils/_desktop_ui_compat.py` … `PurchaseRowEditDialog` のみ（循環 import 防止用に分離）
+3. `purchase_row_edit_dialog.py` … compat 経由に統合
+4. `product_widget.py` / `repricer/result_mixin.py` … 改定連携 lazy import を compat 経由に
+5. pytest + 両パス import 確認
+
+**やらないこと**:
+- `product_widget.py` 全体の import 整理（フリマ・手数料等のモジュールレベルフォールバック）
+- `result_mixin.py` の inventory_only 等の lazy import
+
+**完了条件**:
+- pytest グリーン
+- 循環 import なしで `PurchaseRowEditDialog` / `RepricerWidget` が import 可能
+
+---
+
 ## テスト実行コマンド
 
 ```bash
@@ -212,6 +281,24 @@ Phase 1 から開始してください。Phase 0 のテスト（python/tests/tes
 
 ```
 Phase 2 から開始してください。Phase 0・1 は完了済みです。まず関数の移動先マッピング表を Plan に含めてから実装してください。
+```
+
+### Phase 4 のみ
+
+```
+Phase 4 から開始してください。Phase 0〜3 は完了済みです。
+```
+
+### Phase 5 のみ
+
+```
+Phase 5 から開始してください。Phase 0〜4 は完了済みです。
+```
+
+### Phase 6 のみ
+
+```
+Phase 6 から開始してください。Phase 0〜5 は完了済みです。
 ```
 
 ---

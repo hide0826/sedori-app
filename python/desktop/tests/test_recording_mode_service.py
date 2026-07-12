@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from services.recording_mode_service import (
+from desktop.services.recording_mode_service import (
     create_recording_databases,
     delete_recording_databases,
     set_recording_mode_enabled,
@@ -52,23 +52,23 @@ def isolated_data_dirs(tmp_path: Path, monkeypatch):
     _create_prod_db(prod_db)
 
     monkeypatch.setattr(
-        "services.recording_mode_service.get_data_dir",
+        "desktop.services.recording_mode_service.get_data_dir",
         lambda: data_dir,
     )
     monkeypatch.setattr(
-        "services.recording_mode_service.get_recording_data_dir",
+        "desktop.services.recording_mode_service.get_recording_data_dir",
         lambda: recording_dir,
     )
     monkeypatch.setattr(
-        "services.recording_mode_service.get_recording_hirio_db_path",
+        "desktop.services.recording_mode_service.get_recording_hirio_db_path",
         lambda: str(recording_dir / "hirio.db"),
     )
     monkeypatch.setattr(
-        "services.recording_mode_service.get_recording_product_purchase_db_path",
+        "desktop.services.recording_mode_service.get_recording_product_purchase_db_path",
         lambda: str(recording_dir / "hirio_product_purchase.db"),
     )
     monkeypatch.setattr(
-        "services.recording_mode_service.get_recording_inventory_route_db_path",
+        "desktop.services.recording_mode_service.get_recording_inventory_route_db_path",
         lambda: str(recording_dir / "hirio_inventory_route.db"),
     )
 

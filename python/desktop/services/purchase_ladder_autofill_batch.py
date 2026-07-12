@@ -10,24 +10,21 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from desktop.utils.purchase_elapsed_days import calc_elapsed_days_for_purchase_record
-    from desktop.utils.purchase_repricing_summary import (
-        is_ladder_mode,
-        is_repricing_enabled,
-    )
-    from desktop.utils.repricer_ladder_table import (
+    from utils._purchase_repricer_imports import (
         build_ladder_rules_with_standard_trace,
+        calc_elapsed_days_for_purchase_record,
         ladder_rules_to_json,
     )
+    from utils.purchase_repricing_summary import is_ladder_mode, is_repricing_enabled
 except ImportError:
-    from utils.purchase_elapsed_days import calc_elapsed_days_for_purchase_record  # type: ignore
-    from utils.purchase_repricing_summary import (  # type: ignore
+    from desktop.utils._purchase_repricer_imports import (  # type: ignore
+        build_ladder_rules_with_standard_trace,
+        calc_elapsed_days_for_purchase_record,
+        ladder_rules_to_json,
+    )
+    from desktop.utils.purchase_repricing_summary import (  # type: ignore
         is_ladder_mode,
         is_repricing_enabled,
-    )
-    from utils.repricer_ladder_table import (  # type: ignore
-        build_ladder_rules_with_standard_trace,
-        ladder_rules_to_json,
     )
 
 

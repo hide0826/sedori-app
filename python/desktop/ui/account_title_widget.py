@@ -16,8 +16,11 @@ from PySide6.QtWidgets import (
 )
 import logging
 
-# プロジェクトルートをパスに追加
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+try:
+    from utils.ensure_desktop_sys_path import ensure_desktop_on_sys_path
+except ImportError:
+    from desktop.utils.ensure_desktop_sys_path import ensure_desktop_on_sys_path  # type: ignore
+ensure_desktop_on_sys_path()
 
 from database.account_title_db import AccountTitleDatabase
 from desktop.utils.ui_utils import save_table_header_state, restore_table_header_state

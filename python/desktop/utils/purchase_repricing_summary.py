@@ -9,10 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-try:
-    from desktop.utils.purchase_elapsed_days import calc_elapsed_days_for_purchase_record
-except ImportError:
-    from utils.purchase_elapsed_days import calc_elapsed_days_for_purchase_record  # type: ignore
+from ._purchase_repricer_imports import calc_elapsed_days_for_purchase_record
 
 from utils.repricer_ladder_core import (
     REPRICER_DAY_RANGES,

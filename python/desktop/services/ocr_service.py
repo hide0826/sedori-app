@@ -7,7 +7,6 @@ Tesseract OCRを優先使用、精度が低い場合はGoogle Cloud Vision API�
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 import logging
@@ -35,11 +34,19 @@ except ImportError:
     vision = None
 
 # 画像前処理
-sys.path.insert(0, str(Path(__file__).parent.parent))
+try:
+    from utils.ensure_desktop_sys_path import ensure_desktop_on_sys_path
+except ImportError:
+    from desktop.utils.ensure_desktop_sys_path import ensure_desktop_on_sys_path  # type: ignore
+
+ensure_desktop_on_sys_path()
 try:
     from utils.image_processor import preprocess_image_for_ocr
 except ImportError:
-    preprocess_image_for_ocr = None
+    try:
+        from desktop.utils.image_processor import preprocess_image_for_ocr  # type: ignore
+    except ImportError:
+        preprocess_image_for_ocr = None
 
 logger = logging.getLogger(__name__)
 

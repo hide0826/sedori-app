@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from services.backup_service import (
+from desktop.services.backup_service import (
     BACKUP_FILE_PREFIX,
     create_backup,
     inspect_sqlite_db,
@@ -56,7 +56,7 @@ def test_create_backup_and_restore_roundtrip(tmp_path: Path) -> None:
     (data_dir / "missing_keywords.json").write_text("{}", encoding="utf-8")
 
     # config パスを差し替え
-    import services.backup_service as backup_service
+    import desktop.services.backup_service as backup_service
 
     original_get_config_dir = backup_service.get_config_dir
     backup_service.get_config_dir = lambda: config_dir

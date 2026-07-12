@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
+from .db_path_resolve import resolve_hirio_db_path
+
 
 def normalize_jan_in_record(record: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -59,15 +61,7 @@ class InventoryDatabase:
     
     def __init__(self, db_path: Optional[str] = None):
         """データベースの初期化"""
-        if db_path is None:
-            try:
-                from utils.db_paths import get_hirio_db_path
-            except ImportError:
-                from desktop.utils.db_paths import get_hirio_db_path  # type: ignore
-            db_path = get_hirio_db_path()
-
-        
-        self.db_path = db_path
+        self.db_path = resolve_hirio_db_path(db_path)
         self.conn = None
         self._ensure_db_directory()
         self._init_database()

@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
+from .db_path_resolve import resolve_inventory_route_db_path
+
 
 def normalize_jan_in_record(record: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -55,13 +57,7 @@ class InventoryRouteSnapshotDatabase:
     """仕入データとルートテンプレートの統合スナップショット管理"""
 
     def __init__(self, db_path: Optional[str] = None):
-        if db_path is None:
-            try:
-                from utils.db_paths import get_inventory_route_db_path
-            except ImportError:
-                from desktop.utils.db_paths import get_inventory_route_db_path  # type: ignore
-            db_path = get_inventory_route_db_path()
-        self.db_path = db_path
+        self.db_path = resolve_inventory_route_db_path(db_path)
         self.conn: Optional[sqlite3.Connection] = None
         self._ensure_dir()
         self._connect()

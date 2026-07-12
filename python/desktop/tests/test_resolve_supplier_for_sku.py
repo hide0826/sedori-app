@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from database.store_db import StoreDatabase
+from desktop.database.store_db import StoreDatabase
 
 
 @pytest.fixture

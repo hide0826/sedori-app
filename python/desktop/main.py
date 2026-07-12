@@ -16,6 +16,14 @@ import sys
 import os
 from pathlib import Path
 
+# desktop を sys.path 先頭に載せる（各 widget の重複 insert を減らす前提）
+_desktop_dir = Path(__file__).resolve().parent
+if str(_desktop_dir) not in sys.path:
+    sys.path.insert(0, str(_desktop_dir))
+from utils.ensure_desktop_sys_path import ensure_desktop_on_sys_path
+
+ensure_desktop_on_sys_path()
+
 # 例外ロギング（できるだけ早くセット）
 import traceback
 from datetime import datetime

@@ -10,8 +10,10 @@
 
 import sqlite3
 from pathlib import Path
-from typing import List, Dict, Any, Optional
 from datetime import datetime
+from typing import List, Dict, Any, Optional
+
+from .db_path_resolve import resolve_hirio_db_path
 
 # IN・OUT の両方が空の行は未訪問（履歴表示・店舗スコア集計から除外）
 _SQL_ACTUAL_VISIT = (
@@ -24,15 +26,7 @@ class RouteVisitDatabase:
     """ルート訪問履歴データベース操作クラス"""
 
     def __init__(self, db_path: Optional[str] = None):
-        if db_path is None:
-            try:
-                from utils.db_paths import get_hirio_db_path
-            except ImportError:
-                from desktop.utils.db_paths import get_hirio_db_path  # type: ignore
-            db_path = get_hirio_db_path()
-
-
-        self.db_path = db_path
+        self.db_path = resolve_hirio_db_path(db_path)
         self.conn: Optional[sqlite3.Connection] = None
         self._ensure_db_directory()
         self._init_database()

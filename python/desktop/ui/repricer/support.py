@@ -1,7 +1,25 @@
-"""価格改定ウィジェット: 定数・ワーカー・HTMLヘルパー。"""
+"""価格改定ウィジェット: 定数・ワーカー・HTMLヘルパー・共通 import。"""
 from PySide6.QtWidgets import QTableWidgetItem
 from PySide6.QtCore import QThread, Signal
 from typing import List, Optional
+
+try:
+    from ui.utils.draggable_file_icon import DraggableFileIconWidget
+except ImportError:
+    from desktop.ui.utils.draggable_file_icon import DraggableFileIconWidget  # type: ignore
+
+try:
+    from ui.utils.browser_front_scheduler import schedule_bring_browser_to_front
+except ImportError:
+    from desktop.ui.utils.browser_front_scheduler import schedule_bring_browser_to_front  # type: ignore
+
+try:
+    from desktop.services.keepa_service import KeepaService
+except ImportError:
+    from services.keepa_service import KeepaService  # type: ignore
+
+from utils.error_handler import validate_csv_file, safe_execute
+from utils.settings_helper import get_pricetar_repricing_url
 
 _PRICETAR_BROWSER_TITLE_KEYWORDS = ["pricetar", "プライスター"]
 

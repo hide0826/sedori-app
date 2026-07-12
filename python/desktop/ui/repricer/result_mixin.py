@@ -11,30 +11,16 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSettings, QUrl
 from PySide6.QtGui import QFont, QColor, QDesktopServices
 
-try:
-    from ui.utils.draggable_file_icon import DraggableFileIconWidget
-except ImportError:
-    from desktop.ui.utils.draggable_file_icon import DraggableFileIconWidget  # type: ignore
-
-try:
-    from ui.utils.browser_front_scheduler import schedule_bring_browser_to_front
-except ImportError:
-    from desktop.ui.utils.browser_front_scheduler import schedule_bring_browser_to_front  # type: ignore
-
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
 import re
 from typing import Any, Dict, List, Optional
 
-from utils.error_handler import ErrorHandler, validate_csv_file, safe_execute
-from utils.settings_helper import get_pricetar_repricing_url
-try:
-    from desktop.services.keepa_service import KeepaService
-except ImportError:
-    from services.keepa_service import KeepaService  # type: ignore
+from utils.error_handler import ErrorHandler, safe_execute
 
 from .support import (
+    KeepaService,
     NumericTableWidgetItem,
     RepricerWorker,
     _PRICETAR_BROWSER_TITLE_KEYWORDS,
@@ -43,7 +29,17 @@ from .support import (
     _REPRICER_WORKFLOW_PIPELINE_SEP,
     _format_repricer_status_prefix_html,
     _format_repricer_workflow_pipeline_html,
+    get_pricetar_repricing_url,
+    schedule_bring_browser_to_front,
+    validate_csv_file,
 )
+
+try:
+    from utils._desktop_import_compat import PurchaseDatabase
+    from utils._desktop_ui_compat import PurchaseRowEditDialog
+except ImportError:
+    from desktop.utils._desktop_import_compat import PurchaseDatabase  # type: ignore
+    from desktop.utils._desktop_ui_compat import PurchaseRowEditDialog  # type: ignore
 
 
 class RepricerResultMixin:
@@ -311,10 +307,6 @@ class RepricerResultMixin:
         pw = self.product_widget
         if pw is not None and hasattr(pw, "purchase_history_db"):
             return pw.purchase_history_db
-        try:
-            from database.purchase_db import PurchaseDatabase
-        except ImportError:
-            from desktop.database.purchase_db import PurchaseDatabase  # type: ignore
         return PurchaseDatabase()
 
     def _load_csv_dataframe_for_missing(self) -> Optional[pd.DataFrame]:
@@ -519,10 +511,6 @@ class RepricerResultMixin:
             except (TypeError, ValueError):
                 csv_snap = None
 
-        try:
-            from ui.purchase_row_edit_dialog import PurchaseRowEditDialog
-        except ImportError:
-            from desktop.ui.purchase_row_edit_dialog import PurchaseRowEditDialog
         dialog = PurchaseRowEditDialog(
             record,
             product_widget=pw,

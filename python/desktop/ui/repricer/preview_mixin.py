@@ -1,49 +1,24 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QPushButton, QLabel, QLineEdit, QFileDialog,
-    QTableWidget, QTableWidgetItem, QHeaderView,
-    QProgressBar, QTextEdit, QGroupBox, QSplitter, QApplication,
-    QMessageBox, QFrame, QMenu, QSizePolicy,
-)
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSettings, QUrl
-from PySide6.QtGui import QFont, QColor, QDesktopServices
-
-try:
-    from ui.utils.draggable_file_icon import DraggableFileIconWidget
-except ImportError:
-    from desktop.ui.utils.draggable_file_icon import DraggableFileIconWidget  # type: ignore
-
-try:
-    from ui.utils.browser_front_scheduler import schedule_bring_browser_to_front
-except ImportError:
-    from desktop.ui.utils.browser_front_scheduler import schedule_bring_browser_to_front  # type: ignore
-
-import pandas as pd
-from pathlib import Path
 from datetime import datetime
 import re
-from typing import Any, Dict, List, Optional
 
-from utils.error_handler import ErrorHandler, validate_csv_file, safe_execute
-from utils.settings_helper import get_pricetar_repricing_url
-try:
-    from desktop.services.keepa_service import KeepaService
-except ImportError:
-    from services.keepa_service import KeepaService  # type: ignore
-
-from .support import (
-    NumericTableWidgetItem,
-    RepricerWorker,
-    _PRICETAR_BROWSER_TITLE_KEYWORDS,
-    _REPRICER_ACTION_TO_PIPELINE_STEP,
-    _REPRICER_WORKFLOW_PIPELINE_SEGMENTS,
-    _REPRICER_WORKFLOW_PIPELINE_SEP,
-    _format_repricer_status_prefix_html,
-    _format_repricer_workflow_pipeline_html,
+import pandas as pd
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtWidgets import (
+    QGroupBox,
+    QHBoxLayout,
+    QMenu,
+    QMessageBox,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
 )
+
+from .support import RepricerWorker
 
 
 class RepricerPreviewMixin:

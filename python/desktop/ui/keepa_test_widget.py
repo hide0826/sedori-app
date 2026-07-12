@@ -42,8 +42,11 @@ from PySide6.QtWidgets import (
     QTextEdit,
 )
 
-# プロジェクトルートをパスに追加（python/desktop を sys.path に含める）
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+try:
+    from utils.ensure_desktop_sys_path import ensure_desktop_on_sys_path
+except ImportError:
+    from desktop.utils.ensure_desktop_sys_path import ensure_desktop_on_sys_path  # type: ignore
+ensure_desktop_on_sys_path()
 
 # デスクトップ側servicesを優先して読み込む
 try:

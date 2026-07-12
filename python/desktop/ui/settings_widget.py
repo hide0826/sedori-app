@@ -25,6 +25,56 @@ from datetime import datetime
 from pathlib import Path
 
 
+try:
+    from utils._desktop_import_compat import (
+        DEFAULT_AMAZON_BULK_IMAGE_UPLOAD_URL,
+        DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
+        DEFAULT_PRICETAR_LISTING_URL,
+        DEFAULT_PRICETAR_REPRICING_URL,
+        OCRService,
+        StoreDatabase,
+        create_backup,
+        explain_api_error,
+        get_backup_folder,
+        is_recording_mode,
+        list_backup_archives,
+        record_backup_success,
+        resolve_gemini_flash_model,
+        restore_from_zip,
+        set_recording_mode_enabled,
+        set_recording_mode_enabled_flag,
+        test_fastapi_connection,
+        test_gemini_api,
+        test_keepa_api,
+        test_maps_api,
+    )
+    from utils._desktop_ui_compat import FleaMarketSettingsWidget
+except ImportError:
+    from desktop.utils._desktop_import_compat import (  # type: ignore
+        DEFAULT_AMAZON_BULK_IMAGE_UPLOAD_URL,
+        DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
+        DEFAULT_PRICETAR_LISTING_URL,
+        DEFAULT_PRICETAR_REPRICING_URL,
+        OCRService,
+        StoreDatabase,
+        create_backup,
+        explain_api_error,
+        get_backup_folder,
+        is_recording_mode,
+        list_backup_archives,
+        record_backup_success,
+        resolve_gemini_flash_model,
+        restore_from_zip,
+        set_recording_mode_enabled,
+        set_recording_mode_enabled_flag,
+        test_fastapi_connection,
+        test_gemini_api,
+        test_keepa_api,
+        test_maps_api,
+    )
+    from desktop.utils._desktop_ui_compat import FleaMarketSettingsWidget  # type: ignore
+
+
 class _BackupWorker(QThread):
     finished_with_result = Signal(object)
 
@@ -42,10 +92,6 @@ class _BackupWorker(QThread):
         self._keep_count = keep_count
 
     def run(self) -> None:
-        try:
-            from services.backup_service import create_backup
-        except ImportError:
-            from desktop.services.backup_service import create_backup  # type: ignore
         result = create_backup(
             self._dest_dir,
             include_config=self._include_config,
@@ -69,10 +115,6 @@ class _RestoreWorker(QThread):
         self._include_config = include_config
 
     def run(self) -> None:
-        try:
-            from services.backup_service import restore_from_zip
-        except ImportError:
-            from desktop.services.backup_service import restore_from_zip  # type: ignore
         result = restore_from_zip(
             self._zip_path,
             include_config_override=self._include_config,
@@ -209,10 +251,6 @@ class SettingsWidget(QWidget):
         ext_layout.addWidget(gemini_test_btn, 1, 3)
 
         ext_layout.addWidget(QLabel("Geminiモデル:"), 2, 0)
-        try:
-            from utils.gemini_model_helper import resolve_gemini_flash_model
-        except ImportError:
-            from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
         self.gemini_model_label = QLabel(resolve_gemini_flash_model())
         self.gemini_model_label.setToolTip(
             "HIRIO は gemini-flash-latest（Google 管理の最新 Flash エイリアス）を第一候補に使います。\n"
@@ -517,10 +555,6 @@ class SettingsWidget(QWidget):
         amazon_layout.addWidget(self.amazon_fba_simulator_url_edit, 1, 1)
         amazon_layout.addWidget(QLabel("出品ファイル(L)アップロードURL:"), 2, 0)
         self.amazon_inventory_loader_upload_url_edit = QLineEdit()
-        try:
-            from utils.settings_helper import DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL
-        except ImportError:
-            from desktop.utils.settings_helper import DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL
         self.amazon_inventory_loader_upload_url_edit.setPlaceholderText(
             DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL
         )
@@ -564,7 +598,6 @@ class SettingsWidget(QWidget):
     
     def setup_db_settings_tab(self, parent):
         """DB設定タブ（チェーン店コードマッピング）"""
-        from database.store_db import StoreDatabase
         from ui.store_master_widget import (
             OnlinePlatformListWidget,
             FleaMarketListWidget,
@@ -670,7 +703,6 @@ class SettingsWidget(QWidget):
                 except Exception:
                     pass
                 self.store_db.conn = None
-        from database.store_db import StoreDatabase
         self.store_db = StoreDatabase()
         if hasattr(self, "chain_mapping_table"):
             self.load_chain_mappings()
@@ -791,20 +823,6 @@ class SettingsWidget(QWidget):
         self.settings.setValue("backup/include_config", self.backup_include_config_cb.isChecked())
 
     def _get_backup_service(self):
-        try:
-            from services.backup_service import (
-                create_backup,
-                get_backup_folder,
-                list_backup_archives,
-                restore_from_zip,
-            )
-        except ImportError:
-            from desktop.services.backup_service import (  # type: ignore
-                create_backup,
-                get_backup_folder,
-                list_backup_archives,
-                restore_from_zip,
-            )
         return create_backup, get_backup_folder, list_backup_archives, restore_from_zip
 
     def _refresh_backup_status(self) -> None:
@@ -911,10 +929,6 @@ class SettingsWidget(QWidget):
         self._backup_worker = None
 
         if result.success:
-            try:
-                from services.backup_service import record_backup_success
-            except ImportError:
-                from desktop.services.backup_service import record_backup_success  # type: ignore
             if result.zip_path is not None:
                 record_backup_success(result.zip_path)
             QMessageBox.information(self, "バックアップ完了", result.message)
@@ -1002,10 +1016,6 @@ class SettingsWidget(QWidget):
 
     def setup_flea_market_settings_tab(self, parent):
         """フリマ設定タブ（手数料率・AI出品文案）"""
-        try:
-            from ui.flea_market_settings_widget import FleaMarketSettingsWidget
-        except ImportError:
-            from desktop.ui.flea_market_settings_widget import FleaMarketSettingsWidget
         self.flea_market_settings_widget = FleaMarketSettingsWidget()
         parent.addTab(self.flea_market_settings_widget, "フリマ設定")
 
@@ -1206,10 +1216,6 @@ PySide6 バージョン: {__import__('PySide6').__version__}
     def _sync_recording_mode_status_label(self) -> None:
         if not hasattr(self, "recording_mode_status_label"):
             return
-        try:
-            from utils.settings_helper import is_recording_mode
-        except ImportError:
-            from desktop.utils.settings_helper import is_recording_mode  # type: ignore
         if is_recording_mode():
             self.recording_mode_status_label.setText("現在: デモモード ON（仮想DB使用中）")
             self.recording_mode_status_label.setStyleSheet("color: #e53935; font-weight: bold;")
@@ -1222,16 +1228,6 @@ PySide6 バージョン: {__import__('PySide6').__version__}
 
     def _commit_recording_mode_change(self, new_recording: bool) -> bool:
         """デモモードON/OFFを確定。キャンセル時はチェックを戻した値を返す。"""
-        try:
-            from utils.settings_helper import is_recording_mode, set_recording_mode_enabled_flag
-            from services.recording_mode_service import set_recording_mode_enabled
-        except ImportError:
-            from desktop.utils.settings_helper import (  # type: ignore
-                is_recording_mode,
-                set_recording_mode_enabled_flag,
-            )
-            from desktop.services.recording_mode_service import set_recording_mode_enabled  # type: ignore
-
         previous_recording = is_recording_mode()
         if new_recording == previous_recording:
             return new_recording
@@ -1282,10 +1278,6 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         """デモモードチェック変更時に即反映（3-6-9版と同様）。"""
         if getattr(self, "_recording_mode_loading", False):
             return
-        try:
-            from utils.settings_helper import is_recording_mode
-        except ImportError:
-            from desktop.utils.settings_helper import is_recording_mode  # type: ignore
         before = is_recording_mode()
         final = self._commit_recording_mode_change(checked)
         if final != checked:
@@ -1342,11 +1334,6 @@ PySide6 バージョン: {__import__('PySide6').__version__}
 
     def test_api_connection(self):
         """API接続テスト"""
-        try:
-            from utils.api_test_helper import test_fastapi_connection
-        except ImportError:
-            from desktop.utils.api_test_helper import test_fastapi_connection
-
         original_url = self.api_client.base_url
         self.api_client.base_url = self.api_url_edit.text()
         try:
@@ -1360,58 +1347,35 @@ PySide6 バージョン: {__import__('PySide6').__version__}
 
     def test_maps_api_key(self):
         """Google Maps APIキーの接続テスト"""
-        try:
-            from utils.api_test_helper import test_maps_api
-        except ImportError:
-            from desktop.utils.api_test_helper import test_maps_api
         result = test_maps_api(self.maps_api_key_edit.text())
         self._show_api_test_result("Google Maps APIテスト", result)
 
     def test_gemini_api_key(self):
         """Gemini APIキー・モデルの接続テスト"""
-        try:
-            from utils.api_test_helper import test_gemini_api
-        except ImportError:
-            from desktop.utils.api_test_helper import test_gemini_api
         result = test_gemini_api(self.gemini_api_key_edit.text())
         self._show_api_test_result("Gemini APIテスト", result)
 
     def test_keepa_api_key(self):
         """Keepa APIキーの接続テスト"""
-        try:
-            from utils.api_test_helper import test_keepa_api
-        except ImportError:
-            from desktop.utils.api_test_helper import test_keepa_api
         result = test_keepa_api(self.keepa_api_key_edit.text())
         self._show_api_test_result("Keepa APIテスト", result)
     
     def test_ocr_settings(self):
         """OCR設定のテスト"""
         try:
-            try:
-                from utils.api_test_helper import explain_api_error
-            except ImportError:
-                from desktop.utils.api_test_helper import explain_api_error
-
             tesseract_cmd = self.tesseract_cmd_edit.text().strip() or None
             tessdata_dir = self.tessdata_dir_edit.text().strip() or None
             gcv_credentials = self.gcv_credentials_edit.text().strip() or None
             
             # OCRServiceをインポートしてテスト
-            import sys
-            import os
-            from pathlib import Path
-            # python/desktop をパスに追加
-            desktop_dir = Path(__file__).parent.parent
-            sys.path.insert(0, str(desktop_dir))
-            
-            # デスクトップ側servicesを優先して読み込む
             try:
-                from services.ocr_service import OCRService  # python/desktop/services
+                from utils.ensure_desktop_sys_path import ensure_desktop_on_sys_path
             except ImportError:
-                # フォールバック
-                from desktop.services.ocr_service import OCRService
+                from desktop.utils.ensure_desktop_sys_path import ensure_desktop_on_sys_path  # type: ignore
+            ensure_desktop_on_sys_path()
             
+            # デスクトップ側servicesを優先して読み込む（OCRService は先頭 compat から）
+
             # 環境変数を一時的に設定
             old_tessdata_prefix = os.environ.get('TESSDATA_PREFIX')
             if tessdata_dir:
@@ -1508,10 +1472,6 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                     del os.environ['TESSDATA_PREFIX']
                     
         except Exception as e:
-            try:
-                from utils.api_test_helper import explain_api_error
-            except ImportError:
-                from desktop.utils.api_test_helper import explain_api_error
             QMessageBox.critical(
                 self,
                 "OCR設定テストエラー",
@@ -1572,18 +1532,6 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                 "https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP"
             )
         )
-        try:
-            from utils.settings_helper import (
-                DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
-                DEFAULT_PRICETAR_LISTING_URL,
-                DEFAULT_PRICETAR_REPRICING_URL,
-            )
-        except ImportError:
-            from desktop.utils.settings_helper import (
-                DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
-                DEFAULT_PRICETAR_LISTING_URL,
-                DEFAULT_PRICETAR_REPRICING_URL,
-            )
         self.amazon_inventory_loader_upload_url_edit.setText(
             self.settings.value(
                 "amazon/inventory_loader_upload_url",
@@ -1602,10 +1550,6 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.recording_mode_cb.setChecked(self.settings.value("recording/enabled", False, type=bool))
         self._recording_mode_loading = False
         self._sync_recording_mode_status_label()
-        try:
-            from utils.gemini_model_helper import resolve_gemini_flash_model
-        except ImportError:
-            from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
         gemini_model = resolve_gemini_flash_model(self.settings.value("ocr/gemini_model"))
         if hasattr(self, "gemini_model_label"):
             self.gemini_model_label.setText(gemini_model)
@@ -1685,10 +1629,6 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             self.settings.setValue("ocr/gcv_credentials", self.gcv_credentials_edit.text())
             self.settings.setValue("ocr/gemini_api_key", self.gemini_api_key_edit.text())
             self.settings.setValue("maps/api_key", self.maps_api_key_edit.text())
-            try:
-                from utils.gemini_model_helper import resolve_gemini_flash_model
-            except ImportError:
-                from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
             self.settings.setValue("ocr/gemini_model", resolve_gemini_flash_model())
             # Keepa API設定
             self.settings.setValue("keepa/api_key", self.keepa_api_key_edit.text())
@@ -1699,20 +1639,6 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                 self.amazon_fba_simulator_url_edit.text().strip()
                 or "https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP"
             )
-            try:
-                from utils.settings_helper import (
-                    DEFAULT_AMAZON_BULK_IMAGE_UPLOAD_URL,
-                    DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
-                    DEFAULT_PRICETAR_LISTING_URL,
-                    DEFAULT_PRICETAR_REPRICING_URL,
-                )
-            except ImportError:
-                from desktop.utils.settings_helper import (
-                    DEFAULT_AMAZON_BULK_IMAGE_UPLOAD_URL,
-                    DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
-                    DEFAULT_PRICETAR_LISTING_URL,
-                    DEFAULT_PRICETAR_REPRICING_URL,
-                )
             self.settings.setValue(
                 "amazon/inventory_loader_upload_url",
                 self.amazon_inventory_loader_upload_url_edit.text().strip()
@@ -1790,25 +1716,9 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.keepa_api_key_edit.setText("")
         self.amazon_seller_id_edit.setText("")
         self.amazon_fba_simulator_url_edit.setText("https://sellercentral.amazon.co.jp/revcalpublic?lang=ja_JP")
-        try:
-            from utils.settings_helper import (
-                DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
-                DEFAULT_PRICETAR_LISTING_URL,
-                DEFAULT_PRICETAR_REPRICING_URL,
-            )
-        except ImportError:
-            from desktop.utils.settings_helper import (
-                DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
-                DEFAULT_PRICETAR_LISTING_URL,
-                DEFAULT_PRICETAR_REPRICING_URL,
-            )
         self.amazon_inventory_loader_upload_url_edit.setText(DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL)
         self.pricetar_listing_url_edit.setText(DEFAULT_PRICETAR_LISTING_URL)
         self.pricetar_repricing_url_edit.setText(DEFAULT_PRICETAR_REPRICING_URL)
-        try:
-            from utils.gemini_model_helper import resolve_gemini_flash_model
-        except ImportError:
-            from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
         if hasattr(self, "gemini_model_label"):
             self.gemini_model_label.setText(resolve_gemini_flash_model())
         self.pro_enabled_cb.setChecked(True)  # 開発段階ではデフォルトON
@@ -1817,10 +1727,6 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         
     def get_current_settings(self):
         """現在の設定を辞書で取得"""
-        try:
-            from utils.gemini_model_helper import resolve_gemini_flash_model
-        except ImportError:
-            from desktop.utils.gemini_model_helper import resolve_gemini_flash_model
         return {
             "api": {
                 "url": self.api_url_edit.text(),

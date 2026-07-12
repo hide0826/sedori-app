@@ -1,7 +1,7 @@
 """仕入DBテーブル段階読み込み設定のテスト。"""
 from __future__ import annotations
 
-from services.purchase_table_incremental import (
+from desktop.services.purchase_table_incremental import (
     DEFAULT_AUGMENT_BATCH_SIZE,
     DEFAULT_ENABLED,
     DEFAULT_PAGE_SIZE,

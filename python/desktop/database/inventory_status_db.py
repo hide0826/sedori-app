@@ -17,17 +17,12 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .db_path_resolve import resolve_hirio_db_path
+
 
 class InventoryStatusDatabase:
     def __init__(self, db_path: Optional[str] = None):
-        if db_path is None:
-            try:
-                from utils.db_paths import get_hirio_db_path
-            except ImportError:
-                from desktop.utils.db_paths import get_hirio_db_path  # type: ignore
-            db_path = get_hirio_db_path()
-
-        self.db_path = db_path
+        self.db_path = resolve_hirio_db_path(db_path)
         self.conn: Optional[sqlite3.Connection] = None
         self._ensure_dir()
         self._connect()

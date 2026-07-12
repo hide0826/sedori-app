@@ -24,8 +24,11 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import logging
 
-# プロジェクトルートをパスに追加
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+try:
+    from utils.ensure_desktop_sys_path import ensure_desktop_on_sys_path
+except ImportError:
+    from desktop.utils.ensure_desktop_sys_path import ensure_desktop_on_sys_path  # type: ignore
+ensure_desktop_on_sys_path()
 
 from database.route_db import RouteDatabase
 from utils.data_exporter import DataExporter

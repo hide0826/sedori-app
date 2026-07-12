@@ -1,3 +1,395 @@
+## 2026-07-12 マイルストーン: デスクトップリファクタ道筋（主要トラック完了）
+
+- **道筋**: [`docs/desktop_refactoring_roadmap_plan_prompt.md`](desktop_refactoring_roadmap_plan_prompt.md)
+- **完了サマリ**:
+  - 価格改定 Phase 0〜6
+  - Track A 0〜3（`ui/product/` + `ui/purchase_row_edit/`）手動確認 OK
+  - Track B 0〜1（`ui/inventory/`）手動確認 OK
+  - Track X 0〜2（`db_path_resolve` / settings import / `ensure_desktop_sys_path`）手動確認 OK
+  - Track C 0〜1（`ui/receipt/`）手動確認 OK
+  - Track D 0〜1（`ui/image_manager/`）手動確認は後回し可
+  - Track E Keepa / route_summary / store_master 0〜1
+  - desktop/tests **167件**
+- **次（任意）**: purchase_inventory_only、分割パッケージ内 path 残置整理、価格改定仕上げ
+- **手動確認後回し**: 画像管理タブ・ルート選択タブ（エラー時に修正）
+
+## 2026-07-12 Track A Phase 3: purchase_row_edit_dialog → ui/purchase_row_edit/ 分割
+
+- **目的**: 約 1,728 行の仕入行編集ダイアログをパネル単位に分割。挙動不変（コピペ移動のみ）。
+- **新規**（`python/desktop/ui/purchase_row_edit/`）:
+  - `support.py` … 定数・純関数・Win32 ヘルパ
+  - `tp_mixin.py` … TP 入力・利益率・帯ハイライト
+  - `ladder_mixin.py` … 月別ラダー UI 連携
+  - `fee_channel_mixin.py` … チャネル・手数料・SKU日付
+  - `dialog.py` … オーケストレーター（`_setup_ui` / `_apply` / Keepa 等）
+  - `__init__.py`
+- **シム**: `purchase_row_edit_dialog.py` → `from ui.purchase_row_edit.dialog import PurchaseRowEditDialog`
+- **バックアップ**: `purchase_row_edit_dialog.py.bak_phase3`
+- **未変更**: `repricer_ladder_table` 等 utils、`_desktop_ui_compat` の import パス
+- **検証**: PurchaseRowEditDialog import OK（MRO: Tp/Ladder/FeeChannel）、desktop/tests **167件**パス
+- **手動確認（ユーザー）**: 仕入DB → 行編集で TP・月別ラダー・手数料・保存が問題ないこと → **OK**
+- **次**: 任意（余力があれば purchase_inventory_only 等）
+
+## 2026-07-12 Track X Phase 2 フォロー: `No module named 'desktop'` 起動修正
+
+- **原因**: `ensure_desktop_on_sys_path` が `python/desktop` のみ追加し、`from desktop.utils.*`（仕入DB 等）に必要な `python/` が path に無かった
+- **修正**:
+  - `ensure_desktop_sys_path.py` … desktop を先頭、続けて python/ を追加（`utils` は desktop 優先、`desktop.*` も解決）
+  - 平坦 UI のヘルパー import に `desktop.utils` フォールバックを追加
+  - テストで path 順序と `desktop.utils.ui_utils` import を確認
+- **検証**: desktop cwd 相当で ProductWidget import OK、desktop/tests グリーン
+- **手動確認 OK**: 起動・主要タブが開けることを確認（2026-07-12）
+
+## 2026-07-12 Track X Phase 2: 起動時 sys.path 整理
+
+- **目的**: `python/desktop` を sys.path に載せる処理を共通化し、平坦 UI の重複 insert を減らす。分割済みパッケージ・GCS・scripts は未変更。
+- **新規**:
+  - `utils/ensure_desktop_sys_path.py` … `ensure_desktop_on_sys_path()` / `get_desktop_root()`
+  - `tests/test_ensure_desktop_sys_path.py`（3件）
+- **更新**:
+  - `main.py` … 起動直後にヘルパー呼び出し
+  - 平坦 UI 約 19 ファイル（`top_widget` / `analysis_widget` / … / `company_master` / `barcode_checker` / `route_list` 等）
+  - `ocr_service.py` / `settings_widget.py`（OCR テスト箇所）
+- **未変更**: `ui/inventory|receipt|image_manager|route_summary|store_master/` 内 path、GCS 動的 insert、`journal_entry_widget`、scripts
+- **検証**: desktop/tests **167件**パス（旧164 + 3）
+- **手動確認（ユーザー）**: アプリ起動 → TOP / 設定 / 店舗マスタ / 仕入DB で import エラーが出ないこと → **OK**
+- **次**: 任意（Track A Phase 3 等）
+
+## 2026-07-12 Track E store_master Phase 1: store_master_widget → ui/store_master/ 分割
+
+- **目的**: 約 3,954 行の `store_master_widget.py` をドメイン別に分割。挙動不変（コピペ移動のみ）。
+- **新規**（`python/desktop/ui/store_master/`）:
+  - `widget.py` … `StoreMasterWidget`（タブ容器）
+  - `support.py` … Google Maps import フォールバック
+  - `store_dialogs.py` … `StoreEditDialog` / `CustomFieldEditDialog`
+  - `route_dialogs.py` … `DraggableStoreListWidget` / `RouteManagementDialog`
+  - `store_list.py` … `StoreListWidget`
+  - `expense.py` / `online.py` / `flea_users.py`
+  - `__init__.py`
+- **シム**: `store_master_widget.py` → 外部利用クラスも再エクスポート（settings / custom_fields / inventory 互換）
+- **バックアップ**: `store_master_widget.py.bak_phase1`
+- **互換**: `sys.path`=`../..`、`@staticmethod` 維持
+- **テスト**: `test_store_master_helpers.py` の AST ソースパスを分割先へ更新
+- **検証**: StoreMasterWidget import OK、desktop/tests **164件**パス
+- **次**: 任意（Track X Phase 2 / Track A Phase 3 等）。店舗マスタ手動確認は後回し可
+
+## 2026-07-12 Track E store_master Phase 0: 店舗マスタ安全網テスト
+
+- **目的**: `store_master_widget` 分割前の純関数 pytest 安全網。UI・DB・ネットワークは未変更。
+- **新規**（`python/desktop/tests/`）:
+  - `test_store_master_helpers.py`（9件）
+    - `StoreEditDialog._coerce_coordinate`（空/不正→None・数値）
+    - `StoreListWidget._store_has_coordinates`（両座標あり/欠落・不正）
+    - `OnlinePlatformEditDialog._suggest_platform_tokens`（既知名・フォールバック）
+    - `FleaMarketEditDialog._suggest_tokens`（既知名・フォールバック）
+    - `store_master_auto_register._normalize_entries`（重複排除・非店舗コード除外）
+  - `_source_symbol_loader` で AST 抽出（ウィジェット本体は未 import）
+- **未変更**: `store_master_widget.py` / DB スキーマ / `test_route_code_ensure.py`
+- **検証**: desktop/tests **164件**パス（旧155 + 9）
+- **次**: Track E store_master Phase 1（`ui/store_master/` 分割）
+
+## 2026-07-12 道筋ドキュメント更新（次チャット用・store_master Phase 0）
+
+- **更新**: `docs/desktop_refactoring_roadmap_plan_prompt.md`
+  - route_summary Phase 0〜1 完了を現在地・チェックリストに反映
+  - **Track E store_master Phase 0** の仕様（テスト候補・やらないこと・検証コマンド）を追加
+  - 次チャット用コピペ文を先頭に明示（Plan モードで MD を @ して送るだけ）
+- **次**: 新チャットで本 MD を @ して store_master Phase 0（コピペ文どおり）→ **実施済み**
+
+## 2026-07-12 Track E route_summary Phase 1: route_summary_widget → ui/route_summary/ 分割
+
+- **目的**: 約 4,090 行の `route_summary_widget.py` を責務ごとに分割。挙動不変（コピペ移動のみ）。
+- **新規**（`python/desktop/ui/route_summary/`）:
+  - `widget.py` … オーケストレーター（`data_saved` Signal / `__init__` / setup / パネル）
+  - `support.py` … 定数・ヘルパー・WebEngine・SafeInternalMoveTable・Dialog×2
+  - `workflow_mixin.py` / `map_mixin.py` / `visit_table_mixin.py`
+  - `template_mixin.py` / `matching_mixin.py` / `persistence_mixin.py` / `calc_mixin.py`
+  - `__init__.py`
+- **シム**: `route_summary_widget.py` → `from ui.route_summary.widget import RouteSummaryWidget`
+- **バックアップ**: `route_summary_widget.py.bak_phase1`
+- **互換**: `sys.path`=`../..`、自己参照を `RouteSummaryVisitTableMixin._merge_notes...` へ
+- **テスト**: `test_route_summary_helpers.py` の AST ソースパスを support / visit_table_mixin へ更新
+- **検証**: RouteSummaryWidget import OK（`data_saved` 含む）、desktop/tests **155件**パス
+- **次**: store_master Phase 0（必要時）。ルート選択タブ手動確認は後回し可
+
+## 2026-07-12 Track E route_summary Phase 0: ルート集計安全網テスト
+
+- **目的**: `route_summary_widget` 分割前の純関数 pytest 安全網。UI・DB・ネットワークは未変更。
+- **新規**（`python/desktop/tests/`）:
+  - `test_route_summary_helpers.py`（4件）— template_include / notes マージ / store_code
+  - `test_route_template_time_validation.py`（4件）— 出発・帰宅・店舗 IN/OUT
+  - `test_route_visit_normalize.py`（3件）— 訪問順・滞在/移動・フォルダ名パース
+  - `_source_symbol_loader.py` … AST で関数/メソッド抽出（`python/utils` vs `desktop/utils` 衝突回避）
+- **未変更**: `route_summary_widget.py` / サービス本体
+- **検証**: desktop/tests **155件**パス（旧144 + 11）
+- **次**: Track E route_summary Phase 1（`ui/route_summary/` 分割）
+
+## 2026-07-12 Track E Phase 1: keepa_service → services/keepa/ 分割
+
+- **目的**: 約 1,245 行の `keepa_service.py` を責務ごとに分割。挙動不変（コピペ移動のみ）。
+- **新規**（`python/desktop/services/keepa/`）:
+  - `models.py` … `IMAGE_BASE_URL` / `KeepaProductInfo` / `KeepaOfferRow` / `Keepa369AnalysisResult`
+  - `price_helpers.py` … `KeepaPriceHelpersMixin`（価格抽出・円スケール・コンディション価格）
+  - `offer_helpers.py` … `KeepaOfferHelpersMixin`（offerCSV・live offers・FBA）
+  - `analysis_369.py` … `Keepa369AnalysisMixin`（時系列・369・Gemini）
+  - `service.py` … `KeepaService`（API・fetch・Mixin 束ね）
+  - `__init__.py` … 公開シンボル再エクスポート
+- **シム**: `keepa_service.py` → `from .keepa import KeepaService, ...`
+- **バックアップ**: `keepa_service.py.bak_phase1`
+- **自己参照**: `KeepaService._offer_csv_numbers` → `KeepaOfferHelpersMixin._offer_csv_numbers`（モジュール分割後の NameError 防止）
+- **未変更**: Keepa API・リトライ・Gemini プロンプト・呼び出し元 UI
+- **検証**: KeepaService / dataclass import OK、desktop/tests **144件**パス
+- **次**: Track E その他（route_summary / store_master・必要時）。画像管理手動確認は後回し可
+
+## 2026-07-12 道筋ドキュメント更新（次チャット用・Track E Phase 1）
+
+- **更新**: `docs/desktop_refactoring_roadmap_plan_prompt.md`
+  - Track E Phase 0 完了・desktop/tests **144件**を現在地に反映
+  - 画像管理手動確認は後回し可と明記
+  - **Track E Phase 1**（keepa_service 分割）の分割案・シム方針・検証コマンドを具体化
+  - 次チャット用コピペ文を先頭に明示
+- **次**: （実施済）Track E Phase 1
+
+## 2026-07-12 Track E Phase 0: Keepa サービス安全網テスト
+
+- **目的**: `keepa_service` 分割前の純関数 pytest 安全網。API・UI・リネーム規則は未変更。
+- **新規**: `test_keepa_service.py`（10件）
+  - `_extract_latest_price` / `_extract_latest_rank`
+  - `_offer_csv_numbers` / `_offer_last_landed_list_price`
+  - `_maybe_scale_to_jpy`（ヒューリスティック・参照価格あり）
+  - `_count_sales_drops` / `_series_avg_and_range`
+  - `_condition_label_jp` / `_to_float_or_none`
+- **方針**: 画像管理タブ手動確認は後回し（テスト画像なし）。エラー時に修正。
+- **検証**: desktop/tests **144件**パス（旧134件 + 10件）
+- **次**: Track E Phase 1（`keepa_service` モジュール分割）
+
+## 2026-07-12 Track D Phase 1: image_manager_widget → ui/image_manager/ 分割
+
+- **目的**: 約 6,400 行の `image_manager_widget.py` を責務ごとに分割。挙動不変（コピペ移動のみ）。
+- **新規**（`python/desktop/ui/image_manager/`）:
+  - `widget.py` … オーケストレーター（Signal / `__init__` / `setup_ui` / prefs）
+  - `support.py` … 定数・ヘルパー・Dialog・ImageLoadThread・カスタムリスト
+  - `workflow_mixin.py` / `scan_mixin.py` / `tree_mixin.py` / `preview_mixin.py`
+  - `rename_mixin.py` / `purchase_link_mixin.py` / `registration_mixin.py`
+  - `gcs_mixin.py` / `amazon_template_mixin.py`
+  - `__init__.py`
+- **シム**: `image_manager_widget.py` → `from ui.image_manager.widget import ImageManagerWidget`
+- **バックアップ**: `image_manager_widget.py.bak_phase1`
+- **階層補正**: snapshot=`parents[2]`(desktop)、config=`parents[4]`(repo)、GCS/amazon loader は python+desktop 複数候補、ListingLoader=`parents[3]`
+- **維持**: `_preview_image_ready` / `_preview_image_error`、`ImageLoadThread` Signal、`@staticmethod _pil_image_to_qpixmap`
+- **検証**: ImageManagerWidget import OK、desktop/tests **134件**パス（当時）
+- **次**: （実施済）Track E Phase 0。画像管理手動確認は後回し可
+
+## 2026-07-12 Track D Phase 0: 画像管理安全網テスト
+
+- **目的**: `image_manager_widget` 分割前の純関数 pytest 安全網。UI・リネーム規則・ZIP 方針は未変更。
+- **拡充**: `test_amazon_image_naming.py`（11→18件）
+  - `is_hirio_rerename_temp_filename` / 空SKU / Amazon既命名の rename plan / PT09 無効 / path_getter / カメラ仮名除外
+- **新規**: `test_image_service.py`（9件）
+  - `extract_jan_from_text` / `group_by_jan` / `resolve_auto_correct_preset` / `_save_format_for_path` / `apply_product_auto_correct`
+- **見送り**: ウィジェット先頭ヘルパー（`_normalize_jan_for_match` 等）の直接テスト
+  - 原因: `image_manager_widget` import 時に `python/utils` が `desktop/utils` より先に解決され `utils.amazon_image_naming` が衝突
+  - 本番コード変更なし方針のため Phase 0 では抽出せず、Phase 1 分割時に再挑戦
+- **検証**: desktop/tests **134件**パス（旧118件 + 16件）
+- **次**: （実施済）Track D Phase 1
+
+## 2026-07-12 道筋ドキュメント更新（次チャット用・Track D）
+
+- **更新**: `docs/desktop_refactoring_roadmap_plan_prompt.md`
+  - Track C Phase 1 手動確認 OK（OCR・GCS）を反映
+  - 現在地・チェックリスト・教訓（Signal / `__file__` 階層）を同期
+  - 次チャット用コピペ文を先頭に明示（当時 **Track D Phase 0**）
+- **次**: （実施済）Track D Phase 0
+
+## 2026-07-12 Track C Phase 1 フォロー: GCSパス・スナップショット階層の修正
+
+- **現象**: GCSアップロードで `No module named 'utils.gcs_uploader'`
+- **原因**: 分割後 `ui/receipt/gcs_mixin.py` から見た `../..` が `python/` ではなく `desktop/` を指していた
+- **修正**:
+  - `gcs_mixin._load_gcs_uploader` … `python/` を優先候補に（3階層上）
+  - `widget.py` スナップショット … `parents[3]` で分割前と同じ `python/data/receipt_snapshots`
+  - エラーログパス … `parents[2]` で `desktop/desktop_error.log` に復元
+- **次**: 証憑タブで GCSアップロードを再確認
+
+## 2026-07-12 Track C Phase 1 フォロー: receipt_processed Signal 欠落修正
+
+- **現象**: 全件OCR完了時 `AttributeError: 'ReceiptWidget' has no attribute 'receipt_processed'`
+- **原因**: 分割時にクラス属性 `receipt_processed = Signal(dict)` が mixin 抽出対象外で欠落
+- **修正**: `ui/receipt/widget.py` の `ReceiptWidget` に Signal を復元
+- **次**: 証憑タブで全件OCRを再確認
+
+## 2026-07-12 Track C Phase 1: receipt_widget → ui/receipt/ 分割
+
+- **目的**: 約 10,000 行の `receipt_widget.py` を責務ごとに分割。挙動不変（コピペ移動のみ）。
+- **新規**（`python/desktop/ui/receipt/`）:
+  - `widget.py` … オーケストレーター（init / setup / DB配線）
+  - `support.py` … 定数・WF HTML・Delegates・SnapshotDialog・OCRThread
+  - `snapshot_mixin.py` / `workflow_mixin.py` / `ocr_mixin.py`
+  - `matching_mixin.py` / `table_mixin.py` / `gcs_mixin.py`
+  - `rename_mixin.py` / `warranty_mixin.py` / `linkage_mixin.py`
+  - `__init__.py`
+- **シム**: `receipt_widget.py` → `from ui.receipt.widget import ReceiptWidget`
+- **バックアップ**: `receipt_widget.py.bak_phase1`
+- **検証**: ReceiptWidget / EvidenceManagerWidget import OK、desktop/tests **118件**パス
+- **次**: 証憑タブ（レシート）手動確認後、おすすめ順で Track D Phase 0
+
+## 2026-07-12 Track C Phase 0: レシート安全網テスト
+
+- **目的**: `receipt_widget` 分割前の純関数 pytest 安全網。UI・OCR・保存形式は未変更。
+- **拡充**: `test_receipt_sku_linking.py`（店舗コード正規化・日付/時刻・画像優先マッチ等）
+- **新規**（`python/desktop/tests/`）:
+  - `test_receipt_purchase_price_policy.py` … 差額許容 30円
+  - `test_receipt_matching_normalize.py` … 電話/テキスト正規化・明細合計
+  - `test_receipt_parse_text.py` … OCRテキストから日付・時刻抽出（DB未初期化）
+- **検証**: desktop/tests **118件**パス
+- **次**: Track C Phase 1（`receipt_widget` → `ui/receipt/` 分割）※手動確認必須
+
+## 2026-07-12 Track X Phase 1: settings_widget の import 整理
+
+- **目的**: `settings_widget.py` に散在する ImportError フォールバックを compat に集約。設定の挙動・デフォルト値は不変。
+- **拡張**:
+  - `_desktop_import_compat.py` … backup / recording / OCR / settings_helper / api_test_helper / gemini / StoreDatabase
+  - `_desktop_ui_compat.py` … `FleaMarketSettingsWidget`
+- **変更**: `settings_widget.py` 先頭1ブロックから一括 import。メソッド内・Worker 内の重複 try/except を削除
+- **検証**: SettingsWidget import OK、desktop/tests **96件**パス
+- **次**: Track X Phase 2（sys.path・任意）または Track C Phase 0（レシート安全網）
+
+## 2026-07-12 Track X Phase 0: DB bootstrap（db_paths import）統一
+
+- **目的**: `database/*.py` に散在する `utils.db_paths` / `desktop.utils.db_paths` の try/except を1系統に集約。挙動・スキーマ不変。
+- **新規**: `python/desktop/database/db_path_resolve.py`
+  - `resolve_hirio_db_path` / `resolve_product_purchase_db_path` / `resolve_inventory_route_db_path`
+- **変更**: database 18ファイルが相対 import（`from .db_path_resolve import ...`）でパス解決
+- **未変更**: `db_paths.py` / `db_bootstrap.py` 本体ロジック、UI、スキーマ
+- **検証**: PurchaseDatabase 等 import OK、desktop/tests **96件**パス
+- **次**: Track X Phase 1（`settings_widget` の import 整理）
+
+## 2026-07-12 道筋ドキュメント更新（次チャット用）
+
+- **更新**: `docs/desktop_refactoring_roadmap_plan_prompt.md`
+  - 現在地・完了済み（A0〜2 / B0〜1）・分割時の教訓を整理
+  - 次チャット用のコピペ文を先頭に明示（Track X Phase 0）
+  - 貼り付けプロンプト／ファイル一覧／チェックリストを現状に同期
+- **次**: 在庫タブ手動確認 OK 後、新チャットで本 MD を @ して Track X Phase 0
+
+## 2026-07-12 Track B Phase 1: inventory_widget → ui/inventory/ 分割
+
+- **目的**: 約 7,800 行の `inventory_widget.py` を責務ごとに分割。挙動不変（コピペ移動のみ）。
+- **新規**（`python/desktop/ui/inventory/`）:
+  - `widget.py` … オーケストレーター（Signal / setup / ダイアログ起動）
+  - `support.py` … 定数・WF HTML・AI Thread
+  - `row_edit_dialog.py` / `spot_purchase_dialog.py` / `single_purchase_dialog.py` / `snapshot_dialog.py`
+  - `csv_import_mixin.py` / `table_mixin.py` / `route_match_mixin.py`
+  - `persistence_mixin.py` / `listing_mixin.py` / `workflow_mixin.py`
+  - `__init__.py`
+- **シム**: `inventory_widget.py` → `from ui.inventory.widget import InventoryWidget`
+- **バックアップ**: `inventory_widget.py.bak_phase1`
+- **検証**: InventoryWidget import OK（Signal 含む）、desktop/tests 96件パス
+- **次**: 在庫タブ手動確認後、おすすめ順で Track X Phase 0
+
+## 2026-07-12 Track B Phase 0: 在庫まわり安全網テスト
+
+- **目的**: `inventory_widget` 分割前の純関数 pytest 安全網。本体は未変更。Track A Phase 3 は任意のためスキップ。
+- **新規**（`python/desktop/tests/`）:
+  - `test_inventory_store_matching.py` … ルート日付付与・店舗照合
+  - `test_condition_labels.py` … コンディション番号↔ラベル
+  - `test_inventory_jan_normalize.py` … JAN `.0` 正規化
+  - `test_csv_io_validate.py` … CSV 構造検証・正規化
+- **拡充**: `test_purchase_inventory_only.py`（SKU正規化・列検出・ステータス・upsert）
+- **検証**: desktop/tests **96件**パス
+- **次**: Track B Phase 1（`inventory_widget` → `ui/inventory/` 分割）
+
+## 2026-07-12 Track A Phase 2 フォロー: 検索 NameError 修正
+
+- **現象**: 仕入DB検索時 `NameError: name 'ProductWidget' is not defined` → アプリ終了
+- **原因**: mixin 分割後も `_infer_gcs_receipt_url` 内で旧クラス名 `ProductWidget` を参照
+- **修正**: `PurchaseTableMixin._receipt_image_lookup_key` に置換（`purchase_table_mixin.py`）
+- **手動確認**: 検索再開 OK 前提で Track B へ続行
+
+## 2026-07-12 Track A Phase 2: product_widget → ui/product/ 分割
+
+- **目的**: 約 6,180 行の `product_widget.py` を責務ごとに分割。挙動不変（コピペ移動のみ）。
+- **新規**（`python/desktop/ui/product/`）:
+  - `widget.py` … オーケストレーター（init / setup_* / 商品・販売タブ）
+  - `support.py` … 定数・ヘルパー・UI補助クラス・ProductEditDialog
+  - `purchase_table_mixin.py` … 一覧・フィルタ・増分描画
+  - `purchase_batch_mixin.py` … TP/月別/店舗コード一括
+  - `purchase_edit_mixin.py` … 行編集・スナップショット・画像JAN
+  - `__init__.py`
+- **シム**: `product_widget.py` → `from ui.product.widget import ProductWidget`
+- **バックアップ**: `product_widget.py.bak_phase2`
+- **検証**: ProductWidget import OK、desktop/tests 当初73件・repricer 31件パス
+- **次**: 手動確認後、おすすめ順で Track B Phase 0（Phase 3 は任意）
+
+## 2026-07-12 道筋ドキュメント進捗更新（次チャット用）
+
+- **更新**: `docs/desktop_refactoring_roadmap_plan_prompt.md`
+  - 「現在地」表・完了済み Phase 0/1 の記録
+  - 次は Track A Phase 2（`ui/product/` 分割）
+  - Plan モード用の追記文を先頭に明示（MD を提示するだけで続行可能）
+
+## 2026-07-12 Track A Phase 1: product_widget import 整理
+
+- **目的**: product_widget の散在 ImportError フォールバックを compat に集約。挙動不変・分割なし。
+- **変更**:
+  - `_desktop_import_compat.py` … flea/cost/break_even/inventory_only/table_incremental/elapsed 等を追加
+  - `product_widget.py` … サービス系 try/except を1ブロックに統合（`except ImportError` はモジュール先頭のみ）
+- **検証**: desktop/tests 73件・repricer 31件パス、`ProductWidget` import OK
+- **次**: Track A Phase 2（`ui/product/` 分割）
+
+## 2026-07-12 Track A Phase 0: 仕入DB 安全網テスト
+
+- **目的**: product_widget 分割前の純関数 pytest 安全網を追加。挙動不変。
+- **新規**（`python/desktop/tests/`）:
+  - `test_purchase_cost_calc.py`（スクリプトから移行）
+  - `test_purchase_channel_cost.py`
+  - `test_purchase_break_even.py`
+  - `test_purchase_inventory_only.py`（スクリプトから移行・純関数のみ）
+  - `test_purchase_elapsed_days.py`
+  - `test_purchase_repricing_summary.py`
+- **既存テスト**: `cd python` 起点で通るよう import / monkeypatch を `desktop.*` に統一
+- **検証**: `desktop/tests/` 73件パス、repricer 31件パス
+- **次**: Track A Phase 1（product_widget import 整理）
+
+## 2026-07-12 デスクトップリファクタ道筋ドキュメント作成
+
+- **目的**: 価格改定完了後の次工程を、おすすめ順で Plan モードに投げられるようにする。
+- **新規**: `docs/desktop_refactoring_roadmap_plan_prompt.md`
+- **順番**: Track A 仕入DB → B 在庫 → X 横断 import → C レシート → D 画像管理 → E その他
+- **使い方**: Plan モードにプロンプトを貼り、先頭に `Track A Phase 0 から開始してください` 等を追記（1 Plan = 1 Phase）
+
+## 2026-07-07 価格改定リファクタ Phase 6（仕入DBダイアログ・改定連携 import 整理）
+
+- **目的**: purchase_row_edit_dialog の services フォールバックと改定連携 lazy import を compat に集約。
+- **新規**:
+  - `desktop/utils/_desktop_import_compat.py`（services / database / summarize）
+  - `desktop/utils/_desktop_ui_compat.py`（PurchaseRowEditDialog のみ・循環 import 防止）
+- **変更**:
+  - `purchase_row_edit_dialog.py` … compat 経由（FleaMarket はメソッド内 lazy のまま）
+  - `product_widget.py` … 月別一括 / 改定サマリ / 行編集を compat 経由
+  - `repricer/result_mixin.py` … PurchaseDatabase / PurchaseRowEditDialog を compat 経由
+- **検証**: 31 pytest グリーン、desktop / python 両パス import OK
+
+## 2026-07-07 価格改定リファクタ Phase 5（仕入DB連携 import 整理）
+
+- **目的**: 仕入DB×改定まわりの散在 try/except import を `_purchase_repricer_imports.py` に集約。
+- **新規**: `desktop/utils/_purchase_repricer_imports.py`
+- **変更**:
+  - `purchase_repricing_summary.py` … 相対 import で elapsed_days を参照
+  - `purchase_ladder_autofill_batch.py` … compat 経由に統一
+  - `purchase_row_edit_dialog.py` … repricer_ladder_table / elapsed_days / settings を1ブロックに集約
+- **検証**: 31 pytest グリーン、desktop / python 両パス import OK
+
+## 2026-07-07 価格改定リファクタ Phase 4（repricer パッケージ import 整理）
+
+- **目的**: Phase 3 分割後の mixin 重複 import を `support.py` に集約。挙動不変。
+- **変更**:
+  - `support.py` … DraggableFileIcon / browser_front_scheduler / KeepaService / validate_csv 等を一元化
+  - `workflow_mixin.py` … 未使用 import 削除（95行→必要最小限）
+  - `preview_mixin.py` … compat import を support 経由に
+  - `file_panel_mixin.py` / `result_mixin.py` … 重複 try/except 削除
+- **検証**: 31 pytest グリーン、`from ui.repricer.widget import RepricerWidget` OK
+
 ## 2026-07-07 価格改定リファクタ Phase 0〜3（テスト安全網・モジュール分割・UI分割）
 
 - **目的**: 価格改定まわりを慎重にリファクタ。挙動を変えずにテスト追加・重複解消・可読性向上。

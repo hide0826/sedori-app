@@ -5,12 +5,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from utils.amazon_image_naming import (
+import pytest
+
+from desktop.utils.amazon_image_naming import (
     build_sku_indexed_filename,
     extract_sku_from_image_path,
     extract_sku_from_image_stem,
     infer_sku_from_sorted_images,
     is_amazon_sku_filename,
+    is_hirio_rerename_temp_filename,
     is_legacy_sku_filename,
     needs_amazon_sequence_rerename,
     plan_amazon_rename_targets,
@@ -122,3 +125,66 @@ def test_structured_route_sku_still_detected():
     route_sku = "20260613-HA-29-1545-3P-027"
     assert extract_sku_from_image_stem(f"{route_sku}_1") == route_sku
     assert is_legacy_sku_filename(f"{route_sku}_2.jpg", route_sku)
+
+
+def test_hirio_rerename_temp_filename():
+    assert is_hirio_rerename_temp_filename(".hirio_rerename_001.jpg")
+    assert is_hirio_rerename_temp_filename("/tmp/.hirio_rerename_abc.png")
+    assert not is_hirio_rerename_temp_filename(f"{SKU}_1.jpg")
+    assert not is_hirio_rerename_temp_filename("hirio_rerename_001.jpg")
+
+
+def test_build_filename_empty_sku_raises():
+    with pytest.raises(ValueError, match="SKU"):
+        build_sku_indexed_filename("", 0, ".jpg")
+    with pytest.raises(ValueError, match="SKU"):
+        build_sku_indexed_filename("   ", 0, ".jpg")
+
+
+def test_plan_rename_empty_sku_returns_empty():
+    imgs = [_Img("/folder/shot1.jpg")]
+    assert plan_amazon_rename_targets(imgs, "", exclude_first=False) == []
+    assert plan_amazon_rename_targets(imgs, "  ", exclude_first=False) == []
+
+
+def test_plan_rename_skips_temp_and_renames_amazon_named():
+    """一時ファイルはスキップ。Amazon形式は _N へリネーム対象になる。"""
+    imgs = [
+        _Img("/folder/barcode.jpg"),
+        _Img("/folder/.hirio_rerename_x.jpg"),
+        _Img(f"/folder/{SKU}.MAIN.jpg"),
+        _Img(f"/folder/{SKU}.PT01.jpg"),
+    ]
+    ops = plan_amazon_rename_targets(imgs, SKU, exclude_first=True)
+    # temp スキップ後: MAIN→_1, PT01→_2（スロット index は temp も含む enumerate）
+    # product slots = [.hirio_rerename_x, MAIN, PT01] → temp continue, MAIN→_2, PT01→_3
+    targets = [op[1].replace("\\", "/") for op in ops]
+    assert f"/folder/{SKU}_2.jpg" in targets
+    assert f"/folder/{SKU}_3.jpg" in targets
+    assert all(".hirio_rerename_" not in t for t in targets)
+
+
+def test_amazon_variant_pt09_invalid():
+    assert not is_amazon_sku_filename(f"{SKU}.PT09.jpg", SKU)
+    assert extract_sku_from_image_stem(f"{SKU}.PT09") is None
+    assert is_amazon_sku_filename(f"{SKU}.PT08.jpg", SKU)
+    assert extract_sku_from_image_stem(f"{SKU}.PT08") == SKU
+
+
+def test_plan_rename_path_getter_dict():
+    imgs = [{"p": "/folder/a.jpg"}, {"p": "/folder/b.jpg"}]
+    ops = plan_amazon_rename_targets(
+        imgs, SKU, exclude_first=False, path_getter=lambda r: r["p"]
+    )
+    assert len(ops) == 2
+    assert ops[0][1].replace("\\", "/").endswith(f"{SKU}_1.jpg")
+    assert ops[1][1].replace("\\", "/").endswith(f"{SKU}_2.jpg")
+
+
+def test_infer_sku_skips_camera_then_finds_route():
+    imgs = [
+        _Img("/x/PXL_20260620_1.jpg"),
+        _Img(f"/x/{SKU}.MAIN.jpg"),
+    ]
+    assert infer_sku_from_sorted_images(imgs) == SKU
+    assert infer_sku_from_sorted_images([_Img("/x/IMG_0001.jpg")]) is None
