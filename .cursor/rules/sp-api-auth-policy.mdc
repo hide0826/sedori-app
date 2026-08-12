@@ -13,6 +13,16 @@ alwaysApply: true
 - `x-amzn-access-token` は使わない（誤り）
 - 日本マーケットプレイスIDは `A1VC38T7YXB528` を既定値として扱う
 
+## 取得済みロール（HIRIO 本番アプリ）
+
+詳細は [`docs/sp_api_roles.md`](../../docs/sp_api_roles.md) を参照。要約:
+
+- **商品の出品**（APPROVED）… Listings
+- **料金**（APPROVED）… Product Pricing
+- **在庫と注文の追跡**（APPROVED）… Inventory / Orders
+
+価格改定の API 反映はロール取得済みだが、HIRIO コード側は `feature/sp-api` でこれから実装する。
+
 ## 参照（公式）
 - https://developer-docs.amazon.com/sp-api/changelog/sp-api-will-no-longer-require-aws-iam-or-aws-signature-version-4
 - https://developer-docs.amazon.com/sp-api/docs/connecting-to-the-selling-partner-api

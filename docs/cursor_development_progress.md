@@ -7,6 +7,7 @@
   - Keepa service 拡張、在庫設定更新
 - **Git除外（ローカルのみ）**: `.env`、`.bak`、DBバックアップ、`receipt_snapshots`、`HIRIOold/`
 - **次回**: `feature/sp-api` で出品制限・在庫・価格など SP-API 連携を段階導入
+- **ロール一覧の固定化**: [`docs/sp_api_roles.md`](sp_api_roles.md) に承認済み3ロール（出品・料金・在庫注文）を記載
 
 ## 2026-07-13 古物台帳・閲覧出力の行ダブルクリック詳細編集
 
