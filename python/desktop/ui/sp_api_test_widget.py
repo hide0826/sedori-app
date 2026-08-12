@@ -125,6 +125,32 @@ class SPAPITestWidget(QWidget):
         self.log_output.append(f"[{now}] {text}")
 
     def _read_credentials(self) -> Dict[str, str]:
+        # まず HIRIO 共通モジュールを試し、失敗時は従来の .env 直接読込
+        try:
+            from pathlib import Path
+            import sys
+
+            shared_dir = None
+            for parent in Path(__file__).resolve().parents:
+                if (parent / "shared" / "amazon_credentials.py").exists():
+                    shared_dir = parent / "shared"
+                    break
+            if shared_dir is not None:
+                shared_str = str(shared_dir)
+                if shared_str not in sys.path:
+                    sys.path.insert(0, shared_str)
+                from amazon_credentials import get_sp_api_credentials
+
+                creds = get_sp_api_credentials()
+                if creds.is_complete:
+                    return {
+                        "client_id": creds.client_id,
+                        "client_secret": creds.client_secret,
+                        "refresh_token": creds.refresh_token,
+                    }
+        except Exception:
+            pass
+
         env_map = self._load_env_file()
         return {
             "client_id": env_map.get("SP_API_CLIENT_ID", ""),

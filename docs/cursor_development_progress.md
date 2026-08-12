@@ -1,3 +1,32 @@
+## 2026-08-12 マイルストーン: SP-API本格実装前の保存版（v0.4.0-pre-sp-api）
+
+- **内容**: 物理バックアップ完了後、配布用スナップショットとしてタグ `v0.4.0-pre-sp-api` を付与。以降の SP-API 連携は `feature/sp-api` ブランチで実装する
+- **含む主な変更**:
+  - 古物台帳: 行詳細編集ダイアログ、SKU変更の台帳同期
+  - SP-APIテストタブ: `shared/amazon_credentials` 経由の認証読込フォールバック
+  - Keepa service 拡張、在庫設定更新
+- **Git除外（ローカルのみ）**: `.env`、`.bak`、DBバックアップ、`receipt_snapshots`、`HIRIOold/`
+- **次回**: `feature/sp-api` で出品制限・在庫・価格など SP-API 連携を段階導入
+
+## 2026-07-13 古物台帳・閲覧出力の行ダブルクリック詳細編集
+
+- **内容**: 閲覧・出力テーブルで行をダブルクリックすると詳細編集ダイアログが開き、品目・SKU・レシート画像URLなどを保存できる
+- **実装**:
+  - `ledger_db.py`: `update_ledger_entry` / `get_ledger_entry_by_id`
+  - `ui/ledger_entry_edit_dialog.py`: 行詳細編集UI（URLを開くボタン付き）
+  - `antique_widget.py`: ダブルクリックで編集、保存後に一覧再読込。セル直接編集は無効化
+- **テスト**: `tests/test_ledger_update_entry.py`
+- **手動確認**: 古物台帳→閲覧・出力→行ダブルクリック→品目/SKU/URL変更→保存→一覧反映
+
+## 2026-07-13 仕入行編集のSKU変更を古物台帳へ同期
+
+- **内容**: 仕入DB「仕入行の編集」でSKU先頭日付を変更して反映したとき、古物台帳DBのSKUも同時更新する
+- **実装**:
+  - `ledger_db.py`: `rename_sku(old, new)` を追加（`ledger_entries` / `purchase_rows`）
+  - `purchase_row_edit/fee_channel_mixin.py`: `_apply_sku_date_change` 成功後に台帳SKUを同期。古物台帳タブが読込済みなら再表示
+- **テスト**: `tests/test_ledger_rename_sku.py`（3件）
+- **手動確認**: 仕入DBでSKU日付を変更→反映→古物台帳タブで同一行のSKUが新値になっていること
+
 ## 2026-07-12 マイルストーン: デスクトップリファクタ道筋（主要トラック完了）
 
 - **道筋**: [`docs/desktop_refactoring_roadmap_plan_prompt.md`](desktop_refactoring_roadmap_plan_prompt.md)

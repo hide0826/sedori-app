@@ -12,7 +12,7 @@
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
-    QPushButton, QLabel, QLineEdit, QComboBox,
+    QPushButton, QLabel, QLineEdit, QComboBox, QDialog,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QGroupBox, QMessageBox, QDateEdit, QSpinBox, QCheckBox,
     QFileDialog, QProgressBar, QTextEdit, QPlainTextEdit, QTabWidget,
@@ -1518,6 +1518,8 @@ class AntiqueWidget(QWidget):
         self.data_table._hirio_table_column_legacy_keys = ["ledger/column_widths"]
         self.data_table.setAlternatingRowColors(True)
         self.data_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.data_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.data_table.setToolTip("行をダブルクリックすると詳細編集が開きます")
         
         # 統一スキーマの見出し（日本語）
         self.column_headers = [label for _, label in self.ALL_COLUMNS]
@@ -1655,57 +1657,59 @@ class AntiqueWidget(QWidget):
         """テーブルの更新"""
         if self.antique_data is None:
             return
-            
-        # テーブルの設定
-        self.data_table.setRowCount(len(self.antique_data))
-        
-        # データの設定
-        for i, item in enumerate(self.antique_data):
+        self._populate_data_table(self.antique_data)
+
+    def _populate_data_table(self, rows: List[Dict[str, Any]]) -> None:
+        """閲覧・出力テーブルへ行データを反映（行IDを UserRole+1 に保持）。"""
+        self.data_table.setRowCount(len(rows))
+        for i, item in enumerate(rows):
+            entry_id = item.get("id")
             for j, key in enumerate(self.column_keys):
                 raw = item.get(key, "")
                 value = "" if raw is None else str(raw)
-                # 取引日の場合は時刻部分を削除
                 if key == "entry_date":
                     value = self._normalize_date(value)
                 display_value = value
-                if key == 'hinmei' and value:
-                    # 50文字にトリム
-                    display_value = (value[:50] + '…') if len(value) > 50 else value
+                if key == "hinmei" and value:
+                    display_value = (value[:50] + "…") if len(value) > 50 else value
                 item_widget = QTableWidgetItem(display_value)
-                if key == 'hinmei':
-                    # ツールチップは常にフルテキスト
+                if key == "hinmei":
                     item_widget.setToolTip(value)
-                    # フルテキストをUserRoleに保持
                     item_widget.setData(Qt.UserRole, value)
-                
-                # 金額/数量などの簡易フォーマット
+
                 header_label = self.column_headers[j]
                 if header_label in ["数量", "単価", "金額"] and value.replace(".", "").isdigit():
                     try:
                         num_value = float(value)
                         item_widget.setText(f"{num_value:,.0f}")
-                    except:
+                    except Exception:
                         pass
 
-                # レシート画像URL列はURLとして表示（ダブルクリックでブラウザ）
                 if key == "receipt_no":
+                    tip = "ダブルクリックで詳細編集"
                     if value:
-                        item_widget.setToolTip(f"ダブルクリックでブラウザで表示\n{value}")
-                        item_widget.setData(Qt.UserRole, value)
+                        tip = f"{tip}\n{value}"
                         color = QColor(0, 122, 204)
                         item_widget.setForeground(color)
                         font = item_widget.font()
                         font.setUnderline(True)
                         item_widget.setFont(font)
-                # ツールチップはフルテキスト（他列も同様）
+                        item_widget.setData(Qt.UserRole, value)
+                    item_widget.setToolTip(tip)
+
                 if not item_widget.toolTip():
-                    item_widget.setToolTip(value)
-                
+                    item_widget.setToolTip(f"ダブルクリックで詳細編集\n{value}" if value else "ダブルクリックで詳細編集")
+
+                # 行IDを各セルに保持（フィルタ後でも更新先を特定できるように）
+                if entry_id is not None:
+                    try:
+                        item_widget.setData(Qt.UserRole + 1, int(entry_id))
+                    except (TypeError, ValueError):
+                        pass
+
                 self.data_table.setItem(i, j, item_widget)
-        
-        # 列幅の自動調整
+
         self.data_table.resizeColumnsToContents()
-        # 列表示の適用
         self.apply_column_visibility()
 
     def _on_table_selection_changed(self):
@@ -1739,50 +1743,7 @@ class AntiqueWidget(QWidget):
         
     def update_table_with_filtered_data(self, filtered_data):
         """フィルタ結果でテーブルを更新"""
-        # テーブルの設定
-        self.data_table.setRowCount(len(filtered_data))
-        
-        # データの設定
-        for i, item in enumerate(filtered_data):
-            for j, key in enumerate(self.column_keys):
-                raw = item.get(key, "")
-                value = "" if raw is None else str(raw)
-                # 取引日の場合は時刻部分を削除
-                if key == "entry_date":
-                    value = self._normalize_date(value)
-                display_value = value
-                if key == 'hinmei' and value:
-                    display_value = (value[:50] + '…') if len(value) > 50 else value
-                item_widget = QTableWidgetItem(display_value)
-                if key == 'hinmei':
-                    item_widget.setToolTip(value)
-                    item_widget.setData(Qt.UserRole, value)
-                
-                header_label = self.column_headers[j]
-                if header_label in ["数量", "単価", "金額"] and value.replace(".", "").isdigit():
-                    try:
-                        num_value = float(value)
-                        item_widget.setText(f"{num_value:,.0f}")
-                    except:
-                        pass
-                # レシート画像URL列はURLとして表示（ダブルクリックでブラウザ）
-                if key == "receipt_no":
-                    if value:
-                        item_widget.setToolTip(f"ダブルクリックでブラウザで表示\n{value}")
-                        item_widget.setData(Qt.UserRole, value)
-                        color = QColor(0, 122, 204)
-                        item_widget.setForeground(color)
-                        font = item_widget.font()
-                        font.setUnderline(True)
-                        item_widget.setFont(font)
-                if not item_widget.toolTip():
-                    item_widget.setToolTip(value)
-                
-                self.data_table.setItem(i, j, item_widget)
-        
-        # 列幅の自動調整
-        self.data_table.resizeColumnsToContents()
-        self.apply_column_visibility()
+        self._populate_data_table(list(filtered_data or []))
 
     # === データ取得/フィルタ ===
     def reload_ledger_rows(self) -> bool:
@@ -1928,28 +1889,109 @@ class AntiqueWidget(QWidget):
         return rows
 
     def _on_data_table_double_clicked(self, item: QTableWidgetItem) -> None:
-        """閲覧・出力タブのセルをダブルクリックしたときの処理（レシート画像URLならブラウザで開く）"""
+        """閲覧・出力タブの行をダブルクリック → 詳細編集ダイアログを開く。"""
         try:
-            if not hasattr(self, "column_keys"):
+            if item is None:
                 return
-            col = item.column()
-            if col < 0 or col >= len(self.column_keys):
+            self._open_ledger_entry_edit(item.row())
+        except Exception as e:
+            QMessageBox.warning(self, "詳細編集", f"詳細画面を開けませんでした:\n{e}")
+
+    def _entry_id_from_table_row(self, row: int) -> Optional[int]:
+        """テーブル行から ledger_entries.id を取得。"""
+        if row < 0 or not hasattr(self, "data_table"):
+            return None
+        for c in range(self.data_table.columnCount()):
+            it = self.data_table.item(row, c)
+            if it is None:
+                continue
+            v = it.data(Qt.UserRole + 1)
+            if v is None:
+                continue
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _find_ledger_record_by_id(self, entry_id: int) -> Optional[Dict[str, Any]]:
+        for rec in self.antique_data or []:
+            try:
+                if int(rec.get("id")) == int(entry_id):
+                    return rec
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _open_ledger_entry_edit(self, row: int) -> None:
+        """指定行の詳細編集ダイアログを開き、保存時にDBへ反映する。"""
+        entry_id = self._entry_id_from_table_row(row)
+        if entry_id is None:
+            QMessageBox.warning(
+                self,
+                "詳細編集",
+                "この行のIDが取得できませんでした。『更新』ボタンで再読込してから再度お試しください。",
+            )
+            return
+
+        record = self._find_ledger_record_by_id(entry_id)
+        if record is None:
+            try:
+                from desktop.database.ledger_db import LedgerDatabase
+                record = LedgerDatabase().get_ledger_entry_by_id(entry_id)
+            except Exception:
+                record = None
+        if not record:
+            QMessageBox.warning(self, "詳細編集", "対象データが見つかりませんでした。")
+            return
+
+        try:
+            from ui.ledger_entry_edit_dialog import LedgerEntryEditDialog
+        except ImportError:
+            from desktop.ui.ledger_entry_edit_dialog import LedgerEntryEditDialog  # type: ignore
+
+        old_kind = str(record.get("kobutsu_kind") or "").strip()
+        dialog = LedgerEntryEditDialog(
+            record,
+            category_choices=list(self.CATEGORY_CHOICES),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        values = dialog.get_values()
+        try:
+            from desktop.database.ledger_db import LedgerDatabase
+            db = LedgerDatabase()
+            ok = db.update_ledger_entry(entry_id, values)
+            if not ok:
+                QMessageBox.warning(self, "詳細編集", "保存できませんでした（対象行が見つからない可能性があります）。")
                 return
-            key = self.column_keys[col]
-            if key != "receipt_no":
-                return
-            url = (item.data(Qt.UserRole) or item.text() or "").strip()
-            if not url:
-                return
-            if not (url.startswith("http://") or url.startswith("https://")):
-                return
-            qurl = QUrl(url)
-            if not qurl.isValid():
-                return
-            QDesktopServices.openUrl(qurl)
-        except Exception:
-            # ここでの失敗は致命的ではないので黙って無視
-            pass
+            # 品目が変わった場合は学習辞書へ反映
+            new_kind = str(values.get("kobutsu_kind") or "").strip()
+            if new_kind and new_kind != old_kind:
+                try:
+                    self._learn_category_edit(
+                        str(values.get("hinmei") or ""),
+                        new_kind,
+                        str(values.get("identifier") or "") or None,
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            QMessageBox.critical(self, "詳細編集", f"保存に失敗しました:\n{e}")
+            return
+
+        # 一覧を再読込して反映
+        if self.reload_ledger_rows():
+            self.update_stats()
+            QMessageBox.information(self, "詳細編集", "保存しました。")
+        else:
+            QMessageBox.information(
+                self,
+                "詳細編集",
+                "保存は完了しましたが、一覧の再読込に失敗しました。『更新』で再表示してください。",
+            )
 
     def apply_filters(self):
         rows = self.get_filtered_rows()

@@ -193,6 +193,123 @@ class LedgerDatabase:
         rows = cur.fetchall()
         return [dict(r) for r in rows]
 
+    # 閲覧・出力の行編集で更新可能な列（id / created_at は除外）
+    LEDGER_ENTRY_UPDATABLE_COLUMNS = frozenset(
+        {
+            "entry_date",
+            "counterparty_type",
+            "counterparty_name",
+            "counterparty_branch",
+            "counterparty_address",
+            "contact",
+            "receipt_no",
+            "platform",
+            "platform_order_id",
+            "platform_user",
+            "person_name",
+            "person_address",
+            "id_type",
+            "id_number",
+            "id_checked_on",
+            "id_checked_by",
+            "id_proof_ref",
+            "kobutsu_kind",
+            "hinmoku",
+            "hinmei",
+            "qty",
+            "unit_price",
+            "amount",
+            "identifier",
+            "transaction_method",
+            "notes",
+            "correction_of",
+            "sku",
+        }
+    )
+
+    def update_ledger_entry(self, entry_id: int, fields: Dict[str, Any]) -> bool:
+        """
+        ledger_entries の1行を更新する。
+
+        Args:
+            entry_id: 台帳行 ID
+            fields: 更新する列名→値（未知の列は無視）
+
+        Returns:
+            1行以上更新できた場合 True
+        """
+        try:
+            entry_id = int(entry_id)
+        except (TypeError, ValueError) as e:
+            raise ValueError("entry_id が不正です") from e
+        if entry_id <= 0:
+            raise ValueError("entry_id が不正です")
+
+        clean: Dict[str, Any] = {}
+        for key, value in (fields or {}).items():
+            if key not in self.LEDGER_ENTRY_UPDATABLE_COLUMNS:
+                continue
+            if isinstance(value, str):
+                value = value.strip()
+                if value == "":
+                    value = None
+            clean[key] = value
+
+        # 品目変更時は hinmoku も揃える（入力・生成タブと同じ運用）
+        if "kobutsu_kind" in clean and "hinmoku" not in clean:
+            clean["hinmoku"] = clean["kobutsu_kind"]
+
+        if not clean:
+            return False
+
+        cols = list(clean.keys())
+        placeholders = ", ".join(f"{c} = ?" for c in cols)
+        params = [clean[c] for c in cols] + [entry_id]
+        cur = self.conn.cursor()
+        cur.execute(f"UPDATE ledger_entries SET {placeholders} WHERE id = ?", params)
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def get_ledger_entry_by_id(self, entry_id: int) -> Optional[Dict[str, Any]]:
+        """id で台帳行を1件取得。"""
+        try:
+            entry_id = int(entry_id)
+        except (TypeError, ValueError):
+            return None
+        rows = self.query_ledger("id = ?", (entry_id,))
+        return rows[0] if rows else None
+
+    def rename_sku(self, old_sku: str, new_sku: str) -> int:
+        """
+        古物台帳側の SKU を一括変更する（仕入DBの SKU 変更に追従）。
+
+        - ledger_entries（確定台帳）
+        - purchase_rows（取込ドラフト）
+
+        Returns:
+            更新した行数の合計（該当なしは 0）
+        """
+        old_sku = (old_sku or "").strip()
+        new_sku = (new_sku or "").strip()
+        if not old_sku or not new_sku:
+            raise ValueError("old_sku と new_sku は必須です")
+        if old_sku == new_sku:
+            return 0
+        cur = self.conn.cursor()
+        updated = 0
+        for table in ("ledger_entries", "purchase_rows"):
+            try:
+                cur.execute(
+                    f"UPDATE {table} SET sku = ? WHERE TRIM(COALESCE(sku, '')) = ?",
+                    (new_sku, old_sku),
+                )
+                updated += cur.rowcount or 0
+            except Exception:
+                # テーブル／列が無い古いDBでも仕入側の変更は続行できるようにする
+                pass
+        self.conn.commit()
+        return updated
+
     def close(self) -> None:
         if self.conn:
             self.conn.close()

@@ -225,10 +225,39 @@ class PurchaseFeeChannelMixin:
                     QMessageBox.warning(self, "SKU", str(e))
                     return False
 
+        # 古物台帳（ledger_entries / purchase_rows）の SKU も同時に更新
+        if old_sku and new_sku and old_sku != new_sku:
+            self._sync_ledger_sku_rename(old_sku, new_sku)
+
         self.record["SKU"] = new_sku
         self.record["sku"] = new_sku
         self._last_committed_sku = new_sku
         return True
+
+    def _sync_ledger_sku_rename(self, old_sku: str, new_sku: str) -> None:
+        """仕入SKU変更に合わせて古物台帳DBのSKUを更新し、表示中なら再読込する。"""
+        try:
+            from database.ledger_db import LedgerDatabase
+        except ImportError:
+            try:
+                from desktop.database.ledger_db import LedgerDatabase  # type: ignore
+            except ImportError:
+                return
+        try:
+            LedgerDatabase().rename_sku(old_sku, new_sku)
+        except Exception:
+            # 台帳同期失敗でも仕入DB側の変更は維持する
+            return
+        # 古物台帳タブが既に読み込み済みなら表示を追従
+        try:
+            pw = self._product_widget
+            inv = getattr(pw, "inventory_widget", None) if pw is not None else None
+            antique = getattr(inv, "antique_widget", None) if inv is not None else None
+            if antique is not None and getattr(antique, "_ledger_loaded", False):
+                if hasattr(antique, "reload_ledger_rows"):
+                    antique.reload_ledger_rows()
+        except Exception:
+            pass
 
     def _store_db(self) -> Any:
         pw = self._product_widget

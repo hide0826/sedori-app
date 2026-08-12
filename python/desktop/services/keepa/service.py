@@ -30,8 +30,38 @@ class KeepaService(
         if api_key is None:
             settings = QSettings("HIRIO", "DesktopApp")
             api_key = settings.value("keepa/api_key", "") or None
+
+        # 未設定なら HIRIO 共通クレデンシャル（.env / watcher 共用）を試す
+        if not api_key:
+            api_key = self._load_shared_keepa_api_key()
+
         self.api_key = api_key
         self._client = None  # 遅延初期化
+
+    @staticmethod
+    def _load_shared_keepa_api_key() -> Optional[str]:
+        """D:/HIRIO/shared の共通読込を試す（無くても壊れない）。"""
+        try:
+            from pathlib import Path
+            import sys
+
+            shared_dir = None
+            for parent in Path(__file__).resolve().parents:
+                candidate = parent / "shared" / "amazon_credentials.py"
+                if candidate.exists():
+                    shared_dir = parent / "shared"
+                    break
+            if shared_dir is None:
+                return None
+            shared_str = str(shared_dir)
+            if shared_str not in sys.path:
+                sys.path.insert(0, shared_str)
+            from amazon_credentials import get_keepa_api_key
+
+            creds = get_keepa_api_key()
+            return creds.api_key or None
+        except Exception:
+            return None
 
     def _ensure_client(self):
         if self._client is not None:
