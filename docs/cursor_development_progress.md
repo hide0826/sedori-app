@@ -1,3 +1,22 @@
+## 2026-08-13 販売DB SP-API一式: 注文取込・利益計算・返品返金・429再試行
+
+- **内容**: 商品DB > 販売DB の SP-API 連携を運用向けに拡充
+  - **SP-API更新**: Orders API で注文取込 → 仕入DBを販売済み／一部販売済みに連動
+  - **手数料・利益**: 仕入DBのプラットフォーム手数料・出荷費用・仕入れ価格から計算して埋める
+  - **未確定0円**: 販売価格0の行は再取得時に金額へ上書き（注文IDなし行の突き合わせ・日付表記ゆれ対応）
+  - **販売日時**: PurchaseDate を日本時間の `YYYY-MM-DD HH:MM:SS` で保存
+  - **返品・返金取込**: FBA返品レポート＋フラット返品レポートで返金総額反映・利益再計算
+  - **429対策**: SP-API GET/POST で QuotaExceeded 時に待機再試行
+- **実装**:
+  - `D:\HIRIO\shared\sp_api_client.py`（Orders / Reports / Finances / 429再試行）※ワークスペース shared
+  - `desktop/services/sp_api_orders.py` / `sp_api_refunds.py`
+  - `product/widget.py`（ボタン・upsert・連動）
+- **注意**:
+  - Finances（返金実額）は財務と会計ロールが必要で現状403 → レポート推定で運用
+  - 在庫保管手数料・価格改定API・在庫同期は未実装
+- **テスト**: `test_sp_api_orders.py` / `test_sp_api_refunds.py` / `test_sales_upsert_provisional.py`
+- **次回候補**: 財務と会計ロール申請、価格改定の API 反映、在庫同期、429時の注文取込再開
+
 ## 2026-08-13 仕入DB SP-API取得: 出品日未入力のみ・全件対応
 
 - **内容**: 「SP-API取得」を運用向けに調整。**出品日が空の行だけ**取得する。未選択時は Amazon 全件のうち未入力を対象（確認ダイアログ・キャンセル可）

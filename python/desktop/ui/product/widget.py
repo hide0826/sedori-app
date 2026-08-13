@@ -692,6 +692,20 @@ class ProductWidget(
         self.import_sales_csv_button.clicked.connect(self.import_sales_csv)
         controls_layout.addWidget(self.import_sales_csv_button)
 
+        self.fetch_sales_sp_api_button = QPushButton("SP-API更新")
+        self.fetch_sales_sp_api_button.setToolTip(
+            "Amazon SP-APIの注文から販売DBを更新し、仕入DBを販売済みにします。"
+        )
+        self.fetch_sales_sp_api_button.clicked.connect(self.fetch_sales_from_sp_api)
+        controls_layout.addWidget(self.fetch_sales_sp_api_button)
+
+        self.fetch_refunds_sp_api_button = QPushButton("返品・返金取込")
+        self.fetch_refunds_sp_api_button.setToolTip(
+            "Amazonの返品レポートから返金総額を販売DBへ反映し、利益を再計算します。"
+        )
+        self.fetch_refunds_sp_api_button.clicked.connect(self.fetch_refunds_from_sp_api)
+        controls_layout.addWidget(self.fetch_refunds_sp_api_button)
+
         self.reload_sales_button = QPushButton("再読み込み")
         self.reload_sales_button.clicked.connect(self.load_sales_data)
         controls_layout.addWidget(self.reload_sales_button)
@@ -738,6 +752,24 @@ class ProductWidget(
             return ""
         return text
 
+    @staticmethod
+    def _normalize_sale_date_key(value: Any) -> str:
+        """販売日の突き合わせ用に YYYY-MM-DD へ揃える。"""
+        text = ProductWidget._normalize_text(value)
+        if not text:
+            return ""
+        if "T" in text:
+            text = text.split("T", 1)[0]
+        normalized = text.replace(".", "-").replace("/", "-")[:10]
+        try:
+            return datetime.strptime(normalized, "%Y-%m-%d").strftime("%Y-%m-%d")
+        except ValueError:
+            compact = "".join(ch for ch in text if ch.isdigit())[:8]
+            try:
+                return datetime.strptime(compact, "%Y%m%d").strftime("%Y-%m-%d")
+            except ValueError:
+                return text
+
     def _build_sale_dedupe_key(self, sale: Dict[str, Any]) -> tuple:
         """重複取込判定用キー。"""
         order_id = self._normalize_text(sale.get("order_id"))
@@ -747,7 +779,7 @@ class ProductWidget(
         return (
             "fallback",
             sku,
-            self._normalize_text(sale.get("sale_date")),
+            self._normalize_sale_date_key(sale.get("sale_date")),
             self._to_int_amount(sale.get("sale_price"), default=0),
         )
 
@@ -758,6 +790,11 @@ class ProductWidget(
         - 販売数量 >= 仕入数量: sold（販売済み）
         - 0 < 販売数量 < 仕入数量: partially_sold（一部販売済み）
         """
+        try:
+            from desktop.services.sp_api_orders import SALE_COUNTABLE_TX_METHODS
+        except ImportError:
+            from services.sp_api_orders import SALE_COUNTABLE_TX_METHODS  # type: ignore
+
         summary = {
             "updated_sold": 0,
             "updated_partial": 0,
@@ -774,9 +811,9 @@ class ProductWidget(
             sku = self._normalize_text(sale.get("sku"))
             if not sku:
                 continue
-            # Pending等は在庫減算に含めない（出荷済みのみを販売済みとして扱う）
-            tx = self._normalize_text(sale.get("transaction_method")).lower()
-            if tx and tx not in ("shipped", "shipped "):
+            # Pending / Canceled 等は在庫減算に含めない
+            tx = self._normalize_text(sale.get("transaction_method")).lower().replace(" ", "")
+            if tx not in SALE_COUNTABLE_TX_METHODS:
                 continue
             sold_qty_by_sku[sku] = sold_qty_by_sku.get(sku, 0) + self._to_int_count(sale.get("quantity"), default=1)
 
@@ -800,10 +837,10 @@ class ProductWidget(
 
             if sold_qty >= purchase_qty:
                 next_status = "sold"
-                reason = f"販売CSV連動: 販売数 {sold_qty} / 仕入数 {purchase_qty}"
+                reason = f"販売連動: 販売数 {sold_qty} / 仕入数 {purchase_qty}"
             elif sold_qty > 0:
                 next_status = "partially_sold"
-                reason = f"販売CSV連動: 販売数 {sold_qty} / 仕入数 {purchase_qty}（在庫残あり）"
+                reason = f"販売連動: 販売数 {sold_qty} / 仕入数 {purchase_qty}（在庫残あり）"
 
             if not next_status or current_status == next_status:
                 summary["unchanged"] += 1
@@ -821,6 +858,511 @@ class ProductWidget(
                 summary["updated_partial"] += 1
 
         return summary
+
+    def _upsert_sales_payloads(self, payloads: List[Dict[str, Any]]) -> Dict[str, int]:
+        """
+        販売レコードを重複キーで insert / update する。
+
+        販売価格が 0（未確定）の既存行は、取得側に金額があれば上書きする。
+        注文ID付きと未確定（注文IDなし・0円）の突き合わせにも対応する。
+        """
+        existing_sales = self.sales_db.list_all()
+        existing_by_key: Dict[tuple, Dict[str, Any]] = {}
+        # 未確定（価格0）を sku+販売日 でも引けるようにする
+        provisional_by_sku_date: Dict[tuple, Dict[str, Any]] = {}
+        for s in existing_sales:
+            key = self._build_sale_dedupe_key(s)
+            if key not in existing_by_key:
+                existing_by_key[key] = s
+            price = self._to_int_amount(s.get("sale_price"), default=0)
+            sku = self._normalize_text(s.get("sku"))
+            sale_date = self._normalize_sale_date_key(s.get("sale_date"))
+            if price <= 0 and sku and sale_date:
+                sd_key = (sku, sale_date)
+                if sd_key not in provisional_by_sku_date:
+                    provisional_by_sku_date[sd_key] = s
+
+        inserted = 0
+        updated = 0
+        skipped_duplicate = 0
+        skipped_invalid = 0
+        imported_keys = set()
+
+        for sale_payload in payloads:
+            sku = self._normalize_text(sale_payload.get("sku"))
+            sale_date_full = self._normalize_text(sale_payload.get("sale_date"))
+            sale_date = self._normalize_sale_date_key(sale_date_full)
+            if not sku or not sale_date:
+                skipped_invalid += 1
+                continue
+            # 突き合わせは日付のみ、保存値は時刻付きを維持
+            sale_payload = {**sale_payload, "sale_date": sale_date_full or sale_date}
+            dedupe_key = self._build_sale_dedupe_key(sale_payload)
+            existing_sale = existing_by_key.get(dedupe_key)
+            # 注文ID付き取得で、既存が未確定（0円・注文IDなし）のときも突き合わせる
+            if existing_sale is None:
+                provisional = provisional_by_sku_date.get((sku, sale_date))
+                if provisional is not None:
+                    existing_sale = provisional
+
+            if existing_sale is not None:
+                existing_price = self._to_int_amount(existing_sale.get("sale_price"), default=0)
+                incoming_price = self._to_int_amount(sale_payload.get("sale_price"), default=0)
+                existing_tx = self._normalize_text(existing_sale.get("transaction_method"))
+                incoming_tx = self._normalize_text(sale_payload.get("transaction_method"))
+
+                # 未確定(0円) → 確定(>0円) は必ず上書き
+                # 出荷状態の変化も反映
+                # 価格確定済みでも手数料・利益が空なら仕入計算結果で埋める
+                should_update = False
+                existing_fee_sum = (
+                    self._to_int_amount(existing_sale.get("platform_fee"), 0)
+                    + self._to_int_amount(existing_sale.get("shipping_fee"), 0)
+                    + self._to_int_amount(existing_sale.get("fba_fee"), 0)
+                    + self._to_int_amount(existing_sale.get("other_fees"), 0)
+                )
+                incoming_fee_sum = (
+                    self._to_int_amount(sale_payload.get("platform_fee"), 0)
+                    + self._to_int_amount(sale_payload.get("shipping_fee"), 0)
+                    + self._to_int_amount(sale_payload.get("fba_fee"), 0)
+                    + self._to_int_amount(sale_payload.get("other_fees"), 0)
+                )
+                if existing_price <= 0 and incoming_price > 0:
+                    should_update = True
+                elif existing_price <= 0 and incoming_price <= 0:
+                    # どちらも未確定でも、注文IDや出荷状態が埋まれば更新
+                    if self._normalize_text(sale_payload.get("order_id")) and not self._normalize_text(
+                        existing_sale.get("order_id")
+                    ):
+                        should_update = True
+                    elif incoming_tx and incoming_tx != existing_tx:
+                        should_update = True
+                elif incoming_tx and incoming_tx != existing_tx:
+                    should_update = True
+                elif existing_fee_sum <= 0 and incoming_fee_sum > 0:
+                    should_update = True
+                elif existing_sale.get("net_profit") is None and sale_payload.get("net_profit") is not None:
+                    should_update = True
+
+                if should_update:
+                    target_id = existing_sale.get("id")
+                    if target_id:
+                        merged = dict(sale_payload)
+                        # 取得側が手数料0のときは、既存の手数料・利益を残す
+                        fee_keys = (
+                            "platform_fee",
+                            "shipping_fee",
+                            "fba_fee",
+                            "storage_fee",
+                            "other_fees",
+                            "refund_total",
+                            "net_profit",
+                        )
+                        incoming_fees_zero = all(
+                            self._to_int_amount(sale_payload.get(k), default=0) == 0
+                            for k in fee_keys
+                            if k != "net_profit"
+                        )
+                        if incoming_fees_zero:
+                            for k in fee_keys:
+                                if k in existing_sale and existing_sale.get(k) is not None:
+                                    if k == "net_profit" or self._to_int_amount(
+                                        existing_sale.get(k), default=0
+                                    ) != 0:
+                                        merged[k] = existing_sale.get(k)
+                        # 未確定→確定のとき、取得側の価格が0なら既存を落とさない
+                        if incoming_price <= 0 < existing_price:
+                            merged["sale_price"] = existing_price
+                        self.sales_db.update(int(target_id), merged)
+                        updated += 1
+                        updated_row = {**existing_sale, **merged}
+                        existing_by_key[dedupe_key] = updated_row
+                        existing_by_key[self._build_sale_dedupe_key(updated_row)] = updated_row
+                        if self._to_int_amount(updated_row.get("sale_price"), default=0) <= 0:
+                            provisional_by_sku_date[(sku, sale_date)] = updated_row
+                        else:
+                            provisional_by_sku_date.pop((sku, sale_date), None)
+                        continue
+                skipped_duplicate += 1
+                continue
+
+            if dedupe_key in imported_keys:
+                skipped_duplicate += 1
+                continue
+
+            self.sales_db.insert(sale_payload)
+            imported_keys.add(dedupe_key)
+            existing_by_key[dedupe_key] = sale_payload
+            if self._to_int_amount(sale_payload.get("sale_price"), default=0) <= 0:
+                provisional_by_sku_date[(sku, sale_date)] = sale_payload
+            inserted += 1
+
+        return {
+            "inserted": inserted,
+            "updated": updated,
+            "skipped_duplicate": skipped_duplicate,
+            "skipped_invalid": skipped_invalid,
+        }
+
+    def _refresh_purchase_after_sales_sync(self) -> None:
+        """仕入DB表示が開いている場合、ステータス表示を最新化する。"""
+        try:
+            if hasattr(self, "purchase_all_records_master"):
+                base_records = copy.deepcopy(getattr(self, "purchase_all_records_master", []) or [])
+                if base_records:
+                    self.load_purchase_data(base_records)
+        except Exception:
+            pass
+
+    def _build_purchases_by_sku_for_sales(self) -> Dict[str, Dict[str, Any]]:
+        """
+        販売取込用に SKU → 仕入レコード を作る。
+        手数料はスナップショット側、仕入値は DB も併用する。
+        """
+        by_sku: Dict[str, Dict[str, Any]] = {}
+        sources = []
+        master = getattr(self, "purchase_all_records_master", None) or []
+        current = getattr(self, "purchase_all_records", None) or []
+        if master:
+            sources.append(master)
+        if current:
+            sources.append(current)
+        for source in sources:
+            for rec in source:
+                if not isinstance(rec, dict):
+                    continue
+                sku = self._normalize_text(rec.get("SKU") or rec.get("sku"))
+                if sku and sku not in by_sku:
+                    by_sku[sku] = rec
+
+        # DB にしか無い SKU / 仕入値の補完
+        try:
+            db_rows = self.purchase_history_db.list_all() if hasattr(self, "purchase_history_db") else []
+        except Exception:
+            db_rows = []
+        for row in db_rows or []:
+            sku = self._normalize_text(row.get("sku"))
+            if not sku:
+                continue
+            if sku not in by_sku:
+                by_sku[sku] = {
+                    "sku": sku,
+                    "SKU": sku,
+                    "id": row.get("id"),
+                    "仕入れ価格": row.get("purchase_price") or 0,
+                    "purchase_price": row.get("purchase_price") or 0,
+                }
+            else:
+                rec = by_sku[sku]
+                if not rec.get("id") and row.get("id"):
+                    rec = {**rec, "id": row.get("id")}
+                    by_sku[sku] = rec
+                has_cost = False
+                for key in ("仕入れ価格", "仕入価格", "purchase_price", "cost"):
+                    if rec.get(key) not in (None, "", 0, "0"):
+                        has_cost = True
+                        break
+                if not has_cost and row.get("purchase_price") not in (None, "", 0):
+                    rec = {
+                        **rec,
+                        "仕入れ価格": row.get("purchase_price"),
+                        "purchase_price": row.get("purchase_price"),
+                    }
+                    by_sku[sku] = rec
+        return by_sku
+
+    def fetch_sales_from_sp_api(self) -> None:
+        """SP-API 注文から販売DBを更新し、仕入DBを販売済み連動する。"""
+        days, ok = self._ask_sp_api_sales_lookback_days()
+        if not ok:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "SP-API更新",
+            f"過去 {days} 日分の Amazon 注文を取得し、販売DBへ反映します。\n"
+            "あわせて仕入DBのステータスを販売済み／一部販売済みに更新します。\n\n"
+            "手数料・利益は仕入DBの「プラットフォーム手数料」「出荷費用」「仕入れ価格」から計算します。\n"
+            "（Amazon実額の手数料は CSV 取込でも上書きできます）\n\n"
+            "よろしいですか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            from desktop.services.sp_api_orders import (
+                build_sp_api_client,
+                enrich_sales_with_purchase_fees,
+                fetch_sale_payloads_from_sp_api,
+            )
+        except ImportError:
+            from services.sp_api_orders import (  # type: ignore
+                build_sp_api_client,
+                enrich_sales_with_purchase_fees,
+                fetch_sale_payloads_from_sp_api,
+            )
+
+        try:
+            client = build_sp_api_client()
+            client.ensure_credentials()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(
+                self,
+                "SP-API更新",
+                f"SP-API の認証情報を読み込めませんでした。\n{exc}\n\n"
+                ".env の SP_API_CLIENT_ID / SECRET / REFRESH_TOKEN を確認してください。",
+            )
+            return
+
+        # 仕入手数料参照のため、未読込ならスナップショットを載せる
+        try:
+            if not (getattr(self, "purchase_all_records_master", None) or getattr(self, "purchase_all_records", None)):
+                if hasattr(self, "restore_latest_purchase_snapshot"):
+                    self.restore_latest_purchase_snapshot()
+        except Exception:
+            pass
+
+        prog = QProgressDialog("SP-API から注文を取得中…", "キャンセル", 0, 0, self)
+        prog.setWindowTitle("SP-API更新")
+        prog.setMinimumDuration(0)
+        prog.setValue(0)
+        QApplication.processEvents()
+
+        def _on_progress(msg: str) -> None:
+            prog.setLabelText(msg)
+            QApplication.processEvents()
+
+        try:
+            result = fetch_sale_payloads_from_sp_api(
+                client,
+                days=days,
+                should_cancel=prog.wasCanceled,
+                on_progress=_on_progress,
+            )
+        except Exception as exc:  # noqa: BLE001
+            prog.close()
+            QMessageBox.critical(self, "SP-API更新エラー", f"注文の取得に失敗しました:\n{exc}")
+            return
+
+        prog.setLabelText("仕入DBの手数料で利益を計算中…")
+        QApplication.processEvents()
+
+        try:
+            purchases_by_sku = self._build_purchases_by_sku_for_sales()
+            payloads = enrich_sales_with_purchase_fees(
+                list(result.get("sales") or []),
+                purchases_by_sku,
+            )
+            fees_filled = sum(
+                1
+                for p in payloads
+                if self._to_int_amount(p.get("platform_fee"), 0) > 0
+                or self._to_int_amount(p.get("shipping_fee"), 0) > 0
+            )
+            profit_filled = sum(1 for p in payloads if p.get("net_profit") is not None)
+
+            prog.setLabelText("販売DBへ反映中…")
+            QApplication.processEvents()
+
+            upsert = self._upsert_sales_payloads(payloads)
+            status_sync = self._sync_purchase_status_from_sales()
+            self.load_sales_data()
+            self._refresh_purchase_after_sales_sync()
+        except Exception as exc:  # noqa: BLE001
+            prog.close()
+            QMessageBox.critical(self, "SP-API更新エラー", f"販売DBへの反映に失敗しました:\n{exc}")
+            return
+
+        prog.close()
+
+        err_lines = result.get("errors") or []
+        err_preview = ""
+        if err_lines:
+            shown = "\n".join(str(e) for e in err_lines[:5])
+            more = f"\n…他 {len(err_lines) - 5} 件" if len(err_lines) > 5 else ""
+            err_preview = f"\n\n取得エラー:\n{shown}{more}"
+
+        canceled_note = "\n（キャンセルで中断しました）" if result.get("canceled") else ""
+        QMessageBox.information(
+            self,
+            "SP-API更新完了",
+            f"対象期間: 過去 {days} 日\n"
+            f"注文数: {result.get('orders_seen', 0)} 件\n"
+            f"取込件数: {upsert.get('inserted', 0)} 件\n"
+            f"更新件数: {upsert.get('updated', 0)} 件\n"
+            f"重複スキップ: {upsert.get('skipped_duplicate', 0)} 件\n"
+            f"仕入から手数料反映: {fees_filled} 件\n"
+            f"利益計算: {profit_filled} 件\n\n"
+            f"ステータス更新（販売済み）: {status_sync.get('updated_sold', 0)} 件\n"
+            f"ステータス更新（一部販売済み）: {status_sync.get('updated_partial', 0)} 件\n"
+            f"ステータス変更なし: {status_sync.get('unchanged', 0)} 件"
+            f"{canceled_note}{err_preview}",
+        )
+
+    def _ask_sp_api_sales_lookback_days(self) -> Tuple[int, bool]:
+        """過去何日分を取るか確認する。キャンセル時は (0, False)。"""
+        from PySide6.QtWidgets import QInputDialog
+
+        days, ok = QInputDialog.getInt(
+            self,
+            "SP-API更新",
+            "過去何日分の注文を取得しますか？（1〜180）",
+            30,
+            1,
+            180,
+            1,
+        )
+        return (int(days), bool(ok))
+
+    def _apply_refunds_to_sales_db(self, refunds: List[Dict[str, Any]]) -> Dict[str, int]:
+        """返品・返金レコードを販売DBへ反映する。"""
+        try:
+            from desktop.services.sp_api_refunds import apply_refund_to_sale
+        except ImportError:
+            from services.sp_api_refunds import apply_refund_to_sale  # type: ignore
+
+        summary = {
+            "matched": 0,
+            "updated": 0,
+            "unchanged": 0,
+            "unmatched": 0,
+        }
+        if not refunds:
+            return summary
+
+        sales = self.sales_db.list_all()
+        by_key: Dict[tuple, Dict[str, Any]] = {}
+        for sale in sales:
+            order_id = self._normalize_text(sale.get("order_id"))
+            sku = self._normalize_text(sale.get("sku"))
+            if order_id and sku:
+                by_key[(order_id, sku)] = sale
+
+        for refund in refunds:
+            order_id = self._normalize_text(refund.get("order_id"))
+            sku = self._normalize_text(refund.get("sku"))
+            sale = by_key.get((order_id, sku))
+            if not sale:
+                summary["unmatched"] += 1
+                continue
+            summary["matched"] += 1
+            before = self._to_int_amount(sale.get("refund_total"), default=0)
+            updated = apply_refund_to_sale(dict(sale), refund)
+            after = self._to_int_amount(updated.get("refund_total"), default=0)
+            if after == before and updated.get("net_profit") == sale.get("net_profit"):
+                summary["unchanged"] += 1
+                continue
+            sale_id = sale.get("id")
+            if not sale_id:
+                summary["unchanged"] += 1
+                continue
+            self.sales_db.update(
+                int(sale_id),
+                {
+                    "refund_total": updated.get("refund_total"),
+                    "net_profit": updated.get("net_profit"),
+                },
+            )
+            by_key[(order_id, sku)] = {**sale, **updated}
+            summary["updated"] += 1
+        return summary
+
+    def fetch_refunds_from_sp_api(self) -> None:
+        """返品レポートから販売DBの返金総額・利益を更新する。"""
+        days, ok = self._ask_sp_api_sales_lookback_days()
+        if not ok:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "返品・返金取込",
+            f"過去 {days} 日分の返品レポートを取得し、販売DBの「返金総額」と利益を更新します。\n\n"
+            "・FBA返品レポート（返品事実）\n"
+            "・返品フラットファイル（返金額がある場合あり）\n\n"
+            "※ Amazon実額の返金明細（Finances）は、いまのロールでは使えない場合があります。\n"
+            "その場合は販売価格から返金額を推定します。\n\n"
+            "よろしいですか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            from desktop.services.sp_api_orders import build_sp_api_client
+            from desktop.services.sp_api_refunds import fetch_refund_records_from_sp_api
+        except ImportError:
+            from services.sp_api_orders import build_sp_api_client  # type: ignore
+            from services.sp_api_refunds import fetch_refund_records_from_sp_api  # type: ignore
+
+        try:
+            client = build_sp_api_client()
+            client.ensure_credentials()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(
+                self,
+                "返品・返金取込",
+                f"SP-API の認証情報を読み込めませんでした。\n{exc}",
+            )
+            return
+
+        prog = QProgressDialog("返品・返金を取得中…", "キャンセル", 0, 0, self)
+        prog.setWindowTitle("返品・返金取込")
+        prog.setMinimumDuration(0)
+        prog.setValue(0)
+        QApplication.processEvents()
+
+        def _on_progress(msg: str) -> None:
+            prog.setLabelText(msg)
+            QApplication.processEvents()
+
+        try:
+            result = fetch_refund_records_from_sp_api(
+                client,
+                days=days,
+                should_cancel=prog.wasCanceled,
+                on_progress=_on_progress,
+            )
+            prog.setLabelText("販売DBへ返金を反映中…")
+            QApplication.processEvents()
+            applied = self._apply_refunds_to_sales_db(list(result.get("refunds") or []))
+            self.load_sales_data()
+        except Exception as exc:  # noqa: BLE001
+            prog.close()
+            QMessageBox.critical(self, "返品・返金取込エラー", f"取込に失敗しました:\n{exc}")
+            return
+
+        prog.close()
+
+        err_lines = result.get("errors") or []
+        err_preview = ""
+        if err_lines:
+            shown = "\n".join(str(e) for e in err_lines[:6])
+            more = f"\n…他 {len(err_lines) - 6} 件" if len(err_lines) > 6 else ""
+            err_preview = f"\n\nメモ:\n{shown}{more}"
+
+        reports = ", ".join(result.get("reports_used") or []) or "なし"
+        canceled_note = "\n（キャンセルで中断しました）" if result.get("canceled") else ""
+        finances_note = (
+            "Finances API: 利用可（実額）"
+            if result.get("finances_available")
+            else "Finances API: 未使用（ロール不足のためレポート推定）"
+        )
+        QMessageBox.information(
+            self,
+            "返品・返金取込完了",
+            f"対象期間: 過去 {days} 日\n"
+            f"取得した返品・返金: {len(result.get('refunds') or [])} 件\n"
+            f"販売DB一致: {applied.get('matched', 0)} 件\n"
+            f"更新: {applied.get('updated', 0)} 件\n"
+            f"変更なし: {applied.get('unchanged', 0)} 件\n"
+            f"販売DBに無い: {applied.get('unmatched', 0)} 件\n"
+            f"使ったレポート: {reports}\n"
+            f"{finances_note}"
+            f"{canceled_note}{err_preview}",
+        )
 
     def import_sales_csv(self):
         """売れたものCSVを販売DBへ取り込む。"""
@@ -855,27 +1397,13 @@ class ProductWidget(
             selected_dir = str(Path(file_path).parent)
             self.settings.setValue("directories/sales_csv", selected_dir)
 
-            existing_sales = self.sales_db.list_all()
-            existing_by_key: Dict[tuple, Dict[str, Any]] = {}
-            existing_keys = set()
-            for s in existing_sales:
-                key = self._build_sale_dedupe_key(s)
-                existing_keys.add(key)
-                # 同一キーが複数ある場合は先勝（通常は重複なし想定）
-                if key not in existing_by_key:
-                    existing_by_key[key] = s
-            imported_keys = set()
-
-            inserted = 0
-            updated = 0
-            skipped_duplicate = 0
-            skipped_invalid = 0
-
+            payloads: List[Dict[str, Any]] = []
+            skipped_invalid_csv = 0
             for _, row in df.iterrows():
                 sku = self._normalize_text(row.get("SKU"))
                 sale_date = self._normalize_text(row.get("注文日"))
                 if not sku or not sale_date:
-                    skipped_invalid += 1
+                    skipped_invalid_csv += 1
                     continue
 
                 sale_price = self._to_int_amount(row.get("販売価格"), default=0)
@@ -906,7 +1434,7 @@ class ProductWidget(
                 )
                 refund_total = self._to_int_amount(row.get("返金総額"), default=0)
 
-                sale_payload = {
+                payloads.append({
                     "sku": sku,
                     "sale_date": sale_date,
                     "sales_method": self._normalize_text(row.get("配送経路")) or "FBA",
@@ -921,51 +1449,20 @@ class ProductWidget(
                     "net_profit": net_profit,
                     "order_id": self._normalize_text(row.get("AmazonOrderId")),
                     "transaction_method": self._normalize_text(row.get("出荷状態")),
-                }
+                })
 
-                dedupe_key = self._build_sale_dedupe_key(sale_payload)
-                existing_sale = existing_by_key.get(dedupe_key)
-                if existing_sale is not None:
-                    existing_price = self._to_int_amount(existing_sale.get("sale_price"), default=0)
-                    incoming_price = self._to_int_amount(sale_payload.get("sale_price"), default=0)
-                    # 未確定(0円) → 確定(>0円) のときは更新する
-                    if existing_price <= 0 < incoming_price:
-                        target_id = existing_sale.get("id")
-                        if target_id:
-                            self.sales_db.update(int(target_id), sale_payload)
-                            updated += 1
-                            # 以降の重複判定にも最新値を反映
-                            existing_by_key[dedupe_key] = {**existing_sale, **sale_payload}
-                            continue
-                    skipped_duplicate += 1
-                    continue
-
-                if dedupe_key in imported_keys:
-                    skipped_duplicate += 1
-                    continue
-
-                self.sales_db.insert(sale_payload)
-                imported_keys.add(dedupe_key)
-                inserted += 1
-
+            upsert = self._upsert_sales_payloads(payloads)
             status_sync = self._sync_purchase_status_from_sales()
             self.load_sales_data()
-            try:
-                # 仕入DB表示が開いている場合は、ステータス表示を最新化
-                if hasattr(self, "purchase_all_records_master"):
-                    base_records = copy.deepcopy(getattr(self, "purchase_all_records_master", []) or [])
-                    if base_records:
-                        self.load_purchase_data(base_records)
-            except Exception:
-                pass
+            self._refresh_purchase_after_sales_sync()
 
             QMessageBox.information(
                 self,
                 "販売CSV取込完了",
-                f"取込件数: {inserted} 件\n"
-                f"更新件数(0円→確定): {updated} 件\n"
-                f"重複スキップ: {skipped_duplicate} 件\n"
-                f"不正データスキップ: {skipped_invalid} 件\n\n"
+                f"取込件数: {upsert.get('inserted', 0)} 件\n"
+                f"更新件数(0円→確定): {upsert.get('updated', 0)} 件\n"
+                f"重複スキップ: {upsert.get('skipped_duplicate', 0)} 件\n"
+                f"不正データスキップ: {skipped_invalid_csv + upsert.get('skipped_invalid', 0)} 件\n\n"
                 f"ステータス更新（販売済み）: {status_sync.get('updated_sold', 0)} 件\n"
                 f"ステータス更新（一部販売済み）: {status_sync.get('updated_partial', 0)} 件\n"
                 f"ステータス変更なし: {status_sync.get('unchanged', 0)} 件"
