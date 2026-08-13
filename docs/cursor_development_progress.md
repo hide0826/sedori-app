@@ -1,3 +1,20 @@
+## 2026-08-13 仕入DB SP-API取得: 出品日未入力のみ・全件対応
+
+- **内容**: 「SP-API取得」を運用向けに調整。**出品日が空の行だけ**取得する。未選択時は Amazon 全件のうち未入力を対象（確認ダイアログ・キャンセル可）
+- **手動確認**: 選択行・全件で出品日／プラットフォーム手数料／FBA出荷費用の取得成功を確認
+- **後回し**: 在庫保管手数料（月次レポート）は未実装
+- **次回候補**: 価格改定の API 反映、在庫同期、注文取込
+
+## 2026-08-12 仕入DB: SP-APIで出品日・手数料・出荷費用を取得
+
+- **内容**: データベース管理 > 仕入DB に「SP-API取得」ボタンを追加。選択行の出品日・プラットフォーム手数料・FBA出荷費用を Amazon から取得して反映する
+- **実装**:
+  - `shared/sp_api_client.py`: Listings Items GET / Product Fees POST（ワークスペース `D:\HIRIO\shared`）
+  - `desktop/services/sp_api_listing_fees.py`: パースと仕入レコード反映
+  - `purchase_batch_mixin.py` / `product/widget.py`
+- **注意**: 自己発送の出荷費用は上書きしない。Seller ID 必須。出品日ありはスキップ。未選択なら出品日未入力の Amazon 全件
+- **テスト**: `tests/test_sp_api_listing_fees.py`
+
 ## 2026-08-12 マイルストーン: SP-API本格実装前の保存版（v0.4.0-pre-sp-api）
 
 - **内容**: 物理バックアップ完了後、配布用スナップショットとしてタグ `v0.4.0-pre-sp-api` を付与。以降の SP-API 連携は `feature/sp-api` ブランチで実装する

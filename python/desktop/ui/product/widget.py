@@ -615,6 +615,16 @@ class ProductWidget(
         self.autofill_monthly_ladder_button.clicked.connect(self.autofill_purchase_monthly_ladder_batch)
         controls_layout.addWidget(self.autofill_monthly_ladder_button)
 
+        self.fetch_sp_api_fees_button = QPushButton("SP-API取得")
+        self.fetch_sp_api_fees_button.setToolTip(
+            "出品日・プラットフォーム手数料・出荷費用を Amazon SP-API から取得します。\n"
+            "対象は「出品日が空」の行だけです（既に出品日がある行はスキップ）。\n"
+            "行を選択している → 選択行のうち未入力。未選択 → Amazon 全件のうち未入力。\n"
+            "FBA の出荷費用のみ更新（自己発送は変更しません）。既存手数料は上書きします。"
+        )
+        self.fetch_sp_api_fees_button.clicked.connect(self.fetch_sp_api_listing_fees_for_selected)
+        controls_layout.addWidget(self.fetch_sp_api_fees_button)
+
         # 仕入DB保存ボタン（手動変更を含めて確実にスナップショット保存）
         self.save_purchase_button = QPushButton("仕入DB保存")
         self.save_purchase_button.setToolTip("現在の仕入DBの内容（テーブル上の変更を含む）をスナップショットとして保存します")

@@ -754,3 +754,243 @@ class PurchaseBatchMixin:
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"仕入DBの保存に失敗しました:\n{e}")
 
+    @staticmethod
+    def _purchase_record_has_listed_date(rec: Dict[str, Any]) -> bool:
+        """出品日（listed_date）が入っているか。"""
+        raw = rec.get("出品日") or rec.get("listed_date") or ""
+        return bool(str(raw).strip())
+
+    def _collect_amazon_purchase_records_for_sp_api(
+        self, *, selected_only: bool
+    ) -> Tuple[List[Dict[str, Any]], int, int]:
+        """
+        SP-API 取得対象の Amazon 仕入レコードを集める。
+        出品日が既にある行は対象外（未入力のみ）。
+
+        Returns:
+            (対象レコード, Amazon以外スキップ件数, 出品日ありスキップ件数)
+        """
+        skipped_non_amazon = 0
+        skipped_has_listed = 0
+        targets: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def _append_if_amazon(rec: Optional[Dict[str, Any]]) -> None:
+            nonlocal skipped_non_amazon, skipped_has_listed
+            if not rec:
+                return
+            sku = str(rec.get("SKU") or rec.get("sku") or "").strip()
+            if sku and sku in seen:
+                return
+            channel = str(rec.get("販売チャネル") or rec.get("sales_channel") or "Amazon")
+            if not is_amazon_sales_channel(channel):
+                skipped_non_amazon += 1
+                return
+            if self._purchase_record_has_listed_date(rec):
+                skipped_has_listed += 1
+                return
+            if sku:
+                seen.add(sku)
+            targets.append(rec)
+
+        if selected_only:
+            selected_rows = sorted(
+                {idx.row() for idx in self.purchase_table.selectionModel().selectedRows()}
+            )
+            for row in selected_rows:
+                sku = self._purchase_table_row_sku(row)
+                _append_if_amazon(self._purchase_record_by_sku(sku) if sku else None)
+            return targets, skipped_non_amazon, skipped_has_listed
+
+        self.ensure_purchase_records_fully_augmented()
+        source = getattr(self, "purchase_all_records", None) or []
+        for rec in source:
+            if isinstance(rec, dict):
+                _append_if_amazon(rec)
+        return targets, skipped_non_amazon, skipped_has_listed
+
+    def fetch_sp_api_listing_fees_for_selected(self) -> None:
+        """
+        出品日・プラットフォーム手数料・出荷費用を SP-API から取得して反映する。
+        出品日が空の行だけ対象。行選択ありならその中の未入力、未選択なら Amazon 全件のうち未入力。
+        自己発送の出荷費用は上書きしない。
+        """
+        import time
+
+        if not hasattr(self, "purchase_table"):
+            return
+
+        selected_rows = sorted(
+            {idx.row() for idx in self.purchase_table.selectionModel().selectedRows()}
+        )
+        selected_only = bool(selected_rows)
+        targets, skipped_non_amazon, skipped_has_listed = (
+            self._collect_amazon_purchase_records_for_sp_api(selected_only=selected_only)
+        )
+
+        if not targets:
+            skip_msg = []
+            if skipped_has_listed:
+                skip_msg.append(f"出品日あり {skipped_has_listed} 件")
+            if skipped_non_amazon:
+                skip_msg.append(f"Amazon以外 {skipped_non_amazon} 件")
+            QMessageBox.information(
+                self,
+                "SP-API取得",
+                "出品日が未入力の Amazon 行がありません。"
+                + (("\n（スキップ: " + "、".join(skip_msg) + "）") if skip_msg else ""),
+            )
+            return
+
+        est_min = max(1, (len(targets) + 59) // 60)
+        scope_label = (
+            "選択中のうち出品日未入力"
+            if selected_only
+            else "仕入DBの Amazon 出品日未入力"
+        )
+        confirm = QMessageBox.question(
+            self,
+            "SP-API取得",
+            f"{scope_label} {len(targets)} 件について、\n"
+            "出品日・プラットフォーム手数料・出荷費用を取得します。\n\n"
+            "・出品日が既にある行はスキップします"
+            + (f"（今回 {skipped_has_listed} 件）\n" if skipped_has_listed else "\n")
+            + "・既存の手数料は上書きします\n"
+            "・自己発送の出荷費用は変更しません（FBA のみ更新）\n"
+            f"・API 制限のため 1件あたり約1秒（目安 {est_min} 分）\n"
+            "・途中でキャンセルできます（そこまでの結果は保存します）\n\n"
+            "実行しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        try:
+            from desktop.services.sp_api_listing_fees import (
+                apply_listing_fees_to_record,
+                fetch_listing_and_fees_for_sku,
+                record_is_fba,
+            )
+            from desktop.services.purchase_cost_calc import to_float
+        except ImportError:
+            from services.sp_api_listing_fees import (  # type: ignore
+                apply_listing_fees_to_record,
+                fetch_listing_and_fees_for_sku,
+                record_is_fba,
+            )
+            from services.purchase_cost_calc import to_float  # type: ignore
+
+        try:
+            from desktop.services.sp_api_listing_fees import build_sp_api_client
+        except ImportError:
+            from services.sp_api_listing_fees import build_sp_api_client  # type: ignore
+
+        try:
+            client = build_sp_api_client()
+            client.ensure_credentials()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(
+                self,
+                "SP-API取得",
+                f"SP-API の認証情報を読み込めませんでした。\n{exc}\n\n"
+                ".env の SP_API_CLIENT_ID / SECRET / REFRESH_TOKEN と\n"
+                "SP_API_SELLER_ID（または設定タブの出品者ID）を確認してください。",
+            )
+            return
+
+        total = len(targets)
+        prog = QProgressDialog("SP-API から取得中…", "キャンセル", 0, total, self)
+        prog.setWindowTitle("SP-API取得")
+        prog.setMinimumDuration(0)
+        prog.setValue(0)
+        QApplication.processEvents()
+
+        ok_count = 0
+        fail_notes: List[str] = []
+        canceled = False
+
+        for i, rec in enumerate(targets):
+            if prog.wasCanceled():
+                canceled = True
+                break
+            sku = str(rec.get("SKU") or rec.get("sku") or "").strip()
+            asin = str(rec.get("ASIN") or rec.get("asin") or "").strip()
+            price = to_float(
+                rec.get("販売予定価格") or rec.get("planned_price") or rec.get("price"),
+                0.0,
+            )
+            prog.setLabelText(f"{i + 1} / {total}  {sku}")
+            prog.setValue(i)
+            QApplication.processEvents()
+            if not sku:
+                fail_notes.append("(SKU空)")
+                continue
+            if price <= 0:
+                fail_notes.append(f"{sku}: 販売予定価格が空")
+                continue
+
+            is_fba = record_is_fba(rec)
+            result = fetch_listing_and_fees_for_sku(
+                sku,
+                price,
+                asin=asin,
+                is_fba=is_fba,
+                client=client,
+            )
+            errors = list(result.get("errors") or [])
+            if result.get("platform_fee") is None and result.get("listed_date") == "":
+                fail_notes.append(f"{sku}: " + ("; ".join(errors) or "取得失敗"))
+                time.sleep(0.4)
+                continue
+
+            apply_listing_fees_to_record(
+                rec,
+                listed_date=str(result.get("listed_date") or ""),
+                platform_fee=result.get("platform_fee"),
+                fba_shipping_fee=result.get("fba_shipping_fee"),
+                is_fba=bool(result.get("is_fba")),
+            )
+            if sku and hasattr(self, "purchase_history_db") and result.get("listed_date"):
+                try:
+                    self.purchase_history_db.upsert(
+                        {"sku": sku, "listed_date": result["listed_date"]}
+                    )
+                except Exception as db_exc:  # noqa: BLE001
+                    errors.append(f"DB: {db_exc}")
+            if selected_only or total <= 30:
+                self._refresh_purchase_repricing_table_cells_for_record(rec)
+            ok_count += 1
+            if errors:
+                fail_notes.append(f"{sku}: 一部失敗 " + "; ".join(errors[:2]))
+            time.sleep(0.4)
+
+        if not canceled:
+            prog.setValue(total)
+        prog.close()
+
+        try:
+            self.purchase_all_records_master = copy.deepcopy(self.purchase_all_records)
+        except Exception:
+            pass
+        self.filter_purchase_records()
+        try:
+            self.save_purchase_snapshot()
+        except Exception as snap_exc:  # noqa: BLE001
+            fail_notes.append(f"スナップショット: {snap_exc}")
+
+        msg = f"更新: {ok_count} 件 / 対象 {total} 件"
+        if not selected_only:
+            msg = "出品日未入力のみ取得\n" + msg
+        if skipped_has_listed:
+            msg += f"\n出品日ありスキップ: {skipped_has_listed} 件"
+        if skipped_non_amazon:
+            msg += f"\nAmazon以外スキップ: {skipped_non_amazon} 件"
+        if canceled:
+            msg += "\n（キャンセルで中断）"
+        if fail_notes:
+            msg += "\n\n失敗・注意:\n" + "\n".join(fail_notes[:8])
+            if len(fail_notes) > 8:
+                msg += f"\n…他 {len(fail_notes) - 8} 件"
+        QMessageBox.information(self, "SP-API取得", msg)
+

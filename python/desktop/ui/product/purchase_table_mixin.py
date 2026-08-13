@@ -534,6 +534,7 @@ class PurchaseTableMixin:
         field_headers = (
             "発送方法",
             "販売チャネル",
+            "出品日",
             "プラットフォーム手数料",
             "Amazon手数料",
             "出荷費用",
