@@ -2,9 +2,9 @@
 
 import { useState } from "react";
 import { SubTabs } from "@/components/shell/SubTabs";
-import { ComingSoon } from "@/components/shell/ComingSoon";
 import RepricerSettingsTable from "@/app/components/RepricerSettingsTable";
 import { DummyRepricerCsvDownload } from "@/components/repricer/DummyRepricerCsvDownload";
+import { SpApiRepricerPanel } from "@/components/repricer/SpApiRepricerPanel";
 
 const REPRICER_SUB_TABS = [
   { id: "run", label: "改定実行" },
@@ -50,12 +50,7 @@ export function RepricerWorkspace() {
         </div>
       )}
 
-      {active === "sp-api" && (
-        <ComingSoon
-          title="SP-API改定"
-          description="デスクトップの「SP-API改定」タブに相当する枠です。機能はこれからダミー前提で載せます。"
-        />
-      )}
+      {active === "sp-api" && <SpApiRepricerPanel />}
     </div>
   );
 }
