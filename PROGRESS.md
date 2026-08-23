@@ -33,7 +33,7 @@ HIRIO 全体の正本は [`../../PROGRESS.md`](../../PROGRESS.md)（`C:\HIRIO\PR
 | サーバー | `C:\HIRIO\repo\sedori-app.github`（PWA殻） |
 | 機能枝（目安） | `feature/sp-api` など（運用PC） |
 | PWA殻枝 | `feature/server-pwa`（origin と同期済み） |
-| 最新コミット（殻） | （仕入サブタブ整理後に更新） |
+| 最新コミット（殻） | `da0cff2` 仕入管理サブタブ整理 |
 | PWA URL | http://192.168.0.200:3000 |
 | API URL | http://192.168.0.200:8000 |
 
@@ -109,6 +109,7 @@ python -m uvicorn app:app --host 0.0.0.0 --port 8000
 - ダミー仕入CSVダウンロードを追加（価格改定と同パターン）
 - コンディション説明は ComingSoon 枠のみ
 - 追加: `components/inventory/InventoryWorkspace.tsx` ほか
+- コミット: `da0cff2`
 
 ### 2026-08-23 PWA殻〜価格改定ダミー〜PROGRESS
 
