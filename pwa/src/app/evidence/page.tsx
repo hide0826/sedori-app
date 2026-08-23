@@ -1,10 +1,6 @@
-import { ComingSoon } from "@/components/shell/ComingSoon";
+import { ThinMenuWorkspace } from "@/components/menus/ThinMenuWorkspace";
+import { EVIDENCE_MENU } from "@/components/menus/menuDummyData";
 
 export default function EvidencePage() {
-  return (
-    <ComingSoon
-      title="証憑管理"
-      description="証憑管理の枠です。機能はデスクトップの「証憑管理」タブが正です。"
-    />
-  );
+  return <ThinMenuWorkspace config={EVIDENCE_MENU} />;
 }

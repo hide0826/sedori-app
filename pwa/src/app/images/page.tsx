@@ -1,10 +1,6 @@
-import { ComingSoon } from "@/components/shell/ComingSoon";
+import { ThinMenuWorkspace } from "@/components/menus/ThinMenuWorkspace";
+import { IMAGES_MENU } from "@/components/menus/menuDummyData";
 
 export default function ImagesPage() {
-  return (
-    <ComingSoon
-      title="画像管理"
-      description="画像管理の枠です。機能はデスクトップの「画像管理」タブが正です。"
-    />
-  );
+  return <ThinMenuWorkspace config={IMAGES_MENU} />;
 }

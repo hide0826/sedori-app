@@ -1,10 +1,6 @@
-import { ComingSoon } from "@/components/shell/ComingSoon";
+import { ThinMenuWorkspace } from "@/components/menus/ThinMenuWorkspace";
+import { DATABASE_MENU } from "@/components/menus/menuDummyData";
 
 export default function DatabasePage() {
-  return (
-    <ComingSoon
-      title="データベース管理"
-      description="商品DB・店舗マスタなどの枠です。機能はデスクトップの「データベース管理」が正です。"
-    />
-  );
+  return <ThinMenuWorkspace config={DATABASE_MENU} />;
 }

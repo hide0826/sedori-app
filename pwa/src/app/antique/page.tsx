@@ -1,10 +1,6 @@
-import { ComingSoon } from "@/components/shell/ComingSoon";
+import { ThinMenuWorkspace } from "@/components/menus/ThinMenuWorkspace";
+import { ANTIQUE_MENU } from "@/components/menus/menuDummyData";
 
 export default function AntiquePage() {
-  return (
-    <ComingSoon
-      title="古物台帳"
-      description="古物台帳の枠です。機能はデスクトップの「古物台帳」タブが正です。"
-    />
-  );
+  return <ThinMenuWorkspace config={ANTIQUE_MENU} />;
 }
