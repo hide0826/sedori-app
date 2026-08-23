@@ -25,14 +25,15 @@ HIRIO 全体の正本は [`../../PROGRESS.md`](../../PROGRESS.md)（`C:\HIRIO\PR
 
 ## いまの状態（ひとこと）
 
-**運用・機能更新の正はメインPCデスクトップ。サーバー（mini PC）は PWA 殻＋ダミー検証。価格改定はサブタブ付きでダミーCSVプレビュー成功済み。次は仕入管理のサブタブ整理。**
+**運用・機能更新の正はメインPCデスクトップ。サーバー（mini PC）は PWA 殻＋ダミー検証。価格改定はサブタブ付きでダミーCSVプレビュー成功済み。repo直下に PROGRESS.md を追加済み。次チャットは仕入管理のサブタブ整理から。**
 
 | 項目 | 値 |
 |------|-----|
 | 運用PC | `D:\HIRIO\repo\sedori-app.github`（機能の正） |
 | サーバー | `C:\HIRIO\repo\sedori-app.github`（PWA殻） |
 | 機能枝（目安） | `feature/sp-api` など（運用PC） |
-| PWA殻枝 | `feature/server-pwa` |
+| PWA殻枝 | `feature/server-pwa`（origin と同期済み） |
+| 最新コミット（殻） | `337fa22` PROGRESS.md 追加 |
 | PWA URL | http://192.168.0.200:3000 |
 | API URL | http://192.168.0.200:8000 |
 
@@ -52,9 +53,16 @@ HIRIO 全体の正本は [`../../PROGRESS.md`](../../PROGRESS.md)（`C:\HIRIO\PR
 1. ~~PWA 殻（左ナビ・主要メニュー）~~ → **完了**
 2. ~~価格改定: ダミーCSVプレビュー + LAN API接続~~ → **完了**
 3. ~~価格改定サブタブ（改定実行 / 改定ルール / SP-API改定）~~ → **完了**（SP-APIは枠のみ）
-4. **仕入管理にサブタブ枠**（仕入データ / コンディション説明）＋既存CSVを整理
-5. 価格改定「SP-API改定」をダミー前提で少し中身へ
-6. 他メニュー（ルート / DB / 古物 / 画像 / 証憑 / 分析）は枠のまま → 順に
+4. ~~repo 直下 `PROGRESS.md` 追加~~ → **完了**
+5. **仕入管理にサブタブ枠**（仕入データ / コンディション説明）＋既存CSVを整理
+6. 価格改定「SP-API改定」をダミー前提で少し中身へ
+7. 他メニュー（ルート / DB / 古物 / 画像 / 証憑 / 分析）は枠のまま → 順に
+
+### 次チャット開始時の読み方
+
+1. このファイルの「いまの状態」「次チャットでやること」
+2. Notion 仕様書（アクセスURLはページ上部）
+3. 枝は `feature/server-pwa`（サーバー作業時）
 
 ---
 
@@ -82,7 +90,7 @@ HIRIO 全体の正本は [`../../PROGRESS.md`](../../PROGRESS.md)（`C:\HIRIO\PR
 cd C:\HIRIO\repo\sedori-app.github\pwa
 npm run dev -- -H 0.0.0.0 -p 3000
 
-# API
+# API（システムの Python 3.12 で起動実績あり。.venv は別ユーザーパスで壊れている場合あり）
 cd C:\HIRIO\repo\sedori-app.github\python
 python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
@@ -93,11 +101,13 @@ python -m uvicorn app:app --host 0.0.0.0 --port 8000
 
 ## 作業ログ
 
-### 2026-08-23 PWA殻〜価格改定ダミー
+### 2026-08-23 PWA殻〜価格改定ダミー〜PROGRESS
 
-- 枝 `feature/server-pwa` を作成・push
+- 枝 `feature/server-pwa` を作成・push（origin 同期済み）
 - 左ナビ殻: TOP / 価格改定 / 仕入 / ルート / DB / 古物 / 画像 / 証憑 / 分析 / 設定
 - LANから開くとき API を同じホストの `:8000` へ（localhost保存を無視）
 - ダミーCSVダウンロード＋プレビュー成功（メインPCから確認）
 - 価格改定サブタブ枠を追加
-- 主要コミット: `62bde73` / `db3106f` / `73f25bb` / `2519ac1`
+- repo 直下に本 `PROGRESS.md` を追加。全体ボードからもリンク
+- コミット: `62bde73` / `db3106f` / `73f25bb` / `2519ac1` / `337fa22`
+- **未コミットの意図的除外:** `.bak` / `HIRIOold/` / 領収書スナップショット等（Gitに載せない）
