@@ -31,10 +31,14 @@ const formatDayLabel = (days: number, index: number): string => {
 };
 
 
-export default function RepricerSettingsTable() {
+export default function RepricerSettingsTable({
+  panel = "all",
+}: {
+  panel?: "all" | "rules" | "run";
+}) {
   const [config, setConfig] = useState<RepriceConfig | null>(null);
   const [q4RuleEnabled, setQ4RuleEnabled] = useState(true);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(panel !== "run");
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -43,8 +47,12 @@ export default function RepricerSettingsTable() {
   const [processingResult, setProcessingResult] = useState<ProcessingResult | null>(null);
 
   useEffect(() => {
+    if (panel === "run") {
+      setIsLoading(false);
+      return;
+    }
     fetchConfig();
-  }, []);
+  }, [panel]);
 
   const fetchConfig = async () => {
     setIsLoading(true);
@@ -231,12 +239,25 @@ export default function RepricerSettingsTable() {
   const handlePreview = () => runProcessing('preview');
   const handleApply = () => runProcessing('apply');
 
-  if (isLoading) return <div className="text-center p-8">読み込み中...</div>;
-  if (error) return <div className="text-center p-8 text-red-500">エラー: {error}</div>;
-  if (!config) return <div className="text-center p-8">設定データがありません。</div>;
+  if (panel !== "run") {
+    if (isLoading) return <div className="text-center p-8">読み込み中...</div>;
+    if (error && !config) return <div className="text-center p-8 text-red-500">エラー: {error}</div>;
+    if (!config) return <div className="text-center p-8">設定データがありません。</div>;
+  }
+
+  const showRules = panel === "all" || panel === "rules";
+  const showRun = panel === "all" || panel === "run";
 
   return (
     <div className="container mx-auto p-4">
+      {error && showRun && (
+        <div className="mb-4 rounded-md bg-red-50 px-3 py-2 text-sm text-[var(--hirio-danger)]">
+          {error}
+        </div>
+      )}
+
+      {showRules && config && (
+        <>
       <div className="flex justify-between items-center mb-4">
         <h1 className="text-2xl font-bold">価格改定ルール設定</h1>
         <div className="flex items-center">
@@ -312,9 +333,13 @@ export default function RepricerSettingsTable() {
           {isSaving ? '保存中...' : '設定を保存'}
         </button>
       </div>
+        </>
+      )}
 
+      {showRun && (
+        <>
       {/* --- CSVファイル処理セクション --- */}
-      <div className="mt-8 pt-6 border-t-2 border-gray-200">
+      <div className={showRules ? "mt-8 pt-6 border-t-2 border-gray-200" : ""}>
         <h2 className="text-xl font-bold mb-4">CSVファイル処理</h2>
 
         {/* CSV要件の説明 */}
@@ -345,7 +370,7 @@ export default function RepricerSettingsTable() {
               <li><strong>add-delete</strong>: 追加/削除フラグ</li>
             </ul>
             <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-xs">
-              <strong>注意:</strong> Excel数式記法（="値"）で保存されたCSVファイルも自動対応します
+              <strong>注意:</strong> Excel数式記法（=&quot;値&quot;）で保存されたCSVファイルも自動対応します
             </div>
           </details>
         </div>
@@ -395,6 +420,8 @@ export default function RepricerSettingsTable() {
 
       {/* --- 結果表示セクション --- */}
       {processingResult && <ResultsDisplay result={processingResult} />}
+        </>
+      )}
     </div>
   );
 }
