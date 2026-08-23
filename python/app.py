@@ -44,18 +44,30 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health():
-        return {"status": "ok"}
+        from pathlib import Path
+        from utils.server_db_paths import get_hirio_db_path_for_api
+
+        db_path = get_hirio_db_path_for_api()
+        return {
+            "status": "ok",
+            "db": {
+                "hirio_db_path": db_path,
+                "exists": Path(db_path).exists(),
+            },
+        }
 
     # ルーターのインポートと登録
     from routers.csv import router as csv_router
     from routers.ssot_rules import router as ssot_router
     from routers.repricer import router as repricer_router
     from routers.inventory import router as inventory_router
+    from routers.condition_templates import router as condition_templates_router
 
     app.include_router(csv_router)
     app.include_router(ssot_router)
     app.include_router(repricer_router)  # プレフィックスはルーター内で既に設定済み
     app.include_router(inventory_router)
+    app.include_router(condition_templates_router)
 
     # キャッシュ問題対策
     app.openapi_schema = None

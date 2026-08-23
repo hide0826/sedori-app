@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { SubTabs } from "@/components/shell/SubTabs";
 import {
   CONDITION_ROWS,
@@ -12,6 +12,13 @@ import {
   saveConditionTemplateState,
   type ConditionTemplateState,
 } from "@/components/inventory/conditionTemplates";
+import {
+  apiResponseToState,
+  fetchConditionTemplatesFromApi,
+  resetConditionTemplatesOnApi,
+  saveConditionTemplatesToApi,
+  type ConditionTemplateSource,
+} from "@/lib/condition-templates-api";
 
 const INNER_TABS = [
   { id: "conditions", label: "コンディション説明" },
@@ -20,44 +27,103 @@ const INNER_TABS = [
 
 type InnerTabId = (typeof INNER_TABS)[number]["id"];
 
+const SOURCE_LABEL: Record<ConditionTemplateSource, string> = {
+  server_db: "サーバーDB（hirio.db）",
+  local_storage: "ブラウザ（localStorage）",
+  default: "初期ダミー",
+};
+
 /**
- * デスクトップ「コンディション説明」の薄いPWA版。
- * 本番 hirio.db には繋がず、このブラウザの localStorage にだけ保存する。
+ * コンディション説明テンプレ。
+ * API（hirio.db）を優先し、失敗時は localStorage にフォールバックする。
  */
 export function ConditionTemplatePanel() {
   const [inner, setInner] = useState<InnerTabId>("conditions");
   const [state, setState] = useState<ConditionTemplateState>(() =>
     createDefaultConditionTemplateState()
   );
+  const [source, setSource] = useState<ConditionTemplateSource>("default");
+  const [dbPath, setDbPath] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
-
-  useEffect(() => {
-    setState(loadConditionTemplateState());
-    setHydrated(true);
-  }, []);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
 
   const flash = (text: string) => {
     setMessage(text);
-    window.setTimeout(() => setMessage(null), 2500);
+    window.setTimeout(() => setMessage(null), 3000);
   };
 
-  const handleSave = () => {
-    saveConditionTemplateState(state);
-    flash("このブラウザに保存しました（本番DBとは未接続）");
-  };
-
-  const handleResetConditions = () => {
-    if (!window.confirm("コンディション説明を初期のダミー文面に戻しますか？")) {
+  const loadTemplates = useCallback(async () => {
+    setLoading(true);
+    const api = await fetchConditionTemplatesFromApi();
+    if (api.ok && api.data) {
+      setState(apiResponseToState(api.data));
+      setSource("server_db");
+      setDbPath(api.data.db_path ?? null);
+      setLoading(false);
+      setHydrated(true);
       return;
     }
-    const defaults = createDefaultConditionTemplateState();
-    setState((prev) => ({ ...prev, conditions: defaults.conditions }));
-    flash("コンディション説明をリセットしました（まだ保存していません）");
+
+    const local = loadConditionTemplateState();
+    setState(local);
+    setSource("local_storage");
+    setDbPath(null);
+    setLoading(false);
+    setHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    void loadTemplates();
+  }, [loadTemplates]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    saveConditionTemplateState(state);
+
+    const api = await saveConditionTemplatesToApi(state);
+    if (api.ok) {
+      setSource("server_db");
+      flash("サーバーDBとブラウザの両方に保存しました");
+    } else if (source === "server_db") {
+      flash(
+        `サーバー保存に失敗しました（${api.message ?? "不明"}）。ブラウザのみ保存済み`
+      );
+    } else {
+      flash("ブラウザに保存しました（API未接続）");
+    }
+    setSaving(false);
+  };
+
+  const handleResetConditions = async () => {
+    if (!window.confirm("コンディション説明を空欄にリセットしますか？")) {
+      return;
+    }
+
+    if (source === "server_db") {
+      const result = await resetConditionTemplatesOnApi();
+      if (result.ok && result.data) {
+        setState((prev) => ({
+          ...prev,
+          conditions: apiResponseToState(result.data!).conditions,
+        }));
+        flash("サーバーDBのコンディション説明をリセットしました");
+        return;
+      }
+    }
+
+    setState((prev) => ({
+      ...prev,
+      conditions: Object.fromEntries(
+        CONDITION_ROWS.map((row) => [row.key, ""])
+      ) as ConditionTemplateState["conditions"],
+    }));
+    flash("コンディション説明を空欄にリセットしました（未保存）");
   };
 
   const handleResetDetails = () => {
-    if (!window.confirm("詳細説明を初期のダミー文面に戻しますか？")) {
+    if (!window.confirm("詳細説明を初期文面に戻しますか？")) {
       return;
     }
     const defaults = createDefaultConditionTemplateState();
@@ -66,10 +132,10 @@ export function ConditionTemplatePanel() {
       details: defaults.details,
       customLabels: defaults.customLabels,
     }));
-    flash("詳細説明をリセットしました（まだ保存していません）");
+    flash("詳細説明をリセットしました（保存ボタンで反映）");
   };
 
-  if (!hydrated) {
+  if (!hydrated || loading) {
     return (
       <div className="rounded-lg border border-[var(--hirio-line)] bg-[var(--hirio-surface)] p-6 text-sm text-[var(--hirio-muted)]">
         読み込み中...
@@ -80,21 +146,30 @@ export function ConditionTemplatePanel() {
   return (
     <div className="space-y-5">
       <section className="rounded-lg border border-[var(--hirio-line)] bg-[var(--hirio-accent-soft)] px-4 py-4 text-sm text-[var(--hirio-ink)]">
-        <p className="font-medium">ダミー前提のコンディション説明</p>
+        <p className="font-medium">コンディション説明テンプレ</p>
         <ul className="mt-2 list-disc space-y-1 pl-5 text-[var(--hirio-muted)]">
-          <li>デスクトップのテンプレ編集画面に近い薄い版です</li>
           <li>
-            保存先はこのPCのブラウザ（localStorage）だけです。本番の仕入DBとは
-            まだつながっていません
+            読み込み元: <strong>{SOURCE_LABEL[source]}</strong>
+            {dbPath && (
+              <span className="ml-1 font-mono text-xs">({dbPath})</span>
+            )}
           </li>
+          <li>API 接続時は hirio.db に保存（デスクトップと同じDB）</li>
+          <li>API 不通時はブラウザ（localStorage）にフォールバック</li>
           <li>
-            欠品を差し込みたい位置には{" "}
+            欠品差し込み位置:{" "}
             <code className="rounded bg-[var(--hirio-surface)] px-1">
               {"{欠品}"}
-            </code>{" "}
-            と書いてください
+            </code>
           </li>
         </ul>
+        <button
+          type="button"
+          onClick={() => void loadTemplates()}
+          className="mt-3 text-sm font-medium text-[var(--hirio-accent)] underline"
+        >
+          サーバーから再読み込み
+        </button>
       </section>
 
       <div className="rounded-lg border border-[var(--hirio-line)] bg-[var(--hirio-surface)] p-4 md:p-6">
@@ -113,7 +188,7 @@ export function ConditionTemplatePanel() {
         {inner === "conditions" && (
           <div className="space-y-4">
             <p className="text-sm text-[var(--hirio-muted)]">
-              各コンディションの出品コメント雛形です。編集後に「保存」を押してください。
+              各コンディションの出品コメント雛形です。
             </p>
             <div className="space-y-3">
               {CONDITION_ROWS.map((row) => (
@@ -141,17 +216,18 @@ export function ConditionTemplatePanel() {
             <div className="flex flex-wrap justify-end gap-3">
               <button
                 type="button"
-                onClick={handleResetConditions}
+                onClick={() => void handleResetConditions()}
                 className="rounded-md border border-[var(--hirio-line)] px-4 py-2 text-sm"
               >
                 リセット
               </button>
               <button
                 type="button"
-                onClick={handleSave}
-                className="rounded-md bg-[var(--hirio-accent)] px-4 py-2 text-sm font-medium text-white"
+                onClick={() => void handleSave()}
+                disabled={saving}
+                className="rounded-md bg-[var(--hirio-accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
               >
-                保存
+                {saving ? "保存中..." : "保存"}
               </button>
             </div>
           </div>
@@ -160,7 +236,7 @@ export function ConditionTemplatePanel() {
         {inner === "details" && (
           <div className="space-y-4">
             <p className="text-sm text-[var(--hirio-muted)]">
-              欠品・詳細の定型文です。上段は名称固定、下段のカスタムは名称も変えられます。
+              欠品・詳細の定型文です。
             </p>
             <div className="space-y-3">
               {DETAIL_FIXED_ROWS.map((row) => (
@@ -229,10 +305,11 @@ export function ConditionTemplatePanel() {
               </button>
               <button
                 type="button"
-                onClick={handleSave}
-                className="rounded-md bg-[var(--hirio-accent)] px-4 py-2 text-sm font-medium text-white"
+                onClick={() => void handleSave()}
+                disabled={saving}
+                className="rounded-md bg-[var(--hirio-accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
               >
-                保存
+                {saving ? "保存中..." : "保存"}
               </button>
             </div>
           </div>

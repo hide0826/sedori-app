@@ -3,17 +3,19 @@
 import { FormEvent, useEffect, useState } from "react";
 import { PageHeader } from "@/components/shell/PageHeader";
 import {
-  checkApiHealth,
   getApiBaseUrl,
   getDefaultApiBaseUrl,
   setApiBaseUrl,
 } from "@/lib/api-config";
+import { fetchApiHealthDetail } from "@/lib/condition-templates-api";
 
 export default function SettingsPage() {
   const [apiUrl, setApiUrl] = useState("");
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
   const [testMessage, setTestMessage] = useState<string | null>(null);
   const [testOk, setTestOk] = useState<boolean | null>(null);
+  const [dbPath, setDbPath] = useState<string | null>(null);
+  const [dbExists, setDbExists] = useState<boolean | null>(null);
 
   useEffect(() => {
     setApiUrl(getApiBaseUrl());
@@ -29,9 +31,15 @@ export default function SettingsPage() {
   };
 
   const handleTest = async () => {
-    const result = await checkApiHealth(apiUrl.trim() || getDefaultApiBaseUrl());
+    const result = await fetchApiHealthDetail();
     setTestOk(result.ok);
-    setTestMessage(result.ok ? "接続できました" : `接続できません: ${result.message}`);
+    setDbPath(result.dbPath ?? null);
+    setDbExists(result.dbExists ?? null);
+    setTestMessage(
+      result.ok
+        ? `接続できました${result.dbExists ? "（DBあり）" : "（DB未作成）"}`
+        : `接続できません: ${result.message}`
+    );
   };
 
   const handleReset = () => {
@@ -101,6 +109,12 @@ export default function SettingsPage() {
             }`}
           >
             {testMessage}
+          </p>
+        )}
+        {testOk && dbPath && (
+          <p className="text-xs text-[var(--hirio-muted)]">
+            hirio.db: <span className="font-mono">{dbPath}</span>
+            {dbExists === false && "（ファイルなし）"}
           </p>
         )}
       </form>
