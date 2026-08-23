@@ -33,7 +33,7 @@ HIRIO 全体の正本は [`../../PROGRESS.md`](../../PROGRESS.md)（`C:\HIRIO\PR
 | サーバー | `C:\HIRIO\repo\sedori-app.github`（PWA殻） |
 | 機能枝（目安） | `feature/sp-api` など（運用PC） |
 | PWA殻枝 | `feature/server-pwa`（origin と同期済み） |
-| 最新コミット（殻） | （未コミット: コンディション説明薄い版） |
+| 最新コミット（殻） | `6871575` コンディション説明薄い版 |
 | PWA URL | http://192.168.0.200:3000 |
 | API URL | http://192.168.0.200:8000 |
 
@@ -109,6 +109,7 @@ python -m uvicorn app:app --host 0.0.0.0 --port 8000
 - 内側タブ: コンディション説明 / 詳細説明（欠品＋カスタム）
 - 保存は localStorage のみ（本番 hirio.db 未接続）
 - 追加: `ConditionTemplatePanel.tsx` / `conditionTemplates.ts`
+- コミット: `6871575`
 
 ### 2026-08-23 SP-API改定ダミー中身
 
