@@ -33,7 +33,7 @@ HIRIO 全体の正本は [`../../PROGRESS.md`](../../PROGRESS.md)（`C:\HIRIO\PR
 | サーバー | `C:\HIRIO\repo\sedori-app.github`（PWA殻） |
 | 機能枝（目安） | `feature/sp-api` など（運用PC） |
 | PWA殻枝 | `feature/server-pwa`（origin と同期済み） |
-| 最新コミット（殻） | （未コミット: コンディション説明DB接続） |
+| 最新コミット（殻） | `253db84` コンディション説明DB接続 |
 | PWA URL | http://192.168.0.200:3000 |
 | API URL | http://192.168.0.200:8000 |
 
@@ -110,6 +110,7 @@ python -m uvicorn app:app --host 0.0.0.0 --port 8000
 - API: `GET/PUT /api/condition-templates`、リセット、`/health` に DB パス
 - PWA: API 優先読み込み、保存時は DB＋localStorage、不通時フォールバック
 - 設定: 接続テストで hirio.db パス表示
+- コミット: `253db84`
 
 ### 2026-08-23 他メニュー薄い版
 
