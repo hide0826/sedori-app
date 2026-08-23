@@ -33,7 +33,7 @@ HIRIO 全体の正本は [`../../PROGRESS.md`](../../PROGRESS.md)（`C:\HIRIO\PR
 | サーバー | `C:\HIRIO\repo\sedori-app.github`（PWA殻） |
 | 機能枝（目安） | `feature/sp-api` など（運用PC） |
 | PWA殻枝 | `feature/server-pwa`（origin と同期済み） |
-| 最新コミット（殻） | （未コミット: SP-API改定ダミー。commit後に更新） |
+| 最新コミット（殻） | `babd9db` SP-API改定ダミー |
 | PWA URL | http://192.168.0.200:3000 |
 | API URL | http://192.168.0.200:8000 |
 
@@ -109,6 +109,8 @@ python -m uvicorn app:app --host 0.0.0.0 --port 8000
 - 最安追従は枠＋説明のみ
 - ダミーCSVを `dummyRepricerCsv.ts` に共通化
 - 追加: `components/repricer/SpApiRepricerPanel.tsx`
+- コミット: `babd9db`
+- ダミー①〜⑤の流れをメインPCから確認済み（反映はシミュ）
 
 ### 2026-08-23 仕入管理サブタブ
 
