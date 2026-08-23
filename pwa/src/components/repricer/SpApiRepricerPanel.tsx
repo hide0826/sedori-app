@@ -18,7 +18,43 @@ const PIPELINE = [
   { step: 5, label: "⑤Amazonへ価格反映" },
 ] as const;
 
-type BusyAction = "fetch" | "preview" | "apply" | "patch" | null;
+type BusyAction = "fetch" | "preview" | "apply" | "patch" | "follow" | null;
+
+type FollowResultRow = {
+  sku: string;
+  days: number;
+  currentPrice: number;
+  competitorMin: number;
+  newPrice: number;
+  rule: string;
+};
+
+const DUMMY_FOLLOW_RESULTS: FollowResultRow[] = [
+  {
+    sku: "20250201-B0007RBX52-UM-1650-1",
+    days: 90,
+    currentPrice: 4463,
+    competitorMin: 4200,
+    newPrice: 4200,
+    rule: "150日未満 → 最安揃え",
+  },
+  {
+    sku: "20250201-B000LVNOKQ-UVG-330-1",
+    days: 210,
+    currentPrice: 1120,
+    competitorMin: 980,
+    newPrice: 1020,
+    rule: "150日以降 → ライバル−100円（TP下限）",
+  },
+  {
+    sku: "20250201-B000RGMGAY-UVG-550-1",
+    days: 180,
+    currentPrice: 2971,
+    competitorMin: 3100,
+    newPrice: 2971,
+    rule: "変更なし（最安より高い／TP維持）",
+  },
+];
 
 function normalizeProcessingResult(apiResponse: {
   summary: ProcessingResult["summary"];
@@ -80,6 +116,15 @@ export function SpApiRepricerPanel() {
   const [dryRun, setDryRun] = useState(true);
   const [dryRunCount, setDryRunCount] = useState(1);
   const [patchLog, setPatchLog] = useState<string | null>(null);
+  const [followBusy, setFollowBusy] = useState(false);
+  const [followResults, setFollowResults] = useState<FollowResultRow[] | null>(
+    null
+  );
+  const [followLog, setFollowLog] = useState<string | null>(null);
+  const [followHours, setFollowHours] = useState(8);
+  const [followMax, setFollowMax] = useState(400);
+  const [followPatch, setFollowPatch] = useState(false);
+  const [followAuto, setFollowAuto] = useState(false);
 
   const canPreview = listings.length > 0 && busy === null;
   const canApply = result !== null && busy === null;
@@ -99,7 +144,37 @@ export function SpApiRepricerPanel() {
     setResult(null);
     setHasExecuted(false);
     setPatchLog(null);
+    setFollowResults(null);
+    setFollowLog(null);
     setBusy(null);
+  };
+
+  const handleFollowDummy = async () => {
+    setFollowBusy(true);
+    setFollowLog(null);
+    await new Promise((r) => setTimeout(r, 600));
+
+    const limit = Math.min(followMax, DUMMY_FOLLOW_RESULTS.length);
+    const rows = DUMMY_FOLLOW_RESULTS.slice(0, limit);
+    setFollowResults(rows);
+
+    const changed = rows.filter((r) => r.newPrice !== r.currentPrice);
+    const lines = [
+      "最安追従はダミー計算のみです（SP-API Offers 未接続）。",
+      `調査上限: ${followMax} 件 → 今回 ${rows.length} 件`,
+      `価格変更候補: ${changed.length} 件`,
+    ];
+    if (followPatch) {
+      lines.push(
+        ...changed.map(
+          (r) => `・${r.sku}: ${r.currentPrice} → ${r.newPrice}（反映シミュ）`
+        )
+      );
+    } else {
+      lines.push("「巡回後にAmazonへ反映」は OFF のため計算のみ");
+    }
+    setFollowLog(lines.join("\n"));
+    setFollowBusy(false);
   };
 
   const handleDummyFetch = async () => {
@@ -370,15 +445,106 @@ export function SpApiRepricerPanel() {
         )}
       </div>
 
-      <div className="rounded-lg border border-dashed border-[var(--hirio-line)] bg-[var(--hirio-surface)] p-4 md:p-6">
+      <div className="rounded-lg border border-[var(--hirio-line)] bg-[var(--hirio-surface)] p-4 md:p-6">
         <h2 className="text-lg font-semibold text-[var(--hirio-ink)]">
-          最安追従（準備中）
+          最安追従（SP-API・3-6-9とは別）
         </h2>
         <p className="mt-2 text-sm text-[var(--hirio-muted)]">
-          デスクトップの「同コンディション最安追従」に相当します。PWA
-          ではまだダミーも載せていません。上段の ①〜⑤（3-6-9
-          計算）とは別ロジックです。
+          150日未満は同コンディション最安に揃え、以降は TP
+          へ寄せつつライバルより100円安くするロジックのダミー版です。
         </p>
+
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={handleFollowDummy}
+            disabled={followBusy}
+            className="rounded-md bg-[var(--hirio-accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {followBusy ? "計算中..." : "最安追従を実行（ダミー）"}
+          </button>
+          <label className="inline-flex items-center gap-2 text-sm text-[var(--hirio-muted)]">
+            <input
+              type="checkbox"
+              checked={followAuto}
+              onChange={(e) => setFollowAuto(e.target.checked)}
+              disabled
+            />
+            自動巡回（PWA未対応・表示のみ）
+          </label>
+          <label className="inline-flex items-center gap-2 text-sm">
+            間隔(時間)
+            <input
+              type="number"
+              min={4}
+              max={12}
+              value={followHours}
+              onChange={(e) => setFollowHours(Number(e.target.value) || 8)}
+              className="w-16 rounded-md border border-[var(--hirio-line)] px-2 py-1"
+            />
+          </label>
+          <label className="inline-flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={followPatch}
+              onChange={(e) => setFollowPatch(e.target.checked)}
+            />
+            巡回後にAmazonへ反映（シミュ）
+          </label>
+          <label className="inline-flex items-center gap-2 text-sm">
+            上限件数
+            <input
+              type="number"
+              min={1}
+              max={5000}
+              value={followMax}
+              onChange={(e) => setFollowMax(Number(e.target.value) || 400)}
+              className="w-20 rounded-md border border-[var(--hirio-line)] px-2 py-1"
+            />
+          </label>
+        </div>
+
+        {followResults && (
+          <div className="mt-4 overflow-x-auto">
+            <table className="min-w-full border-collapse text-left text-sm">
+              <thead>
+                <tr className="border-b border-[var(--hirio-line)] text-[var(--hirio-muted)]">
+                  <th className="px-2 py-2 font-medium">SKU</th>
+                  <th className="px-2 py-2 text-right font-medium">出品日数</th>
+                  <th className="px-2 py-2 text-right font-medium">現在</th>
+                  <th className="px-2 py-2 text-right font-medium">同条件最安</th>
+                  <th className="px-2 py-2 text-right font-medium">改定後</th>
+                  <th className="px-2 py-2 font-medium">ルール</th>
+                </tr>
+              </thead>
+              <tbody>
+                {followResults.map((row) => (
+                  <tr
+                    key={row.sku}
+                    className="border-b border-[var(--hirio-line)]"
+                  >
+                    <td className="px-2 py-2 font-mono text-xs">{row.sku}</td>
+                    <td className="px-2 py-2 text-right">{row.days}</td>
+                    <td className="px-2 py-2 text-right">{row.currentPrice}</td>
+                    <td className="px-2 py-2 text-right">
+                      {row.competitorMin}
+                    </td>
+                    <td className="px-2 py-2 text-right font-medium">
+                      {row.newPrice}
+                    </td>
+                    <td className="px-2 py-2 text-xs">{row.rule}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {followLog && (
+          <pre className="mt-4 whitespace-pre-wrap rounded-md border border-[var(--hirio-line)] bg-[var(--hirio-bg)] p-3 text-xs text-[var(--hirio-ink)]">
+            {followLog}
+          </pre>
+        )}
       </div>
     </div>
   );
