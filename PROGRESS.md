@@ -33,7 +33,7 @@ HIRIO 全体の正本は [`../../PROGRESS.md`](../../PROGRESS.md)（`C:\HIRIO\PR
 | サーバー | `C:\HIRIO\repo\sedori-app.github`（PWA殻） |
 | 機能枝（目安） | `feature/sp-api` など（運用PC） |
 | PWA殻枝 | `feature/server-pwa`（origin と同期済み） |
-| 最新コミット（殻） | `670e11f` コンディション説明DB接続 |
+| 最新コミット（殻） | `1f89a60` PROGRESS更新（DB接続確認記録） |
 | PWA URL | http://192.168.0.200:3000 |
 | API URL | http://192.168.0.200:8000 |
 
