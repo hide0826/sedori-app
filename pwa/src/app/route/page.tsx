@@ -1,6 +1,5 @@
-import { ThinMenuWorkspace } from "@/components/menus/ThinMenuWorkspace";
-import { ROUTE_MENU } from "@/components/menus/menuDummyData";
+import { RouteWorkspace } from "@/components/route/RouteWorkspace";
 
 export default function RoutePage() {
-  return <ThinMenuWorkspace config={ROUTE_MENU} />;
+  return <RouteWorkspace />;
 }

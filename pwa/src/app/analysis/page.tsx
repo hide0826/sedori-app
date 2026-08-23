@@ -1,6 +1,5 @@
-import { ThinMenuWorkspace } from "@/components/menus/ThinMenuWorkspace";
-import { ANALYSIS_MENU } from "@/components/menus/menuDummyData";
+import { AnalysisWorkspace } from "@/components/analysis/AnalysisWorkspace";
 
 export default function AnalysisPage() {
-  return <ThinMenuWorkspace config={ANALYSIS_MENU} />;
+  return <AnalysisWorkspace />;
 }

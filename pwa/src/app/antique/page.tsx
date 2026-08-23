@@ -1,6 +1,5 @@
-import { ThinMenuWorkspace } from "@/components/menus/ThinMenuWorkspace";
-import { ANTIQUE_MENU } from "@/components/menus/menuDummyData";
+import { AntiqueWorkspace } from "@/components/antique/AntiqueWorkspace";
 
 export default function AntiquePage() {
-  return <ThinMenuWorkspace config={ANTIQUE_MENU} />;
+  return <AntiqueWorkspace />;
 }

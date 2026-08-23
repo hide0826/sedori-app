@@ -62,12 +62,24 @@ def create_app() -> FastAPI:
     from routers.repricer import router as repricer_router
     from routers.inventory import router as inventory_router
     from routers.condition_templates import router as condition_templates_router
+    from routers.routes import router as routes_router
+    from routers.stores import router as stores_router
+    from routers.products import router as products_router
+    from routers.route_visits import router as route_visits_router
+    from routers.ledger import router as ledger_router
+    from routers.analysis import router as analysis_router
 
     app.include_router(csv_router)
     app.include_router(ssot_router)
     app.include_router(repricer_router)  # プレフィックスはルーター内で既に設定済み
     app.include_router(inventory_router)
     app.include_router(condition_templates_router)
+    app.include_router(routes_router)
+    app.include_router(stores_router)
+    app.include_router(products_router)
+    app.include_router(route_visits_router)
+    app.include_router(ledger_router)
+    app.include_router(analysis_router)
 
     # キャッシュ問題対策
     app.openapi_schema = None

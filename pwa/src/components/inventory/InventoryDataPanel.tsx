@@ -1,11 +1,20 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import CsvUploader from "@/app/components/CsvUploader";
 import InventoryDataGrid from "@/app/components/InventoryDataGrid";
 import { InventoryItem } from "@/types/repricer";
 import { getApiBaseUrl } from "@/lib/api-config";
 import { DummyInventoryCsvDownload } from "@/components/inventory/DummyInventoryCsvDownload";
+import {
+  fetchRouteSummariesFromApi,
+  type RouteSummary,
+} from "@/lib/routes-api";
+import {
+  inventoryItemToPurchaseRecord,
+  matchStoresFromData,
+  purchaseRecordToInventoryItem,
+} from "@/lib/inventory-api";
 
 /**
  * 仕入管理「仕入データ」サブタブの中身。
@@ -19,6 +28,22 @@ export function InventoryDataPanel() {
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportSuccess, setExportSuccess] = useState<string | null>(null);
+  const [routes, setRoutes] = useState<RouteSummary[]>([]);
+  const [selectedRouteId, setSelectedRouteId] = useState<number | null>(null);
+  const [timeTolerance, setTimeTolerance] = useState(1);
+  const [isMatching, setIsMatching] = useState(false);
+  const [matchError, setMatchError] = useState<string | null>(null);
+  const [matchSuccess, setMatchSuccess] = useState<string | null>(null);
+
+  useEffect(() => {
+    void (async () => {
+      const res = await fetchRouteSummariesFromApi();
+      if (res.ok && res.data && res.data.summaries.length > 0) {
+        setRoutes(res.data.summaries);
+        setSelectedRouteId(res.data.summaries[0].id);
+      }
+    })();
+  }, []);
 
   const handleCsvUploadSuccess = (data: InventoryItem[]) => {
     setInventoryData(data);
@@ -30,6 +55,46 @@ export function InventoryDataPanel() {
 
   const handleInventoryDataChange = (newData: InventoryItem[]) => {
     setInventoryData(newData);
+  };
+
+  const handleMatchStores = async () => {
+    if (inventoryData.length === 0) return;
+    if (selectedRouteId == null) {
+      setMatchError("ルートを選択してください");
+      return;
+    }
+
+    setIsMatching(true);
+    setMatchError(null);
+    setMatchSuccess(null);
+
+    try {
+      const purchaseData = inventoryData.map(inventoryItemToPurchaseRecord);
+      const result = await matchStoresFromData(
+        purchaseData,
+        selectedRouteId,
+        timeTolerance
+      );
+
+      if (!result.ok || !result.data) {
+        throw new Error(result.message ?? "時刻突合に失敗しました");
+      }
+
+      const updated = result.data.data.map(purchaseRecordToInventoryItem);
+      setInventoryData(updated);
+      const { matched_rows, total_rows } = result.data.stats;
+      setMatchSuccess(
+        `時刻突合完了: ${matched_rows} / ${total_rows} 件に店舗コードを付与しました`
+      );
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "時刻突合中にエラーが発生しました";
+      setMatchError(message);
+    } finally {
+      setIsMatching(false);
+    }
   };
 
   const handleGenerateSKU = async () => {
@@ -163,14 +228,15 @@ export function InventoryDataPanel() {
   return (
     <div>
       <section className="mb-5 rounded-lg border border-[var(--hirio-line)] bg-[var(--hirio-accent-soft)] px-4 py-4 text-sm text-[var(--hirio-ink)]">
-        <p className="font-medium">ダミーデータで試す手順</p>
+        <p className="font-medium">使い方</p>
         <ol className="mt-2 list-decimal space-y-1 pl-5 text-[var(--hirio-muted)]">
           <li>
             <DummyInventoryCsvDownload />
+            またはアマサーチの仕入 CSV を選ぶ
           </li>
-          <li>下のアップロード欄でそのファイルを選ぶ</li>
-          <li>プレビュー表が出たら必要ならセルを編集</li>
-          <li>「SKU一括生成」→「出品CSVダウンロード」の順で試せる</li>
+          <li>下のアップロード欄でファイルを選ぶ</li>
+          <li>ルートを選んで「時刻突合」→ 仕入れ先に店舗コードが入る</li>
+          <li>必要なら「SKU一括生成」→「出品CSVダウンロード」</li>
         </ol>
       </section>
 
@@ -179,6 +245,62 @@ export function InventoryDataPanel() {
 
         {inventoryData.length > 0 && (
           <div>
+            <section className="mb-4 rounded-lg border border-[var(--hirio-line)] bg-[var(--hirio-accent-soft)] px-4 py-4 text-sm">
+              <p className="font-medium text-[var(--hirio-ink)]">時刻突合（店舗コード自動付与）</p>
+              <p className="mt-1 text-xs text-[var(--hirio-muted)]">
+                仕入れ日時とルートの IN/OUT を照合し、「仕入れ先」列に店舗コードを入れます。
+              </p>
+              <div className="mt-3 flex flex-wrap items-end gap-3">
+                <label className="text-sm text-[var(--hirio-muted)]">
+                  ルート
+                  <select
+                    className="ml-2 max-w-xs rounded border border-[var(--hirio-line)] bg-white px-2 py-1 text-sm"
+                    value={selectedRouteId ?? ""}
+                    onChange={(e) => setSelectedRouteId(Number(e.target.value))}
+                    disabled={routes.length === 0 || isMatching}
+                  >
+                    {routes.length === 0 ? (
+                      <option value="">ルートを読み込み中…</option>
+                    ) : (
+                      routes.map((r) => (
+                        <option key={r.id} value={r.id}>
+                          {[r.route_date, r.route_display_name || r.route_code]
+                            .filter(Boolean)
+                            .join(" ")}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </label>
+                <label className="text-sm text-[var(--hirio-muted)]">
+                  許容（分）
+                  <input
+                    type="number"
+                    min={1}
+                    max={120}
+                    className="ml-2 w-16 rounded border border-[var(--hirio-line)] bg-white px-2 py-1 text-sm"
+                    value={timeTolerance}
+                    onChange={(e) => setTimeTolerance(Number(e.target.value) || 1)}
+                    disabled={isMatching}
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={handleMatchStores}
+                  disabled={isMatching || selectedRouteId == null}
+                  className="rounded-md bg-[var(--hirio-ink)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                >
+                  {isMatching ? "突合中…" : "時刻突合"}
+                </button>
+              </div>
+              {matchSuccess && (
+                <p className="mt-2 text-sm text-[var(--hirio-ok)]">{matchSuccess}</p>
+              )}
+              {matchError && (
+                <p className="mt-2 text-sm text-[var(--hirio-danger)]">{matchError}</p>
+              )}
+            </section>
+
             <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div className="flex flex-wrap gap-3">
                 <button
