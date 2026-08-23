@@ -403,6 +403,12 @@ class MainWindow(QMainWindow):
                 repricer_369.repricing_executed.connect(lambda _mode: top_widget.refresh())
             except Exception:
                 pass
+        repricer_sp = getattr(self, "repricer_sp_api_widget", None)
+        if repricer_sp is not None and hasattr(repricer_sp, "repricing_executed"):
+            try:
+                repricer_sp.repricing_executed.connect(lambda _mode: top_widget.refresh())
+            except Exception:
+                pass
 
     def _setup_tabs_phase(self, phase: int) -> bool:
         """タブを1フェーズずつ構築。True を返すと全タブ完了。"""
@@ -426,6 +432,13 @@ class MainWindow(QMainWindow):
             repricer_tabs_369 = QTabWidget()
             repricer_tabs_369.addTab(self.repricer_widget_369, "改定実行")
             self._attach_repricer_settings_lazy(repricer_tabs_369, "369")
+            # SP-API改定（既存「改定実行」とは独立。プライスターCSVを使わない）
+            try:
+                from ui.repricer_sp_api import RepricerSpApiWidget
+            except ImportError:
+                from desktop.ui.repricer_sp_api import RepricerSpApiWidget  # type: ignore
+            self.repricer_sp_api_widget = RepricerSpApiWidget(self.api_client, mode="369")
+            repricer_tabs_369.addTab(self.repricer_sp_api_widget, "SP-API改定")
             self.tab_widget.addTab(repricer_tabs_369, "価格改定")
 
             from ui.inventory_widget import InventoryWidget

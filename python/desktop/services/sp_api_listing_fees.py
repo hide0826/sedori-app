@@ -4,6 +4,7 @@
 SP-API から出品日・プラットフォーム手数料・出荷費用を取得し、仕入レコードへ反映する。
 
 - 出品日: Listings Items API の summaries.createdDate
+  ※FBA出品チャネル（AMAZON）がある SKU のみ（在庫0=即売れ済みも含む。純粋な自己発送のみは除外）
 - プラットフォーム手数料: Product Fees の ReferralFee + VariableClosingFee + PerItemFee
 - 出荷費用: FBA のとき FBAFees（自己発送は Amazon から取れないので据え置き）
 """
@@ -69,7 +70,7 @@ def format_listed_date(raw: str) -> str:
 
 
 def parse_listing_created_date(listing_body: Dict[str, Any]) -> str:
-    """Listings Items レスポンスから出品日を取り出す。"""
+    """Listings Items レスポンスから createdDate を取り出す（在庫チェックなし）。"""
     summaries = listing_body.get("summaries")
     if summaries is None and isinstance(listing_body.get("payload"), dict):
         summaries = listing_body["payload"].get("summaries")
@@ -85,15 +86,49 @@ def parse_listing_created_date(listing_body: Dict[str, Any]) -> str:
     return ""
 
 
-def listing_is_amazon_fulfilled(listing_body: Dict[str, Any]) -> Optional[bool]:
-    """出品レスポンスから FBA かどうかを推定。不明なら None。"""
+def _listing_fulfillment_rows(listing_body: Dict[str, Any]) -> list:
     avail = listing_body.get("fulfillmentAvailability")
     if avail is None and isinstance(listing_body.get("payload"), dict):
         avail = listing_body["payload"].get("fulfillmentAvailability")
-    if not isinstance(avail, list):
-        return None
+    return avail if isinstance(avail, list) else []
+
+
+def listing_has_sellable_quantity(listing_body: Dict[str, Any]) -> bool:
+    """fulfillmentAvailability に在庫数量 1 以上があるか。"""
+    for row in _listing_fulfillment_rows(listing_body):
+        if not isinstance(row, dict):
+            continue
+        try:
+            qty = int(row.get("quantity") or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if qty > 0:
+            return True
+    return False
+
+
+def listing_is_fba_listed(listing_body: Dict[str, Any]) -> bool:
+    """FBA（AMAZON）出品チャネルが存在するか。在庫0（即売れ済み）でも True。"""
+    return listing_is_amazon_fulfilled(listing_body) is True
+
+
+def parse_listing_listed_date(listing_body: Dict[str, Any]) -> str:
+    """
+    仕入DBの「出品日」用。FBA出品がある SKU だけ createdDate を返す。
+
+    createdDate は Amazon 上の出品登録日（FBA倉庫到着日ではない）。
+    在庫0でも FBA チャネルがあれば採用（即売れ済みを拾う）。
+    自己発送（DEFAULT のみ）や FBA 未設定の出品登録だけは除外。
+    """
+    if not listing_is_fba_listed(listing_body):
+        return ""
+    return parse_listing_created_date(listing_body)
+
+
+def listing_is_amazon_fulfilled(listing_body: Dict[str, Any]) -> Optional[bool]:
+    """出品レスポンスから FBA かどうかを推定。不明なら None。"""
     codes = []
-    for row in avail:
+    for row in _listing_fulfillment_rows(listing_body):
         if isinstance(row, dict):
             codes.append(str(row.get("fulfillmentChannelCode") or "").upper())
     if any("AMAZON" in c for c in codes):
@@ -179,9 +214,10 @@ def apply_listing_fees_to_record(
     platform_fee: Optional[int] = None,
     fba_shipping_fee: Optional[int] = None,
     is_fba: bool = True,
+    update_listed_date: bool = True,
 ) -> Dict[str, Any]:
     """仕入レコードへ出品日・手数料を書き、利益系を再計算する。"""
-    if listed_date:
+    if update_listed_date and listed_date:
         record["出品日"] = listed_date
         record["listed_date"] = listed_date
 
@@ -243,7 +279,7 @@ def fetch_listing_and_fees_for_sku(
 
     try:
         listing = client.get_listing_item(sku)
-        listed_date = parse_listing_created_date(listing)
+        listed_date = parse_listing_listed_date(listing)
         listing_fba = listing_is_amazon_fulfilled(listing)
     except Exception as exc:  # noqa: BLE001
         errors.append(f"出品情報: {exc}")

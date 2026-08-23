@@ -169,6 +169,9 @@ class PurchaseRowEditDialog(
         self._csv_inventory_snapshot = csv_inventory_snapshot or {}
         self._repricer_widget = repricer_widget
         self._manual_export_price_edit: Optional[QLineEdit] = None
+        self._sale_price_spin: Optional[QSpinBox] = None
+        self._sp_api_fee_timer: Optional[QTimer] = None
+        self._sp_api_fee_fetching = False
         self._fee_recalc_guard = False
         self._tp_source_labels: Dict[int, QLabel] = {}
         self._platform_fee_spin: Optional[QSpinBox] = None
@@ -231,7 +234,7 @@ class PurchaseRowEditDialog(
             sku_lbl = QLabel(sku_full or "-")
             if locked:
                 sku_lbl.setToolTip(
-                    "販売中・販売済み・一部販売済みの商品は、SKU先頭の日付（8桁）を変更できません。"
+                    "販売済み・一部販売済みの商品は、SKU先頭の日付（8桁）を変更できません。"
                 )
             elif not sku_full:
                 sku_lbl.setToolTip("")
@@ -294,11 +297,15 @@ class PurchaseRowEditDialog(
         profit_text = _format_price(profit)
         if base_rate:
             profit_text = f"{profit_text}（{base_rate:.1f}%）"
-        planned_lbl = QLabel(_format_price(sale_price))
-        planned_lbl.setToolTip(
-            "仕入スナップショット／仕入データに保存されている販売予定価格（仕入時点の見込み）です。"
+        self._sale_price_spin = QSpinBox()
+        self._sale_price_spin.setRange(0, 10_000_000)
+        self._sale_price_spin.setSingleStep(100)
+        self._sale_price_spin.setValue(int(round(sale_price)) if sale_price > 0 else 0)
+        self._sale_price_spin.setToolTip(
+            "販売予定価格。Amazon の場合、変更後に SP-API で手数料・出荷費用を再取得します。"
         )
-        info_layout.addRow("販売予定価格（仕入時）:", planned_lbl)
+        self._sale_price_spin.valueChanged.connect(self._on_sale_price_changed)
+        info_layout.addRow("販売予定価格:", self._sale_price_spin)
         self._repricing_enabled_cb = QCheckBox("価格改定の対象にする（ON）")
         _apply_checkbox_dark_style(self._repricing_enabled_cb)
         repricing_val = self.record.get("価格改定")
@@ -895,6 +902,13 @@ class PurchaseRowEditDialog(
         old_sku = self._last_committed_sku
         if not self._apply_sku_date_change():
             return
+        if self._sale_price_spin is not None:
+            sale_int = int(self._sale_price_spin.value())
+            self._sale_price_value = float(sale_int)
+            self.record["販売予定価格"] = sale_int
+            self.record["planned_price"] = sale_int
+            self.record["price"] = sale_int
+            self.record["expected_price"] = sale_int
         ladder_on = self._ladder_enabled_cb.isChecked()
         ladder_rules_json = ""
         if ladder_on:

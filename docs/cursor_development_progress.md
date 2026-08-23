@@ -1,3 +1,29 @@
+## 2026-08-13 SP-API最安追従（150日境界・自動巡回）
+
+- **内容**: SP-API改定タブに「最安追従」を追加。既存 3-6-9 / 改定実行タブは未変更
+- **ルール**:
+  - 出品150日以内: 同コンディション最安に揃える（TP未満にはしない）
+  - 151日以降: TPへ段階接近。自分より安い同条件出品があればその価格−100円（下限はTP）
+- **最安の出所**: Product Pricing `getItemOffers`（バッチ最大20）。Keepa不使用
+- **自動**: 4〜12時間おきのタイマー（アプリ起動中のみ）。「巡回後にAmazonへ反映」は任意
+- **実装**: `sp_api_offers.py` / `sp_api_follow_reprice.py` / `SpApiClient.get_item_offers(_batch)`
+- **ついで**: PATCH の商品タイプ 4000003 は `PRODUCT` で1回再試行
+- **テスト**: `desktop/tests/test_sp_api_follow_reprice.py`
+
+## 2026-08-13 SP-API価格改定タブ（既存改定実行を壊さない段階実装）
+
+- **内容**: 価格改定内に並びの新サブタブ「SP-API改定」を追加。既存「改定実行」（プライスターCSV）は未変更
+- **操作**: ①SP-API取得 → ②プレビュー → ③目視 → ④実行（計算のみ） → ⑤Amazonへ価格反映（Listings PATCH）。監査用CSV保存あり
+- **実装**:
+  - `desktop/ui/repricer_sp_api/`（独立ウィジェット）
+  - `desktop/services/sp_api_inventory.py`（`GET_MERCHANT_LISTINGS_ALL_DATA` → プライスター互換CSV）
+  - `desktop/services/sp_api_reprice.py`（変更SKUのみ PATCH）
+  - `shared/sp_api_client.py`: PATCH / `patch_listing_price`
+  - `main_window.py`: `repricer_tabs_369` に「SP-API改定」追加
+- **安全策**: ⑤は既定で「先頭N件のみ」（既定1件）。`priceTrace` は常に0
+- **テスト**: `desktop/tests/test_sp_api_reprice_inventory.py`
+- **次回**: 実アカウントで①取得〜⑤1SKU試験、件数上限の運用調整
+
 ## 2026-08-13 価格改定 SP-API自動化: 方針整理（在庫取得が前提）
 
 - **内容**: 価格改定タブ「改定実行」の SP-API 自動化について現状とギャップを整理。コード未実装（方針のみ）

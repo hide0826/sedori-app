@@ -282,7 +282,136 @@ class PurchaseFeeChannelMixin:
                     self._platform_fee_spin.setValue(fee)
                 finally:
                     self._fee_recalc_guard = False
+        elif self._sale_price_value > 0:
+            self._schedule_sp_api_fee_fetch()
         self._refresh_cost_summary()
+
+    def _on_sale_price_changed(self, value: int = 0) -> None:
+        if self._fee_recalc_guard:
+            return
+        self._sale_price_value = float(value)
+        channel = self._sales_channel_combo.currentText().strip() if self._sales_channel_combo else ""
+        if not is_amazon_sales_channel(channel):
+            rate = flea_fee_rate_percent_for_channel(channel, self._store_db())
+            if rate is not None and self._platform_fee_spin is not None and self._sale_price_value > 0:
+                fee = platform_fee_from_sale_price(self._sale_price_value, rate)
+                self._fee_recalc_guard = True
+                try:
+                    self._platform_fee_spin.setValue(fee)
+                finally:
+                    self._fee_recalc_guard = False
+            self._refresh_cost_summary()
+            return
+        self._refresh_cost_summary()
+        if self._sale_price_value > 0:
+            self._schedule_sp_api_fee_fetch()
+
+    def _schedule_sp_api_fee_fetch(self) -> None:
+        if self._sp_api_fee_timer is None:
+            self._sp_api_fee_timer = QTimer(self)
+            self._sp_api_fee_timer.setSingleShot(True)
+            self._sp_api_fee_timer.timeout.connect(self._fetch_sp_api_fees_for_current_price)
+        self._sp_api_fee_timer.start(600)
+
+    def _fetch_sp_api_fees_for_current_price(self) -> None:
+        if self._sp_api_fee_fetching:
+            return
+        sku = self._record_str("SKU") or self._record_str("sku")
+        if not sku or self._sale_price_value <= 0:
+            return
+        channel = self._sales_channel_combo.currentText().strip() if self._sales_channel_combo else ""
+        if not is_amazon_sales_channel(channel):
+            return
+
+        asin = self._record_str("ASIN") or self._record_str("asin")
+        shipping_method = (
+            self._shipping_method_combo.currentText().strip()
+            if self._shipping_method_combo is not None
+            else str(
+                self.record.get("発送方法")
+                or self.record.get("shippingMethod")
+                or self.record.get("shipping_method")
+                or "FBA"
+            ).strip()
+        )
+        self.record["発送方法"] = shipping_method
+        self.record["shippingMethod"] = shipping_method
+        self.record["shipping_method"] = shipping_method
+
+        try:
+            from services.sp_api_listing_fees import (
+                apply_listing_fees_to_record,
+                build_sp_api_client,
+                fetch_listing_and_fees_for_sku,
+                record_is_fba,
+            )
+        except ImportError:
+            from desktop.services.sp_api_listing_fees import (  # type: ignore
+                apply_listing_fees_to_record,
+                build_sp_api_client,
+                fetch_listing_and_fees_for_sku,
+                record_is_fba,
+            )
+
+        self._sp_api_fee_fetching = True
+        if self._sale_price_spin is not None:
+            self._sale_price_spin.setToolTip("SP-API から手数料を取得中…")
+        QApplication.processEvents()
+        try:
+            client = build_sp_api_client()
+            result = fetch_listing_and_fees_for_sku(
+                sku,
+                self._sale_price_value,
+                asin=asin,
+                is_fba=record_is_fba(self.record),
+                client=client,
+            )
+            platform_fee = result.get("platform_fee")
+            if platform_fee is None:
+                errors = result.get("errors") or []
+                if self._sale_price_spin is not None:
+                    self._sale_price_spin.setToolTip(
+                        f"手数料取得失敗: {'; '.join(errors[:2]) if errors else '不明'}"
+                    )
+                return
+
+            apply_listing_fees_to_record(
+                self.record,
+                listed_date=str(result.get("listed_date") or ""),
+                platform_fee=platform_fee,
+                fba_shipping_fee=result.get("fba_shipping_fee"),
+                is_fba=bool(result.get("is_fba")),
+                update_listed_date=False,
+            )
+            self._fee_recalc_guard = True
+            try:
+                if self._platform_fee_spin is not None and platform_fee is not None:
+                    self._platform_fee_spin.setValue(int(platform_fee))
+                fba_fee = result.get("fba_shipping_fee")
+                if (
+                    self._shipping_cost_spin is not None
+                    and fba_fee is not None
+                    and bool(result.get("is_fba"))
+                ):
+                    self._shipping_cost_spin.setValue(int(fba_fee))
+            finally:
+                self._fee_recalc_guard = False
+            self._refresh_cost_summary()
+            if self._sale_price_spin is not None:
+                self._sale_price_spin.setToolTip(
+                    "販売予定価格。Amazon の場合、変更後に SP-API で手数料・出荷費用を再取得します。"
+                )
+        except Exception as exc:  # noqa: BLE001
+            if self._sale_price_spin is not None:
+                self._sale_price_spin.setToolTip(f"SP-API 取得エラー: {exc}")
+        finally:
+            self._sp_api_fee_fetching = False
+
+    def _record_str(self, key: str) -> str:
+        v = self.record.get(key)
+        if v is None:
+            return ""
+        return str(v).strip()
 
     def _on_fee_spin_changed(self, _value: int = 0) -> None:
         if self._fee_recalc_guard:

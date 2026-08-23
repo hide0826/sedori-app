@@ -7,9 +7,11 @@ from __future__ import annotations
 from desktop.services.sp_api_listing_fees import (
     apply_listing_fees_to_record,
     format_listed_date,
+    listing_has_sellable_quantity,
     listing_is_amazon_fulfilled,
     parse_fees_estimate,
     parse_listing_created_date,
+    parse_listing_listed_date,
     record_is_fba,
 )
 
@@ -27,6 +29,26 @@ def test_parse_listing_created_date():
         ]
     }
     assert parse_listing_created_date(body) == "2025/01/08"
+
+
+def test_parse_listing_listed_date_fba_channel_includes_sold_out():
+    body_with_stock = {
+        "summaries": [{"createdDate": "2025-01-08T12:34:56Z"}],
+        "fulfillmentAvailability": [{"fulfillmentChannelCode": "AMAZON_JP", "quantity": 2}],
+    }
+    body_sold_out = {
+        "summaries": [{"createdDate": "2025-01-08T12:34:56Z"}],
+        "fulfillmentAvailability": [{"fulfillmentChannelCode": "AMAZON_JP", "quantity": 0}],
+    }
+    body_mfn_only = {
+        "summaries": [{"createdDate": "2025-01-08T12:34:56Z"}],
+        "fulfillmentAvailability": [{"fulfillmentChannelCode": "DEFAULT", "quantity": 1}],
+    }
+    assert parse_listing_listed_date(body_with_stock) == "2025/01/08"
+    assert parse_listing_listed_date(body_sold_out) == "2025/01/08"
+    assert parse_listing_listed_date(body_mfn_only) == ""
+    assert listing_has_sellable_quantity(body_with_stock) is True
+    assert listing_has_sellable_quantity(body_sold_out) is False
 
 
 def test_listing_is_amazon_fulfilled():

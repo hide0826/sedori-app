@@ -183,8 +183,8 @@ _CONDITION_OPTIONS = [
     "コレクター商品(可)",
     "再生品",
 ]
-_SKU_DATE_BLOCKED_STATUS_CODES = frozenset({"selling", "sold", "partially_sold"})
-_SKU_DATE_BLOCKED_LABELS = frozenset({"販売中", "販売済み", "一部販売済み"})
+_SKU_DATE_BLOCKED_STATUS_CODES = frozenset({"sold", "partially_sold"})
+_SKU_DATE_BLOCKED_LABELS = frozenset({"販売済み", "一部販売済み"})
 def _normalized_purchase_status_code(record: Dict[str, Any]) -> str:
     raw = record.get("ステータス") if record.get("ステータス") is not None else record.get("status")
     if raw is None or str(raw).strip() == "":
@@ -192,10 +192,11 @@ def _normalized_purchase_status_code(record: Dict[str, Any]) -> str:
     s = str(raw).strip()
     if s in _SKU_DATE_BLOCKED_LABELS:
         return {
-            "販売中": "selling",
             "販売済み": "sold",
             "一部販売済み": "partially_sold",
         }[s]
+    if s == "販売中":
+        return "selling"
     return s.lower()
 def _sku_date_edit_locked(record: Dict[str, Any]) -> bool:
     return _normalized_purchase_status_code(record) in _SKU_DATE_BLOCKED_STATUS_CODES
