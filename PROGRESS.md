@@ -33,7 +33,7 @@ HIRIO 全体の正本は [`../../PROGRESS.md`](../../PROGRESS.md)（`C:\HIRIO\PR
 | サーバー | `C:\HIRIO\repo\sedori-app.github`（PWA殻） |
 | 機能枝（目安） | `feature/sp-api` など（運用PC） |
 | PWA殻枝 | `feature/server-pwa`（origin と同期済み） |
-| 最新コミット（殻） | `fbd585c` hirio.db 読み取り一括＋仕入時刻突合 |
+| 最新コミット（殻） | `66eb286`（機能 `fbd585c` + PROGRESS更新） |
 | PWA URL | http://192.168.0.200:3000 |
 | API URL | http://192.168.0.200:8000 |
 
@@ -68,7 +68,7 @@ HIRIO 全体の正本は [`../../PROGRESS.md`](../../PROGRESS.md)（`C:\HIRIO\PR
 
 ### 次チャット向けメモ（2026-08-23 終了時）
 
-- **枝:** `feature/server-pwa`（サーバー作業はこの枝）
+- 枝 `feature/server-pwa` — push 済み（`fbd585c` / `66eb286`）
 - **いま:** hirio.db 読み取り接続は主要メニューほぼ完了。**未接続は画像・証憑のみ**
 - **仕入時刻突合:** PWA から利用可。**許容時間デフォルト 1 分**（30分だと誤検知が出やすい）
 - **API 一覧（読み取り）:** `/api/routes`, `/api/stores`, `/api/products`, `/api/route-visits`, `/api/ledger/entries`, `/api/analysis/*`
