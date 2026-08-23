@@ -63,7 +63,8 @@ export default function SettingsPage() {
             className="w-full rounded-md border border-[var(--hirio-line)] px-3 py-2 text-sm outline-none focus:border-[var(--hirio-accent)]"
           />
           <span className="mt-1.5 block text-xs text-[var(--hirio-muted)]">
-            例: http://localhost:8000 （末尾の / は不要）
+            サーバー本体: http://localhost:8000 ／ メインPCから: http://192.168.0.200:8000
+            （未保存なら、開いているホスト名の :8000 を自動使用）
           </span>
         </label>
 
