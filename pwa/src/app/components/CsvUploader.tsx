@@ -2,6 +2,7 @@
 
 import React, { useState, useCallback, ChangeEvent, DragEvent } from 'react';
 import { InventoryItem } from '@/types/repricer';
+import { getApiBaseUrl } from '@/lib/api-config';
 
 interface CsvUploaderProps {
   onUploadSuccess: (data: InventoryItem[]) => void;
@@ -88,7 +89,7 @@ export default function CsvUploader({ onUploadSuccess }: CsvUploaderProps) {
     formData.append('file', selectedFile);
 
     try {
-      const response = await fetch('http://localhost:8000/api/inventory/upload', {
+      const response = await fetch(`${getApiBaseUrl()}/api/inventory/upload`, {
         method: 'POST',
         headers: {
           'Authorization': 'Bearer hirio-local-key' // Adjust as per your authentication

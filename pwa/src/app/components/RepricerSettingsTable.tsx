@@ -3,8 +3,7 @@
 import { useState, useEffect } from 'react';
 import { RepriceConfig, RepriceRule, ProcessingResult } from '@/types/repricer';
 import ResultsDisplay from './ResultsDisplay';
-
-const API_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+import { getApiBaseUrl } from '@/lib/api-config';
 
 // 定数を定義
 const DAYS_INTERVALS = [30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 360];
@@ -51,7 +50,7 @@ export default function RepricerSettingsTable() {
     setIsLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_URL}/repricer/config`);
+      const res = await fetch(`${getApiBaseUrl()}/repricer/config`);
       if (!res.ok) {
         throw new Error(`Failed to fetch config: ${res.statusText}`);
       }
@@ -73,7 +72,7 @@ export default function RepricerSettingsTable() {
     setError(null);
     const payload = { ...config, q4_rule_enabled: q4RuleEnabled };
     try {
-      const res = await fetch(`${API_URL}/repricer/config`, {
+      const res = await fetch(`${getApiBaseUrl()}/repricer/config`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -145,8 +144,8 @@ export default function RepricerSettingsTable() {
     formData.append('file', selectedFile);
 
     const endpoint = mode === 'preview'
-      ? `${API_URL}/repricer/preview`
-      : `${API_URL}/repricer/apply`;
+      ? `${getApiBaseUrl()}/repricer/preview`
+      : `${getApiBaseUrl()}/repricer/apply`;
 
     try {
       console.log(`[${mode.toUpperCase()}] Sending request to ${endpoint}`);
@@ -212,7 +211,7 @@ export default function RepricerSettingsTable() {
         reportCsvContent: apiResponse.reportCsvContent
       };
       console.log('Result before ResultsDisplay:', result);
-      console.log('First 3 SKU values from API:', apiResponse.items?.slice(0, 3).map(item => item.sku));
+      console.log('First 3 SKU values from API:', apiResponse.items?.slice(0, 3).map((item: { sku?: string }) => item.sku));
       console.log('updatedCsvContent from API:', apiResponse.updatedCsvContent ? 'Present' : 'Missing');
       console.log('reportCsvContent from API:', apiResponse.reportCsvContent ? 'Present' : 'Missing');
 
