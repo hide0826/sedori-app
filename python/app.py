@@ -68,6 +68,12 @@ def create_app() -> FastAPI:
     from routers.route_visits import router as route_visits_router
     from routers.ledger import router as ledger_router
     from routers.analysis import router as analysis_router
+    from routers.images import router as images_router
+    from routers.receipts import router as receipts_router
+    from routers.expenses import router as expenses_router
+    from routers.account_titles import router as account_titles_router
+    from routers.sp_api import router as sp_api_router
+    from routers.journal import router as journal_router
 
     app.include_router(csv_router)
     app.include_router(ssot_router)
@@ -80,6 +86,12 @@ def create_app() -> FastAPI:
     app.include_router(route_visits_router)
     app.include_router(ledger_router)
     app.include_router(analysis_router)
+    app.include_router(images_router)
+    app.include_router(receipts_router)
+    app.include_router(expenses_router)
+    app.include_router(account_titles_router)
+    app.include_router(sp_api_router)
+    app.include_router(journal_router)
 
     # キャッシュ問題対策
     app.openapi_schema = None

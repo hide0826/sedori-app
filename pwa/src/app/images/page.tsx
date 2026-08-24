@@ -1,6 +1,5 @@
-import { ThinMenuWorkspace } from "@/components/menus/ThinMenuWorkspace";
-import { IMAGES_MENU } from "@/components/menus/menuDummyData";
+import { ImagesWorkspace } from "@/components/images/ImagesWorkspace";
 
 export default function ImagesPage() {
-  return <ThinMenuWorkspace config={IMAGES_MENU} />;
+  return <ImagesWorkspace />;
 }

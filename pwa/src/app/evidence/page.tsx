@@ -1,6 +1,5 @@
-import { ThinMenuWorkspace } from "@/components/menus/ThinMenuWorkspace";
-import { EVIDENCE_MENU } from "@/components/menus/menuDummyData";
+import { EvidenceWorkspace } from "@/components/evidence/EvidenceWorkspace";
 
 export default function EvidencePage() {
-  return <ThinMenuWorkspace config={EVIDENCE_MENU} />;
+  return <EvidenceWorkspace />;
 }

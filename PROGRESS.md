@@ -25,7 +25,7 @@ HIRIO 全体の正本は [`../../PROGRESS.md`](../../PROGRESS.md)（`C:\HIRIO\PR
 
 ## いまの状態（ひとこと）
 
-**運用・機能更新の正はメインPCデスクトップ。サーバー PWA は主要メニューの読み取り接続がほぼ完了（画像・証憑は未接続）。仕入の時刻突合も PWA から利用可。**
+**運用・機能更新の正はメインPCデスクトップ。サーバー PWA は証憑管理をデスクトップ踏襲（4タブ＋手動編集）まで対応。**
 
 | 項目 | 値 |
 |------|-----|
@@ -64,16 +64,19 @@ HIRIO 全体の正本は [`../../PROGRESS.md`](../../PROGRESS.md)（`C:\HIRIO\PR
 12. ~~店舗マスタ／商品DBを hirio.db に接続（読み取り専用）~~ → **完了**
 13. ~~仕入データの時刻突合~~ → **完了**（PWA からルート選択＋`/api/inventory/match-stores-from-data`、許容1分）
 14. ~~ルート訪問DB / 古物 / 分析~~ → **完了**（読み取り専用）
-15. **他メニューの本番接続**（候補: **画像** / **証憑**）
+15. ~~他メニューの本番接続（画像 / 証憑）~~ → **完了**（読み取り専用）
+16. ~~PWA SP-API 本番接続（価格改定タブ）~~ → **完了**（取得・PATCH・最安追従。試験モード既定ON）
+17. ~~書き込み系メニュー（第一弾）~~ → **完了**
+18. ~~証憑管理デスクトップ踏襲~~ → **完了**（レシート手動編集 / 経費フル項目 / 科目 / 仕訳帳。OCR系はデスクトップ）
+19. **次段階**（候補: 他メニューの書き込み / 本番切替判断 / テストフィードバック修正）
 
-### 次チャット向けメモ（2026-08-23 終了時）
+### 次チャット向けメモ（2026-08-24）
 
-- 枝 `feature/server-pwa` — push 済み（`fbd585c` / `66eb286`）
-- **いま:** hirio.db 読み取り接続は主要メニューほぼ完了。**未接続は画像・証憑のみ**
-- **仕入時刻突合:** PWA から利用可。**許容時間デフォルト 1 分**（30分だと誤検知が出やすい）
-- **API 一覧（読み取り）:** `/api/routes`, `/api/stores`, `/api/products`, `/api/route-visits`, `/api/ledger/entries`, `/api/analysis/*`
-- **API 再起動:** コード更新後は `:8000` の uvicorn を止めてから起動（古いプロセスだと 404）
-- **確認 URL:** PWA http://192.168.0.200:3000 / API http://192.168.0.200:8000/docs
+- 枝 `feature/server-pwa`
+- **いま:** 読み取り接続完了＋**書き込み第一弾**（経費 CRUD・勘定科目追加/削除）
+- **注意:** 書き込み先はサーバー `hirio.db`。運用PC本番DBとは別（同期は手動）
+- **API 再起動:** コード更新後は `:8000` の uvicorn を止めてから起動
+- **確認 URL:** PWA http://192.168.0.200:3000/evidence / API http://192.168.0.200:8000/docs
 
 1. このファイルの「いまの状態」「次チャットでやること」
 2. Notion 仕様書（アクセスURLはページ上部）
@@ -87,13 +90,13 @@ HIRIO 全体の正本は [`../../PROGRESS.md`](../../PROGRESS.md)（`C:\HIRIO\PR
 | メニュー | サブタブ | 状態 |
 |----------|----------|------|
 | TOP | - | 殻OK |
-| 価格改定 | 改定実行 / 改定ルール / SP-API改定 | 実行・ルール利用可。SP-APIは①〜⑤＋最安追従ダミー可 |
+| 価格改定 | 改定実行 / 改定ルール / SP-API改定 | 実行・ルール利用可。**SP-API改定は本番接続可**（認証あり時。試験モード既定） |
 | 仕入管理 | 仕入データ / コンディション説明 | 仕入データは CSV＋**時刻突合**＋SKU。コンディション説明は **hirio.db 接続済み** |
 | ルート | ルート選択 / ルートサマリー | **hirio.db 接続済み**（読み取り専用・API優先） |
 | データベース管理 | 商品DB / 店舗マスタ / ルート訪問DB | **hirio.db 接続済み**（読み取り専用） |
 | 古物台帳 | 閲覧・出力 / 入力・生成 | 閲覧は **hirio.db 接続済み**。入力・出力はデスクトップ |
-| 画像管理 | 画像管理 / 画像登録 | 薄い版（ダミー表） |
-| 証憑管理 | レシート / 経費 / 勘定科目 | 薄い版（ダミー表） |
+| 画像管理 | 画像管理 / 画像登録 | **hirio.db 接続済み**（SKU別枚数・スキャン一覧。登録処理はデスクトップ） |
+| 証憑管理 | レシート / 経費 / 勘定科目 / **仕訳帳** | **デスクトップ踏襲**。手動編集可。OCR・一括マッチ・GCS・確定はデスクトップ |
 | 分析 | 基本統計 / 店舗スコア | **hirio.db 接続済み**（簡易集計） |
 | 設定 | - | APIベースURL・接続テスト＋DBパス表示 |
 
@@ -118,6 +121,10 @@ python -m uvicorn app:app --host 0.0.0.0 --port 8000
 # http://192.168.0.200:8000/api/route-visits
 # http://192.168.0.200:8000/api/ledger/entries
 # http://192.168.0.200:8000/api/analysis/summary
+# http://192.168.0.200:8000/api/images/products
+# http://192.168.0.200:8000/api/receipts
+# http://192.168.0.200:8000/api/expenses
+# http://192.168.0.200:8000/api/account-titles/debit
 # http://192.168.0.200:8000/docs
 ```
 
@@ -126,6 +133,38 @@ python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ---
 
 ## 作業ログ
+
+### 2026-08-24 証憑管理デスクトップ踏襲（書き込み本格化）
+
+- タブをデスクトップ同様4つに: レシート / 経費 / 勘定科目 / 仕訳帳
+- 経費: 日付・カテゴリ・科目・支払先・金額・数量・単価・支払方法・メモ＋期間フィルタ
+- 勘定科目: 借方追加/削除、貸方追加/編集/削除
+- レシート: 手動編集（科目・日付・店舗・合計・SKU紐付け等）。OCRパイプラインは未移植
+- 仕訳帳: CRUD（借方/貸方は科目マスタから選択）
+- API: `PUT /api/receipts/{id}`, `PUT /api/account-titles/credit/{id}`, `/api/journal/entries`
+- 書き込み先はサーバー hirio.db（運用PC本番とは別）
+
+### 2026-08-24 書き込み系第一弾（経費・勘定科目）
+
+- API: `POST/PUT/DELETE /api/expenses`, `POST/DELETE /api/account-titles/debit|credit`
+- PWA: `EvidenceWorkspace` に経費フォーム・科目追加/削除
+- 書き込み先は **サーバー hirio.db**（運用PC本番DBとは別。同期は手動）
+- レシート OCR/突合・商品DB編集などは未着手
+
+### 2026-08-23 SP-API 本番接続（PWA 価格改定タブ）
+
+- API: `/api/sp-api/health`, `/api/sp-api/fetch-listings`, `/api/sp-api/follow-reprice`, `/api/sp-api/patch-prices`
+- PWA: `SpApiRepricerPanel` — 認証OK時は本番取得・PATCH・最安追従。未設定時ダミー
+- 追加: `python/routers/sp_api.py`, `pwa/src/lib/sp-api.ts`
+- 注意: `fetch-listings` はレポート方式で数分かかる場合あり。PATCH は試験モード（dry_run）既定
+
+### 2026-08-23 画像管理 / 証憑管理 hirio.db 接続
+
+- API: `/api/images/products`, `/api/images/scanned`, `/api/receipts`, `/api/expenses`, `/api/account-titles/debit|credit`
+- PWA: `ImagesWorkspace`, `EvidenceWorkspace`（API 優先、不通時ダミー）
+- データ件数目安: 商品1047 / スキャン2784 / レシート13 / 借方科目11
+- 追加: `python/routers/images.py`, `receipts.py`, `expenses.py`, `account_titles.py`
+- 追加: `pwa/src/lib/images-api.ts`, `evidence-api.ts`, `components/images/`, `components/evidence/`
 
 ### 2026-08-23 ルート訪問DB / 古物台帳 / 分析 hirio.db 接続
 

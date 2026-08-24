@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import ResultsDisplay from "@/app/components/ResultsDisplay";
 import { getApiBaseUrl } from "@/lib/api-config";
 import { ProcessingResult } from "@/types/repricer";
@@ -9,6 +9,14 @@ import {
   DUMMY_LISTINGS,
   type DummyListingRow,
 } from "@/components/repricer/dummyRepricerCsv";
+import {
+  createRepricerFileFromCsv,
+  fetchListingsFromSpApi,
+  fetchSpApiHealth,
+  patchPricesViaSpApi,
+  runFollowRepriceFromSpApi,
+  type SpApiListingRow,
+} from "@/lib/sp-api";
 
 const PIPELINE = [
   { step: 1, label: "①SP-API取得" },
@@ -101,14 +109,18 @@ function normalizeProcessingResult(apiResponse: {
 }
 
 /**
- * デスクトップ「SP-API改定」の薄いPWA版。
- * Amazon SP-API への実送信はせず、ダミー取得＋既存 /repricer API で流れを試す。
+ * デスクトップ「SP-API改定」の PWA 版。
+ * SP-API 認証があれば本番取得・反映。なければダミーにフォールバック。
  */
 export function SpApiRepricerPanel() {
   const [activeStep, setActiveStep] = useState<number | null>(null);
   const [statusText, setStatusText] = useState("ワークフロー: 未実行");
   const [listings, setListings] = useState<DummyListingRow[]>([]);
   const [sourceLabel, setSourceLabel] = useState("");
+  const [dataSource, setDataSource] = useState<"sp_api" | "dummy">("dummy");
+  const [csvContent, setCsvContent] = useState<string | null>(null);
+  const [csvFilename, setCsvFilename] = useState<string>("test_repricer_dummy.csv");
+  const [spApiReady, setSpApiReady] = useState<boolean | null>(null);
   const [busy, setBusy] = useState<BusyAction>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ProcessingResult | null>(null);
@@ -126,6 +138,12 @@ export function SpApiRepricerPanel() {
   const [followPatch, setFollowPatch] = useState(false);
   const [followAuto, setFollowAuto] = useState(false);
 
+  useEffect(() => {
+    void fetchSpApiHealth().then((res) => {
+      setSpApiReady(res.ok && Boolean(res.data?.credentials_configured));
+    });
+  }, []);
+
   const canPreview = listings.length > 0 && busy === null;
   const canApply = result !== null && busy === null;
   const canPatch = hasExecuted && result !== null && busy === null;
@@ -140,6 +158,9 @@ export function SpApiRepricerPanel() {
     setStatusText("ワークフロー: 未実行");
     setListings([]);
     setSourceLabel("");
+    setDataSource("dummy");
+    setCsvContent(null);
+    setCsvFilename("test_repricer_dummy.csv");
     setError(null);
     setResult(null);
     setHasExecuted(false);
@@ -149,9 +170,66 @@ export function SpApiRepricerPanel() {
     setBusy(null);
   };
 
-  const handleFollowDummy = async () => {
+  const toListingRows = (rows: SpApiListingRow[]): DummyListingRow[] =>
+    rows.map((row) => ({
+      sku: row.sku,
+      asin: row.asin,
+      title: row.title,
+      price: row.price ?? 0,
+      cost: row.cost ?? 0,
+      akaji: row.akaji ?? 0,
+    }));
+
+  const handleFollow = async () => {
     setFollowBusy(true);
     setFollowLog(null);
+    setFollowResults(null);
+
+    if (dataSource === "sp_api" && listings.length > 0) {
+      const res = await runFollowRepriceFromSpApi({
+        listings: listings.map((r) => ({
+          sku: r.sku,
+          asin: r.asin,
+          title: r.title,
+          price: r.price,
+          cost: r.cost,
+          akaji: r.akaji,
+        })),
+        maxListings: followMax,
+        applyAmazon: followPatch,
+      });
+      if (res.ok && res.data) {
+        setFollowResults(
+          res.data.items.map((it) => ({
+            sku: it.sku,
+            days: it.days ?? 0,
+            currentPrice: it.currentPrice ?? 0,
+            competitorMin: it.competitorMin ?? 0,
+            newPrice: it.newPrice ?? 0,
+            rule: it.rule,
+          }))
+        );
+        const lines = [
+          followPatch
+            ? "最安追従 → Amazon PATCH 実行（本番）"
+            : "最安追従（計算のみ）",
+          `調査: ${res.data.count} 件 / 変更候補: ${res.data.changed_count} 件`,
+        ];
+        if (res.data.patch && typeof res.data.patch === "object") {
+          const p = res.data.patch as Record<string, unknown>;
+          if (p.success_count != null) {
+            lines.push(`PATCH 成功: ${p.success_count} / 失敗: ${p.failed_count ?? 0}`);
+          }
+        }
+        setFollowLog(lines.join("\n"));
+        setFollowBusy(false);
+        return;
+      }
+      setFollowLog(res.message ?? "最安追従 API に失敗しました");
+      setFollowBusy(false);
+      return;
+    }
+
     await new Promise((r) => setTimeout(r, 600));
 
     const limit = Math.min(followMax, DUMMY_FOLLOW_RESULTS.length);
@@ -177,7 +255,7 @@ export function SpApiRepricerPanel() {
     setFollowBusy(false);
   };
 
-  const handleDummyFetch = async () => {
+  const handleFetch = async () => {
     setBusy("fetch");
     setError(null);
     setResult(null);
@@ -185,9 +263,28 @@ export function SpApiRepricerPanel() {
     setPatchLog(null);
     setActiveStep(1);
     setStatusText("ワークフロー: 実行中");
-    // 実SP-APIの代わりに、少し待ってからダミー一覧を載せる
+
+    if (spApiReady) {
+      setStatusText("ワークフロー: SP-API レポート取得中（数分かかる場合あり）…");
+      const res = await fetchListingsFromSpApi();
+      if (res.ok && res.data) {
+        setListings(toListingRows(res.data.listings));
+        setCsvContent(res.data.csv_content);
+        setCsvFilename(res.data.csv_filename);
+        setDataSource("sp_api");
+        setSourceLabel(`SP-API 出品一覧（${res.data.count} 件）`);
+        setActiveStep(1);
+        setStatusText("ワークフロー: 取得完了 → 次はプレビュー");
+        setBusy(null);
+        return;
+      }
+      setError(res.message ?? "SP-API 取得に失敗しました。ダミーに切り替えます。");
+    }
+
     await new Promise((r) => setTimeout(r, 400));
     setListings(DUMMY_LISTINGS);
+    setCsvContent(null);
+    setDataSource("dummy");
     setSourceLabel("ダミー出品一覧（Amazon未接続）");
     setActiveStep(1);
     setStatusText("ワークフロー: 取得完了 → 次はプレビュー");
@@ -202,7 +299,11 @@ export function SpApiRepricerPanel() {
     setStatusText("ワークフロー: 実行中");
 
     const formData = new FormData();
-    formData.append("file", createDummyRepricerFile());
+    const file =
+      csvContent && dataSource === "sp_api"
+        ? createRepricerFileFromCsv(csvContent, csvFilename)
+        : createDummyRepricerFile();
+    formData.append("file", file);
     const endpoint =
       mode === "preview"
         ? `${getApiBaseUrl()}/repricer/preview`
@@ -245,17 +346,55 @@ export function SpApiRepricerPanel() {
     }
   };
 
-  const handlePatchSimulation = async () => {
+  const handlePatch = async () => {
     if (!result) return;
     setBusy("patch");
     setError(null);
     setActiveStep(5);
     setStatusText("ワークフロー: 実行中");
-    await new Promise((r) => setTimeout(r, 500));
 
     const targets = result.items.filter((it) => it.new_price !== it.price);
     const limit = dryRun ? Math.max(1, dryRunCount) : targets.length;
     const applied = targets.slice(0, limit);
+
+    if (dataSource === "sp_api" && spApiReady) {
+      const res = await patchPricesViaSpApi({
+        items: applied.map((it) => ({
+          sku: it.sku,
+          price: it.price,
+          new_price: it.new_price,
+          productName: it.productName,
+        })),
+        dryRun: dryRun,
+        maxItems: limit,
+      });
+      if (res.ok && res.data) {
+        if (res.data.dry_run) {
+          setPatchLog(
+            [
+              "Amazon PATCH（試験モード: 件数確認のみ）",
+              `変更候補: ${targets.length} 件 → 試行 ${res.data.target_count ?? limit} 件`,
+            ].join("\n")
+          );
+        } else {
+          setPatchLog(
+            [
+              "Amazon PATCH 実行完了（本番）",
+              `成功: ${res.data.success_count ?? 0} / 失敗: ${res.data.failed_count ?? 0}`,
+            ].join("\n")
+          );
+        }
+        setActiveStep(5);
+        setStatusText("ワークフロー: Amazon反映完了");
+        setBusy(null);
+        return;
+      }
+      setError(res.message ?? "Amazon PATCH に失敗しました");
+      setBusy(null);
+      return;
+    }
+
+    await new Promise((r) => setTimeout(r, 500));
 
     setPatchLog(
       [
@@ -278,16 +417,23 @@ export function SpApiRepricerPanel() {
   return (
     <div className="space-y-5">
       <section className="rounded-lg border border-[var(--hirio-line)] bg-[var(--hirio-accent-soft)] px-4 py-4 text-sm text-[var(--hirio-ink)]">
-        <p className="font-medium">ダミー前提の SP-API改定</p>
+        <p className="font-medium">
+          SP-API改定
+          {spApiReady === null
+            ? "（接続確認中…）"
+            : spApiReady
+              ? " — 認証OK（本番取得可）"
+              : " — ダミーモード（認証未設定）"}
+        </p>
         <ul className="mt-2 list-disc space-y-1 pl-5 text-[var(--hirio-muted)]">
           <li>
-            「SP-API取得」は Amazon に繋がず、固定のダミー出品を読み込みます
+            「SP-API取得」は認証があれば Amazon 出品レポートを取得（数分かかる場合あり）
           </li>
           <li>
-            プレビュー／実行は既存の改定API（サーバー上のダミー計算）を使います
+            プレビュー／実行はサーバー上の改定API（取得CSVまたはダミーCSV）
           </li>
           <li>
-            「Amazonへ価格反映」は画面上のシミュレーションのみ（本番送信なし）
+            「Amazonへ価格反映」は試験モードOFF＋SP-API接続時のみ本番 PATCH
           </li>
         </ul>
       </section>
@@ -320,16 +466,22 @@ export function SpApiRepricerPanel() {
             type="text"
             readOnly
             value={sourceLabel}
-            placeholder="①「SP-API取得（ダミー）」で出品一覧を読み込みます"
+            placeholder="①「SP-API取得」で出品一覧を読み込みます"
             className="min-w-0 flex-1 rounded-md border border-[var(--hirio-line)] bg-[var(--hirio-bg)] px-3 py-2 text-sm"
           />
           <button
             type="button"
-            onClick={handleDummyFetch}
+            onClick={handleFetch}
             disabled={busy !== null}
             className="rounded-md bg-[var(--hirio-accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
-            {busy === "fetch" ? "取得中..." : "SP-API取得（ダミー）"}
+            {busy === "fetch"
+              ? spApiReady
+                ? "SP-API取得中..."
+                : "取得中..."
+              : spApiReady
+                ? "SP-API取得"
+                : "SP-API取得（ダミー）"}
           </button>
           <button
             type="button"
@@ -349,10 +501,14 @@ export function SpApiRepricerPanel() {
           </button>
           <button
             type="button"
-            onClick={handlePatchSimulation}
+            onClick={handlePatch}
             disabled={!canPatch}
             className="rounded-md bg-[var(--hirio-accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-            title="実送信はしません。画面上のシミュレーションだけです"
+            title={
+              dataSource === "sp_api" && !dryRun
+                ? "Amazon へ本番 PATCH します"
+                : "試験モードまたはダミー時はシミュレーション"
+            }
           >
             {busy === "patch" ? "反映中..." : "Amazonへ価格反映"}
           </button>
@@ -404,7 +560,7 @@ export function SpApiRepricerPanel() {
         {listings.length > 0 && (
           <div className="mt-6 overflow-x-auto">
             <h3 className="mb-2 text-sm font-medium text-[var(--hirio-ink)]">
-              取得一覧（ダミー）
+              取得一覧（{dataSource === "sp_api" ? "SP-API" : "ダミー"}）
             </h3>
             <table className="min-w-full border-collapse text-left text-sm">
               <thead>
@@ -457,7 +613,7 @@ export function SpApiRepricerPanel() {
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button
             type="button"
-            onClick={handleFollowDummy}
+            onClick={handleFollow}
             disabled={followBusy}
             className="rounded-md bg-[var(--hirio-accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
