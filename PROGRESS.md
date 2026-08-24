@@ -5,7 +5,7 @@ HIRIO 全体の正本は [`../../PROGRESS.md`](../../PROGRESS.md)（`C:\HIRIO\PR
 仕様・方針: Notion「[HIRIO サーバー移行・PWA化 仕様書（Cursor向け）](https://app.notion.com/p/3c3a6e81a58b813ebd28e484134d6afe)」  
 詳細ログ（デスクトップ寄り）: [`docs/cursor_development_progress.md`](docs/cursor_development_progress.md)
 
-更新日: 2026-08-23
+更新日: 2026-08-24
 
 ---
 
@@ -33,7 +33,7 @@ HIRIO 全体の正本は [`../../PROGRESS.md`](../../PROGRESS.md)（`C:\HIRIO\PR
 | サーバー | `C:\HIRIO\repo\sedori-app.github`（PWA殻） |
 | 機能枝（目安） | `feature/sp-api` など（運用PC） |
 | PWA殻枝 | `feature/server-pwa`（origin と同期済み） |
-| 最新コミット（殻） | `66eb286`（機能 `fbd585c` + PROGRESS更新） |
+| 最新コミット（殻） | `3dad40e`（画像・証憑接続＋書き込み＋SP-API） |
 | PWA URL | http://192.168.0.200:3000 |
 | API URL | http://192.168.0.200:8000 |
 
@@ -73,7 +73,7 @@ HIRIO 全体の正本は [`../../PROGRESS.md`](../../PROGRESS.md)（`C:\HIRIO\PR
 ### 次チャット向けメモ（2026-08-24）
 
 - 枝 `feature/server-pwa`
-- **いま:** 読み取り接続完了＋**書き込み第一弾**（経費 CRUD・勘定科目追加/削除）
+- **いま:** 読み取り接続完了＋**証憑4タブ書き込み**（経費・科目・レシート手動編集・仕訳帳）
 - **注意:** 書き込み先はサーバー `hirio.db`。運用PC本番DBとは別（同期は手動）
 - **API 再起動:** コード更新後は `:8000` の uvicorn を止めてから起動
 - **確認 URL:** PWA http://192.168.0.200:3000/evidence / API http://192.168.0.200:8000/docs
