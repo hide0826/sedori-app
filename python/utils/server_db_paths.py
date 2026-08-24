@@ -41,3 +41,13 @@ def get_hirio_db_path_for_api() -> str:
         if recording_db.exists():
             return str(recording_db)
     return str(data_dir / "hirio.db")
+
+
+def get_product_purchase_db_path_for_api() -> str:
+    """仕入DBスナップショット（デスクトップと同じ hirio_product_purchase.db）。"""
+    data_dir = _desktop_data_dir()
+    if is_recording_mode_without_pyside6():
+        recording_db = data_dir / "recording" / "hirio_product_purchase.db"
+        if recording_db.exists():
+            return str(recording_db)
+    return str(data_dir / "hirio_product_purchase.db")

@@ -6,17 +6,23 @@ inventory.py
 """
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form, Body
 from fastapi.responses import StreamingResponse, Response
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import io
 import pandas as pd
 import math
 import json
 from pathlib import Path
+from pydantic import BaseModel, Field
 
 from services.inventory_service import InventoryService
 from services.inventory_store_matching import (
     InventoryStoreMatchingError,
     match_stores_from_purchase_data,
+)
+from services.inventory_db_save import (
+    load_route_template,
+    save_purchase_data,
+    save_route_visits_from_summary,
 )
 from utils.server_db_paths import get_hirio_db_path_for_api
 from schemas.inventory_schemas import (
@@ -245,3 +251,53 @@ async def match_stores_from_data(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class SaveToDbRequest(BaseModel):
+    purchase_data: List[Dict[str, Any]] = Field(default_factory=list)
+    route_summary_id: Optional[int] = None
+
+
+@router.get("/route-template/{route_summary_id}")
+def get_route_template(route_summary_id: int):
+    """
+    デスクトップ「ルートテンプレ読込」のサーバー版。
+    Excel ではなく hirio.db に保存済みのルート訪問を読み込む。
+    """
+    try:
+        return load_route_template(route_summary_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.post("/save-to-db")
+def save_inventory_to_db(request: SaveToDbRequest):
+    """
+    デスクトップ「DB保存」の第一弾。
+    仕入データを hirio_product_purchase.db にマージ保存し、
+    ルートが指定されていれば訪問履歴も hirio.db に保存する。
+    """
+    try:
+        purchase_result = save_purchase_data(request.purchase_data)
+        route_result: Dict[str, Any]
+        if request.route_summary_id is None:
+            route_result = {
+                "saved": False,
+                "message": "ルート情報: ルートテンプレートが未ロードです",
+            }
+        else:
+            route_result = save_route_visits_from_summary(request.route_summary_id)
+
+        messages = [purchase_result["message"], route_result["message"]]
+        return {
+            "status": "success",
+            "purchase": purchase_result,
+            "route": route_result,
+            "messages": messages,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e

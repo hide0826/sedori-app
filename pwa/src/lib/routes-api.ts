@@ -23,14 +23,17 @@ export type RouteSummary = {
 export type RouteVisit = {
   id: number | null;
   store_code: string | null;
+  store_name?: string | null;
   visit_order: number | null;
   store_in_time: string | null;
   store_out_time: string | null;
   stay_duration: number | null;
+  travel_time_from_prev?: number | null;
   store_item_count: number | null;
   store_gross_profit: number | null;
   store_notes: string | null;
   purchase_success: boolean | null;
+  store_rating?: number | null;
 };
 
 export type RouteSummariesResponse = {

@@ -95,3 +95,100 @@ export async function matchStoresFromData(
     return { ok: false, message };
   }
 }
+
+export type RouteTemplateSummary = {
+  id: number;
+  route_date: string | null;
+  route_code: string | null;
+  route_display_name: string;
+  departure_time: string | null;
+  return_time: string | null;
+};
+
+export type RouteTemplateVisit = {
+  id: number | null;
+  visit_order: number | null;
+  store_code: string;
+  store_name: string;
+  store_in_time: string | null;
+  store_out_time: string | null;
+  stay_duration: number | null;
+  travel_time_from_prev: number | null;
+  store_gross_profit: number | null;
+  store_item_count: number | null;
+  store_rating: number | null;
+  store_notes: string | null;
+};
+
+export type RouteTemplateResult = {
+  source: string;
+  db_path?: string;
+  summary: RouteTemplateSummary;
+  count: number;
+  visits: RouteTemplateVisit[];
+};
+
+export type SaveToDbResult = {
+  status: string;
+  purchase: {
+    saved: boolean;
+    message: string;
+    stats?: {
+      new_count: number;
+      updated_count: number;
+      skipped_count: number;
+      total_count: number;
+    };
+    db_path?: string;
+  };
+  route: {
+    saved: boolean;
+    message: string;
+    visit_count?: number;
+  };
+  messages: string[];
+};
+
+export async function fetchRouteTemplateFromApi(
+  routeSummaryId: number
+): Promise<{ ok: boolean; data?: RouteTemplateResult; message?: string }> {
+  const url = `${getApiBaseUrl()}/api/inventory/route-template/${routeSummaryId}`;
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) {
+      const text = await res.text();
+      return { ok: false, message: `HTTP ${res.status}: ${text.slice(0, 200)}` };
+    }
+    const data = (await res.json()) as RouteTemplateResult;
+    return { ok: true, data };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, message };
+  }
+}
+
+export async function saveInventoryToDb(
+  purchaseData: Record<string, unknown>[],
+  routeSummaryId: number | null
+): Promise<{ ok: boolean; data?: SaveToDbResult; message?: string }> {
+  const url = `${getApiBaseUrl()}/api/inventory/save-to-db`;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        purchase_data: purchaseData,
+        route_summary_id: routeSummaryId,
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      return { ok: false, message: `HTTP ${res.status}: ${text.slice(0, 200)}` };
+    }
+    const data = (await res.json()) as SaveToDbResult;
+    return { ok: true, data };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, message };
+  }
+}
