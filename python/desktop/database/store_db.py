@@ -142,6 +142,15 @@ class StoreDatabase:
             conn.commit()
         except sqlite3.OperationalError:
             pass
+
+        # Google Map 2本目（マイグレーション）
+        try:
+            cursor.execute(
+                "ALTER TABLE routes ADD COLUMN google_map_url_2 TEXT"
+            )
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
         
         # updated_atを自動更新するトリガー（routes）
         cursor.execute("""
@@ -822,6 +831,164 @@ class StoreDatabase:
         
         rows = cursor.fetchall()
         return [self._row_to_dict(row) for row in rows]
+
+    def list_store_membership_snapshot(self) -> List[Dict[str, Any]]:
+        """Undo用の軽量スナップショット（所属・順序のみ）。"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, affiliated_route_name, route_code, display_order
+            FROM stores
+            ORDER BY id
+            """
+        )
+        rows = []
+        for row in cursor.fetchall():
+            rows.append(
+                {
+                    "id": int(row[0]),
+                    "affiliated_route_name": row[1],
+                    "route_code": row[2],
+                    "display_order": row[3],
+                }
+            )
+        return rows
+
+    def apply_kanban_membership_snapshot(self, snapshot: Dict[str, Any]) -> bool:
+        """カンバン Undo/Redo 用: 差分だけを1トランザクションで復元する。"""
+        snap_stores = snapshot.get("stores") or []
+        snap_routes = snapshot.get("routes") or []
+        snap_codes = {
+            (r.get("route_code") or "").strip()
+            for r in snap_routes
+            if (r.get("route_code") or "").strip()
+        }
+        name_by_code = {
+            (r.get("route_code") or "").strip(): (r.get("route_name") or "").strip()
+            for r in snap_routes
+            if (r.get("route_code") or "").strip()
+            and (r.get("route_name") or "").strip()
+        }
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            # 1) スナップショットに無いルートは削除
+            cursor.execute("SELECT route_name, route_code FROM routes")
+            for row in cursor.fetchall():
+                name = (row[0] or "").strip()
+                code = (row[1] or "").strip()
+                if code and code not in snap_codes:
+                    cursor.execute(
+                        "DELETE FROM routes WHERE route_name = ? AND route_code = ?",
+                        (name, code),
+                    )
+
+            # 2) ルート名の復元（コードは固定。店舗所属は次ステップで確定）
+            if name_by_code:
+                cursor.execute("SELECT route_code, route_name FROM routes")
+                for row in cursor.fetchall():
+                    code = (row[0] or "").strip()
+                    current_name = (row[1] or "").strip()
+                    target_name = name_by_code.get(code)
+                    if not target_name or target_name == current_name:
+                        continue
+                    cursor.execute(
+                        """
+                        UPDATE routes
+                        SET route_name = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE route_code = ?
+                        """,
+                        (target_name, code),
+                    )
+                    for table in ("route_summaries", "route_visit_logs"):
+                        try:
+                            cursor.execute(
+                                f"""
+                                UPDATE {table}
+                                SET route_name = ?
+                                WHERE route_code = ? OR route_name = ?
+                                """,
+                                (target_name, code, current_name),
+                            )
+                        except sqlite3.OperationalError:
+                            pass
+
+            # 3) 店舗所属・訪問順（差分のみ）
+            cursor.execute(
+                """
+                SELECT id, affiliated_route_name, route_code, display_order
+                FROM stores
+                """
+            )
+            current_by_id: Dict[int, tuple] = {}
+            for row in cursor.fetchall():
+                current_by_id[int(row[0])] = (row[1], row[2], row[3])
+
+            for store in snap_stores:
+                sid = store.get("id")
+                if not sid:
+                    continue
+                sid_i = int(sid)
+                try:
+                    order_val = int(store.get("display_order") or 0)
+                except (TypeError, ValueError):
+                    order_val = 0
+                target = (
+                    store.get("affiliated_route_name"),
+                    store.get("route_code"),
+                    order_val,
+                )
+                current = current_by_id.get(sid_i)
+                if current is not None:
+                    try:
+                        cur_order = int(current[2] or 0)
+                    except (TypeError, ValueError):
+                        cur_order = 0
+                    if (
+                        current[0] == target[0]
+                        and current[1] == target[1]
+                        and cur_order == target[2]
+                    ):
+                        continue
+                cursor.execute(
+                    """
+                    UPDATE stores
+                    SET affiliated_route_name = ?,
+                        route_code = ?,
+                        display_order = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (target[0], target[1], target[2], sid_i),
+                )
+
+            # 4) ルート列の並び
+            ordered_codes = [
+                (r.get("route_code") or "").strip()
+                for r in sorted(
+                    snap_routes,
+                    key=lambda x: int(x.get("display_order") or 0),
+                )
+                if (r.get("route_code") or "").strip()
+            ]
+            for idx, code in enumerate(ordered_codes, start=1):
+                cursor.execute(
+                    """
+                    UPDATE routes
+                    SET display_order = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE route_code = ?
+                    """,
+                    (idx, code),
+                )
+
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"カンバン履歴一括復元エラー: {e}")
+            conn.rollback()
+            return False
     
     def _row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
         """Rowを辞書に変換（custom_fieldsをパース）"""
@@ -1408,7 +1575,8 @@ class StoreDatabase:
 
         # 1. routes テーブルから全ルートを取得（マスタ）
         cursor.execute("""
-            SELECT route_name, route_code, google_map_url, display_order
+            SELECT route_name, route_code, google_map_url, display_order,
+                   google_map_url_2
             FROM routes
         """)
         route_rows = cursor.fetchall()
@@ -1423,12 +1591,17 @@ class StoreDatabase:
                 display_order = int(row[3] or 0)
             except (TypeError, ValueError, IndexError):
                 display_order = 0
+            try:
+                google_map_url_2 = row[4] or ""
+            except (IndexError, TypeError):
+                google_map_url_2 = ""
             if not route_code:
                 continue
             routes_by_code[route_code] = {
                 "route_name": route_name,
                 "route_code": route_code,
                 "google_map_url": google_map_url,
+                "google_map_url_2": google_map_url_2,
                 "display_order": display_order,
             }
 
@@ -1461,6 +1634,7 @@ class StoreDatabase:
                         "route_name": "",  # 不明なコードは名前空欄
                         "route_code": code,
                         "google_map_url": "",
+                        "google_map_url_2": "",
                         "display_order": 0,
                     }
 
@@ -1476,6 +1650,7 @@ class StoreDatabase:
                     "route_code": code,
                     "store_count": count,
                     "google_map_url": route_info.get("google_map_url", ""),
+                    "google_map_url_2": route_info.get("google_map_url_2", ""),
                     "display_order": int(route_info.get("display_order") or 0),
                 }
             )
@@ -1514,7 +1689,104 @@ class StoreDatabase:
             print(f"ルート並び順更新エラー: {e}")
             conn.rollback()
             return False
-    
+
+    def create_route_at_front(self, route_name: str) -> Optional[str]:
+        """新規ルートを display_order=1（未所属の直後＝左上）に登録し、ルートコードを返す。
+
+        ルートコードは R### 形式で自動採番。既存ルートの display_order は +1 する。
+        同名ルートが既にある場合は None。
+        """
+        route_name = (route_name or "").strip()
+        if not route_name:
+            return None
+
+        existing = self.get_route_code_by_name(route_name)
+        if existing:
+            return None
+
+        route_code = self.generate_next_route_code()
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE routes
+                SET display_order = COALESCE(display_order, 0) + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                """
+            )
+            cursor.execute(
+                """
+                INSERT INTO routes (route_name, route_code, google_map_url, display_order)
+                VALUES (?, ?, ?, 1)
+                """,
+                (route_name, route_code, ""),
+            )
+            conn.commit()
+            return route_code
+        except Exception as e:
+            print(f"ルート先頭登録エラー: {e}")
+            conn.rollback()
+            return None
+
+    def rename_route_by_code(self, route_code: str, new_route_name: str) -> bool:
+        """ルートコードは変えず、ルート名だけ変更する。
+
+        routes.route_name と、主所属が旧名の店舗の affiliated_route_name を更新する。
+        """
+        route_code = (route_code or "").strip()
+        new_route_name = (new_route_name or "").strip()
+        if not route_code or not new_route_name:
+            return False
+
+        old_name = (self.get_route_name_by_code(route_code) or "").strip()
+        if not old_name:
+            return False
+        if old_name == new_route_name:
+            return True
+
+        conflict = self.get_route_code_by_name(new_route_name)
+        if conflict and conflict != route_code:
+            return False
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE routes
+                SET route_name = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE route_code = ?
+                """,
+                (new_route_name, route_code),
+            )
+            cursor.execute(
+                """
+                UPDATE stores
+                SET affiliated_route_name = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE affiliated_route_name = ?
+                """,
+                (new_route_name, old_name),
+            )
+            for table in ("route_summaries", "route_visit_logs"):
+                try:
+                    cursor.execute(
+                        f"""
+                        UPDATE {table}
+                        SET route_name = ?
+                        WHERE route_code = ? OR route_name = ?
+                        """,
+                        (new_route_name, route_code, old_name),
+                    )
+                except sqlite3.OperationalError:
+                    pass
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"ルート名変更エラー: {e}")
+            conn.rollback()
+            return False
+
     def get_store_by_id(self, store_id: int) -> Optional[Dict[str, Any]]:
         """IDで店舗を取得（get_storeのエイリアス）"""
         return self.get_store(store_id)
@@ -1583,41 +1855,99 @@ class StoreDatabase:
             return False
     
     def get_route_google_map_url(self, route_name: str) -> str:
-        """ルート名から Google Map URL を取得（routes テーブル）"""
+        """ルート名から Google Map URL（リンク1）を取得（routes テーブル）"""
+        urls = self.get_route_google_map_urls(route_name)
+        return urls[0]
+
+    def get_route_google_map_urls(self, route_name: str) -> tuple:
+        """ルート名から Google Map URL（リンク1・リンク2）を取得。"""
         name = (route_name or "").strip()
         if not name:
-            return ""
+            return ("", "")
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT google_map_url FROM routes WHERE route_name = ?",
-            (name,),
-        )
+        try:
+            cursor.execute(
+                """
+                SELECT google_map_url, google_map_url_2
+                FROM routes WHERE route_name = ?
+                """,
+                (name,),
+            )
+        except sqlite3.OperationalError:
+            cursor.execute(
+                "SELECT google_map_url FROM routes WHERE route_name = ?",
+                (name,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return ("", "")
+            return (str(row[0] or "").strip(), "")
         row = cursor.fetchone()
         if not row:
-            return ""
-        return str(row[0] or "").strip()
+            return ("", "")
+        return (str(row[0] or "").strip(), str(row[1] or "").strip())
 
     def update_route_google_map_url(self, route_name: str, google_map_url: str) -> bool:
-        """ルートの Google Map URL を更新"""
+        """ルートの Google Map URL（リンク1のみ）を更新。リンク2は維持。"""
+        url2 = self.get_route_google_map_urls(route_name)[1]
+        return self.update_route_google_map_urls(route_name, google_map_url, url2)
+
+    def update_route_google_map_urls(
+        self,
+        route_name: str,
+        google_map_url: str = "",
+        google_map_url_2: str = "",
+    ) -> bool:
+        """ルートの Google Map URL（リンク1・リンク2）を更新する。"""
+        route_name = (route_name or "").strip()
+        url1 = (google_map_url or "").strip()
+        url2 = (google_map_url_2 or "").strip()
+        if not route_name:
+            return False
+
         conn = self._get_connection()
         cursor = conn.cursor()
         
         try:
-            # まず routes テーブルに該当ルートが存在するか確認
             cursor.execute("SELECT id FROM routes WHERE route_name = ?", (route_name,))
             existing_route = cursor.fetchone()
             
             if existing_route:
-                # 既存ルートのURLを更新
-                cursor.execute("""
-                    UPDATE routes 
-                    SET google_map_url = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE route_name = ?
-                """, (google_map_url, route_name))
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE routes
+                        SET google_map_url = ?,
+                            google_map_url_2 = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE route_name = ?
+                        """,
+                        (url1, url2, route_name),
+                    )
+                except sqlite3.OperationalError:
+                    cursor.execute(
+                        """
+                        UPDATE routes
+                        SET google_map_url = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE route_name = ?
+                        """,
+                        (url1, route_name),
+                    )
             else:
                 route_code = self.ensure_route_code(route_name)
-                self.upsert_route(route_name, route_code, google_map_url)
+                self.upsert_route(route_name, route_code, url1)
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE routes
+                        SET google_map_url_2 = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE route_name = ?
+                        """,
+                        (url2, route_name),
+                    )
+                except sqlite3.OperationalError:
+                    pass
             
             conn.commit()
             return True

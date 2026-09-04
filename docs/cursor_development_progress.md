@@ -1,3 +1,35 @@
+## 2026-09-04 ルート一覧カンバン続き（登録・改名・Undo高速化・件数・Map2本）
+
+- **内容**: `feature/sp-api` 上でルート一覧カンバンを運用向けに拡充（コミット対象）
+- **追加機能**:
+  - **ルート登録**: ツールバーから新規ルート。コード自動採番（R###）、未所属の右隣に空列
+  - **ルート名変更**: 列タイトルダブルクリック（コード変更不可）
+  - **登録数表示**: タイトル横に「ルート N ／ 店舗 M」
+  - **Google Map**: 列ヘッダにリンク1・リンク2（クリックでブラウザ、URLボタンで編集）
+- **改善**:
+  - **戻る高速化**: 差分のみ1トランザクション復元。ルート一覧表示中は店舗一覧テーブル再読込を後回し
+- **DB**: `create_route_at_front` / `rename_route_by_code` / `apply_kanban_membership_snapshot` / `routes.google_map_url_2`
+- **テスト**: `test_create_route_at_front_and_rename` / `test_apply_kanban_membership_snapshot_diff_only`
+- **次回候補**: 列折りたたみ、複数店舗 DnD、ルート選択タブとの訪問順同期、店舗追加の Undo 方針
+
+## 2026-09-04 ルート一覧カンバン: 「戻る」高速化
+
+- **内容**: Undo/Redo が全店舗を1件ずつ更新して遅かった問題を改善
+- **改善**: 差分のみを1トランザクションで復元。ルート一覧表示中は店舗一覧テーブル再読込を後回し
+- **実装**: `store_db.apply_kanban_membership_snapshot` / `route_kanban.py` / `widget.py`
+- **テスト**: `test_apply_kanban_membership_snapshot_diff_only`
+
+## 2026-09-04 ルート一覧カンバン: ルート登録・ルート名変更
+
+- **内容**: 店舗マスタ「ルート一覧」にルート登録ボタンとルート名ダブルクリック改名を追加
+- **操作**:
+  - 「ルート登録」→ ルート名入力 → ルートコード自動採番（R###）→ 未所属の右隣（左上）に空列
+  - 列タイトルをダブルクリック（または右クリック）→ ルート名のみ変更（コード変更不可）
+  - 他ルートから DnD で店舗を移動可能。登録・改名は Undo 対象
+- **実装**: `store_db.create_route_at_front` / `rename_route_by_code`、`route_kanban.py`
+- **テスト**: `test_create_route_at_front_and_rename`
+- **次回候補**: 列折りたたみ、複数店舗 DnD、ルート選択タブとの訪問順同期
+
 ## 2026-08-13 SP-API最安追従（150日境界・自動巡回）
 
 - **内容**: SP-API改定タブに「最安追従」を追加。既存 3-6-9 / 改定実行タブは未変更

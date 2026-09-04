@@ -202,3 +202,70 @@ def test_build_kanban_columns_data(temp_store_db: StoreDatabase):
     assert is_primary_in_route(cols["R010"][0], "成田") or is_primary_in_route(
         cols["R010"][1], "成田"
     )
+
+
+def test_create_route_at_front_and_rename(temp_store_db: StoreDatabase):
+    temp_store_db.upsert_route("既存ルート", "R001")
+    temp_store_db.update_route_display_orders(["R001"])
+
+    code = temp_store_db.create_route_at_front("新規テストルート")
+    assert code is not None
+    assert code.startswith("R")
+
+    routes = temp_store_db.list_routes_with_store_count()
+    by_code = {r["route_code"]: r for r in routes}
+    assert by_code[code]["display_order"] == 1
+    assert by_code["R001"]["display_order"] == 2
+
+    # 同名は拒否
+    assert temp_store_db.create_route_at_front("新規テストルート") is None
+
+    sid = _insert_store(
+        temp_store_db,
+        store_code="S1",
+        store_name="所属店",
+        affiliated_route_name="新規テストルート",
+        route_code=code,
+    )
+    assert temp_store_db.rename_route_by_code(code, "改名後ルート")
+    assert temp_store_db.get_route_name_by_code(code) == "改名後ルート"
+    store = temp_store_db.get_store(sid)
+    assert store.get("affiliated_route_name") == "改名後ルート"
+    assert store.get("route_code") == code
+
+
+def test_apply_kanban_membership_snapshot_diff_only(temp_store_db: StoreDatabase):
+    temp_store_db.upsert_route("Aルート", "R001")
+    temp_store_db.update_route_display_orders(["R001"])
+    sid = _insert_store(
+        temp_store_db,
+        store_code="S1",
+        store_name="店1",
+        affiliated_route_name="Aルート",
+        route_code="R001",
+    )
+    temp_store_db.update_store(sid, {"display_order": 1})
+    before = {
+        "stores": temp_store_db.list_store_membership_snapshot(),
+        "routes": [
+            {
+                "route_code": r["route_code"],
+                "route_name": r["route_name"],
+                "display_order": r["display_order"],
+            }
+            for r in temp_store_db.list_routes_with_store_count()
+        ],
+    }
+    temp_store_db.update_store(
+        sid,
+        {
+            "affiliated_route_name": "別ルート",
+            "route_code": "R002",
+            "display_order": 9,
+        },
+    )
+    assert temp_store_db.apply_kanban_membership_snapshot(before)
+    store = temp_store_db.get_store(sid)
+    assert store.get("affiliated_route_name") == "Aルート"
+    assert store.get("route_code") == "R001"
+    assert int(store.get("display_order") or 0) == 1

@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import sys
 import os
+import webbrowser
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtWidgets import (
@@ -73,6 +74,171 @@ def _decode_drag_payload(raw: QByteArray) -> Optional[Dict[str, Any]]:
         return json.loads(bytes(raw).decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
+
+
+class GoogleMapUrlDialog(QDialog):
+    """ルート列ヘッダ用: Google Map URL（リンク1・リンク2）の登録・編集。"""
+
+    def __init__(
+        self,
+        route_name: str,
+        current_url: str = "",
+        current_url_2: str = "",
+        parent: QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Google Map URL（リンク1・リンク2）")
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        form.addRow("ルート:", QLabel(route_name or "（名称なし）"))
+
+        self.url_edit = QLineEdit((current_url or "").strip())
+        self.url_edit.setPlaceholderText("https://maps.google.com/...（1本目）")
+        form.addRow("リンク1:", self.url_edit)
+
+        self.url_edit_2 = QLineEdit((current_url_2 or "").strip())
+        self.url_edit_2.setPlaceholderText("https://maps.google.com/...（2本目・任意）")
+        form.addRow("リンク2:", self.url_edit_2)
+        layout.addLayout(form)
+
+        hint = QLabel(
+            "店舗が多いルート向けに、Google Map を最大2本まで登録できます。\n"
+            "空欄で保存すると、そのリンクを削除します。"
+        )
+        hint.setStyleSheet("color: #888; font-size: 9pt;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.url_edit.selectAll()
+        self.url_edit.setFocus()
+
+    def url(self) -> str:
+        return self.url_edit.text().strip()
+
+    def url_2(self) -> str:
+        return self.url_edit_2.text().strip()
+
+
+class NewRouteDialog(QDialog):
+    """カンバン用: 新規ルート登録（ルートコードは自動採番・変更不可）。"""
+
+    def __init__(self, db: StoreDatabase, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.db = db
+        self.setWindowTitle("ルート登録")
+        self.setMinimumWidth(360)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.route_name_edit = QLineEdit()
+        self.route_name_edit.setPlaceholderText("例: 足立ー埼玉川口ルート")
+        form.addRow("ルート名:", self.route_name_edit)
+
+        self.route_code_edit = QLineEdit()
+        self.route_code_edit.setReadOnly(True)
+        self.route_code_edit.setPlaceholderText("自動採番")
+        preview = self.db.generate_next_route_code()
+        self.route_code_edit.setText(preview)
+        form.addRow("ルートコード:", self.route_code_edit)
+
+        layout.addLayout(form)
+        hint = QLabel(
+            "ルートコードは自動で振られます（変更不可）。\n"
+            "登録後、未所属の右隣（左上）に空の列が現れます。"
+        )
+        hint.setStyleSheet("color: #888; font-size: 9pt;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.route_name_edit.setFocus()
+
+    def route_name(self) -> str:
+        return self.route_name_edit.text().strip()
+
+    def accept(self) -> None:
+        name = self.route_name()
+        if not name:
+            QMessageBox.warning(self, "警告", "ルート名を入力してください。")
+            return
+        existing = self.db.get_route_code_by_name(name)
+        if existing:
+            QMessageBox.warning(
+                self,
+                "警告",
+                f"同じルート名が既にあります（{existing}）。\n別名にしてください。",
+            )
+            return
+        super().accept()
+
+
+class RenameRouteDialog(QDialog):
+    """カンバン用: ルート名のみ変更（ルートコードは変更不可）。"""
+
+    def __init__(
+        self,
+        route_code: str,
+        route_name: str,
+        db: StoreDatabase,
+        parent: QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self.db = db
+        self._route_code = (route_code or "").strip()
+        self.setWindowTitle("ルート名の変更")
+        self.setMinimumWidth(360)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.route_code_edit = QLineEdit(self._route_code)
+        self.route_code_edit.setReadOnly(True)
+        form.addRow("ルートコード:", self.route_code_edit)
+
+        self.route_name_edit = QLineEdit((route_name or "").strip())
+        form.addRow("ルート名:", self.route_name_edit)
+
+        layout.addLayout(form)
+        hint = QLabel("ルートコードは変更できません。")
+        hint.setStyleSheet("color: #888; font-size: 9pt;")
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.route_name_edit.selectAll()
+        self.route_name_edit.setFocus()
+
+    def new_route_name(self) -> str:
+        return self.route_name_edit.text().strip()
+
+    def accept(self) -> None:
+        name = self.new_route_name()
+        if not name:
+            QMessageBox.warning(self, "警告", "ルート名を入力してください。")
+            return
+        conflict = self.db.get_route_code_by_name(name)
+        if conflict and conflict != self._route_code:
+            QMessageBox.warning(
+                self,
+                "警告",
+                f"同じルート名が既にあります（{conflict}）。\n別名にしてください。",
+            )
+            return
+        super().accept()
 
 
 class MoveToRouteDialog(QDialog):
@@ -280,6 +446,8 @@ class RouteKanbanColumn(QFrame):
         subtitle: str,
         route_name: str = "",
         route_code: str = "",
+        google_map_url: str = "",
+        google_map_url_2: str = "",
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
@@ -287,6 +455,8 @@ class RouteKanbanColumn(QFrame):
         self.column_key = column_key
         self.route_name = route_name
         self.route_code = route_code
+        self.google_map_url = (google_map_url or "").strip()
+        self.google_map_url_2 = (google_map_url_2 or "").strip()
         self._is_unassigned = column_key == UNASSIGNED_COLUMN_KEY
 
         self.setFrameShape(QFrame.StyledPanel)
@@ -320,17 +490,56 @@ class RouteKanbanColumn(QFrame):
         self.title_label = QLabel(title)
         self.title_label.setStyleSheet("font-weight: bold; font-size: 10pt; color: #e8e8e8;")
         self.title_label.setWordWrap(True)
+        if not self._is_unassigned:
+            self.title_label.setToolTip("ダブルクリックでルート名を変更（コードは変更不可）")
+            self.title_label.mouseDoubleClickEvent = self._title_double_click  # type: ignore[method-assign]
         header_layout.addWidget(self.title_label)
 
-        self.subtitle_label = QLabel(subtitle)
-        self.subtitle_label.setStyleSheet("font-size: 8pt; color: #999;")
-        self.subtitle_label.setWordWrap(True)
-        header_layout.addWidget(self.subtitle_label)
-
         if not self._is_unassigned:
-            hint = QLabel("↕ ヘッダをドラッグで列の並び替え")
+            map_row = QHBoxLayout()
+            map_row.setSpacing(4)
+            map_links = QVBoxLayout()
+            map_links.setSpacing(1)
+
+            self.map_link_label = QLabel()
+            self.map_link_label.setWordWrap(True)
+            self.map_link_label.setCursor(Qt.PointingHandCursor)
+            self.map_link_label.mousePressEvent = (  # type: ignore[method-assign]
+                lambda e: self._map_link_clicked(e, 1)
+            )
+            map_links.addWidget(self.map_link_label)
+
+            self.map_link_label_2 = QLabel()
+            self.map_link_label_2.setWordWrap(True)
+            self.map_link_label_2.setCursor(Qt.PointingHandCursor)
+            self.map_link_label_2.mousePressEvent = (  # type: ignore[method-assign]
+                lambda e: self._map_link_clicked(e, 2)
+            )
+            map_links.addWidget(self.map_link_label_2)
+            map_row.addLayout(map_links, 1)
+
+            self.map_edit_btn = QPushButton("URL")
+            self.map_edit_btn.setFixedWidth(36)
+            self.map_edit_btn.setToolTip("リンク1・リンク2の Google Map URL を登録・編集")
+            self.map_edit_btn.setStyleSheet(
+                "QPushButton { font-size: 8pt; padding: 2px 4px; }"
+            )
+            self.map_edit_btn.clicked.connect(self._open_map_url_editor)
+            map_row.addWidget(self.map_edit_btn, 0, Qt.AlignTop)
+            header_layout.addLayout(map_row)
+            self._refresh_map_link_label()
+
+            hint = QLabel("↕ ヘッダDnD / 名前ダブルクリックで改名")
             hint.setStyleSheet("font-size: 7pt; color: #777;")
             header_layout.addWidget(hint)
+        else:
+            self.map_link_label = None
+            self.map_link_label_2 = None
+            self.map_edit_btn = None
+            self.subtitle_label = QLabel(subtitle)
+            self.subtitle_label.setStyleSheet("font-size: 8pt; color: #999;")
+            self.subtitle_label.setWordWrap(True)
+            header_layout.addWidget(self.subtitle_label)
 
         self.header.mousePressEvent = self._header_mouse_press  # type: ignore[method-assign]
         self.header.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -351,13 +560,91 @@ class RouteKanbanColumn(QFrame):
         base = self.title_label.text().split(" · ")[0]
         self.title_label.setText(f"{base} · {count}店")
 
+    def set_google_map_url(self, url: str, url_2: str = "") -> None:
+        self.google_map_url = (url or "").strip()
+        self.google_map_url_2 = (url_2 or "").strip()
+        self._refresh_map_link_label()
+
+    def _open_map_url_editor(self) -> None:
+        self.kanban.edit_route_google_map_url(
+            self.route_name,
+            self.route_code,
+            self.google_map_url,
+            self.google_map_url_2,
+        )
+
+    def _format_map_link_text(self, link_no: int, url: str) -> tuple:
+        """表示テキストとツールチップを返す。"""
+        if url:
+            display = url
+            if len(display) > 36:
+                display = display[:33] + "..."
+            text = f"リンク{link_no}: {display}"
+            tip = f"{url}\n\nクリックでブラウザ表示\n「URL」ボタンで編集"
+            style = "font-size: 8pt; color: #6eb5ff; text-decoration: underline;"
+        else:
+            text = f"リンク{link_no}: 未設定"
+            tip = "未設定です。「URL」ボタン、またはここをクリックで登録"
+            style = "font-size: 8pt; color: #888;"
+        return text, tip, style
+
+    def _refresh_map_link_label(self) -> None:
+        if self.map_link_label is not None:
+            text, tip, style = self._format_map_link_text(1, self.google_map_url)
+            self.map_link_label.setText(text)
+            self.map_link_label.setToolTip(tip)
+            self.map_link_label.setStyleSheet(style)
+        if self.map_link_label_2 is not None:
+            text, tip, style = self._format_map_link_text(2, self.google_map_url_2)
+            self.map_link_label_2.setText(text)
+            self.map_link_label_2.setToolTip(tip)
+            self.map_link_label_2.setStyleSheet(style)
+
+    def _map_link_clicked(self, event, link_no: int = 1) -> None:
+        if event.button() != Qt.LeftButton:
+            return
+        url = self.google_map_url if link_no == 1 else self.google_map_url_2
+        if url:
+            self.kanban.open_route_google_map_url(url)
+        else:
+            self._open_map_url_editor()
+
+    def _title_double_click(self, event) -> None:
+        if self._is_unassigned:
+            return
+        if event.button() == Qt.LeftButton:
+            self.kanban.rename_route_column(self.route_code, self.route_name)
+
     def _header_context_menu(self, pos) -> None:
         menu = QMenu(self)
         add_action = menu.addAction("このルートに店舗を追加...")
+        rename_action = None
+        map_edit_action = None
+        map_open_action = None
+        map_open_action_2 = None
+        if not self._is_unassigned:
+            rename_action = menu.addAction("ルート名を変更...")
+            map_edit_action = menu.addAction("Google Map URLを編集（リンク1・2）...")
+            map_open_action = menu.addAction("リンク1をブラウザで開く")
+            map_open_action.setEnabled(bool(self.google_map_url))
+            map_open_action_2 = menu.addAction("リンク2をブラウザで開く")
+            map_open_action_2.setEnabled(bool(self.google_map_url_2))
         chosen = menu.exec(self.header.mapToGlobal(pos))
         if chosen == add_action:
             initial = "" if self._is_unassigned else self.route_name
             self.kanban.add_store(initial_route_name=initial)
+        elif rename_action is not None and chosen == rename_action:
+            self.kanban.rename_route_column(self.route_code, self.route_name)
+        elif map_edit_action is not None and chosen == map_edit_action:
+            self._open_map_url_editor()
+        elif map_open_action is not None and chosen == map_open_action:
+            self.kanban.open_route_google_map_url(self.google_map_url)
+        elif (
+            not self._is_unassigned
+            and map_open_action_2 is not None
+            and chosen == map_open_action_2
+        ):
+            self.kanban.open_route_google_map_url(self.google_map_url_2)
 
     def _header_mouse_press(self, event) -> None:
         if self._is_unassigned:
@@ -494,6 +781,24 @@ class RouteKanbanWidget(QWidget):
         title.setStyleSheet("font-size: 12pt; font-weight: bold;")
         toolbar.addWidget(title)
 
+        self.summary_label = QLabel("ルート 0 ／ 店舗 0")
+        self.summary_label.setToolTip(
+            "登録ルート数と登録店舗数の合計です。\n"
+            "未所属の店舗も店舗数に含まれます。"
+        )
+        self.summary_label.setStyleSheet(
+            "QLabel {"
+            " background-color: #3a3a3a;"
+            " color: #f0f0f0;"
+            " font-size: 10pt;"
+            " font-weight: bold;"
+            " padding: 4px 12px;"
+            " border-radius: 4px;"
+            " border: 1px solid #666;"
+            "}"
+        )
+        toolbar.addWidget(self.summary_label)
+
         add_store_btn = QPushButton("店舗追加")
         add_store_btn.setToolTip("店舗一覧と同じダイアログで新規店舗を登録します")
         add_store_btn.setStyleSheet(
@@ -503,8 +808,24 @@ class RouteKanbanWidget(QWidget):
         add_store_btn.clicked.connect(lambda: self.add_store())
         toolbar.addWidget(add_store_btn)
 
+        add_route_btn = QPushButton("ルート登録")
+        add_route_btn.setToolTip(
+            "新規ルートを登録します。\n"
+            "ルート名を入力するとルートコードが自動採番され、\n"
+            "未所属の右隣（左上）に空列が現れます。"
+        )
+        add_route_btn.setStyleSheet(
+            "QPushButton { background-color: #0d6efd; color: white; "
+            "font-weight: bold; padding: 6px 14px; border-radius: 4px; }"
+        )
+        add_route_btn.clicked.connect(self.register_new_route)
+        toolbar.addWidget(add_route_btn)
+
         self.undo_btn = QPushButton("戻る")
-        self.undo_btn.setToolTip("直前の操作を取り消します（Ctrl+Z）\n対象: 店舗の移動・列の並び替え")
+        self.undo_btn.setToolTip(
+            "直前の操作を取り消します（Ctrl+Z）\n"
+            "対象: 店舗の移動・列の並び替え・ルート登録・ルート名変更"
+        )
         self.undo_btn.clicked.connect(self.undo_action)
         toolbar.addWidget(self.undo_btn)
 
@@ -564,8 +885,9 @@ class RouteKanbanWidget(QWidget):
 
         legend = QLabel(
             f"凡例: 薄色 + [追加] = 副所属 / 右クリックで店舗移動 / "
-            f"ヘッダDnDで列並び替え / 戻る・進むは移動・並び替え用 / "
-            f"横{COLUMNS_PER_ROW}列折り返し"
+            f"ヘッダの🗺リンククリックでGoogle Map / 「URL」で登録 / "
+            f"ヘッダDnDで列並び替え / ルート名ダブルクリックで改名 / "
+            f"戻る・進むは移動・並び替え用 / 横{COLUMNS_PER_ROW}列折り返し"
         )
         legend.setStyleSheet("color: #999; font-size: 9pt;")
         layout.addWidget(legend)
@@ -589,20 +911,8 @@ class RouteKanbanWidget(QWidget):
         self._sync_focus_controls_enabled()
 
     def _capture_membership_snapshot(self) -> Dict[str, Any]:
-        """店舗所属・訪問順・ルート並びをスナップショットする。"""
-        stores = []
-        for store in self.db.list_stores():
-            sid = store.get("id")
-            if not sid:
-                continue
-            stores.append(
-                {
-                    "id": int(sid),
-                    "affiliated_route_name": store.get("affiliated_route_name"),
-                    "route_code": store.get("route_code"),
-                    "display_order": store.get("display_order"),
-                }
-            )
+        """店舗所属・訪問順・ルート並び・ルート名をスナップショットする。"""
+        stores = self.db.list_store_membership_snapshot()
         routes = []
         for route in self.db.list_routes_with_store_count():
             code = (route.get("route_code") or "").strip()
@@ -611,37 +921,16 @@ class RouteKanbanWidget(QWidget):
             routes.append(
                 {
                     "route_code": code,
+                    "route_name": (route.get("route_name") or "").strip(),
                     "display_order": int(route.get("display_order") or 0),
                 }
             )
         return {"stores": stores, "routes": routes}
 
     def _restore_membership_snapshot(self, snapshot: Dict[str, Any]) -> bool:
-        """スナップショットをDBへ復元する。"""
+        """スナップショットをDBへ一括復元する（差分のみ・1トランザクション）。"""
         try:
-            for store in snapshot.get("stores") or []:
-                sid = store.get("id")
-                if not sid:
-                    continue
-                self.db.update_store(
-                    int(sid),
-                    {
-                        "affiliated_route_name": store.get("affiliated_route_name"),
-                        "route_code": store.get("route_code"),
-                        "display_order": store.get("display_order"),
-                    },
-                )
-            ordered_codes = [
-                r["route_code"]
-                for r in sorted(
-                    snapshot.get("routes") or [],
-                    key=lambda x: int(x.get("display_order") or 0),
-                )
-                if r.get("route_code")
-            ]
-            if ordered_codes:
-                self.db.update_route_display_orders(ordered_codes)
-            return True
+            return self.db.apply_kanban_membership_snapshot(snapshot)
         except Exception as e:
             print(f"カンバン履歴復元エラー: {e}")
             return False
@@ -711,6 +1000,120 @@ class RouteKanbanWidget(QWidget):
             if (route.get("route_code") or "").strip() == code:
                 return (route.get("route_name") or "").strip()
         return ""
+
+    def register_new_route(self) -> None:
+        """ツールバー「ルート登録」: 左上（未所属の直後）に新規ルート列を作る。"""
+        dialog = NewRouteDialog(self.db, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        route_name = dialog.route_name()
+        self._push_undo_snapshot()
+        route_code = self.db.create_route_at_front(route_name)
+        if not route_code:
+            self._discard_last_undo()
+            QMessageBox.warning(
+                self,
+                "エラー",
+                "ルートの登録に失敗しました。\n同名ルートがないか確認してください。",
+            )
+            return
+
+        self._after_db_change()
+        QMessageBox.information(
+            self,
+            "完了",
+            f"ルート「{route_name}」（{route_code}）を登録しました。\n"
+            "他の列から店舗をドラッグ＆ドロップで移せます。",
+        )
+        # 新列へスクロール（未所属の次＝グリッド index 1）
+        column = self._columns.get(route_code)
+        if column is not None:
+            self.scroll.ensureWidgetVisible(column, 20, 20)
+
+    def open_route_google_map_url(self, url: str) -> None:
+        """保存済み Google Map URL をブラウザで開く。"""
+        url = (url or "").strip()
+        if not url:
+            QMessageBox.information(
+                self,
+                "Google Map",
+                "URLがまだ登録されていません。\n列ヘッダの「URL」ボタンから登録できます。",
+            )
+            return
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            QMessageBox.warning(self, "エラー", f"ブラウザで開けませんでした:\n{e}")
+
+    def edit_route_google_map_url(
+        self,
+        route_name: str,
+        route_code: str,
+        current_url: str = "",
+        current_url_2: str = "",
+    ) -> None:
+        """列ヘッダから Google Map URL（リンク1・2）を登録・更新する。"""
+        route_name = (route_name or "").strip()
+        route_code = (route_code or "").strip()
+        if not route_name and not route_code:
+            return
+
+        dialog = GoogleMapUrlDialog(
+            route_name or route_code,
+            current_url,
+            current_url_2,
+            self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        new_url = dialog.url()
+        new_url_2 = dialog.url_2()
+        try:
+            if not self.db.update_route_google_map_urls(route_name, new_url, new_url_2):
+                QMessageBox.warning(self, "エラー", "Google Map URL の保存に失敗しました。")
+                return
+        except Exception as e:
+            QMessageBox.warning(self, "エラー", f"Google Map URL の保存に失敗しました:\n{e}")
+            return
+
+        column = self._columns.get(route_code)
+        if column is not None:
+            column.set_google_map_url(new_url, new_url_2)
+        for route in self._all_routes:
+            if (route.get("route_code") or "").strip() == route_code:
+                route["google_map_url"] = new_url
+                route["google_map_url_2"] = new_url_2
+                break
+        # 店舗一覧タブのルート情報も同期
+        self.routes_changed.emit()
+
+    def rename_route_column(self, route_code: str, current_name: str) -> None:
+        """列ヘッダのダブルクリック／右クリックからルート名だけ変更する。"""
+        route_code = (route_code or "").strip()
+        if not route_code:
+            return
+
+        dialog = RenameRouteDialog(route_code, current_name, self.db, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        new_name = dialog.new_route_name()
+        if new_name == (current_name or "").strip():
+            return
+
+        self._push_undo_snapshot()
+        if not self.db.rename_route_by_code(route_code, new_name):
+            self._discard_last_undo()
+            QMessageBox.warning(
+                self,
+                "エラー",
+                "ルート名の変更に失敗しました。\n同名ルートがないか確認してください。",
+            )
+            return
+
+        self._after_db_change()
 
     def add_store(self, initial_route_name: Optional[str] = None) -> None:
         """店舗一覧と同じダイアログで新規店舗を追加し、カンバンを即更新する。"""
@@ -899,6 +1302,25 @@ class RouteKanbanWidget(QWidget):
         col = index % COLUMNS_PER_ROW
         self.board_layout.addWidget(column, row, col)
 
+    def _update_summary_counts(
+        self,
+        route_count: int,
+        store_count: int,
+        unassigned_count: int = 0,
+    ) -> None:
+        """ツールバーの登録ルート数・登録店舗数表示を更新する。"""
+        if not hasattr(self, "summary_label"):
+            return
+        self.summary_label.setText(
+            f"ルート {route_count} ／ 店舗 {store_count}"
+        )
+        self.summary_label.setToolTip(
+            "登録ルート数と登録店舗数の合計です。\n"
+            f"ルート: {route_count} 本\n"
+            f"店舗: {store_count} 店"
+            + (f"（うち未所属 {unassigned_count} 店）" if unassigned_count else "")
+        )
+
     def reload_board(self) -> None:
         self._clear_board_layout()
         self._columns.clear()
@@ -909,6 +1331,13 @@ class RouteKanbanWidget(QWidget):
         routes = self._routes_to_display()
         stores = self.db.list_stores()
         column_data = build_kanban_columns_data(stores, self._all_routes)
+
+        unassigned_stores = column_data.get(UNASSIGNED_COLUMN_KEY, [])
+        self._update_summary_counts(
+            route_count=len(self._all_routes),
+            store_count=len(stores),
+            unassigned_count=len(unassigned_stores),
+        )
 
         columns_to_add: List[RouteKanbanColumn] = []
 
@@ -921,7 +1350,7 @@ class RouteKanbanWidget(QWidget):
         )
         self._populate_column_list(
             unassigned,
-            column_data.get(UNASSIGNED_COLUMN_KEY, []),
+            unassigned_stores,
             route_name="",
             is_unassigned=True,
         )
@@ -940,6 +1369,8 @@ class RouteKanbanWidget(QWidget):
                 subtitle="店舗: リスト内DnD / 列: ヘッダDnD",
                 route_name=name,
                 route_code=code,
+                google_map_url=str(route.get("google_map_url") or ""),
+                google_map_url_2=str(route.get("google_map_url_2") or ""),
                 parent=self.board,
             )
             self._populate_column_list(

@@ -1,3 +1,76 @@
+## 2026-09-04: セッションまとめ（カンバン続き: 登録・改名・Undo高速化・件数・Map2本）
+
+- **状況:** 完了（`feature/sp-api` へコミット・プッシュ）
+- **ルート一覧カンバン:**
+  - ルート登録（自動採番・左上に空列）／ルート名ダブルクリック改名
+  - 登録ルート数・店舗数バッジ
+  - Google Map リンク1・リンク2（列ヘッダ、クリックでブラウザ）
+  - 戻る／進むの高速化（差分一括復元＋店舗一覧再読込の後回し）
+- **主要ファイル:** `route_kanban.py` / `store_db.py` / `widget.py` / 関連テスト
+- **対象外コミット:** `.bak` / DB実データ / 認証JSON / レシート実データ
+
+---
+
+## 2026-09-04: ルートカンバン Google Map をリンク1・リンク2の2本対応
+
+- **タスク:** 1ルートあたり Google Map URL を2本（リンク1・リンク2）登録できるようにする
+- **状況:** 完了
+- **変更点:**
+  - **`store_db.py`:** `routes.google_map_url_2` 追加（マイグレーション）。`update_route_google_map_urls` / `get_route_google_map_urls`
+  - **`route_kanban.py`:** 列ヘッダに「リンク1」「リンク2」表示。URLボタンで両方編集、クリックで各リンクをブラウザ表示
+- **互換:** 既存のリンク1（`google_map_url`）はそのまま。店舗一覧の単一URL保存もリンク2を消さない
+- **バックアップ:** `*.bak_gmap_url2`
+
+---
+
+## 2026-09-04: ルートカンバン列ヘッダに Google Map リンク
+
+- **タスク:** 各ルート列ヘッダに Google Map URL の登録欄と、クリックでブラウザ表示を追加
+- **状況:** 完了
+- **変更点:** `route_kanban.py`
+  - ヘッダに 🗺 リンク表示 + 「URL」ボタン（未設定時はクリックで登録ダイアログ）
+  - 保存は既存 `update_route_google_map_url`（店舗一覧と同じ）
+  - 右クリックメニューからも編集・ブラウザ表示可
+- **バックアップ:** `route_kanban.py.bak_gmap_link`
+
+---
+
+## 2026-09-04: ルートカンバンに登録ルート数・店舗数を表示
+
+- **タスク:** ルート一覧カンバン上部に登録ルート数・登録店舗数を分かりやすく表示
+- **状況:** 完了
+- **変更点:** `route_kanban.py` タイトル横に「ルート N ／ 店舗 M」バッジ。再読込・操作後に自動更新。ツールチップに未所属件数も表示
+- **バックアップ:** `route_kanban.py.bak_summary_counts`
+
+---
+
+## 2026-09-04: ルートカンバン「戻る」の高速化
+
+- **タスク:** 戻る／進むが全店舗を1件ずつ更新して遅かった問題を改善
+- **状況:** 完了
+- **原因:** `update_store` を全店舗分呼び出し（都度 SELECT + COMMIT）＋店舗一覧タブの全件再読込
+- **変更点:**
+  - **`store_db.py`:** `list_store_membership_snapshot` / `apply_kanban_membership_snapshot`（差分のみ・1トランザクション）
+  - **`route_kanban.py`:** Undo/Redo 復元を一括APIへ切替
+  - **`widget.py`:** ルート一覧タブ表示中は店舗一覧テーブル再読込を後回し
+- **テスト:** `test_apply_kanban_membership_snapshot_diff_only`
+- **バックアップ:** `*.bak_undo_perf`
+
+---
+
+## 2026-09-04: ルートカンバンにルート登録・ルート名変更
+
+- **タスク:** ルート一覧カンバンに「ルート登録」と、列ヘッダのダブルクリックによるルート名変更を追加
+- **状況:** 完了
+- **変更点:**
+  - **`store_db.py`:** `create_route_at_front`（自動採番 R###・display_order=1 で左上へ）、`rename_route_by_code`（コード固定・店舗の主所属名も追随）
+  - **`route_kanban.py`:** ツールバー「ルート登録」、タイトルダブルクリック／右クリックで改名。Undo 対象に登録・改名を含める
+  - **テスト:** `test_create_route_at_front_and_rename`
+- **バックアップ:** `route_kanban.py.bak_route_create_rename` / `store_db.py.bak_route_create_rename`
+- **動作確認:** import OK、pytest 1 passed
+
+---
+
 ## 2026-09-04: セッションまとめ（ルート地図 dedupe / ルート一覧カンバン）
 
 - **状況:** 完了（`feature/sp-api` へコミット・プッシュ）
