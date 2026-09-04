@@ -29,6 +29,10 @@ from database.store_db import StoreDatabase
 from database.account_title_db import AccountTitleDatabase
 from utils.excel_importer import ExcelImporter
 from utils.ui_utils import reapply_table_column_widths
+from services.store_route_membership_service import (
+    apply_store_to_route_membership,
+    detach_store_from_route_if_not_selected,
+)
 
 
 class DraggableStoreListWidget(QListWidget):
@@ -402,69 +406,26 @@ class RouteManagementDialog(QDialog):
             
             # 店舗のルート情報を更新
             for store_id in selected_store_ids:
-                store = self.db.get_store(store_id)
-                if store:
-                    allow_duplicate = duplicate_flags.get(store_id, False)
-                    
-                    # 既存のルートコードを取得（カンマ区切りの文字列をリストに変換）
-                    existing_route_code_str = store.get('route_code') or ''
-                    existing_codes = [
-                        code.strip()
-                        for code in existing_route_code_str.split(',')
-                        if code.strip()
-                    ]
-                    
-                    if allow_duplicate:
-                        # 既存のルートコードを維持したまま、このルートコードを追加
-                        if route_code not in existing_codes:
-                            existing_codes.append(route_code)
-                        new_route_code_str = ",".join(existing_codes) if existing_codes else None
-                        
-                        update_data = {
-                            'route_code': new_route_code_str,
-                        }
-                        # まだ所属ルート名が設定されていない場合のみ、このルート名を設定
-                        if not store.get('affiliated_route_name'):
-                            update_data['affiliated_route_name'] = route_name
-                        self.db.update_store(store_id, update_data)
-                    else:
-                        # このルートをメインとし、ルートコードはこのルートのみとする
-                        self.db.update_store(store_id, {
-                            'affiliated_route_name': route_name,
-                            'route_code': route_code
-                        })
-            
+                allow_duplicate = duplicate_flags.get(store_id, False)
+                apply_store_to_route_membership(
+                    self.db,
+                    store_id,
+                    route_name,
+                    route_code,
+                    allow_duplicate=allow_duplicate,
+                )
+
             # このルートから外れた店舗のルート情報を更新
             if self.is_edit_mode:
                 all_stores = self.db.list_stores()
                 for store in all_stores:
-                    store_id = store.get('id')
-                    if not store_id:
-                        continue
-                    
-                    existing_route_code_str = store.get('route_code') or ''
-                    existing_codes = [
-                        code.strip()
-                        for code in existing_route_code_str.split(',')
-                        if code.strip()
-                    ]
-                    
-                    if not existing_codes:
-                        continue
-                    
-                    # このルートコードを持っているが、今回の選択から外れている店舗については、このルートコードだけを削除
-                    if route_code in existing_codes and store_id not in selected_store_ids:
-                        new_codes = [code for code in existing_codes if code != route_code]
-                        new_route_code_str = ",".join(new_codes) if new_codes else None
-                        
-                        update_data = {
-                            'route_code': new_route_code_str
-                        }
-                        # このルート名がaffiliated_route_nameとして設定されていた場合はクリア
-                        if store.get('affiliated_route_name') == self.route_name:
-                            update_data['affiliated_route_name'] = None
-                        
-                        self.db.update_store(store_id, update_data)
+                    detach_store_from_route_if_not_selected(
+                        self.db,
+                        store,
+                        self.route_name,
+                        route_code,
+                        selected_store_ids,
+                    )
             
             # routesテーブルにルート情報を保存
             self.db.upsert_route(route_name, route_code)

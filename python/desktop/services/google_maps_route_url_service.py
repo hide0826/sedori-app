@@ -4,19 +4,23 @@
 店舗訪問リストから Google Maps ルート URL を生成するサービス。
 
 - ルート1の始点: 現在地 (Current+Location)
-- ルート2以降の始点: 前ルートの最終店舗
+- ルート2以降の始点: 前セグメントの最終店舗
 - 1 URL あたり最大 9 店舗（始点含め Google Maps の 10 地点上限）
-- 同一緯度経度の併設店舗は 1 地点にまとめる
+- 同一地点の併設店舗（ハードオフ／オフハウス等）は代表 1 件にまとめる
+  ※ Places API 由来で座標が数〜数十 m ずれることがあるため、距離閾値で判定
 - Maps Embed API 用 URL も併せて生成（API キー指定時）
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import asin, cos, radians, sin, sqrt
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote, urlencode
 
 COORD_PRECISION = 5
+# 併設店の Places 座標ずれ（実測で最大約 65m）を吸収しつつ、別店舗の誤結合を避ける
+SAME_LOCATION_RADIUS_M = 80.0
 MAX_STOPS_PER_SEGMENT = 9
 ORIGIN_LABEL = "Current+Location"
 EMBED_ORIGIN_CURRENT = "Current Location"
@@ -79,32 +83,75 @@ def location_key(store: Dict[str, Any]) -> Optional[Tuple[float, float]]:
     return (round(lat, COORD_PRECISION), round(lng, COORD_PRECISION))
 
 
+def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """2点間の大円距離（メートル）"""
+    r = 6371000.0
+    dlat = radians(lat2 - lat1)
+    dlng = radians(lng2 - lng1)
+    a = (
+        sin(dlat / 2) ** 2
+        + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlng / 2) ** 2
+    )
+    return 2.0 * r * asin(sqrt(a))
+
+
+def _is_same_location(
+    lat: float,
+    lng: float,
+    other_lat: float,
+    other_lng: float,
+    radius_m: float = SAME_LOCATION_RADIUS_M,
+) -> bool:
+    """丸め一致、または距離閾値以内なら同一地点とみなす。"""
+    if (
+        round(lat, COORD_PRECISION) == round(other_lat, COORD_PRECISION)
+        and round(lng, COORD_PRECISION) == round(other_lng, COORD_PRECISION)
+    ):
+        return True
+    return _haversine_m(lat, lng, other_lat, other_lng) <= radius_m
+
+
 def dedupe_stores_by_coordinates(
     stores: Sequence[Dict[str, Any]],
+    radius_m: float = SAME_LOCATION_RADIUS_M,
 ) -> Tuple[List[Dict[str, Any]], List[SkippedDuplicateStore]]:
-    """訪問順を保ちつつ、同一座標の店舗を先頭 1 件にまとめる。"""
+    """訪問順を保ちつつ、同一地点（距離閾値以内）の店舗を先頭 1 件にまとめる。
+
+    Places API で取得した併設店座標は数〜数十 m ずれることが多いため、
+    厳密一致ではなく半径判定を使う。
+    """
     unique: List[Dict[str, Any]] = []
     skipped: List[SkippedDuplicateStore] = []
-    seen: Dict[Tuple[float, float], Dict[str, Any]] = {}
+    kept_coords: List[Tuple[Dict[str, Any], float, float]] = []
 
     for store in stores:
-        key = location_key(store)
-        if key is None:
+        lat = _coerce_float(store.get("latitude"))
+        lng = _coerce_float(store.get("longitude"))
+        if lat is None or lng is None:
             unique.append(dict(store))
             continue
-        if key in seen:
-            kept = seen[key]
+
+        matched: Optional[Dict[str, Any]] = None
+        for kept, kept_lat, kept_lng in kept_coords:
+            if _is_same_location(lat, lng, kept_lat, kept_lng, radius_m=radius_m):
+                matched = kept
+                break
+
+        if matched is not None:
             skipped.append(
                 SkippedDuplicateStore(
                     store_code=str(store.get("store_code") or store.get("supplier_code") or ""),
                     store_name=str(store.get("store_name") or ""),
-                    kept_store_code=str(kept.get("store_code") or kept.get("supplier_code") or ""),
-                    kept_store_name=str(kept.get("store_name") or ""),
+                    kept_store_code=str(
+                        matched.get("store_code") or matched.get("supplier_code") or ""
+                    ),
+                    kept_store_name=str(matched.get("store_name") or ""),
                 )
             )
             continue
+
         kept_store = dict(store)
-        seen[key] = kept_store
+        kept_coords.append((kept_store, lat, lng))
         unique.append(kept_store)
 
     return unique, skipped

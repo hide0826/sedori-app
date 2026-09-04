@@ -200,7 +200,7 @@ class RouteSummaryMapMixin:
         self.map_segment_combo.blockSignals(True)
         self.map_segment_combo.clear()
         for seg in result.segments:
-            label = f"ルート{seg.index}（{len(seg.store_codes)}店舗）"
+            label = f"ルート{seg.index}（{len(seg.store_codes)}地点）"
             self.map_segment_combo.addItem(label, seg.url)
         self.map_segment_combo.blockSignals(False)
 
@@ -218,9 +218,7 @@ class RouteSummaryMapMixin:
 
         self.map_browser_btn.setEnabled(bool(result.segments))
 
-        if silent:
-            return
-
+        # 再読込（silent）でも併設店まとめ結果は知らせる（到着重複の確認用）
         info_lines = []
         if result.skipped_duplicates:
             dup_lines = [
@@ -229,8 +227,11 @@ class RouteSummaryMapMixin:
             ]
             if len(result.skipped_duplicates) > 8:
                 dup_lines.append(f"…他 {len(result.skipped_duplicates) - 8} 件")
-            info_lines.append("【同一地点の店舗を1地点にまとめました】\n" + "\n".join(dup_lines))
-        if result.missing_coordinates:
+            info_lines.append(
+                f"【同一地点の店舗を1地点にまとめました（{len(result.skipped_duplicates)}件）】\n"
+                + "\n".join(dup_lines)
+            )
+        if not silent and result.missing_coordinates:
             missing_lines = [
                 f"・{m['store_name']}（{m['store_code']}）"
                 for m in result.missing_coordinates[:8]

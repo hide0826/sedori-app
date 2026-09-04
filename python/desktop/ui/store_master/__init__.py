@@ -8,6 +8,7 @@ try:
     from ui.store_master.store_dialogs import StoreEditDialog, CustomFieldEditDialog
     from ui.store_master.route_dialogs import DraggableStoreListWidget, RouteManagementDialog
     from ui.store_master.store_list import StoreListWidget
+    from ui.store_master.route_kanban import RouteKanbanWidget
     from ui.store_master.expense import (
         ExpenseDestinationEditDialog,
         ExpenseDestinationListWidget,
@@ -31,6 +32,7 @@ except ImportError:
     from .store_dialogs import StoreEditDialog, CustomFieldEditDialog
     from .route_dialogs import DraggableStoreListWidget, RouteManagementDialog
     from .store_list import StoreListWidget
+    from .route_kanban import RouteKanbanWidget
     from .expense import (
         ExpenseDestinationEditDialog,
         ExpenseDestinationListWidget,
@@ -57,6 +59,7 @@ __all__ = [
     "DraggableStoreListWidget",
     "RouteManagementDialog",
     "StoreListWidget",
+    "RouteKanbanWidget",
     "ExpenseDestinationEditDialog",
     "ExpenseDestinationListWidget",
     "OnlinePlatformEditDialog",

@@ -35,6 +35,34 @@ def test_dedupe_same_coordinates():
     assert skipped[0].kept_store_code == "HA-14"
 
 
+def test_dedupe_near_coordinates_within_radius():
+    """Places API 由来の数〜十数 m ずれも同一地点としてまとめる"""
+    stores = [
+        _store("HA-46", "ハードオフ 四街道店", 35.6768949, 140.1621192),
+        _store("HO-16", "ホビーオフ四街道店", 35.6769304, 140.1621199),  # ~4m
+        _store("HA-18", "ハードオフ富里インター店", 35.7489725, 140.3108172),
+        _store("OF-13", "オフハウス冨里インター店", 35.7490296, 140.3108565),  # ~7m
+        _store("HO-05", "ホビーオフ冨里インター店", 35.7489047, 140.3109215),  # ~12m
+        _store("SS-25", "セカンドストリート富里", 35.7388108, 140.3228639),
+    ]
+    unique, skipped = dedupe_stores_by_coordinates(stores)
+    assert len(unique) == 3
+    assert len(skipped) == 3
+    assert {s["store_code"] for s in unique} == {"HA-46", "HA-18", "SS-25"}
+    assert {s.store_code for s in skipped} == {"HO-16", "OF-13", "HO-05"}
+
+
+def test_dedupe_does_not_merge_far_stores():
+    """閾値を超える別店舗はまとめない（約 200m 想定）"""
+    stores = [
+        _store("A", "店A", 35.6700, 140.1600),
+        _store("B", "店B", 35.6718, 140.1600),  # ~200m
+    ]
+    unique, skipped = dedupe_stores_by_coordinates(stores)
+    assert len(unique) == 2
+    assert len(skipped) == 0
+
+
 def test_split_nine_stores():
     stores = [_store(f"S{i:02d}", f"店{i}", 36.0 + i * 0.01, 140.0) for i in range(14)]
     unique, _ = dedupe_stores_by_coordinates(stores)
@@ -104,6 +132,8 @@ def test_missing_coordinates_reported():
 
 if __name__ == "__main__":
     test_dedupe_same_coordinates()
+    test_dedupe_near_coordinates_within_radius()
+    test_dedupe_does_not_merge_far_stores()
     test_split_nine_stores()
     test_build_directions_url_starts_with_current_location()
     test_build_embed_directions_url()

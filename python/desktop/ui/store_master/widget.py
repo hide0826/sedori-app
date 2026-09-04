@@ -32,6 +32,7 @@ from utils.ui_utils import reapply_table_column_widths
 
 from ui.company_master_widget import CompanyMasterWidget
 from .store_list import StoreListWidget
+from .route_kanban import RouteKanbanWidget
 from .online import OnlineStoreListWidget
 from .flea_users import FleaMarketUserListWidget
 from .expense import ExpenseDestinationListWidget
@@ -57,6 +58,10 @@ class StoreMasterWidget(QWidget):
         self.store_list_widget = StoreListWidget()
         self.tab_widget.addTab(self.store_list_widget, "店舗一覧")
 
+        # ルート一覧カンバンタブ
+        self.route_kanban_widget = RouteKanbanWidget()
+        self.tab_widget.addTab(self.route_kanban_widget, "ルート一覧")
+
         # 電脳店舗タブ
         self.online_store_widget = OnlineStoreListWidget()
         self.tab_widget.addTab(self.online_store_widget, "EC店舗一覧")
@@ -74,3 +79,22 @@ class StoreMasterWidget(QWidget):
         self.tab_widget.addTab(self.company_master_widget, "法人マスタ")
         
         layout.addWidget(self.tab_widget)
+
+        self._kanban_tab_index = self.tab_widget.indexOf(self.route_kanban_widget)
+        self.route_kanban_widget.routes_changed.connect(self._on_kanban_routes_changed)
+        self.store_list_widget.routes_changed.connect(self._on_store_list_routes_changed)
+        self.tab_widget.currentChanged.connect(self._on_master_tab_changed)
+
+    def _on_kanban_routes_changed(self) -> None:
+        """カンバン操作後に店舗一覧タブのルート情報を同期"""
+        self.store_list_widget.load_routes()
+        self.store_list_widget.load_stores(self.store_list_widget.search_edit.text())
+
+    def _on_store_list_routes_changed(self) -> None:
+        """店舗一覧のルート編集後にカンバンを同期"""
+        self.route_kanban_widget.reload_board()
+
+    def _on_master_tab_changed(self, index: int) -> None:
+        """ルート一覧タブ表示時に最新データを読み込む"""
+        if index == self._kanban_tab_index:
+            self.route_kanban_widget.reload_board()

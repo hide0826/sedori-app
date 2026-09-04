@@ -41,6 +41,8 @@ from .route_dialogs import RouteManagementDialog
 
 class StoreListWidget(QWidget):
     """店舗一覧管理ウィジェット（店舗マスタタブ用）"""
+
+    routes_changed = Signal()
     
     def __init__(self):
         super().__init__()
@@ -1247,6 +1249,7 @@ class StoreListWidget(QWidget):
                     self._adjust_route_combo_store_count(added_route, 1)
                 QMessageBox.information(self, "完了", "店舗を追加しました")
                 self.load_stores(self.search_edit.text())
+                self.routes_changed.emit()
             except Exception as e:
                 QMessageBox.critical(self, "エラー", f"追加に失敗しました:\n{str(e)}")
     
@@ -1350,6 +1353,7 @@ class StoreListWidget(QWidget):
             self.load_routes()
             # 店舗一覧を再読み込み
             self.load_stores(self.search_edit.text())
+            self.routes_changed.emit()
     
     def edit_route(self):
         """ルート編集"""
@@ -1373,6 +1377,7 @@ class StoreListWidget(QWidget):
             self.load_routes()
             # 店舗一覧を再読み込み
             self.load_stores(self.search_edit.text())
+            self.routes_changed.emit()
 
     def delete_selected_route(self):
         """選択中のルートを削除"""
@@ -1454,5 +1459,6 @@ class StoreListWidget(QWidget):
             self.current_selected_route = None
             self.load_routes()
             self.load_stores(self.search_edit.text())
+            self.routes_changed.emit()
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"ルートの削除に失敗しました:\n{str(e)}")

@@ -133,6 +133,15 @@ class StoreDatabase:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # カンバン表示順（マイグレーション）
+        try:
+            cursor.execute(
+                "ALTER TABLE routes ADD COLUMN display_order INTEGER DEFAULT 0"
+            )
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
         
         # updated_atを自動更新するトリガー（routes）
         cursor.execute("""
@@ -483,6 +492,10 @@ class StoreDatabase:
         if 'longitude' in store_data:
             update_fields.append('longitude = ?')
             update_values.append(store_data.get('longitude'))
+
+        if 'display_order' in store_data:
+            update_fields.append('display_order = ?')
+            update_values.append(store_data.get('display_order'))
         
         if not update_fields:
             return False  # 更新するフィールドがない
@@ -1395,7 +1408,7 @@ class StoreDatabase:
 
         # 1. routes テーブルから全ルートを取得（マスタ）
         cursor.execute("""
-            SELECT route_name, route_code, google_map_url
+            SELECT route_name, route_code, google_map_url, display_order
             FROM routes
         """)
         route_rows = cursor.fetchall()
@@ -1406,12 +1419,17 @@ class StoreDatabase:
             route_name = (row[0] or "").strip()
             route_code = (row[1] or "").strip()
             google_map_url = row[2] or ""
+            try:
+                display_order = int(row[3] or 0)
+            except (TypeError, ValueError, IndexError):
+                display_order = 0
             if not route_code:
                 continue
             routes_by_code[route_code] = {
                 "route_name": route_name,
                 "route_code": route_code,
                 "google_map_url": google_map_url,
+                "display_order": display_order,
             }
 
         # 2. stores テーブルから全店舗の route_code を取得し、店舗数を集計
@@ -1443,6 +1461,7 @@ class StoreDatabase:
                         "route_name": "",  # 不明なコードは名前空欄
                         "route_code": code,
                         "google_map_url": "",
+                        "display_order": 0,
                     }
 
         # 3. routes_by_code と store_count_by_code を結合して最終的なリストを作成
@@ -1457,12 +1476,44 @@ class StoreDatabase:
                     "route_code": code,
                     "store_count": count,
                     "google_map_url": route_info.get("google_map_url", ""),
+                    "display_order": int(route_info.get("display_order") or 0),
                 }
             )
 
-        # ルートコード、ルート名で安定ソート
-        routes.sort(key=lambda r: (r.get("route_code") or "", r.get("route_name") or ""))
+        # カンバン表示順 → ルートコード → ルート名
+        routes.sort(
+            key=lambda r: (
+                int(r.get("display_order") or 0),
+                r.get("route_code") or "",
+                r.get("route_name") or "",
+            )
+        )
         return routes
+
+    def update_route_display_orders(self, ordered_route_codes: List[str]) -> bool:
+        """カンバン上のルート並び順を display_order として保存する。"""
+        codes = [str(c).strip() for c in ordered_route_codes if str(c).strip()]
+        if not codes:
+            return False
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            for idx, code in enumerate(codes, start=1):
+                cursor.execute(
+                    """
+                    UPDATE routes
+                    SET display_order = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE route_code = ?
+                    """,
+                    (idx, code),
+                )
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"ルート並び順更新エラー: {e}")
+            conn.rollback()
+            return False
     
     def get_store_by_id(self, store_id: int) -> Optional[Dict[str, Any]]:
         """IDで店舗を取得（get_storeのエイリアス）"""
@@ -1488,11 +1539,13 @@ class StoreDatabase:
                     WHERE id = ?
                 """, (route_name, route_code, google_map_url, existing[0]))
             else:
-                # 新規挿入
+                # 新規挿入（末尾の display_order）
+                cursor.execute("SELECT COALESCE(MAX(display_order), 0) FROM routes")
+                max_order = int(cursor.fetchone()[0] or 0)
                 cursor.execute("""
-                    INSERT INTO routes (route_name, route_code, google_map_url)
-                    VALUES (?, ?, ?)
-                """, (route_name, route_code, google_map_url))
+                    INSERT INTO routes (route_name, route_code, google_map_url, display_order)
+                    VALUES (?, ?, ?, ?)
+                """, (route_name, route_code, google_map_url, max_order + 1))
             
             conn.commit()
             return True
