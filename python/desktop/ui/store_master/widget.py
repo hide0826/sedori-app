@@ -33,6 +33,7 @@ from utils.ui_utils import reapply_table_column_widths
 from ui.company_master_widget import CompanyMasterWidget
 from .store_list import StoreListWidget
 from .route_kanban import RouteKanbanWidget
+from .route_map_widget import RouteMapWidget
 from .online import OnlineStoreListWidget
 from .flea_users import FleaMarketUserListWidget
 from .expense import ExpenseDestinationListWidget
@@ -62,6 +63,10 @@ class StoreMasterWidget(QWidget):
         self.route_kanban_widget = RouteKanbanWidget()
         self.tab_widget.addTab(self.route_kanban_widget, "ルート一覧")
 
+        # ルート地図タブ（ピン＋線＋タグ色分け）
+        self.route_map_widget = RouteMapWidget()
+        self.tab_widget.addTab(self.route_map_widget, "ルート地図")
+
         # 電脳店舗タブ
         self.online_store_widget = OnlineStoreListWidget()
         self.tab_widget.addTab(self.online_store_widget, "EC店舗一覧")
@@ -81,8 +86,12 @@ class StoreMasterWidget(QWidget):
         layout.addWidget(self.tab_widget)
 
         self._kanban_tab_index = self.tab_widget.indexOf(self.route_kanban_widget)
+        self._map_tab_index = self.tab_widget.indexOf(self.route_map_widget)
         self._store_list_dirty = False
         self.route_kanban_widget.routes_changed.connect(self._on_kanban_routes_changed)
+        self.route_kanban_widget.stores_data_changed.connect(
+            self._on_kanban_stores_data_changed
+        )
         self.store_list_widget.routes_changed.connect(self._on_store_list_routes_changed)
         self.tab_widget.currentChanged.connect(self._on_master_tab_changed)
 
@@ -98,6 +107,13 @@ class StoreMasterWidget(QWidget):
             self.store_list_widget.load_stores(self.store_list_widget.search_edit.text())
             self._store_list_dirty = False
 
+    def _on_kanban_stores_data_changed(self, store_ids=None) -> None:
+        """店舗の追加・分離後は店舗一覧を即時再読込（併設グループも展開）。"""
+        self.store_list_widget.load_routes()
+        ids = list(store_ids or [])
+        self.store_list_widget.refresh_after_external_change(ids)
+        self._store_list_dirty = False
+
     def _on_store_list_routes_changed(self) -> None:
         """店舗一覧のルート編集後にカンバンを同期"""
         self.route_kanban_widget.reload_board()
@@ -106,6 +122,8 @@ class StoreMasterWidget(QWidget):
         """タブ切替時に必要なら最新データを読み込む"""
         if index == self._kanban_tab_index:
             self.route_kanban_widget.reload_board()
+        elif index == self._map_tab_index:
+            self.route_map_widget.reload()
         elif index == self.tab_widget.indexOf(self.store_list_widget) and self._store_list_dirty:
             self.store_list_widget.load_stores(self.store_list_widget.search_edit.text())
             self._store_list_dirty = False

@@ -51,6 +51,7 @@ class StoreEditDialog(QDialog):
         self.initial_route_name = initial_route_name
         # カスタムフィールド編集ウィジェットのマップは必ず初期化しておく
         self.custom_field_edits = {}
+        self.tag_checks: Dict[int, QCheckBox] = {}
         self._latitude: Optional[float] = None
         self._longitude: Optional[float] = None
         
@@ -153,6 +154,35 @@ class StoreEditDialog(QDialog):
                     self.custom_field_edits[field_name] = edit
             
             layout.addWidget(custom_group)
+
+        # 店舗タグ（複数選択）
+        tag_group = QGroupBox("店舗タグ（複数選択可）")
+        tag_layout = QVBoxLayout(tag_group)
+        tag_hint = QLabel(
+            "地図のピン色は、優先度がいちばん高いタグの色になります。"
+        )
+        tag_hint.setStyleSheet("color: #888;")
+        tag_layout.addWidget(tag_hint)
+        tags = self.db.list_store_tags(active_only=True)
+        if tags:
+            for tag in tags:
+                tid = int(tag["id"])
+                cb = QCheckBox(str(tag.get("name") or ""))
+                color = str(tag.get("color") or "#1976d2")
+                cb.setStyleSheet(
+                    "QCheckBox { spacing: 8px; font-weight: bold; color: %s; }"
+                    "QCheckBox::indicator { width: 16px; height: 16px; border: 2px solid #cfd8dc;"
+                    " border-radius: 3px; background: #2b2b2b; }"
+                    "QCheckBox::indicator:checked { background: #4caf50; border: 2px solid #81c784; }"
+                    % color
+                )
+                tag_layout.addWidget(cb)
+                self.tag_checks[tid] = cb
+        else:
+            empty = QLabel("タグが未登録です。「ルート地図」タブのタグ管理から追加できます。")
+            empty.setWordWrap(True)
+            tag_layout.addWidget(empty)
+        layout.addWidget(tag_group)
         
         # 情報取得ボタン（Google Map APIから住所・電話番号を取得）
         info_button_layout = QHBoxLayout()
@@ -418,6 +448,21 @@ class StoreEditDialog(QDialog):
             for field_name, edit in self.custom_field_edits.items():
                 value = custom_fields.get(field_name, '')
                 edit.setText(str(value))
+
+        # タグ（複数）
+        selected_ids = set()
+        for tag in self.store_data.get("tags") or []:
+            try:
+                selected_ids.add(int(tag.get("id")))
+            except (TypeError, ValueError):
+                pass
+        if not selected_ids and self.store_data.get("id") is not None:
+            try:
+                selected_ids = set(self.db.get_store_tag_ids(int(self.store_data["id"])))
+            except Exception:
+                selected_ids = set()
+        for tid, cb in self.tag_checks.items():
+            cb.setChecked(tid in selected_ids)
     
     @staticmethod
     def _coerce_coordinate(value: Any) -> Optional[float]:
@@ -451,7 +496,10 @@ class StoreEditDialog(QDialog):
             'address': self.address_edit.text().strip(),
             'phone': self.phone_edit.text().strip(),
             'supplier_code': None,  # 互換性のためNULL（store_codeを使用）
-            'custom_fields': {}
+            'custom_fields': {},
+            'tag_ids': [
+                tid for tid, cb in self.tag_checks.items() if cb.isChecked()
+            ],
         }
         
         # カスタムフィールドの取得

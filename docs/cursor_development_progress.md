@@ -1,3 +1,59 @@
+## 2026-09-11 店舗マスタまとめ（地図・タグ・CSV・併設・併記分離）完了
+
+- **状況**: 完了。ブランチ `feature/sp-api` にコミット予定
+- **含む**: ルート地図／複数タグ／Takeout CSV／HA・HO・OF併設まとめ／併記店分離（**未所属のみ**）／店舗一覧即時反映
+
+## 2026-09-11 併記分離→店舗一覧へ即時反映
+
+- **内容**: 分離後に店舗一覧を即再読込。同座標の HA/HO/OF は併設まとめだが、対象グループは自動展開
+- **対象**: 未所属のみ（一括ボタン・右クリックとも）
+- **実装**: `widget.py` / `store_list.py` / `route_kanban.py` / `combined_store_split_service.py`
+
+## 2026-09-11 併記店舗名の分離（ハードオフ・オフハウス 等）
+
+- **内容**: 未所属の併記店名をブランドごとに分離。コード再配置、住所・電話再取得、緯度経度流用
+- **UI**: ルート一覧「併記店分離」ボタン／未所属の右クリック「併記店舗を分離…」
+- **実装**: `combined_store_split_service.py` / `route_kanban.py`
+- **テスト**: `tests/test_combined_store_split.py`（4件）
+
+## 2026-09-11 店舗一覧にも併設まとめ＋件数表示
+
+- **内容**: 店舗一覧に「併設」列を追加。HA/HO/OF・30m以内を代表行でまとめ、「＋2店舗併設」「＋3店舗併設」表示。クリックで展開
+- **ルート一覧**: 同様に「＋2店舗併設／＋3店舗併設」表記へ変更（件数が一目で分かる）
+- **実装**: `store_list.py` / `route_kanban.py` / `hardoff_collocation_groups.py`
+
+## 2026-09-11 カンバン: HA/HO/OF 併設を＋展開表示
+
+- **内容**: 緯度経度30m以内のハードオフ・ホビーオフ・オフハウスを代表1件＋「＋N」でまとめ表示。クリックで全件展開
+- **代表順**: HA → HO → OF
+- **実装**: `hardoff_collocation_groups.py` / `route_kanban.py`
+- **テスト**: `tests/test_hardoff_collocation_groups.py`（4件）
+
+## 2026-09-11 Takeoutお気に入りCSVインポート
+
+- **内容**: 店舗一覧に「CSVインポート」を追加。Google Takeout「お気に入りの場所.csv」から未登録店舗を未所属で取込
+- **処理**: Places APIで住所・電話・緯度経度取得、店舗コード自動採番。店名（空白無視）／電話／住所／近接座標で重複スキップ
+- **実装**: `google_takeout_favorites_import.py` / `store_list.py`（`add_store` に notes 対応）
+- **テスト**: `tests/test_google_takeout_favorites_import.py`（6件）
+
+## 2026-09-11 ルート地図: チェックボックス可視化＋全選択/全解除
+
+- **内容**: ダークテーマで見えなかったルート／タグのチェックを明示スタイルの QCheckBox に変更。各欄に全選択・全解除ボタンを追加
+- **実装**: `route_map_widget.py`
+
+## 2026-09-11 ルート地図＋複数タグ色分け
+
+- **内容**: 店舗マスタに「ルート地図」タブを追加。ピン・ルート線・全選択・複数タグ色分け・道路沿い所要時間
+- **操作**:
+  - 店舗マスタ → **ルート地図**: 左でルート／タグを選択、右に Leaflet 地図
+  - **全選択**で全ルート線を重ね表示（最適化の俯瞰用。訪問順の自動最適化はなし）
+  - 店舗編集でタグを複数チェック。ピン色は優先度がいちばん高いタグ
+  - 「道路沿いルート＋所要時間」ON で Directions API（失敗時は直線）
+- **DB**: `store_tags` / `store_tag_links`。既定タグ: 大型店舗・値付け甘い・あまり行かなくて良い
+- **実装**: `store_db.py` / `route_map_widget.py` / `store_tags_dialog.py` / `google_maps_directions_service.py`
+- **テスト**: `tests/test_store_tags_and_map.py`（4件）
+- **注意**: Directions 利用時は Cloud Console で Directions API を有効化
+
 ## 2026-09-11 店舗追加: 未所属でも登録可能に
 
 - **内容**: ルート一覧「店舗追加」で所属ルートを「（未所属）」にして登録できるよう改善

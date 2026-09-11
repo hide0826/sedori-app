@@ -8,7 +8,7 @@ import json
 import sys
 import os
 import webbrowser
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from PySide6.QtWidgets import (
     QWidget,
@@ -30,6 +30,8 @@ from PySide6.QtWidgets import (
     QDialog,
     QFormLayout,
     QDialogButtonBox,
+    QProgressDialog,
+    QApplication,
 )
 from PySide6.QtCore import Qt, Signal, QMimeData, QByteArray, QTimer, QPoint
 from PySide6.QtGui import QDrag, QColor, QBrush, QCursor, QShortcut, QKeySequence
@@ -51,6 +53,17 @@ from services.store_route_membership_service import (
     store_code_from_store,
     store_in_route,
 )
+from services.hardoff_collocation_groups import (
+    collocation_toggle_label,
+    group_hardoff_family_stores,
+)
+from services.combined_store_split_service import (
+    build_split_names,
+    find_combined_unassigned_stores,
+    split_all_combined_unassigned,
+    split_combined_store,
+)
+from .support import get_store_info_from_google
 from .store_dialogs import StoreEditDialog
 
 KANBAN_MIME_TYPE = "application/x-hirio-route-kanban"
@@ -61,6 +74,34 @@ AUTO_SCROLL_MARGIN_PX = 56
 AUTO_SCROLL_STEP_PX = 18
 AUTO_SCROLL_INTERVAL_MS = 16
 MAX_UNDO_HISTORY = 40
+
+# item data roles
+ROLE_STORE = Qt.UserRole
+ROLE_IS_PRIMARY = Qt.UserRole + 1
+ROLE_COLLOC_META = Qt.UserRole + 2
+
+
+def _collocation_group_key(members: List[Dict[str, Any]]) -> str:
+    from services.hardoff_collocation_groups import collocation_group_key
+
+    return collocation_group_key(members)
+
+
+def _format_store_label(
+    store: Dict[str, Any],
+    *,
+    is_primary: bool,
+    is_unassigned: bool,
+    prefix: str = "",
+) -> str:
+    code = store_code_from_store(store)
+    name = (store.get("store_name") or "").strip()
+    label = f"{code} {name}".strip()
+    if prefix:
+        label = f"{prefix}{label}"
+    if not is_unassigned and not is_primary:
+        label = f"{label} [追加]"
+    return label
 
 
 def _encode_drag_payload(payload: Dict[str, Any]) -> QByteArray:
@@ -316,12 +357,13 @@ class RouteKanbanColumnList(QListWidget):
         self.setSelectionMode(QListWidget.SingleSelection)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
+        self.itemClicked.connect(self._on_item_clicked)
 
     def startDrag(self, supportedActions):
         item = self.currentItem()
         if not item:
             return
-        store = item.data(Qt.UserRole)
+        store = item.data(ROLE_STORE)
         if not store or not store.get("id"):
             return
 
@@ -330,7 +372,7 @@ class RouteKanbanColumnList(QListWidget):
             "source_column_key": self.column_key,
             "source_route_name": self.route_name,
             "source_route_code": self.route_code,
-            "source_is_primary": bool(item.data(Qt.UserRole + 1)),
+            "source_is_primary": bool(item.data(ROLE_IS_PRIMARY)),
         }
         mime = QMimeData()
         mime.setData(KANBAN_MIME_TYPE, _encode_drag_payload(payload))
@@ -399,11 +441,28 @@ class RouteKanbanColumnList(QListWidget):
         else:
             event.ignore()
 
+    def _on_item_clicked(self, item: QListWidgetItem) -> None:
+        """併設グループの ＋／－ 行クリックで展開・折りたたみ。"""
+        meta = item.data(ROLE_COLLOC_META) or {}
+        if not isinstance(meta, dict):
+            return
+        if meta.get("kind") != "col_header":
+            return
+        member_count = int(meta.get("member_count") or 0)
+        if member_count <= 0:
+            member_count = int(meta.get("extra_count") or 0) + 1
+        if member_count <= 1:
+            return
+        group_key = str(meta.get("group_key") or "")
+        if not group_key:
+            return
+        self.kanban.toggle_collocation_expanded(self.column_key, group_key)
+
     def _show_context_menu(self, pos) -> None:
         item = self.itemAt(pos)
         if not item:
             return
-        store = item.data(Qt.UserRole)
+        store = item.data(ROLE_STORE)
         if not store or not store.get("id"):
             return
 
@@ -412,6 +471,13 @@ class RouteKanbanColumnList(QListWidget):
         unassign_action = None
         if self.column_key != UNASSIGNED_COLUMN_KEY:
             unassign_action = menu.addAction("未所属へ外す")
+
+        split_action = None
+        # 併記分離は未所属列のみ
+        if self.column_key == UNASSIGNED_COLUMN_KEY:
+            split_plan = build_split_names(str(store.get("store_name") or ""))
+            if split_plan and split_plan.is_splittable:
+                split_action = menu.addAction("併記店舗を分離...")
 
         chosen = menu.exec(self.mapToGlobal(pos))
         if chosen is None:
@@ -433,6 +499,8 @@ class RouteKanbanColumnList(QListWidget):
                 target_route_name="",
                 target_route_code="",
             )
+        elif split_action and chosen == split_action:
+            self.kanban.split_one_combined_store(store)
 
 
 class RouteKanbanColumn(QFrame):
@@ -746,6 +814,8 @@ class RouteKanbanWidget(QWidget):
     """ルート一覧カンバン（未所属 + 各ルート列）。"""
 
     routes_changed = Signal()
+    # 店舗の追加・分離など、店舗一覧へ即時同期が必要な変更
+    stores_data_changed = Signal(object)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -762,6 +832,8 @@ class RouteKanbanWidget(QWidget):
         self._undo_stack: List[Dict[str, Any]] = []
         self._redo_stack: List[Dict[str, Any]] = []
         self._applying_history = False
+        # 列キー -> 展開中の併設グループキー
+        self._expanded_collocations: Dict[str, Set[str]] = {}
 
         self._auto_scroll_timer = QTimer(self)
         self._auto_scroll_timer.setInterval(AUTO_SCROLL_INTERVAL_MS)
@@ -824,6 +896,22 @@ class RouteKanbanWidget(QWidget):
         )
         add_route_btn.clicked.connect(self.register_new_route)
         toolbar.addWidget(add_route_btn)
+
+        split_btn = QPushButton("併記店分離")
+        split_btn.setToolTip(
+            "未所属の「ハードオフ・オフハウス」などの併記店名を調査し、\n"
+            "ブランドごとに分離します（例: ハードオフ久喜店 / オフハウス久喜店）。\n"
+            "・店舗コードを再採番\n"
+            "・住所・電話を Google から再取得\n"
+            "・緯度経度は元店舗を流用\n"
+            "右クリックメニューからも1件ずつ実行できます。"
+        )
+        split_btn.setStyleSheet(
+            "QPushButton { background-color: #6f42c1; color: white; "
+            "font-weight: bold; padding: 6px 14px; border-radius: 4px; }"
+        )
+        split_btn.clicked.connect(self.split_all_combined_unassigned_stores)
+        toolbar.addWidget(split_btn)
 
         self.undo_btn = QPushButton("戻る")
         self.undo_btn.setToolTip(
@@ -888,8 +976,8 @@ class RouteKanbanWidget(QWidget):
         layout.addLayout(focus_row)
 
         legend = QLabel(
-            f"凡例: 薄色 + [追加] = 副所属 / 右クリックで店舗移動 / "
-            f"ヘッダの🗺リンククリックでGoogle Map / 「URL」で登録 / "
+            f"凡例: 薄色 + [追加] = 副所属 / ＋2店舗併設・＋3店舗併設 = HA/HO/OF（30m）クリックで展開 / "
+            f"右クリックで店舗移動 / ヘッダの🗺リンクでGoogle Map / 「URL」で登録 / "
             f"ヘッダDnDで列並び替え / ルート名ダブルクリックで改名 / "
             f"戻る・進むは移動・並び替え用 / 横{COLUMNS_PER_ROW}列折り返し"
         )
@@ -1157,7 +1245,10 @@ class RouteKanbanWidget(QWidget):
             if not aff:
                 data["affiliated_route_name"] = None
                 data["route_code"] = None
-            self.db.add_store(data)
+            tag_ids = data.pop("tag_ids", None) or []
+            new_id = self.db.add_store(data)
+            if new_id:
+                self.db.set_store_tag_ids(int(new_id), tag_ids)
             was_unassigned = not aff
             msg = "店舗を追加しました"
             if was_unassigned:
@@ -1172,6 +1263,224 @@ class RouteKanbanWidget(QWidget):
                     self.scroll.ensureWidgetVisible(column, 20, 20)
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"追加に失敗しました:\n{str(e)}")
+
+    def _fetch_info_for_split(self, store_name: str):
+        if get_store_info_from_google is None:
+            return None
+        try:
+            return get_store_info_from_google(store_name, language_code="ja")
+        except Exception:
+            return None
+
+    def _format_split_result_message(self, result) -> str:
+        lines = [
+            f"調査: {result.scanned} 件",
+            f"分離成功: {result.split_count} 件",
+            f"更新: {len(result.updated)} 件",
+            f"新規作成: {len(result.created)} 件",
+            f"スキップ: {len(result.skipped)} 件",
+            f"失敗: {len(result.failed)} 件",
+        ]
+        if result.updated:
+            lines.append("\n【更新】")
+            for row in result.updated[:10]:
+                lines.append(f"・{row}")
+            if len(result.updated) > 10:
+                lines.append(f"…他 {len(result.updated) - 10} 件")
+        if result.created:
+            lines.append("\n【新規】")
+            for row in result.created[:10]:
+                lines.append(f"・{row}")
+            if len(result.created) > 10:
+                lines.append(f"…他 {len(result.created) - 10} 件")
+        if result.skipped:
+            lines.append("\n【スキップ】")
+            for row in result.skipped[:5]:
+                lines.append(f"・{row}")
+        if result.failed:
+            lines.append("\n【失敗】")
+            for row in result.failed[:5]:
+                lines.append(f"・{row}")
+        if result.created or result.updated:
+            lines.append(
+                "\n※店舗一覧にも反映済みです。"
+                "同じ座標の HA/HO/OF は「併設」列でまとめ表示されます"
+                "（今回分は自動で展開しています）。"
+            )
+        return "\n".join(lines)
+
+    def split_one_combined_store(self, store: Dict[str, Any]) -> None:
+        """右クリック: 未所属の併記店舗1件を分離する。"""
+        aff = (store.get("affiliated_route_name") or "").strip()
+        if aff:
+            QMessageBox.information(
+                self,
+                "併記店分離",
+                "分離できるのは未所属の店舗だけです。\n"
+                f"この店舗は「{aff}」に所属しています。",
+            )
+            return
+
+        name = str(store.get("store_name") or "")
+        plan = build_split_names(name)
+        if not plan or not plan.is_splittable:
+            QMessageBox.information(
+                self,
+                "併記店分離",
+                "この店舗名は分離対象ではありません。\n"
+                "（ハードオフ・オフハウス など複数ブランドの併記が必要です）",
+            )
+            return
+
+        preview = " / ".join(bp.store_name for bp in plan.brands)
+        reply = QMessageBox.question(
+            self,
+            "併記店分離の確認",
+            f"次のように分離します。\n\n"
+            f"元: {name}\n"
+            f"→ {preview}\n\n"
+            f"・代表ブランドは元レコードを更新（コードは可能な限り維持）\n"
+            f"・他ブランドは未所属で新規追加\n"
+            f"・住所・電話を Google から再取得\n"
+            f"・緯度経度は元の値を流用\n\n"
+            f"実行しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        if get_store_info_from_google is None:
+            QMessageBox.warning(
+                self,
+                "注意",
+                "Google Maps サービスが使えないため、\n"
+                "住所・電話は元データのコピーになります。\n"
+                "（設定タブの Maps API キーも確認してください）",
+            )
+
+        progress = QProgressDialog("併記店を分離中...", None, 0, 0, self)
+        progress.setWindowTitle("併記店分離")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+
+        self._push_undo_snapshot()
+        try:
+            result = split_combined_store(
+                self.db,
+                store,
+                fetch_info=self._fetch_info_for_split,
+                dry_run=False,
+            )
+        except Exception as e:
+            progress.close()
+            self._discard_last_undo()
+            QMessageBox.critical(self, "エラー", f"分離に失敗しました:\n{e}")
+            return
+
+        progress.close()
+        if result.split_count <= 0 and result.failed:
+            self._discard_last_undo()
+            QMessageBox.warning(self, "併記店分離", self._format_split_result_message(result))
+            return
+
+        self._after_db_change()
+        self.stores_data_changed.emit(result.affected_ids)
+        QMessageBox.information(self, "併記店分離 完了", self._format_split_result_message(result))
+
+    def split_all_combined_unassigned_stores(self) -> None:
+        """ツールバー: 未所属の併記店舗を一括分離する。"""
+        targets = find_combined_unassigned_stores(self.db)
+        if not targets:
+            QMessageBox.information(
+                self,
+                "併記店分離",
+                "未所属に、分離できる併記店舗はありませんでした。\n"
+                "（例: ハードオフ・オフハウス久喜店）",
+            )
+            return
+
+        preview_lines = []
+        for store in targets[:12]:
+            name = str(store.get("store_name") or "")
+            plan = build_split_names(name)
+            if plan:
+                preview_lines.append(
+                    f"・{name} → {' / '.join(bp.store_name for bp in plan.brands)}"
+                )
+        if len(targets) > 12:
+            preview_lines.append(f"…他 {len(targets) - 12} 件")
+
+        reply = QMessageBox.question(
+            self,
+            "併記店一括分離の確認",
+            f"未所属の併記店舗 {len(targets)} 件を分離します。\n\n"
+            + "\n".join(preview_lines)
+            + "\n\n"
+            "・住所・電話を Google から再取得（API利用）\n"
+            "・緯度経度は元店舗を流用\n"
+            "・店舗コードを再配置\n\n"
+            "続行しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        if get_store_info_from_google is None:
+            QMessageBox.warning(
+                self,
+                "注意",
+                "Google Maps サービスが使えないため、\n"
+                "住所・電話は元データのコピーになります。",
+            )
+
+        progress = QProgressDialog(
+            "併記店を分離中...", "キャンセル", 0, len(targets), self
+        )
+        progress.setWindowTitle("併記店一括分離")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        def _on_progress(current: int, total: int, label: str) -> bool:
+            if progress.wasCanceled():
+                return False
+            progress.setMaximum(max(total, 1))
+            progress.setValue(min(current, total))
+            progress.setLabelText(f"処理中 ({current}/{total}): {label}")
+            QApplication.processEvents()
+            return not progress.wasCanceled()
+
+        self._push_undo_snapshot()
+        try:
+            result = split_all_combined_unassigned(
+                self.db,
+                fetch_info=self._fetch_info_for_split,
+                progress_callback=_on_progress,
+                dry_run=False,
+            )
+        except Exception as e:
+            progress.close()
+            self._discard_last_undo()
+            QMessageBox.critical(self, "エラー", f"一括分離に失敗しました:\n{e}")
+            return
+
+        progress.close()
+        if result.split_count <= 0 and not result.created and not result.updated:
+            self._discard_last_undo()
+            QMessageBox.information(
+                self, "併記店一括分離", self._format_split_result_message(result)
+            )
+            return
+
+        self._after_db_change()
+        self.stores_data_changed.emit(result.affected_ids)
+        QMessageBox.information(
+            self, "併記店一括分離 完了", self._format_split_result_message(result)
+        )
 
     def begin_drag_scroll(self) -> None:
         self._drag_scroll_active = True
@@ -1458,6 +1767,32 @@ class RouteKanbanWidget(QWidget):
         self.reload_board()
         return True
 
+    def toggle_collocation_expanded(self, column_key: str, group_key: str) -> None:
+        """併設グループの展開状態を切り替え、該当列だけ再描画する。"""
+        key = (column_key or "").strip()
+        gkey = (group_key or "").strip()
+        if not key or not gkey:
+            return
+        expanded = self._expanded_collocations.setdefault(key, set())
+        if gkey in expanded:
+            expanded.discard(gkey)
+        else:
+            expanded.add(gkey)
+
+        column = self._columns.get(key)
+        if column is None:
+            return
+        # 列の店舗データは reload せず、保持している _column_stores から再描画
+        stores = getattr(self, "_column_stores", {}).get(key) or []
+        route_name = column.route_name
+        is_unassigned = key == UNASSIGNED_COLUMN_KEY
+        self._populate_column_list(
+            column,
+            stores,
+            route_name=route_name,
+            is_unassigned=is_unassigned,
+        )
+
     def _populate_column_list(
         self,
         column: RouteKanbanColumn,
@@ -1466,23 +1801,93 @@ class RouteKanbanWidget(QWidget):
         route_name: str,
         is_unassigned: bool,
     ) -> None:
-        column.store_list.clear()
-        for store in stores:
-            code = store_code_from_store(store)
-            name = (store.get("store_name") or "").strip()
-            label = f"{code} {name}".strip()
-            is_primary = True
-            if not is_unassigned:
-                is_primary = is_primary_in_route(store, route_name)
-                if not is_primary:
-                    label = f"{label} [追加]"
+        if not hasattr(self, "_column_stores"):
+            self._column_stores = {}
+        self._column_stores[column.column_key] = list(stores)
 
-            item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, store)
-            item.setData(Qt.UserRole + 1, is_primary)
-            if not is_unassigned and not is_primary:
-                item.setBackground(QBrush(QColor("#555555")))
-            column.store_list.addItem(item)
+        column.store_list.clear()
+        expanded = self._expanded_collocations.get(column.column_key, set())
+        groups = group_hardoff_family_stores(stores)
+
+        for group in groups:
+            members = group.members
+            rep = group.representative
+            gkey = _collocation_group_key(members)
+            extra = group.extra_count
+            member_count = group.member_count
+            is_group = extra > 0
+            is_expanded = bool(is_group and gkey in expanded)
+
+            rep_primary = True
+            if not is_unassigned:
+                rep_primary = is_primary_in_route(rep, route_name)
+
+            if is_group:
+                prefix = collocation_toggle_label(member_count, expanded=is_expanded) + " "
+            else:
+                prefix = ""
+
+            header = QListWidgetItem(
+                _format_store_label(
+                    rep,
+                    is_primary=rep_primary,
+                    is_unassigned=is_unassigned,
+                    prefix=prefix,
+                )
+            )
+            header.setData(ROLE_STORE, rep)
+            header.setData(ROLE_IS_PRIMARY, rep_primary)
+            header.setData(
+                ROLE_COLLOC_META,
+                {
+                    "kind": "col_header" if is_group else "solo",
+                    "group_key": gkey,
+                    "extra_count": extra,
+                    "member_count": member_count,
+                    "expanded": is_expanded,
+                    "member_stores": members if is_group else [rep],
+                },
+            )
+            if is_group:
+                header.setToolTip(
+                    f"併設 {member_count} 店舗（ハードオフ／ホビーオフ／オフハウス・30m以内）\n"
+                    "クリックで展開・折りたたみ"
+                )
+                header.setForeground(QBrush(QColor("#90caf9")))
+            if not is_unassigned and not rep_primary:
+                header.setBackground(QBrush(QColor("#555555")))
+            column.store_list.addItem(header)
+
+            if is_group and is_expanded:
+                for member in members[1:]:
+                    mem_primary = True
+                    if not is_unassigned:
+                        mem_primary = is_primary_in_route(member, route_name)
+                    child = QListWidgetItem(
+                        _format_store_label(
+                            member,
+                            is_primary=mem_primary,
+                            is_unassigned=is_unassigned,
+                            prefix="　　",
+                        )
+                    )
+                    child.setData(ROLE_STORE, member)
+                    child.setData(ROLE_IS_PRIMARY, mem_primary)
+                    child.setData(
+                        ROLE_COLLOC_META,
+                        {
+                            "kind": "col_member",
+                            "group_key": gkey,
+                            "extra_count": 0,
+                            "member_count": member_count,
+                            "expanded": True,
+                            "member_stores": members,
+                        },
+                    )
+                    child.setForeground(QBrush(QColor("#b0bec5")))
+                    if not is_unassigned and not mem_primary:
+                        child.setBackground(QBrush(QColor("#555555")))
+                    column.store_list.addItem(child)
 
         column.set_store_count(len(stores))
 
@@ -1613,16 +2018,38 @@ class RouteKanbanWidget(QWidget):
             return
 
         ordered_codes: List[str] = []
+        seen_codes: Set[str] = set()
         for row in range(source_list.count()):
             item = source_list.item(row)
-            if not item or not item.data(Qt.UserRole + 1):
+            if not item:
                 continue
-            store = item.data(Qt.UserRole)
+            meta = item.data(ROLE_COLLOC_META) or {}
+            kind = meta.get("kind") if isinstance(meta, dict) else None
+
+            # 展開中のメンバー行はヘッダの member_stores でまとめて処理
+            if kind == "col_member":
+                continue
+
+            if kind == "col_header":
+                members = meta.get("member_stores") or []
+                for store in members:
+                    if not is_primary_in_route(store, source_list.route_name):
+                        continue
+                    code = store_code_from_store(store)
+                    if code and code not in seen_codes:
+                        ordered_codes.append(code)
+                        seen_codes.add(code)
+                continue
+
+            if not item.data(ROLE_IS_PRIMARY):
+                continue
+            store = item.data(ROLE_STORE)
             if not store:
                 continue
             code = store_code_from_store(store)
-            if code:
+            if code and code not in seen_codes:
                 ordered_codes.append(code)
+                seen_codes.add(code)
 
         if not ordered_codes:
             return

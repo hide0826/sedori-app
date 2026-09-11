@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, QMimeData, QSettings
 from PySide6.QtGui import QColor, QDrag
-from typing import Tuple, List, Dict, Any, Optional
+from typing import Tuple, List, Dict, Any, Optional, Set
 import sys
 import os
 import re
@@ -37,6 +37,26 @@ from .support import (
 )
 from .store_dialogs import StoreEditDialog, CustomFieldEditDialog
 from .route_dialogs import RouteManagementDialog
+from services.hardoff_collocation_groups import (
+    collocation_group_key,
+    collocation_toggle_label,
+    group_hardoff_family_stores,
+)
+
+STORE_LIST_BASIC_COLUMNS = [
+    "ID",
+    "併設",
+    "所属ルート名",
+    "ルートコード",
+    "店舗コード",
+    "店舗名",
+    "住所",
+    "電話番号",
+    "登録番号",
+    "タグ",
+    "備考",
+    "経度緯度",
+]
 
 
 class StoreListWidget(QWidget):
@@ -53,6 +73,9 @@ class StoreListWidget(QWidget):
         # ルート情報リスト（コンボボックスの並び順と完全に一致させる）
         # 各要素は {'route_name': str, 'route_code': str, 'store_count': int, 'google_map_url': str} の辞書
         self.route_data = []
+        self._all_stores_for_table: List[Dict[str, Any]] = []
+        self._expanded_collocations: Set[str] = set()
+        self._pending_expand_store_ids: Set[int] = set()
         
         self.setup_ui()
         self.load_routes()
@@ -97,6 +120,22 @@ class StoreListWidget(QWidget):
             }
         """)
         button_layout.addWidget(import_btn)
+
+        csv_import_btn = QPushButton("CSVインポート")
+        csv_import_btn.setToolTip(
+            "Google Takeout「お気に入りの場所.csv」から未登録店舗を取り込みます。\n"
+            "未所属ルートへ登録し、住所・電話・緯度経度を取得して店舗コードを自動付番します。"
+        )
+        csv_import_btn.clicked.connect(self.import_takeout_csv)
+        csv_import_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #20c997;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+        """)
+        button_layout.addWidget(csv_import_btn)
         
         # 店舗追加ボタン
         add_btn = QPushButton("店舗追加")
@@ -120,6 +159,19 @@ class StoreListWidget(QWidget):
             }
         """)
         button_layout.addWidget(delete_btn)
+
+        tags_btn = QPushButton("店舗タグ管理")
+        tags_btn.setToolTip("大型店舗・値付け甘い など複数タグを管理します")
+        tags_btn.clicked.connect(self.manage_store_tags)
+        tags_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6f42c1;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+        """)
+        button_layout.addWidget(tags_btn)
         
         button_layout.addStretch()
         
@@ -884,15 +936,16 @@ class StoreListWidget(QWidget):
         # テキストを折り返して全文表示
         self.store_table.setWordWrap(True)
         
-        # ソート機能を有効化
-        self.store_table.setSortingEnabled(True)
+        # 併設グループ表示のため、ヘッダーソートは無効（検索で絞り込み）
+        self.store_table.setSortingEnabled(False)
         
         # ヘッダー設定（列幅は ui_utils が永続化）
         header = self.store_table.horizontalHeader()
-        header.setSectionsClickable(True)  # ヘッダークリックでソート可能に
+        header.setSectionsClickable(False)
         
         # 備考欄の変更を監視
         self.store_table.cellChanged.connect(self.on_store_cell_changed)
+        self.store_table.cellClicked.connect(self.on_store_table_cell_clicked)
         # 店舗行ダブルクリックで編集ウィンドウを開く
         self.store_table.cellDoubleClicked.connect(self.on_store_table_double_clicked)
         
@@ -914,78 +967,155 @@ class StoreListWidget(QWidget):
         
         self.update_table(stores)
         self.update_statistics()
+
+    def refresh_after_external_change(
+        self, expand_store_ids: Optional[List[int]] = None
+    ) -> None:
+        """他タブ（ルート一覧など）での店舗追加・分離後に一覧を再読込する。"""
+        if expand_store_ids:
+            for sid in expand_store_ids:
+                try:
+                    self._pending_expand_store_ids.add(int(sid))
+                except (TypeError, ValueError):
+                    continue
+        search = ""
+        if hasattr(self, "search_edit") and self.search_edit is not None:
+            search = self.search_edit.text()
+        self.load_stores(search)
     
     def load_custom_fields(self):
         """カスタムフィールド定義を読み込む"""
         self.custom_fields_def = self.db.list_custom_fields(active_only=True)
     
     def update_table(self, stores: list):
-        """テーブルを更新"""
-        # ソート機能を一時的に無効化（データ投入中はソートしない）
+        """テーブルを更新（HA/HO/OF 併設は代表行＋展開）。"""
         self.store_table.setSortingEnabled(False)
-        
-        # カスタムフィールド定義を取得
         self.load_custom_fields()
+        self.db.attach_tags_to_stores(stores)
 
-        # 店舗名の重複判定用（前後空白を除去して比較）
-        def _norm_store_name(name: Any) -> str:
+        def _code_key(s):
+            return str(s.get("store_code") or s.get("supplier_code") or "").upper()
+
+        stores_sorted = sorted(list(stores), key=_code_key)
+        self._all_stores_for_table = stores_sorted
+
+        def _norm_store_name(name):
             return str(name or "").strip()
 
-        name_counts: Dict[str, int] = {}
-        for s in stores:
+        name_counts = {}
+        for s in stores_sorted:
             n = _norm_store_name(s.get("store_name", ""))
-            if not n:
-                continue
-            name_counts[n] = name_counts.get(n, 0) + 1
-        
-        # 基本カラム + カスタムフィールドカラム
-        # 「登録番号」カラムを追加
-        basic_columns = ["ID", "所属ルート名", "ルートコード", "店舗コード", "店舗名", "住所", "電話番号", "登録番号", "備考", "経度緯度"]
-        custom_columns = [field['display_name'] for field in self.custom_fields_def]
+            if n:
+                name_counts[n] = name_counts.get(n, 0) + 1
+
+        basic_columns = list(STORE_LIST_BASIC_COLUMNS)
+        custom_columns = [field["display_name"] for field in self.custom_fields_def]
         columns = basic_columns + custom_columns
-        
-        self.store_table.setRowCount(len(stores))
+
+        display_rows = []
+        grouped = group_hardoff_family_stores(stores_sorted)
+        # 分離直後など: 対象店舗が属する併設グループを自動展開
+        if self._pending_expand_store_ids:
+            pending = set(self._pending_expand_store_ids)
+            for group in grouped:
+                member_ids = set()
+                for m in group.members:
+                    try:
+                        member_ids.add(int(m.get("id") or 0))
+                    except (TypeError, ValueError):
+                        continue
+                if member_ids & pending:
+                    self._expanded_collocations.add(collocation_group_key(group.members))
+            self._pending_expand_store_ids.clear()
+
+        for group in grouped:
+            members = group.members
+            gkey = collocation_group_key(members)
+            n = group.member_count
+            is_group = n > 1
+            expanded = bool(is_group and gkey in self._expanded_collocations)
+            display_rows.append(
+                {
+                    "store": group.representative,
+                    "kind": "col_header" if is_group else "solo",
+                    "group_key": gkey,
+                    "member_count": n,
+                    "expanded": expanded,
+                }
+            )
+            if is_group and expanded:
+                for member in members[1:]:
+                    display_rows.append(
+                        {
+                            "store": member,
+                            "kind": "col_member",
+                            "group_key": gkey,
+                            "member_count": n,
+                            "expanded": True,
+                        }
+                    )
+
+        self.store_table.setRowCount(len(display_rows))
         self.store_table.setColumnCount(len(columns))
         self.store_table.setHorizontalHeaderLabels(columns)
-        
-        # cellChangedシグナルを一時的にブロック
         self.store_table.blockSignals(True)
-        
-        # データの設定
-        for i, store in enumerate(stores):
-            store_id = store.get('id', 0)
-            
-            # 基本カラム
-            # IDは数値としてソートできるように設定
+
+        colloc_col = basic_columns.index("併設")
+        registration_col_index = basic_columns.index("登録番号")
+        store_name_col_index = basic_columns.index("店舗名")
+        tags_col_index = basic_columns.index("タグ")
+        notes_col_index = basic_columns.index("備考")
+        coords_col_index = basic_columns.index("経度緯度")
+        route_name_col = basic_columns.index("所属ルート名")
+
+        for i, row_info in enumerate(display_rows):
+            store = row_info["store"]
+            store_id = store.get("id", 0)
+            kind = row_info["kind"]
+            member_count = int(row_info["member_count"] or 1)
+            expanded = bool(row_info["expanded"])
+
             id_item = QTableWidgetItem()
-            id_item.setData(Qt.EditRole, store_id)  # 数値として設定
+            id_item.setData(Qt.EditRole, store_id)
             id_item.setText(str(store_id))
-            id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)  # 編集不可
+            id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
+            id_item.setData(Qt.UserRole + 1, row_info)
             self.store_table.setItem(i, 0, id_item)
-            
-            # 編集不可のカラム（登録番号以外）＋ 登録番号カラム（編集可）
-            # store_codeを優先し、なければsupplier_codeをフォールバック（互換性のため）
-            store_code = store.get('store_code', '') or store.get('supplier_code', '')
 
-            # ルートコードがカンマ区切りで複数ある場合は、それぞれのルート名を取得してカンマ区切りで表示
-            base_affiliated_route_name = store.get('affiliated_route_name', '') or ''
-            route_code_str = store.get('route_code', '') or ''
+            if kind == "col_header":
+                badge = collocation_toggle_label(member_count, expanded=expanded)
+            elif kind == "col_member":
+                badge = "　└"
+            else:
+                badge = ""
+            colloc_item = QTableWidgetItem(badge)
+            colloc_item.setFlags(colloc_item.flags() & ~Qt.ItemIsEditable)
+            colloc_item.setTextAlignment(Qt.AlignCenter)
+            if kind == "col_header":
+                colloc_item.setForeground(QColor("#90caf9"))
+                colloc_item.setToolTip(
+                    f"併設 {member_count} 店舗（ハードオフ／ホビーオフ／オフハウス・30m以内）\n"
+                    "クリックで展開・折りたたみ"
+                )
+            elif kind == "col_member":
+                colloc_item.setForeground(QColor("#b0bec5"))
+            self.store_table.setItem(i, colloc_col, colloc_item)
+
+            store_code = store.get("store_code", "") or store.get("supplier_code", "")
+            base_affiliated_route_name = store.get("affiliated_route_name", "") or ""
+            route_code_str = store.get("route_code", "") or ""
             display_route_name = base_affiliated_route_name
-
             if route_code_str:
-                codes = [code.strip() for code in route_code_str.split(',') if code.strip()]
-                route_names: list[str] = []
+                codes = [code.strip() for code in route_code_str.split(",") if code.strip()]
+                route_names = []
                 for code in codes:
                     try:
-                        name = self.db.get_route_name_by_code(code) or ''
+                        name = self.db.get_route_name_by_code(code) or ""
                     except Exception:
-                        name = ''
+                        name = ""
                     if name:
                         route_names.append(name)
-
-                # ルートコードから名前が取得できた場合はそれらを優先して表示
                 if route_names:
-                    # 重複を除去し、コードの並び順で表示
                     seen = set()
                     ordered_names = []
                     for name in route_names:
@@ -994,109 +1124,131 @@ class StoreListWidget(QWidget):
                             ordered_names.append(name)
                     display_route_name = ",".join(ordered_names)
 
-            registration_col_index = basic_columns.index("登録番号")
-            store_name_col_index = basic_columns.index("店舗名")
-            for col, value in enumerate([
+            store_name_display = str(store.get("store_name", "") or "")
+            if kind == "col_member":
+                store_name_display = f"　{store_name_display}"
+
+            values = [
                 display_route_name,
                 route_code_str,
-                store_code,  # 店舗コード
-                store.get('store_name', ''),
-                store.get('address', ''),
-                store.get('phone', ''),
-                store.get('registration_number', '')
-            ], start=1):
-                item = QTableWidgetItem(str(value) if value else '')
-                # 店舗名が重複している場合は赤字にする（店舗名セルのみ）
+                store_code,
+                store_name_display,
+                store.get("address", ""),
+                store.get("phone", ""),
+                store.get("registration_number", ""),
+            ]
+            for offset, value in enumerate(values):
+                col = route_name_col + offset
+                item = QTableWidgetItem(str(value) if value else "")
                 if col == store_name_col_index:
-                    nm = _norm_store_name(value)
+                    nm = _norm_store_name(store.get("store_name", ""))
                     if nm and name_counts.get(nm, 0) >= 2:
                         item.setForeground(QColor(200, 0, 0))
                         item.setToolTip(f"店舗名が重複しています: {nm}")
+                    elif kind == "col_member":
+                        item.setForeground(QColor("#b0bec5"))
                 if col == registration_col_index:
-                    # 登録番号カラムは編集可能 + store_idをUserRoleに保持
                     item.setData(Qt.UserRole, store_id)
                 else:
-                    # それ以外は編集不可
                     item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self.store_table.setItem(i, col, item)
-            
-            # 備考欄は編集可能
-            notes_text = store.get('notes', '') or ''
+
+            tag_names = [
+                str(t.get("name") or "")
+                for t in (store.get("tags") or [])
+                if t.get("name")
+            ]
+            tags_text = " / ".join(tag_names)
+            tags_item = QTableWidgetItem(tags_text)
+            tags_item.setFlags(tags_item.flags() & ~Qt.ItemIsEditable)
+            tags_item.setToolTip(tags_text)
+            if tag_names:
+                top_color = (store.get("tags") or [{}])[0].get("color") or "#1976d2"
+                tags_item.setForeground(QColor(top_color))
+            self.store_table.setItem(i, tags_col_index, tags_item)
+
+            notes_text = store.get("notes", "") or ""
             notes_item = QTableWidgetItem(notes_text)
             notes_item.setData(Qt.UserRole, store_id)
             notes_item.setToolTip(notes_text)
-            notes_col_index = basic_columns.index("備考")
             self.store_table.setItem(i, notes_col_index, notes_item)
 
-            # 経度緯度（取得済みならチェック表示のみ）
-            coords_col_index = basic_columns.index("経度緯度")
             has_coords = self._store_has_coordinates(store)
             coords_item = QTableWidgetItem("✓" if has_coords else "")
             coords_item.setTextAlignment(Qt.AlignCenter)
             coords_item.setFlags(coords_item.flags() & ~Qt.ItemIsEditable)
             if has_coords:
-                lat = store.get('latitude')
-                lng = store.get('longitude')
-                coords_item.setToolTip(f"緯度: {lat}\n経度: {lng}")
+                coords_item.setToolTip(
+                    f"緯度: {store.get('latitude')}\n経度: {store.get('longitude')}"
+                )
             self.store_table.setItem(i, coords_col_index, coords_item)
-            
-            # カスタムフィールド（編集不可）
-            custom_fields = store.get('custom_fields', {})
+
+            custom_fields = store.get("custom_fields", {})
             for j, field_def in enumerate(self.custom_fields_def):
                 col_idx = len(basic_columns) + j
-                field_name = field_def['field_name']
-                value = custom_fields.get(field_name, '')
-                field_type = field_def.get('field_type', 'TEXT')
-                
-                # フィールドタイプに応じてデータ型を設定
+                field_name = field_def["field_name"]
+                value = custom_fields.get(field_name, "")
+                field_type = field_def.get("field_type", "TEXT")
                 item = QTableWidgetItem()
-                if field_type == 'INTEGER':
+                if field_type == "INTEGER":
                     try:
-                        int_value = int(value) if value else 0
-                        item.setData(Qt.EditRole, int_value)
+                        item.setData(Qt.EditRole, int(value) if value else 0)
                     except (ValueError, TypeError):
                         item.setData(Qt.EditRole, 0)
-                    item.setText(str(value) if value else '')
-                elif field_type == 'REAL':
+                    item.setText(str(value) if value else "")
+                elif field_type == "REAL":
                     try:
-                        float_value = float(value) if value else 0.0
-                        item.setData(Qt.EditRole, float_value)
+                        item.setData(Qt.EditRole, float(value) if value else 0.0)
                     except (ValueError, TypeError):
                         item.setData(Qt.EditRole, 0.0)
-                    item.setText(str(value) if value else '')
+                    item.setText(str(value) if value else "")
                 else:
-                    item.setText(str(value) if value else '')
-                
-                item.setFlags(item.flags() & ~Qt.ItemIsEditable)  # 編集不可
+                    item.setText(str(value) if value else "")
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self.store_table.setItem(i, col_idx, item)
-        
-        # cellChangedシグナルのブロックを解除
+
         self.store_table.blockSignals(False)
-        
-        # データ投入完了後、ソート機能を再有効化
-        self.store_table.setSortingEnabled(True)
-        
-        # 店舗コードカラムで昇順ソート（店舗コードは3列目、0-indexedで3）
-        store_code_col_index = basic_columns.index("店舗コード")
-        self.store_table.sortItems(store_code_col_index, Qt.AscendingOrder)
-        
+        self.store_table.setSortingEnabled(False)
         reapply_table_column_widths(self.store_table)
-        
-        # 行の高さを内容に合わせて自動調整（折り返しテキスト対応）
         self.store_table.resizeRowsToContents()
-    
+
+    def on_store_table_cell_clicked(self, row: int, column: int) -> None:
+        """併設列クリックで展開・折りたたみ。"""
+        basic_columns = list(STORE_LIST_BASIC_COLUMNS)
+        if column != basic_columns.index("併設"):
+            return
+        id_item = self.store_table.item(row, 0)
+        if not id_item:
+            return
+        row_info = id_item.data(Qt.UserRole + 1) or {}
+        if not isinstance(row_info, dict):
+            return
+        if row_info.get("kind") != "col_header":
+            return
+        if int(row_info.get("member_count") or 0) <= 1:
+            return
+        gkey = str(row_info.get("group_key") or "")
+        if not gkey:
+            return
+        if gkey in self._expanded_collocations:
+            self._expanded_collocations.discard(gkey)
+        else:
+            self._expanded_collocations.add(gkey)
+        self.update_table(self._all_stores_for_table)
+
     def update_statistics(self):
         """統計情報を更新"""
         stats = self.db.get_statistics()
         self.stats_label.setText(
             f"統計: 店舗数 {stats['total_stores']}件, "
             f"登録ルート数 {stats['registered_routes']}件"
+            " ／ 併設列の「＋2店舗併設」「＋3店舗併設」をクリックで展開"
         )
     
     def on_store_cell_changed(self, row: int, column: int):
         """セルが変更されたときの処理（登録番号・備考欄を保存）"""
         # 登録番号列と備考列のみ保存対象
-        basic_columns = ["ID", "所属ルート名", "ルートコード", "店舗コード", "店舗名", "住所", "電話番号", "登録番号", "備考", "経度緯度"]
+        basic_columns = list(STORE_LIST_BASIC_COLUMNS)
         registration_column_index = basic_columns.index("登録番号")
         notes_column_index = basic_columns.index("備考")
         if column not in (registration_column_index, notes_column_index):
@@ -1224,6 +1376,139 @@ class StoreListWidget(QWidget):
             
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"Excelインポートに失敗しました:\n{str(e)}")
+
+    def import_takeout_csv(self):
+        """Google Takeout お気に入り CSV から未登録店舗を未所属で取り込む。"""
+        try:
+            from services.google_takeout_favorites_import import (
+                import_takeout_favorites,
+                parse_takeout_favorites_csv,
+            )
+        except Exception:
+            try:
+                from google_takeout_favorites_import import (  # type: ignore
+                    import_takeout_favorites,
+                    parse_takeout_favorites_csv,
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "エラー",
+                    f"CSVインポートモジュールを読み込めませんでした:\n{e}",
+                )
+                return
+
+        if get_store_info_from_google is None:
+            QMessageBox.warning(
+                self,
+                "エラー",
+                "Google Mapsサービスが読み込めません。\n"
+                "設定タブの Maps API キーも確認してください。",
+            )
+            return
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "お気に入りの場所.csv を選択",
+            "",
+            "CSVファイル (*.csv);;すべてのファイル (*)",
+        )
+        if not file_path:
+            return
+
+        try:
+            preview_rows = parse_takeout_favorites_csv(file_path)
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"CSVの読み込みに失敗しました:\n{e}")
+            return
+
+        if not preview_rows:
+            QMessageBox.information(self, "CSVインポート", "取り込める店舗名がありませんでした。")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "CSVインポート確認",
+            f"「お気に入りの場所」形式の CSV を取り込みます。\n\n"
+            f"件数: {len(preview_rows)} 件（タイトルあり）\n"
+            f"・DBに無い店舗だけ追加\n"
+            f"・所属ルートは未所属\n"
+            f"・住所・電話・緯度経度を Google Maps から取得\n"
+            f"・店舗コードを自動採番\n"
+            f"・店名ゆれ／電話／住所／近接座標で重複スキップ\n\n"
+            f"API呼び出しのため時間がかかることがあります。続行しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        progress = QProgressDialog(
+            "CSVインポート中...", "キャンセル", 0, len(preview_rows), self
+        )
+        progress.setWindowTitle("CSVインポート")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        def _on_progress(current: int, total: int, label: str) -> bool:
+            if progress.wasCanceled():
+                return False
+            progress.setMaximum(max(total, 1))
+            progress.setValue(min(current, total))
+            progress.setLabelText(f"処理中 ({current}/{total}): {label}")
+            QApplication.processEvents()
+            return not progress.wasCanceled()
+
+        try:
+            result = import_takeout_favorites(
+                self.db,
+                file_path,
+                fetch_info=lambda name: get_store_info_from_google(
+                    name, language_code="ja"
+                ),
+                progress_callback=_on_progress,
+            )
+        except Exception as e:
+            progress.close()
+            QMessageBox.critical(self, "エラー", f"CSVインポートに失敗しました:\n{e}")
+            return
+
+        progress.close()
+
+        lines = [
+            f"解析: {result.parsed} 件",
+            f"追加: {len(result.added)} 件（未所属）",
+            f"スキップ（重複など）: {len(result.skipped)} 件",
+            f"失敗: {len(result.failed)} 件",
+        ]
+        if result.cancelled:
+            lines.append("※途中でキャンセルされました")
+        if result.added:
+            lines.append("\n【追加例】")
+            for row in result.added[:8]:
+                code = row.store_code or "（コード未採番）"
+                lines.append(f"・{row.title} → {code}")
+            if len(result.added) > 8:
+                lines.append(f"…他 {len(result.added) - 8} 件")
+        if result.skipped:
+            lines.append("\n【スキップ例】")
+            for row in result.skipped[:5]:
+                extra = f" → {row.matched_store}" if row.matched_store else ""
+                lines.append(f"・{row.title}: {row.reason}{extra}")
+            if len(result.skipped) > 5:
+                lines.append(f"…他 {len(result.skipped) - 5} 件")
+        if result.failed:
+            lines.append("\n【失敗例】")
+            for row in result.failed[:5]:
+                lines.append(f"・{row.title}: {row.reason}")
+            if len(result.failed) > 5:
+                lines.append(f"…他 {len(result.failed) - 5} 件")
+
+        QMessageBox.information(self, "CSVインポート完了", "\n".join(lines))
+        self.load_stores(self.search_edit.text())
+        self.load_routes()
+        self.routes_changed.emit()
     
     def add_store(self):
         """店舗追加"""
@@ -1243,7 +1528,10 @@ class StoreListWidget(QWidget):
                         generated = self.db.get_next_store_code_from_store_name(store_name)
                         if generated:
                             data['store_code'] = generated
-                self.db.add_store(data)
+                tag_ids = data.pop("tag_ids", None) or []
+                new_id = self.db.add_store(data)
+                if new_id:
+                    self.db.set_store_tag_ids(int(new_id), tag_ids)
                 added_route = (data.get("affiliated_route_name") or "").strip()
                 if added_route:
                     self._adjust_route_combo_store_count(added_route, 1)
@@ -1287,7 +1575,10 @@ class StoreListWidget(QWidget):
                 data = dialog.get_data()
                 old_route = (store_data.get("affiliated_route_name") or "").strip()
                 new_route = (data.get("affiliated_route_name") or "").strip()
+                tag_ids = data.pop("tag_ids", None)
                 self.db.update_store(store_id, data)
+                if tag_ids is not None:
+                    self.db.set_store_tag_ids(store_id, tag_ids)
                 if old_route != new_route:
                     if old_route:
                         self._adjust_route_combo_store_count(old_route, -1)
@@ -1315,7 +1606,9 @@ class StoreListWidget(QWidget):
         except ValueError:
             QMessageBox.warning(self, "エラー", "不正なID形式です")
             return
-        store_name = self.store_table.item(row, 4).text()
+        store_name_col = STORE_LIST_BASIC_COLUMNS.index("店舗名")
+        name_item = self.store_table.item(row, store_name_col)
+        store_name = name_item.text().strip() if name_item else ""
         
         reply = QMessageBox.question(
             self,
@@ -1344,6 +1637,13 @@ class StoreListWidget(QWidget):
         dialog = CustomFieldsDialog(self, self.db)
         dialog.exec()
         self.load_stores(self.search_edit.text())  # カスタムフィールドが変わったので再読み込み
+
+    def manage_store_tags(self):
+        """店舗タグ管理ダイアログを開く。"""
+        from .store_tags_dialog import StoreTagsDialog
+        dialog = StoreTagsDialog(self, db=self.db)
+        dialog.exec()
+        self.load_stores(self.search_edit.text())
     
     def create_new_route(self):
         """新規ルート作成"""

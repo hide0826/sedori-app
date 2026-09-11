@@ -203,13 +203,13 @@ class SettingsWidget(QWidget):
         ext_layout.addWidget(QLabel("Google Maps APIキー:"), 0, 0)
         self.maps_api_key_edit = QLineEdit()
         self.maps_api_key_edit.setPlaceholderText(
-            "Maps Embed API / Places API (New) 用（Gemini キーとは別）"
+            "Maps Embed / Places / Directions 用（Gemini キーとは別）"
         )
         self.maps_api_key_edit.setEchoMode(QLineEdit.Password)
         self.maps_api_key_edit.setClearButtonEnabled(True)
         self.maps_api_key_edit.setToolTip(
-            "ルート地図表示・店舗の住所/緯度経度取得に使用します。\n"
-            "Cloud Console で Maps Embed API と Places API (New) を有効化したキーを入力してください。"
+            "ルート地図・店舗の住所/緯度経度取得・道路沿いルート（Directions）に使用します。\n"
+            "Cloud Console で Maps Embed API / Places API (New) / Directions API を有効化したキーを入力してください。"
         )
         ext_layout.addWidget(self.maps_api_key_edit, 0, 1)
         maps_toggle_btn = QPushButton("表示")

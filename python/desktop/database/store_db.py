@@ -402,7 +402,49 @@ class StoreDatabase:
             "CREATE INDEX IF NOT EXISTS idx_flea_market_users_username ON flea_market_users(username)"
         )
 
+        # 店舗タグ（複数タグ対応）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS store_tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                color TEXT NOT NULL DEFAULT '#1976d2',
+                priority INTEGER NOT NULL DEFAULT 100,
+                is_active INTEGER DEFAULT 1,
+                display_order INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS store_tag_links (
+                store_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (store_id, tag_id),
+                FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE,
+                FOREIGN KEY (tag_id) REFERENCES store_tags(id) ON DELETE CASCADE
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_store_tag_links_tag ON store_tag_links(tag_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_store_tag_links_store ON store_tag_links(store_id)"
+        )
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS update_store_tags_timestamp
+            AFTER UPDATE ON store_tags
+            FOR EACH ROW
+            BEGIN
+                UPDATE store_tags SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            END
+        """)
+
         conn.commit()
+        try:
+            self._seed_default_store_tags()
+        except Exception as exc:
+            print(f"店舗タグ初期データスキップ: {exc}")
         try:
             self.repair_invalid_route_codes()
         except Exception as exc:
@@ -428,8 +470,8 @@ class StoreDatabase:
             INSERT INTO stores (
                 affiliated_route_name, route_code, supplier_code, 
                 store_name, address, phone, custom_fields, store_code,
-                latitude, longitude
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                latitude, longitude, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             store_data.get('affiliated_route_name'),
             store_data.get('route_code'),
@@ -441,6 +483,7 @@ class StoreDatabase:
             store_data.get('store_code'),
             store_data.get('latitude'),
             store_data.get('longitude'),
+            store_data.get('notes'),
         ))
         
         conn.commit()
@@ -571,7 +614,7 @@ class StoreDatabase:
         """店舗を削除"""
         conn = self._get_connection()
         cursor = conn.cursor()
-        
+        cursor.execute("DELETE FROM store_tag_links WHERE store_id = ?", (store_id,))
         cursor.execute("DELETE FROM stores WHERE id = ?", (store_id,))
         conn.commit()
         
@@ -586,7 +629,9 @@ class StoreDatabase:
         row = cursor.fetchone()
         
         if row:
-            return self._row_to_dict(row)
+            store = self._row_to_dict(row)
+            self.attach_tags_to_stores([store])
+            return store
         return None
     
     def get_store_by_supplier_code(self, supplier_code: str) -> Optional[Dict[str, Any]]:
@@ -1002,8 +1047,251 @@ class StoreDatabase:
                 store_dict['custom_fields'] = {}
         else:
             store_dict['custom_fields'] = {}
+
+        if "tags" not in store_dict:
+            store_dict["tags"] = []
         
         return store_dict
+
+    # ==================== store_tags / store_tag_links ====================
+
+    _DEFAULT_STORE_TAGS = (
+        {"name": "大型店舗", "color": "#e53935", "priority": 10, "display_order": 1},
+        {"name": "値付け甘い", "color": "#43a047", "priority": 20, "display_order": 2},
+        {"name": "あまり行かなくて良い", "color": "#9e9e9e", "priority": 30, "display_order": 3},
+    )
+
+    def _seed_default_store_tags(self) -> None:
+        """初回用の既定タグを投入（既存があればスキップ）。"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM store_tags")
+        if int(cursor.fetchone()[0] or 0) > 0:
+            return
+        for tag in self._DEFAULT_STORE_TAGS:
+            cursor.execute(
+                """
+                INSERT INTO store_tags (name, color, priority, is_active, display_order)
+                VALUES (?, ?, ?, 1, ?)
+                """,
+                (
+                    tag["name"],
+                    tag["color"],
+                    tag["priority"],
+                    tag["display_order"],
+                ),
+            )
+        conn.commit()
+
+    def list_store_tags(self, active_only: bool = False) -> List[Dict[str, Any]]:
+        """店舗タグマスタ一覧。"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        if active_only:
+            cursor.execute(
+                """
+                SELECT * FROM store_tags
+                WHERE is_active = 1
+                ORDER BY display_order ASC, priority ASC, name ASC
+                """
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT * FROM store_tags
+                ORDER BY display_order ASC, priority ASC, name ASC
+                """
+            )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def add_store_tag(self, tag_data: Dict[str, Any]) -> int:
+        """店舗タグを追加。"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO store_tags (name, color, priority, is_active, display_order)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                (tag_data.get("name") or "").strip(),
+                (tag_data.get("color") or "#1976d2").strip() or "#1976d2",
+                int(tag_data.get("priority") or 100),
+                1 if tag_data.get("is_active", 1) else 0,
+                int(tag_data.get("display_order") or 0),
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+    def update_store_tag(self, tag_id: int, tag_data: Dict[str, Any]) -> bool:
+        """店舗タグを更新。"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE store_tags SET
+                name = ?,
+                color = ?,
+                priority = ?,
+                is_active = ?,
+                display_order = ?
+            WHERE id = ?
+            """,
+            (
+                (tag_data.get("name") or "").strip(),
+                (tag_data.get("color") or "#1976d2").strip() or "#1976d2",
+                int(tag_data.get("priority") or 100),
+                1 if tag_data.get("is_active", 1) else 0,
+                int(tag_data.get("display_order") or 0),
+                tag_id,
+            ),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def delete_store_tag(self, tag_id: int) -> bool:
+        """店舗タグを削除（リンクも削除）。"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM store_tag_links WHERE tag_id = ?", (tag_id,))
+        cursor.execute("DELETE FROM store_tags WHERE id = ?", (tag_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def get_store_tag_ids(self, store_id: int) -> List[int]:
+        """店舗に付いたタグID一覧。"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT tag_id FROM store_tag_links
+            WHERE store_id = ?
+            ORDER BY tag_id
+            """,
+            (store_id,),
+        )
+        return [int(row[0]) for row in cursor.fetchall()]
+
+    def set_store_tag_ids(self, store_id: int, tag_ids: List[int]) -> bool:
+        """店舗のタグを置き換え（複数可）。"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM store_tag_links WHERE store_id = ?", (store_id,))
+            seen = set()
+            for raw_id in tag_ids or []:
+                try:
+                    tid = int(raw_id)
+                except (TypeError, ValueError):
+                    continue
+                if tid in seen:
+                    continue
+                seen.add(tid)
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO store_tag_links (store_id, tag_id)
+                    VALUES (?, ?)
+                    """,
+                    (store_id, tid),
+                )
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"店舗タグ保存エラー: {e}")
+            conn.rollback()
+            return False
+
+    def attach_tags_to_stores(self, stores: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """店舗リストに tags 配列を付与（優先度順）。"""
+        if not stores:
+            return stores
+        store_ids = []
+        for store in stores:
+            sid = store.get("id")
+            if sid is not None:
+                try:
+                    store_ids.append(int(sid))
+                except (TypeError, ValueError):
+                    pass
+        if not store_ids:
+            for store in stores:
+                store["tags"] = []
+            return stores
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        placeholders = ",".join("?" for _ in store_ids)
+        cursor.execute(
+            f"""
+            SELECT l.store_id, t.id, t.name, t.color, t.priority, t.display_order
+            FROM store_tag_links l
+            JOIN store_tags t ON t.id = l.tag_id
+            WHERE l.store_id IN ({placeholders}) AND t.is_active = 1
+            ORDER BY t.priority ASC, t.display_order ASC, t.name ASC
+            """,
+            store_ids,
+        )
+        by_store: Dict[int, List[Dict[str, Any]]] = {sid: [] for sid in store_ids}
+        for row in cursor.fetchall():
+            sid = int(row[0])
+            by_store.setdefault(sid, []).append(
+                {
+                    "id": int(row[1]),
+                    "name": row[2],
+                    "color": row[3],
+                    "priority": int(row[4] or 100),
+                    "display_order": int(row[5] or 0),
+                }
+            )
+        for store in stores:
+            try:
+                sid = int(store.get("id"))
+            except (TypeError, ValueError):
+                store["tags"] = []
+                continue
+            store["tags"] = by_store.get(sid, [])
+        return stores
+
+    def get_map_payload(self) -> Dict[str, Any]:
+        """ルート地図用: ルート別店舗（訪問順）＋タグ一覧。"""
+        tags = self.list_store_tags(active_only=True)
+        routes_meta = self.list_routes_with_store_count()
+        payload_routes: List[Dict[str, Any]] = []
+        for route in routes_meta:
+            name = (route.get("route_name") or "").strip()
+            if not name:
+                continue
+            stores = self.attach_tags_to_stores(
+                self.get_stores_for_route_ordered(name)
+            )
+            payload_routes.append(
+                {
+                    "route_name": name,
+                    "route_code": route.get("route_code") or "",
+                    "display_order": int(route.get("display_order") or 0),
+                    "store_count": len(stores),
+                    "stores": stores,
+                }
+            )
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM stores
+            WHERE affiliated_route_name IS NULL OR TRIM(affiliated_route_name) = ''
+            ORDER BY store_name ASC
+            """
+        )
+        unassigned = self.attach_tags_to_stores(
+            [self._row_to_dict(row) for row in cursor.fetchall()]
+        )
+        return {
+            "tags": tags,
+            "routes": payload_routes,
+            "unassigned": unassigned,
+        }
     
     # ==================== store_custom_fields テーブル操作 ====================
     
