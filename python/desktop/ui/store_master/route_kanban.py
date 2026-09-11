@@ -800,12 +800,16 @@ class RouteKanbanWidget(QWidget):
         toolbar.addWidget(self.summary_label)
 
         add_store_btn = QPushButton("店舗追加")
-        add_store_btn.setToolTip("店舗一覧と同じダイアログで新規店舗を登録します")
+        add_store_btn.setToolTip(
+            "新規店舗を登録します。\n"
+            "所属ルートは初期値「（未所属）」です（あとから移動可）。\n"
+            "特定ルート列の右クリックから追加すると、そのルートが初期選択されます。"
+        )
         add_store_btn.setStyleSheet(
             "QPushButton { background-color: #28a745; color: white; "
             "font-weight: bold; padding: 6px 14px; border-radius: 4px; }"
         )
-        add_store_btn.clicked.connect(lambda: self.add_store())
+        add_store_btn.clicked.connect(lambda: self.add_store(initial_route_name=""))
         toolbar.addWidget(add_store_btn)
 
         add_route_btn = QPushButton("ルート登録")
@@ -1116,7 +1120,11 @@ class RouteKanbanWidget(QWidget):
         self._after_db_change()
 
     def add_store(self, initial_route_name: Optional[str] = None) -> None:
-        """店舗一覧と同じダイアログで新規店舗を追加し、カンバンを即更新する。"""
+        """店舗一覧と同じダイアログで新規店舗を追加し、カンバンを即更新する。
+
+        initial_route_name が空文字のときは未所属として登録する初期状態にする。
+        None のときはフォーカスモード等の既定ルートを使う。
+        """
         if initial_route_name is None:
             initial_route_name = self._default_initial_route_name()
 
@@ -1124,8 +1132,10 @@ class RouteKanbanWidget(QWidget):
         dialog = StoreEditDialog(
             self,
             custom_fields_def=custom_fields_def,
-            initial_route_name=initial_route_name or None,
+            # 空文字も「未所属」意図として渡す（None だと既定ルートに落ちる）
+            initial_route_name=initial_route_name if initial_route_name else "",
         )
+        # StoreEditDialog は falsy な initial_route_name を未所属扱いにする
         if dialog.exec() != QDialog.Accepted:
             return
 
@@ -1142,11 +1152,24 @@ class RouteKanbanWidget(QWidget):
                     generated = self.db.get_next_store_code_from_store_name(store_name)
                     if generated:
                         data["store_code"] = generated
+            # 未所属はルート名・コードを空で保存
+            aff = (data.get("affiliated_route_name") or "").strip()
+            if not aff:
+                data["affiliated_route_name"] = None
+                data["route_code"] = None
             self.db.add_store(data)
-            QMessageBox.information(self, "完了", "店舗を追加しました")
+            was_unassigned = not aff
+            msg = "店舗を追加しました"
+            if was_unassigned:
+                msg += "\n（未所属列に入ります。あとからドラッグでルートへ移動できます）"
+            QMessageBox.information(self, "完了", msg)
             # カンバン再描画（店舗リスト・店舗数を即反映）
             self.routes_changed.emit()
             self.reload_board()
+            if was_unassigned:
+                column = self._columns.get(UNASSIGNED_COLUMN_KEY)
+                if column is not None:
+                    self.scroll.ensureWidgetVisible(column, 20, 20)
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"追加に失敗しました:\n{str(e)}")
 

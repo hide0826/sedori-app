@@ -28,6 +28,9 @@ sys.path.insert(0, _desktop_root)
 from database.store_db import StoreDatabase
 from database.account_title_db import AccountTitleDatabase
 from utils.excel_importer import ExcelImporter
+
+# 所属ルート未設定（カンバンの「未所属」列に入る）
+UNASSIGNED_ROUTE_LABEL = "（未所属）"
 from utils.ui_utils import reapply_table_column_widths
 
 from .support import (
@@ -58,15 +61,16 @@ class StoreEditDialog(QDialog):
         if store_data:
             self.load_data()
         else:
-            # 新規追加時に初期ルートが与えられていれば自動入力
+            # 新規追加: 初期ルートがあればそれを、なければ未所属
             if self.initial_route_name:
                 idx = self.affiliated_route_name_combo.findText(self.initial_route_name)
                 if idx >= 0:
                     self.affiliated_route_name_combo.setCurrentIndex(idx)
                 else:
                     self.affiliated_route_name_combo.setCurrentText(self.initial_route_name)
-                # ルートコードを自動設定（店舗コードは店舗名入力時に自動生成）
                 self.on_route_name_changed(self.initial_route_name)
+            else:
+                self._select_unassigned_route()
     
     def setup_ui(self):
         """UIの設定"""
@@ -76,10 +80,14 @@ class StoreEditDialog(QDialog):
         form_group = QGroupBox("基本情報")
         form_layout = QFormLayout(form_group)
         
-        # 所属ルート名: 編集可能なQComboBox
+        # 所属ルート名: 編集可能なQComboBox（先頭に未所属）
         self.affiliated_route_name_combo = QComboBox()
         self.affiliated_route_name_combo.setEditable(True)  # 編集可能に設定
         self.affiliated_route_name_combo.setInsertPolicy(QComboBox.NoInsert)  # 新規入力時は追加しない
+        self.affiliated_route_name_combo.setToolTip(
+            "とりあえずルート未定の店舗は「（未所属）」を選んで登録できます。\n"
+            "あとからルート一覧カンバンで移動できます。"
+        )
         # 既存ルート名一覧をロード
         self.load_route_names()
         # ルート選択変更時のシグナル接続
@@ -228,13 +236,35 @@ class StoreEditDialog(QDialog):
             self._longitude = lng
     
     def load_route_names(self):
-        """既存のルート名一覧をロード"""
+        """既存のルート名一覧をロード（先頭に未所属）"""
         route_names = self.db.get_route_names()
+        self.affiliated_route_name_combo.blockSignals(True)
         self.affiliated_route_name_combo.clear()
+        self.affiliated_route_name_combo.addItem(UNASSIGNED_ROUTE_LABEL)
         self.affiliated_route_name_combo.addItems(route_names)
+        self.affiliated_route_name_combo.blockSignals(False)
+
+    def _normalize_route_name(self, route_name: str) -> str:
+        """表示用ラベルを実データ用のルート名へ正規化する（未所属は空文字）。"""
+        name = (route_name or "").strip()
+        if not name or name == UNASSIGNED_ROUTE_LABEL:
+            return ""
+        return name
+
+    def _select_unassigned_route(self) -> None:
+        """所属ルートを未所属にする。"""
+        self.affiliated_route_name_combo.blockSignals(True)
+        idx = self.affiliated_route_name_combo.findText(UNASSIGNED_ROUTE_LABEL)
+        if idx >= 0:
+            self.affiliated_route_name_combo.setCurrentIndex(idx)
+        else:
+            self.affiliated_route_name_combo.setCurrentText(UNASSIGNED_ROUTE_LABEL)
+        self.affiliated_route_name_combo.blockSignals(False)
+        self.route_code_edit.clear()
     
     def on_route_name_changed(self, route_name: str):
         """ルート名が変更された時（プルダウン選択時）"""
+        route_name = self._normalize_route_name(route_name)
         if not route_name:
             self.route_code_edit.clear()
             # 店舗コードは店舗名が入力されるまで空のままにする
@@ -369,7 +399,7 @@ class StoreEditDialog(QDialog):
                 # リストにない場合は現在のテキストとして設定
                 self.affiliated_route_name_combo.setCurrentText(route_name)
         else:
-            self.affiliated_route_name_combo.setCurrentText('')
+            self._select_unassigned_route()
         
         self.route_code_edit.setText(self.store_data.get('route_code', ''))
         # store_codeを優先し、なければsupplier_codeをフォールバック（互換性のため）
@@ -401,17 +431,21 @@ class StoreEditDialog(QDialog):
     def get_data(self) -> dict:
         """入力データを取得"""
         # 所属ルート名はQComboBoxから取得（編集可能なので現在のテキスト）
-        route_name = self.affiliated_route_name_combo.currentText().strip()
+        route_name = self._normalize_route_name(
+            self.affiliated_route_name_combo.currentText()
+        )
         route_code = self.route_code_edit.text().strip()
         if route_name and (
             not route_code or StoreDatabase.is_invalid_route_code(route_code, route_name)
         ):
             route_code = self.db.ensure_route_code(route_name)
+        if not route_name:
+            route_code = ""
         
         store_code = self._get_store_code_text()
         data = {
-            'affiliated_route_name': route_name,
-            'route_code': route_code,
+            'affiliated_route_name': route_name if route_name else None,
+            'route_code': route_code if route_code else None,
             'store_code': store_code if store_code else None,
             'store_name': self.store_name_edit.text().strip(),
             'address': self.address_edit.text().strip(),
