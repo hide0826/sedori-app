@@ -1246,6 +1246,9 @@ class RouteKanbanWidget(QWidget):
                 data["affiliated_route_name"] = None
                 data["route_code"] = None
             tag_ids = data.pop("tag_ids", None) or []
+            tag_ids = self._merge_auto_brand_tag_ids(
+                str(data.get("store_name") or ""), tag_ids
+            )
             new_id = self.db.add_store(data)
             if new_id:
                 self.db.set_store_tag_ids(int(new_id), tag_ids)
@@ -1263,6 +1266,16 @@ class RouteKanbanWidget(QWidget):
                     self.scroll.ensureWidgetVisible(column, 20, 20)
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"追加に失敗しました:\n{str(e)}")
+
+    def _merge_auto_brand_tag_ids(self, store_name: str, tag_ids: list) -> list:
+        try:
+            from services.store_brand_tag_service import merge_brand_tag_ids
+        except Exception:
+            try:
+                from store_brand_tag_service import merge_brand_tag_ids  # type: ignore
+            except Exception:
+                return list(tag_ids or [])
+        return merge_brand_tag_ids(self.db, store_name, tag_ids or [])
 
     def _fetch_info_for_split(self, store_name: str):
         if get_store_info_from_google is None:

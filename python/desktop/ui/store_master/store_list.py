@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QProgressDialog, QApplication, QListWidget, QListWidgetItem,
     QSplitter, QDoubleSpinBox, QAbstractItemView, QSizePolicy,
 )
-from PySide6.QtCore import Qt, Signal, QMimeData, QSettings
+from PySide6.QtCore import Qt, Signal, QMimeData, QSettings, QTimer
 from PySide6.QtGui import QColor, QDrag
 from typing import Tuple, List, Dict, Any, Optional, Set
 import sys
@@ -76,6 +76,7 @@ class StoreListWidget(QWidget):
         self._all_stores_for_table: List[Dict[str, Any]] = []
         self._expanded_collocations: Set[str] = set()
         self._pending_expand_store_ids: Set[int] = set()
+        self._brand_tags_synced = False
         
         self.setup_ui()
         self.load_routes()
@@ -959,6 +960,7 @@ class StoreListWidget(QWidget):
     
     def load_stores(self, search_term: str = ""):
         """店舗一覧を読み込む"""
+        self._ensure_brand_tags_on_load()
         stores = self.db.list_stores(search_term)
         
         # ルートフィルタが設定されている場合は店舗一覧をフィルタリング
@@ -967,6 +969,54 @@ class StoreListWidget(QWidget):
         
         self.update_table(stores)
         self.update_statistics()
+
+    def _ensure_brand_tags_on_load(self) -> None:
+        """初回読込時はタグ定義だけ用意し、付与はUI表示後に遅延実行する。"""
+        if self._brand_tags_synced:
+            return
+        self._brand_tags_synced = True
+        try:
+            from services.store_brand_tag_service import ensure_brand_store_tags
+        except Exception:
+            try:
+                from store_brand_tag_service import ensure_brand_store_tags  # type: ignore
+            except Exception:
+                return
+        try:
+            # ここは軽量（未作成タグの追加・旧名リネームのみ）
+            ensure_brand_store_tags(self.db)
+        except Exception as e:
+            print(f"ブランドタグ準備エラー: {e}")
+            return
+        # 全店舗走査は画面表示後に回す（起動時の応答なし防止）
+        QTimer.singleShot(50, self._deferred_apply_missing_brand_tags)
+
+    def _deferred_apply_missing_brand_tags(self) -> None:
+        try:
+            from services.store_brand_tag_service import apply_brand_tags_to_all_stores
+        except Exception:
+            try:
+                from store_brand_tag_service import apply_brand_tags_to_all_stores  # type: ignore
+            except Exception:
+                return
+        try:
+            result = apply_brand_tags_to_all_stores(
+                self.db, replace_existing_brand=False, fix_mismatch=True
+            )
+            if int(result.get("updated") or 0) > 0:
+                self.load_stores(self.search_edit.text() if hasattr(self, "search_edit") else "")
+        except Exception as e:
+            print(f"ブランドタグ自動付与エラー: {e}")
+
+    def _merge_auto_brand_tag_ids(self, store_name: str, tag_ids: list) -> list:
+        try:
+            from services.store_brand_tag_service import merge_brand_tag_ids
+        except Exception:
+            try:
+                from store_brand_tag_service import merge_brand_tag_ids  # type: ignore
+            except Exception:
+                return list(tag_ids or [])
+        return merge_brand_tag_ids(self.db, store_name, tag_ids or [])
 
     def refresh_after_external_change(
         self, expand_store_ids: Optional[List[int]] = None
@@ -1529,6 +1579,9 @@ class StoreListWidget(QWidget):
                         if generated:
                             data['store_code'] = generated
                 tag_ids = data.pop("tag_ids", None) or []
+                tag_ids = self._merge_auto_brand_tag_ids(
+                    str(data.get("store_name") or ""), tag_ids
+                )
                 new_id = self.db.add_store(data)
                 if new_id:
                     self.db.set_store_tag_ids(int(new_id), tag_ids)

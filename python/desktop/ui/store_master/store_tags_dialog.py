@@ -143,7 +143,9 @@ class StoreTagsDialog(QDialog):
         layout = QVBoxLayout(self)
         info = QLabel(
             "店舗には複数のタグを付けられます。\n"
-            "地図のピン色は、付いたタグのうち優先度が最も高い（数値が小さい）色を使います。"
+            "地図のピン色は、付いたタグのうち優先度が最も高い（数値が小さい）色を使います。\n"
+            "ブランド系（BOOKOFF／セカンドストリート／ハードオフ／トレジャーファクトリー／その他）は"
+            "店名から自動判別できます。評価系タグ（大型店舗など）とは分けて使えます。"
         )
         info.setWordWrap(True)
         layout.addWidget(info)
@@ -176,6 +178,16 @@ class StoreTagsDialog(QDialog):
         )
         delete_btn.clicked.connect(self.delete_tag)
         buttons.addWidget(delete_btn)
+
+        auto_btn = QPushButton("既存店舗へブランド自動付与")
+        auto_btn.setToolTip(
+            "全店舗の店名から BOOKOFF／セカンドストリート／ハードオフ／"
+            "トレジャーファクトリー／その他 を判別して付与します。\n"
+            "すでに店舗種別タグがある店舗は付け直します（評価系は残します）。"
+        )
+        auto_btn.clicked.connect(self.auto_apply_brand_tags)
+        buttons.addWidget(auto_btn)
+
         buttons.addStretch()
         close_btn = QPushButton("閉じる")
         close_btn.clicked.connect(self.accept)
@@ -188,15 +200,73 @@ class StoreTagsDialog(QDialog):
         for i, tag in enumerate(tags):
             self.table.setItem(i, 0, QTableWidgetItem(str(tag.get("id") or "")))
             self.table.setItem(i, 1, QTableWidgetItem(str(tag.get("name") or "")))
-            color = str(tag.get("color") or "#1976d2")
-            color_item = QTableWidgetItem(color)
-            color_item.setBackground(QColor(color))
-            self.table.setItem(i, 2, color_item)
+            color = str(tag.get("color") or "#1976d2").strip() or "#1976d2"
+            # 色列はスウォッチ表示（コードはツールチップ）
+            placeholder = QTableWidgetItem("")
+            placeholder.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            placeholder.setData(Qt.UserRole, color)
+            self.table.setItem(i, 2, placeholder)
+            swatch = QLabel()
+            swatch.setFixedHeight(22)
+            swatch.setMinimumWidth(56)
+            swatch.setAlignment(Qt.AlignCenter)
+            swatch.setToolTip(f"色: {color}")
+            swatch.setStyleSheet(
+                f"background-color: {color}; border: 1px solid #888; "
+                f"border-radius: 4px; margin: 2px;"
+            )
+            self.table.setCellWidget(i, 2, swatch)
             self.table.setItem(i, 3, QTableWidgetItem(str(tag.get("priority") or "")))
             self.table.setItem(i, 4, QTableWidgetItem(str(tag.get("display_order") or "")))
             active = "有効" if tag.get("is_active", 1) else "無効"
             self.table.setItem(i, 5, QTableWidgetItem(active))
             self.table.item(i, 0).setData(Qt.UserRole, tag)
+        self.table.setColumnWidth(2, 72)
+
+    def auto_apply_brand_tags(self) -> None:
+        try:
+            from services.store_brand_tag_service import (
+                apply_brand_tags_to_all_stores,
+                ensure_brand_store_tags,
+            )
+        except Exception:
+            try:
+                from store_brand_tag_service import (  # type: ignore
+                    apply_brand_tags_to_all_stores,
+                    ensure_brand_store_tags,
+                )
+            except Exception as e:
+                QMessageBox.critical(self, "エラー", f"自動付与モジュールを読めません:\n{e}")
+                return
+
+        reply = QMessageBox.question(
+            self,
+            "ブランドタグ自動付与",
+            "全店舗の店名から店舗種別タグを自動付与します。\n"
+            "（BOOKOFF／セカンドストリート／ハードオフ／トレジャーファクトリー／その他）\n\n"
+            "既存の店舗種別は店名に合わせて付け直します。\n"
+            "大型店舗などの評価系タグはそのまま残ります。\n"
+            "続行しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            ensure_brand_store_tags(self.db)
+            result = apply_brand_tags_to_all_stores(
+                self.db, replace_existing_brand=True
+            )
+            self.reload()
+            QMessageBox.information(
+                self,
+                "完了",
+                f"調査: {result['scanned']} 件\n"
+                f"付与・更新: {result['updated']} 件\n"
+                f"スキップ: {result['skipped']} 件",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"自動付与に失敗しました:\n{e}")
 
     def _selected_tag(self) -> Optional[Dict[str, Any]]:
         rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []

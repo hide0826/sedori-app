@@ -1059,6 +1059,11 @@ class StoreDatabase:
         {"name": "大型店舗", "color": "#e53935", "priority": 10, "display_order": 1},
         {"name": "値付け甘い", "color": "#43a047", "priority": 20, "display_order": 2},
         {"name": "あまり行かなくて良い", "color": "#9e9e9e", "priority": 30, "display_order": 3},
+        {"name": "BOOKOFF系", "color": "#c62828", "priority": 40, "display_order": 10},
+        {"name": "セカンドストリート系", "color": "#00695c", "priority": 41, "display_order": 11},
+        {"name": "ハードオフ系", "color": "#1565c0", "priority": 42, "display_order": 12},
+        {"name": "トレジャーファクトリー系", "color": "#ef6c00", "priority": 43, "display_order": 13},
+        {"name": "その他", "color": "#607d8b", "priority": 90, "display_order": 14},
     )
 
     def _seed_default_store_tags(self) -> None:
@@ -1067,6 +1072,18 @@ class StoreDatabase:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM store_tags")
         if int(cursor.fetchone()[0] or 0) > 0:
+            # 既存DBでもブランド系タグが無ければ後から足す
+            try:
+                from services.store_brand_tag_service import ensure_brand_store_tags
+
+                ensure_brand_store_tags(self)
+            except Exception:
+                try:
+                    from store_brand_tag_service import ensure_brand_store_tags  # type: ignore
+
+                    ensure_brand_store_tags(self)
+                except Exception:
+                    pass
             return
         for tag in self._DEFAULT_STORE_TAGS:
             cursor.execute(

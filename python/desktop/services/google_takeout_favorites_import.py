@@ -395,6 +395,17 @@ def import_takeout_favorites(
         try:
             new_id = db.add_store(store_data)
             store_data["id"] = new_id
+            try:
+                from services.store_brand_tag_service import apply_brand_tag_to_store
+
+                apply_brand_tag_to_store(db, int(new_id), place.title)
+            except Exception:
+                try:
+                    from store_brand_tag_service import apply_brand_tag_to_store  # type: ignore
+
+                    apply_brand_tag_to_store(db, int(new_id), place.title)
+                except Exception:
+                    pass
             index.register(store_data)
             result.added.append(
                 ImportAdded(

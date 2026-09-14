@@ -337,6 +337,12 @@ def split_combined_store(
             result.created.append(f"{bp.store_name} [{code}]")
             if new_id:
                 result.created_ids.append(int(new_id))
+                try:
+                    from services.store_brand_tag_service import apply_brand_tag_to_store
+
+                    apply_brand_tag_to_store(db, int(new_id), bp.store_name)
+                except Exception:
+                    pass
 
         result.split_count = 1
     except Exception as e:
