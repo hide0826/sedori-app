@@ -1,3 +1,46 @@
+## 2026-09-15 ルート地図: 店舗ラベル＋拡大維持（完了・コミット）
+
+- **状況**: 完了。実機確認OK。ブランチ `feature/sp-api` へコミット／プッシュ
+- **含む**:
+  1. 店舗表示を文字ラベルへ（BO / SS / TR / H1 / H2 / H3 / 他）
+  2. HA/HO/OF 併設は1ピン（H2/H3）にまとめ
+  3. 店舗ラベル切替・再読込でも拡大位置を維持（ピン差し替え方式）
+- **操作**: ルート地図タブ「店舗ラベル」（既定ON）。OFFで従来の色付き丸ピン
+- **実装**: `store_brand_tag_service.py` / `route_map_widget.py`
+- **テスト**: `test_store_brand_tag_service.py` / `test_store_tags_and_map.py`
+
+## 2026-09-15 ルート地図: 拡大維持を「ピン差し替え」方式へ
+
+- **原因**: 毎回 HTML を作り直していたため、位置取得に失敗すると全体表示へ戻る
+- **対応**: 初回だけ地図を生成。以降は `__HIRIO_UPDATE(..., {{fit:false}})` でピンだけ更新
+- **補助**: 拡大位置は `document.title` 経由でも Python に記憶
+- **実装**: `route_map_widget.py`
+
+## 2026-09-15 ルート地図: 拡大位置維持の再修正
+
+- **原因**: `const map` が QWebEngine の JS から見えず、位置取得が常に失敗 → 毎回 fitBounds
+- **対応**: `window.__HIRIO_MAP` / `__HIRIO_MAP_VIEW` に公開し、移動・ズームのたびに記憶。QSettings にも保存
+- **実装**: `route_map_widget.py`
+
+## 2026-09-15 ルート地図: 再描画時も拡大位置を維持
+
+- **内容**: 店舗ラベル切替・再読込・チェック変更で全体表示へ戻らないよう、直前の中心・ズームを復元
+- **実装**: `route_map_widget.py`（`saved_view`）
+
+## 2026-09-15 ルート地図: 店舗ラベルを文字表示（BO/SS/TR/H1〜H3）
+
+- **内容**: 見づらい記号アイコンを文字ラベルへ変更。HA/HO/OF併設は1ピンにまとめる
+- **ラベル**: SS / TR / BO / H1 / H2 / H3（その他は「他」）
+- **実装**: `store_brand_tag_service.py` / `route_map_widget.py`
+
+## 2026-09-14 ルート地図: 店舗アイコン表示
+
+- **内容**: ロケスマ風に店舗種別アイコンで地図表示。公式ロゴは使わず HIRIO オリジナル記号
+- **操作**: ルート地図タブ左上の「店舗アイコン」（既定ON）。OFFで従来の色付き丸ピン
+- **細分化**: ハードオフ／ホビーオフ／オフハウス／オフモールは店名で別アイコン
+- **実装**: `store_brand_tag_service.py` / `route_map_widget.py`
+- **テスト**: `test_store_brand_tag_service.py` / `test_store_tags_and_map.py`
+
 ## 2026-09-14 ルート地図UX・店舗種別タグまとめ
 
 - **状況**: 完了（`feature/sp-api` へコミット）

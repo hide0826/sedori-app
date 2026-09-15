@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""店舗マスタ「ルート地図」タブ: ピン＋ルート線＋全選択＋タグ色分け。"""
+"""店舗マスタ「ルート地図」タブ: 文字ラベル／ピン＋ルート線＋全選択＋タグ色分け。"""
 from __future__ import annotations
 
 import json
@@ -52,6 +52,46 @@ except Exception:
 
 from .store_tags_dialog import StoreTagsDialog
 
+try:
+    from services.store_brand_tag_service import (
+        MAP_ICON_DEFS,
+        MAP_ICON_ORDER,
+        hardoff_collocation_icon_key,
+        resolve_map_icon_key,
+    )
+except Exception:
+    try:
+        from store_brand_tag_service import (  # type: ignore
+            MAP_ICON_DEFS,
+            MAP_ICON_ORDER,
+            hardoff_collocation_icon_key,
+            resolve_map_icon_key,
+        )
+    except Exception:
+        MAP_ICON_DEFS = {}  # type: ignore
+        MAP_ICON_ORDER = ()  # type: ignore
+
+        def resolve_map_icon_key(store_name: str, tag_names=None) -> str:
+            return "other"
+
+        def hardoff_collocation_icon_key(member_count: int) -> str:
+            return "hardoff1"
+
+try:
+    from services.hardoff_collocation_groups import (
+        detect_hardoff_family_brand,
+        group_hardoff_family_stores,
+    )
+except Exception:
+    try:
+        from hardoff_collocation_groups import (  # type: ignore
+            detect_hardoff_family_brand,
+            group_hardoff_family_stores,
+        )
+    except Exception:
+        detect_hardoff_family_brand = None  # type: ignore
+        group_hardoff_family_stores = None  # type: ignore
+
 ROUTE_LINE_COLORS = [
     "#1e88e5",  # 青
     "#fb8c00",  # オレンジ
@@ -74,6 +114,7 @@ SETTINGS_ORG = "HIRIO"
 SETTINGS_APP = "desktop"
 SETTINGS_MAIN_SPLITTER = "store_master/route_map/main_splitter"
 SETTINGS_LEFT_SPLITTER = "store_master/route_map/left_splitter"
+SETTINGS_MAP_VIEW = "store_master/route_map/map_view"
 
 # ダークテーマでもチェック枠が見えるようにする共通スタイル
 CHECKBOX_BASE_STYLE = """
@@ -162,6 +203,11 @@ def _pin_color_for_store(store: Dict[str, Any]) -> str:
     return color or DEFAULT_PIN_COLOR
 
 
+def _icon_key_for_store(store: Dict[str, Any]) -> str:
+    tag_names = [t.get("name") for t in (store.get("tags") or []) if t.get("name")]
+    return resolve_map_icon_key(str(store.get("store_name") or ""), tag_names)
+
+
 def _store_map_dict(store: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     try:
         lat = float(store.get("latitude"))
@@ -169,6 +215,7 @@ def _store_map_dict(store: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     except (TypeError, ValueError):
         return None
     tags = store.get("tags") or []
+    tag_names = [t.get("name") for t in tags if t.get("name")]
     return {
         "id": store.get("id"),
         "store_code": store.get("store_code") or store.get("supplier_code") or "",
@@ -176,30 +223,80 @@ def _store_map_dict(store: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "lat": lat,
         "lng": lng,
         "pin_color": _pin_color_for_store(store),
-        "tag_names": [t.get("name") for t in tags if t.get("name")],
+        "icon_key": _icon_key_for_store(store),
+        "tag_names": tag_names,
         "tag_ids": [int(t["id"]) for t in tags if t.get("id") is not None],
+        "member_names": [],
     }
+
+
+def _mean_lat_lng(stores: List[Dict[str, Any]]) -> Optional[tuple]:
+    lats: List[float] = []
+    lngs: List[float] = []
+    for store in stores:
+        try:
+            lats.append(float(store.get("latitude")))
+            lngs.append(float(store.get("longitude")))
+        except (TypeError, ValueError):
+            continue
+    if not lats:
+        return None
+    return (sum(lats) / len(lats), sum(lngs) / len(lngs))
+
+
+def _markers_from_stores(stores_raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """地図ピン用。HA/HO/OF の併設は 1 ピン（H1/H2/H3）にまとめる。"""
+    if not stores_raw:
+        return []
+    if group_hardoff_family_stores is None:
+        markers = []
+        for store in stores_raw:
+            mapped = _store_map_dict(store)
+            if mapped:
+                markers.append(mapped)
+        return markers
+
+    markers: List[Dict[str, Any]] = []
+    for group in group_hardoff_family_stores(stores_raw):
+        members = list(group.members or [])
+        mapped = None
+        for candidate in [group.representative] + members:
+            mapped = _store_map_dict(candidate)
+            if mapped:
+                break
+        if not mapped:
+            continue
+        if detect_hardoff_family_brand is not None and detect_hardoff_family_brand(
+            group.representative
+        ):
+            mapped["icon_key"] = hardoff_collocation_icon_key(len(members))
+            names = []
+            for m in members:
+                name = str(m.get("store_name") or "").strip()
+                if name and name not in names:
+                    names.append(name)
+            mapped["member_names"] = names
+            mean = _mean_lat_lng(members)
+            if mean:
+                mapped["lat"], mapped["lng"] = mean
+        markers.append(mapped)
+    return markers
+
+
+def _json_for_js(obj: Any) -> str:
+    """HTML / runJavaScript 用に JSON を安全化。"""
+    return json.dumps(obj, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
 
 
 def build_leaflet_html(payload: Dict[str, Any]) -> str:
     """Leaflet 地図 HTML（CDN）。payload は JSON 埋め込み。"""
-    data_json = json.dumps(payload, ensure_ascii=False)
-    # </script> を壊さない
-    data_json = data_json.replace("<", "\\u003c").replace(">", "\\u003e")
+    data_json = _json_for_js(payload)
     grayscale = bool(payload.get("grayscale"))
     # 注意: この文字列は後で f-string に {tile_url} として埋め込む。
     # ここを {{s}} にすると Leaflet に二重ブレースが渡りタイルが真っ黒になる。
-    # Carto は API キー無しだと "API KEY REQUIRED" 透かしが出るため使わない。
-    # 白黒は OSM タイル＋ CSS grayscale で実現する（追加キー不要）。
     tile_url = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
     tile_attr = "&copy; OpenStreetMap"
-    line_weight = 5 if grayscale else 4
-    line_opacity = 0.95 if grayscale else 0.85
-    dash_weight = 4 if grayscale else 3
-    mode_label = "白黒地図" if grayscale else "カラー地図"
-    # タイル未着時も真っ黒にしない
     map_bg = "#e8e8e8" if grayscale else "#cfd8dc"
-    # 白黒ON時だけタイル面をグレースケール（ピン・線は色のまま）
     tile_filter_css = (
         ".leaflet-tile-pane { filter: grayscale(100%) contrast(1.05) brightness(1.05); }"
         if grayscale
@@ -217,7 +314,7 @@ def build_leaflet_html(payload: Dict[str, Any]) -> str:
   html, body, #map {{ margin:0; padding:0; height:100%; width:100%; background:{map_bg}; }}
   .legend {{
     background: rgba(30,30,30,0.9); color:#eee; padding:8px 10px;
-    border-radius:6px; font: 12px/1.4 sans-serif; max-width:220px;
+    border-radius:6px; font: 12px/1.4 sans-serif; max-width:280px;
   }}
   .legend .swatch {{
     display:inline-block; width:12px; height:12px; border-radius:50%;
@@ -229,43 +326,155 @@ def build_leaflet_html(payload: Dict[str, Any]) -> str:
     background: rgba(30,30,30,0.85); color:#eee; padding:4px 8px;
     border-radius:4px; font: 11px/1.3 sans-serif;
   }}
+  .hirio-pin-wrap, .hirio-pin-wrap.leaflet-div-icon {{
+    background: transparent !important;
+    border: none !important;
+  }}
+  .hirio-pin {{
+    width: 34px;
+    height: 44px;
+    text-align: center;
+  }}
+  .hirio-pin-badge {{
+    width: 30px;
+    height: 30px;
+    margin: 0 auto;
+    border-radius: 50%;
+    border: 2px solid #fff;
+    box-shadow: 0 1px 5px rgba(0,0,0,0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }}
+  .hirio-pin-text {{
+    color: #fff;
+    font: 700 11px/1 "Segoe UI","Meiryo UI","Yu Gothic UI",sans-serif;
+    letter-spacing: 0;
+  }}
+  .hirio-pin-pointer {{
+    width: 0;
+    height: 0;
+    margin: -1px auto 0;
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+    border-top-width: 10px;
+    border-top-style: solid;
+  }}
+  .legend-icon {{
+    display: inline-flex;
+    width: 24px;
+    height: 18px;
+    border-radius: 9px;
+    border: 1px solid #fff;
+    margin-right: 6px;
+    vertical-align: middle;
+    align-items: center;
+    justify-content: center;
+    font: 700 10px/1 "Segoe UI","Meiryo UI",sans-serif;
+    color: #fff;
+  }}
   {tile_filter_css}
 </style>
 </head>
 <body>
 <div id="map"></div>
 <script>
-const DATA = {data_json};
+window.__HIRIO_DATA = {data_json};
 const map = L.map('map', {{ zoomControl: true }});
+window.__HIRIO_MAP = map;
+window.__HIRIO_MAP_VIEW = null;
+window.__HIRIO_READY = false;
+
+const layerGroup = L.layerGroup().addTo(map);
+let legendControl = null;
+let modeBadgeControl = null;
+const DEFAULT_PIN = '{DEFAULT_PIN_COLOR}';
+
+function hirioRememberView() {{
+  try {{
+    const c = map.getCenter();
+    const view = {{ lat: c.lat, lng: c.lng, zoom: map.getZoom() }};
+    window.__HIRIO_MAP_VIEW = view;
+    // Python 側へ確実に伝える（titleChanged）
+    document.title = 'HIRIO_MAP:' + JSON.stringify(view);
+  }} catch (e) {{}}
+}}
+map.on('moveend', hirioRememberView);
+map.on('zoomend', hirioRememberView);
+
 L.tileLayer('{tile_url}', {{
   maxZoom: 19,
   attribution: '{tile_attr}'
 }}).addTo(map);
 
-const layerGroup = L.layerGroup().addTo(map);
-const bounds = [];
+function hirioSetGrayscale(on) {{
+  const pane = document.querySelector('.leaflet-tile-pane');
+  if (pane) {{
+    pane.style.filter = on
+      ? 'grayscale(100%) contrast(1.05) brightness(1.05)'
+      : '';
+  }}
+  document.body.style.background = on ? '#e8e8e8' : '#cfd8dc';
+  const mapEl = document.getElementById('map');
+  if (mapEl) mapEl.style.background = on ? '#e8e8e8' : '#cfd8dc';
+}}
+
+function bindStorePopup(marker, store, routeName) {{
+  const tags = (store.tag_names || []).join(' / ') || '（タグなし）';
+  const code = store.store_code ? '[' + store.store_code + '] ' : '';
+  const members = store.member_names || [];
+  let extra = '';
+  if (members.length > 1) {{
+    extra = '<div>併設: ' + members.join(' / ') + '</div>';
+  }}
+  marker.bindPopup(
+    '<div class="popup-title">' + code + (store.store_name || '') + '</div>' +
+    extra +
+    '<div>ルート: ' + (routeName || '未所属') + '</div>' +
+    '<div class="popup-tags">タグ: ' + tags + '</div>'
+  );
+}}
 
 function addCircle(store, routeName) {{
   const marker = L.circleMarker([store.lat, store.lng], {{
     radius: 8,
     color: '#ffffff',
     weight: 1.5,
-    fillColor: store.pin_color || '{DEFAULT_PIN_COLOR}',
+    fillColor: store.pin_color || DEFAULT_PIN,
     fillOpacity: 0.95
   }});
-  const tags = (store.tag_names || []).join(' / ') || '（タグなし）';
-  const code = store.store_code ? '[' + store.store_code + '] ' : '';
-  marker.bindPopup(
-    '<div class="popup-title">' + code + (store.store_name || '') + '</div>' +
-    '<div>ルート: ' + (routeName || '未所属') + '</div>' +
-    '<div class="popup-tags">タグ: ' + tags + '</div>'
-  );
+  bindStorePopup(marker, store, routeName);
   marker.addTo(layerGroup);
-  bounds.push([store.lat, store.lng]);
+}}
+
+function addIconMarker(store, routeName, icons) {{
+  const key = store.icon_key || 'other';
+  const spec = (icons && icons[key]) || (icons && icons.other) || {{ bg: DEFAULT_PIN, text: '他', fg: '#ffffff' }};
+  const bg = spec.bg || DEFAULT_PIN;
+  const fg = spec.fg || '#ffffff';
+  const text = spec.text || '他';
+  const html =
+    '<div class="hirio-pin">' +
+      '<div class="hirio-pin-badge" style="background:' + bg + '">' +
+        '<span class="hirio-pin-text" style="color:' + fg + '">' + text + '</span>' +
+      '</div>' +
+      '<div class="hirio-pin-pointer" style="border-top-color:' + bg + '"></div>' +
+    '</div>';
+  const marker = L.marker([store.lat, store.lng], {{
+    icon: L.divIcon({{
+      className: 'hirio-pin-wrap',
+      html: html,
+      iconSize: [34, 44],
+      iconAnchor: [17, 42],
+      popupAnchor: [0, -36]
+    }}),
+    keyboard: false
+  }});
+  bindStorePopup(marker, store, routeName);
+  marker.addTo(layerGroup);
 }}
 
 function addRouteLine(pts, color, weight, opacity) {{
-  // 白い下敷きでコントラスト確保 → 色付き本体
   L.polyline(pts, {{
     color: '#ffffff', weight: weight + 2, opacity: 0.7
   }}).addTo(layerGroup);
@@ -274,51 +483,111 @@ function addRouteLine(pts, color, weight, opacity) {{
   }}).addTo(layerGroup);
 }}
 
-(DATA.routes || []).forEach(function(route) {{
-  const color = route.line_color || '#1e88e5';
-  const pts = [];
-  (route.stores || []).forEach(function(s) {{
-    addCircle(s, route.route_name);
-    pts.push([s.lat, s.lng]);
-  }});
-  if ((route.road_polyline || []).length >= 2) {{
-    addRouteLine(route.road_polyline, color, {line_weight}, {line_opacity});
-  }} else if (pts.length >= 2) {{
-    addRouteLine(pts, color, {dash_weight}, {line_opacity});
+function hirioUpdateLegend(data) {{
+  if (legendControl) {{
+    map.removeControl(legendControl);
+    legendControl = null;
   }}
-}});
+  if (modeBadgeControl) {{
+    map.removeControl(modeBadgeControl);
+    modeBadgeControl = null;
+  }}
+  const useIcons = !!data.use_icons;
+  const icons = data.map_icons || {{}};
+  legendControl = L.control({{ position: 'bottomleft' }});
+  legendControl.onAdd = function() {{
+    const div = L.DomUtil.create('div', 'legend');
+    let html = '<div style="font-weight:bold;margin-bottom:4px;">凡例</div>';
+    if (useIcons) {{
+      (data.icon_legend || []).forEach(function(row) {{
+        const spec = icons[row.key] || icons.other || {{}};
+        const bg = spec.bg || row.bg || '#888';
+        const fg = spec.fg || '#fff';
+        const text = spec.text || row.text || '';
+        html += '<div><span class="legend-icon" style="background:' + bg + ';color:' + fg + '">' +
+                text + '</span>' + (row.label || spec.label || '') + '</div>';
+      }});
+    }} else {{
+      html += '<div><span class="swatch" style="background:' + DEFAULT_PIN + '"></span>タグなし</div>';
+      (data.tag_legend || []).forEach(function(t) {{
+        html += '<div><span class="swatch" style="background:' + (t.color||'#888') + '"></span>' +
+                (t.name||'') + '</div>';
+      }});
+    }}
+    div.innerHTML = html;
+    return div;
+  }};
+  legendControl.addTo(map);
 
-(DATA.unassigned || []).forEach(function(s) {{
-  addCircle(s, '未所属');
-}});
-
-if (bounds.length) {{
-  map.fitBounds(bounds, {{ padding: [40, 40] }});
-}} else {{
-  map.setView([35.68, 139.76], 10);
+  modeBadgeControl = L.control({{ position: 'topright' }});
+  modeBadgeControl.onAdd = function() {{
+    const div = L.DomUtil.create('div', 'mode-badge');
+    div.textContent = data.grayscale ? '白黒地図' : 'カラー地図';
+    return div;
+  }};
+  modeBadgeControl.addTo(map);
 }}
 
-const legend = L.control({{ position: 'bottomleft' }});
-legend.onAdd = function() {{
-  const div = L.DomUtil.create('div', 'legend');
-  let html = '<div style="font-weight:bold;margin-bottom:4px;">凡例</div>';
-  html += '<div><span class="swatch" style="background:{DEFAULT_PIN_COLOR}"></span>タグなし</div>';
-  (DATA.tag_legend || []).forEach(function(t) {{
-    html += '<div><span class="swatch" style="background:' + (t.color||'#888') + '"></span>' +
-            (t.name||'') + '</div>';
-  }});
-  div.innerHTML = html;
-  return div;
-}};
-legend.addTo(map);
+// ピン・線だけ描き直す。fit=false なら拡大位置は絶対に変えない
+window.__HIRIO_UPDATE = function(data, opts) {{
+  opts = opts || {{}};
+  window.__HIRIO_DATA = data || {{}};
+  const useIcons = !!data.use_icons;
+  const icons = data.map_icons || {{}};
+  const grayscale = !!data.grayscale;
+  const lineWeight = grayscale ? 5 : 4;
+  const lineOpacity = grayscale ? 0.95 : 0.85;
+  const dashWeight = grayscale ? 4 : 3;
+  const bounds = [];
 
-const modeBadge = L.control({{ position: 'topright' }});
-modeBadge.onAdd = function() {{
-  const div = L.DomUtil.create('div', 'mode-badge');
-  div.textContent = '{mode_label}';
-  return div;
+  hirioSetGrayscale(grayscale);
+  layerGroup.clearLayers();
+
+  (data.routes || []).forEach(function(route) {{
+    const color = route.line_color || '#1e88e5';
+    const pts = [];
+    (route.stores || []).forEach(function(s) {{
+      if (useIcons) addIconMarker(s, route.route_name, icons);
+      else addCircle(s, route.route_name);
+      pts.push([s.lat, s.lng]);
+      bounds.push([s.lat, s.lng]);
+    }});
+    if ((route.road_polyline || []).length >= 2) {{
+      addRouteLine(route.road_polyline, color, lineWeight, lineOpacity);
+    }} else if (pts.length >= 2) {{
+      addRouteLine(pts, color, dashWeight, lineOpacity);
+    }}
+  }});
+
+  (data.unassigned || []).forEach(function(s) {{
+    if (useIcons) addIconMarker(s, '未所属', icons);
+    else addCircle(s, '未所属');
+    bounds.push([s.lat, s.lng]);
+  }});
+
+  hirioUpdateLegend(data);
+
+  if (opts.fit) {{
+    const savedView = data.saved_view || null;
+    if (
+      savedView &&
+      Number.isFinite(savedView.lat) &&
+      Number.isFinite(savedView.lng) &&
+      Number.isFinite(savedView.zoom)
+    ) {{
+      map.setView([savedView.lat, savedView.lng], savedView.zoom);
+    }} else if (bounds.length) {{
+      map.fitBounds(bounds, {{ padding: [40, 40] }});
+    }} else {{
+      map.setView([35.68, 139.76], 10);
+    }}
+  }}
+  hirioRememberView();
+  window.__HIRIO_READY = true;
+  return true;
 }};
-modeBadge.addTo(map);
+
+window.__HIRIO_UPDATE(window.__HIRIO_DATA, {{ fit: true }});
 </script>
 </body>
 </html>
@@ -340,7 +609,10 @@ class RouteMapWidget(QWidget):
         self._tag_checks: Dict[int, QCheckBox] = {}
         self._brand_tags_synced = False
         self._splitter_sizes_restored = False
+        self._saved_map_view: Optional[Dict[str, float]] = None
+        self._map_ready = False
         self.setup_ui()
+        self._saved_map_view = self._load_map_view_settings()
 
     def setup_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -381,6 +653,16 @@ class RouteMapWidget(QWidget):
         )
         self.grayscale_check.toggled.connect(self._on_options_changed)
         toolbar.addWidget(self.grayscale_check)
+
+        self.icon_check = QCheckBox("店舗ラベル")
+        self.icon_check.setChecked(True)
+        self.icon_check.setStyleSheet(_checkbox_style("#e0e0e0"))
+        self.icon_check.setToolTip(
+            "ON: BO / SS / TR / H1〜H3 の文字ラベルで表示します\n"
+            "OFF: 従来の色付き丸ピン（タグ色）"
+        )
+        self.icon_check.toggled.connect(self._on_options_changed)
+        toolbar.addWidget(self.icon_check)
 
         toolbar.addStretch()
         layout.addLayout(toolbar)
@@ -515,6 +797,8 @@ class RouteMapWidget(QWidget):
             self.map_view = QWebEngineView()
             self.map_view.setMinimumHeight(420)
             self.map_view.setMinimumWidth(360)
+            self.map_view.loadFinished.connect(self._on_map_load_finished)
+            self.map_view.titleChanged.connect(self._on_map_title_changed)
             right_layout.addWidget(self.map_view)
         else:
             self.map_view = None
@@ -808,6 +1092,121 @@ class RouteMapWidget(QWidget):
         # いずれかの表示タグがあればOK
         return any(tid in allowed for tid in tag_ids)
 
+    _JS_GET_MAP_VIEW = """
+(function(){
+  try {
+    if (window.__HIRIO_MAP_VIEW &&
+        Number.isFinite(window.__HIRIO_MAP_VIEW.lat) &&
+        Number.isFinite(window.__HIRIO_MAP_VIEW.lng) &&
+        Number.isFinite(window.__HIRIO_MAP_VIEW.zoom)) {
+      return {
+        lat: window.__HIRIO_MAP_VIEW.lat,
+        lng: window.__HIRIO_MAP_VIEW.lng,
+        zoom: window.__HIRIO_MAP_VIEW.zoom
+      };
+    }
+    var m = window.__HIRIO_MAP;
+    if (!m) return null;
+    var c = m.getCenter();
+    return {lat: c.lat, lng: c.lng, zoom: m.getZoom()};
+  } catch (e) {
+    return null;
+  }
+})();
+"""
+
+    @staticmethod
+    def _normalize_map_view(view: Any) -> Optional[Dict[str, float]]:
+        if not isinstance(view, dict):
+            return None
+        try:
+            lat = float(view.get("lat"))
+            lng = float(view.get("lng"))
+            zoom = float(view.get("zoom"))
+        except (TypeError, ValueError):
+            return None
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0):
+            return None
+        if zoom < 1 or zoom > 22:
+            return None
+        return {"lat": lat, "lng": lng, "zoom": zoom}
+
+    def _load_map_view_settings(self) -> Optional[Dict[str, float]]:
+        try:
+            raw = self._settings().value(SETTINGS_MAP_VIEW)
+        except Exception:
+            return None
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                return None
+        return self._normalize_map_view(raw)
+
+    def _persist_map_view(self, view: Optional[Dict[str, float]]) -> None:
+        if not view:
+            return
+        try:
+            self._settings().setValue(SETTINGS_MAP_VIEW, dict(view))
+        except Exception:
+            pass
+
+    def _on_map_load_finished(self, ok: bool) -> None:
+        self._map_ready = bool(ok)
+
+    def _on_map_title_changed(self, title: str) -> None:
+        """拡大・移動のたびに document.title 経由で位置を受け取る。"""
+        text = str(title or "")
+        if not text.startswith("HIRIO_MAP:"):
+            return
+        try:
+            raw = json.loads(text[len("HIRIO_MAP:") :])
+        except Exception:
+            return
+        view = self._normalize_map_view(raw)
+        if view is None:
+            return
+        self._saved_map_view = view
+        self._persist_map_view(view)
+
+    def _apply_leaflet_payload(self, leaflet_payload: Dict[str, Any]) -> None:
+        """地図へ反映。既に表示中ならピンだけ差し替え（拡大位置は維持）。"""
+        if self.map_view is None:
+            return
+
+        if self._saved_map_view is not None:
+            leaflet_payload["saved_view"] = self._saved_map_view
+
+        # 既に地図があるときは HTML を作り直さない（ここが全体表示に戻る主因だった）
+        if self._map_ready:
+            data_json = _json_for_js(leaflet_payload)
+            js = (
+                "(function(){"
+                "try {"
+                "if (typeof window.__HIRIO_UPDATE !== 'function') return false;"
+                f"return window.__HIRIO_UPDATE({data_json}, {{fit:false}});"
+                "} catch (e) { return false; }"
+                "})();"
+            )
+
+            def _after_update(result: Any) -> None:
+                if result is True:
+                    return
+                # 更新関数が無い／失敗時だけフル再読込
+                self._map_ready = False
+                html_doc = build_leaflet_html(leaflet_payload)
+                self.map_view.setHtml(html_doc, QUrl("https://local.hirio/"))
+
+            try:
+                self.map_view.page().runJavaScript(js, _after_update)
+                return
+            except Exception:
+                self._map_ready = False
+
+        self._map_ready = False
+        html_doc = build_leaflet_html(leaflet_payload)
+        self.map_view.setHtml(html_doc, QUrl("https://local.hirio/"))
+
     def _refresh_map(self) -> None:
         if not self._payload_cache:
             return
@@ -824,11 +1223,7 @@ class RouteMapWidget(QWidget):
             stores_raw = [
                 s for s in (route.get("stores") or []) if self._store_passes_tag_filter(s)
             ]
-            stores = []
-            for s in stores_raw:
-                mapped = _store_map_dict(s)
-                if mapped:
-                    stores.append(mapped)
+            stores = _markers_from_stores(stores_raw)
 
             entry: Dict[str, Any] = {
                 "route_name": route.get("route_name") or "",
@@ -877,12 +1272,12 @@ class RouteMapWidget(QWidget):
 
         unassigned: List[Dict[str, Any]] = []
         if self.show_unassigned_check.isChecked():
-            for s in self._payload_cache.get("unassigned") or []:
-                if not self._store_passes_tag_filter(s):
-                    continue
-                mapped = _store_map_dict(s)
-                if mapped:
-                    unassigned.append(mapped)
+            unassigned_raw = [
+                s
+                for s in (self._payload_cache.get("unassigned") or [])
+                if self._store_passes_tag_filter(s)
+            ]
+            unassigned = _markers_from_stores(unassigned_raw)
 
         tag_legend = []
         for tag in self._payload_cache.get("tags") or []:
@@ -892,16 +1287,34 @@ class RouteMapWidget(QWidget):
                     {"name": tag.get("name"), "color": tag.get("color")}
                 )
 
-        html_doc = build_leaflet_html(
-            {
-                "routes": map_routes,
-                "unassigned": unassigned,
-                "tag_legend": tag_legend,
-                "grayscale": bool(self.grayscale_check.isChecked()),
-            }
-        )
-        if self.map_view is not None:
-            self.map_view.setHtml(html_doc, QUrl("https://local.hirio/"))
+        visible_stores: List[Dict[str, Any]] = []
+        for route in map_routes:
+            visible_stores.extend(route.get("stores") or [])
+        visible_stores.extend(unassigned)
+        present_keys = {
+            str(s.get("icon_key") or "other") for s in visible_stores
+        }
+        icon_legend = []
+        for key in MAP_ICON_ORDER:
+            if key in present_keys:
+                spec = MAP_ICON_DEFS.get(key) or {}
+                icon_legend.append(
+                    {
+                        "key": key,
+                        "label": spec.get("label") or key,
+                        "bg": spec.get("bg") or DEFAULT_PIN_COLOR,
+                    }
+                )
+
+        leaflet_payload: Dict[str, Any] = {
+            "routes": map_routes,
+            "unassigned": unassigned,
+            "tag_legend": tag_legend,
+            "icon_legend": icon_legend,
+            "map_icons": MAP_ICON_DEFS,
+            "use_icons": bool(self.icon_check.isChecked()),
+            "grayscale": bool(self.grayscale_check.isChecked()),
+        }
 
         if not summary_lines:
             if use_road:
@@ -914,3 +1327,5 @@ class RouteMapWidget(QWidget):
                 )
         else:
             self.summary_text.setPlainText("\n".join(summary_lines))
+
+        self._apply_leaflet_payload(leaflet_payload)

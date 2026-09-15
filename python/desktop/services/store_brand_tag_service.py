@@ -68,6 +68,123 @@ BRAND_TAG_DEFS: Tuple[Dict[str, Any], ...] = (
 
 BRAND_TAG_NAMES: Tuple[str, ...] = tuple(t["name"] for t in BRAND_TAG_DEFS)
 
+# 地図ラベル（文字コード。公式ロゴは使わない）
+# ハードオフ系は併設数で H1 / H2 / H3
+MAP_ICON_ORDER: Tuple[str, ...] = (
+    "secondstreet",
+    "treasurefactory",
+    "bookoff",
+    "hardoff1",
+    "hardoff2",
+    "hardoff3",
+    "other",
+)
+
+_MAP_ICON_PATTERNS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    (
+        "hardoff",
+        (
+            "ホビーオフ",
+            "ホビー・オフ",
+            "HOBBY OFF",
+            "HOBBYOFF",
+            "オフハウス",
+            "オフ・ハウス",
+            "OFF HOUSE",
+            "OFFHOUSE",
+            "オフモール",
+            "オフ・モール",
+            "OFF MALL",
+            "OFFMALL",
+            "ハードオフ",
+            "HARD OFF",
+            "HARDOFF",
+            "モードオフ",
+            "MODE OFF",
+            "MODEOFF",
+        ),
+    ),
+    (
+        "treasurefactory",
+        (
+            "トレジャーファクトリー",
+            "トレファク",
+            "TREASURE FACTORY",
+            "TREASUREFACTORY",
+            "TREFAC",
+        ),
+    ),
+    (
+        "secondstreet",
+        (
+            "セカンドストリート",
+            "セカンド・ストリート",
+            "セカスト",
+            "2ND STREET",
+            "2NDSTREET",
+            "SECOND STREET",
+            "SECONDSTREET",
+        ),
+    ),
+    (
+        "bookoff",
+        ("ブックオフ", "BOOKOFF", "BOOK OFF", "BOOK-OFF"),
+    ),
+)
+
+_BRAND_TAG_TO_ICON: Dict[str, str] = {
+    "BOOKOFF系": "bookoff",
+    "セカンドストリート系": "secondstreet",
+    "ハードオフ系": "hardoff",
+    "トレジャーファクトリー系": "treasurefactory",
+    "その他": "other",
+}
+
+MAP_ICON_DEFS: Dict[str, Dict[str, str]] = {
+    "secondstreet": {
+        "label": "セカンドストリート系",
+        "text": "SS",
+        "bg": "#00897b",
+        "fg": "#ffffff",
+    },
+    "treasurefactory": {
+        "label": "トレジャーファクトリー系",
+        "text": "TR",
+        "bg": "#ef6c00",
+        "fg": "#ffffff",
+    },
+    "bookoff": {
+        "label": "BOOKOFF系",
+        "text": "BO",
+        "bg": "#c62828",
+        "fg": "#ffffff",
+    },
+    "hardoff1": {
+        "label": "ハードオフ系",
+        "text": "H1",
+        "bg": "#1565c0",
+        "fg": "#ffffff",
+    },
+    "hardoff2": {
+        "label": "ハードオフ系2店舗併設",
+        "text": "H2",
+        "bg": "#0d47a1",
+        "fg": "#ffffff",
+    },
+    "hardoff3": {
+        "label": "ハードオフ系3店舗併設",
+        "text": "H3",
+        "bg": "#1a237e",
+        "fg": "#ffffff",
+    },
+    "other": {
+        "label": "その他",
+        "text": "他",
+        "bg": "#607d8b",
+        "fg": "#ffffff",
+    },
+}
+
 # 長い／具体的な表記を先に判定
 _BRAND_PATTERNS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     (
@@ -143,6 +260,61 @@ def detect_brand_tag_name(store_name: str) -> str:
             if p and (p in name or p_compact in compact):
                 return tag_name
     return "その他"
+
+
+def detect_map_icon_key(store_name: str) -> str:
+    """店舗名から地図ラベル種別を返す（ハードオフ系は hardoff）。"""
+    name = _norm(store_name)
+    if not name:
+        return "other"
+    compact = name.replace(" ", "").replace("・", "")
+    for key, patterns in _MAP_ICON_PATTERNS:
+        for pat in patterns:
+            p = _norm(pat)
+            p_compact = p.replace(" ", "").replace("・", "")
+            if p and (p in name or p_compact in compact):
+                return key
+    return "other"
+
+
+def icon_key_from_brand_tag_name(tag_name: str) -> Optional[str]:
+    """店舗種別タグ名から地図ラベル種別へ。該当しなければ None。"""
+    return _BRAND_TAG_TO_ICON.get((tag_name or "").strip())
+
+
+def hardoff_collocation_icon_key(member_count: int) -> str:
+    """併設店舗数から H1 / H2 / H3 のキーを返す。"""
+    try:
+        n = int(member_count)
+    except (TypeError, ValueError):
+        n = 1
+    if n >= 3:
+        return "hardoff3"
+    if n == 2:
+        return "hardoff2"
+    return "hardoff1"
+
+
+def normalize_map_icon_key(key: str) -> str:
+    """hardoff を単独表示用の hardoff1 にそろえる。"""
+    k = (key or "").strip() or "other"
+    if k == "hardoff":
+        return "hardoff1"
+    return k
+
+
+def resolve_map_icon_key(
+    store_name: str, tag_names: Optional[Sequence[str]] = None
+) -> str:
+    """店名を優先し、判別できなければ店舗種別タグからラベルを決める。"""
+    key = detect_map_icon_key(store_name)
+    if key != "other":
+        return normalize_map_icon_key(key)
+    for raw in tag_names or []:
+        mapped = icon_key_from_brand_tag_name(str(raw or ""))
+        if mapped:
+            return normalize_map_icon_key(mapped)
+    return "other"
 
 
 def is_brand_tag_name(name: str) -> bool:

@@ -18,10 +18,13 @@ from services.store_brand_tag_service import (
     apply_brand_tag_to_store,
     apply_brand_tags_to_all_stores,
     detect_brand_tag_name,
+    detect_map_icon_key,
     ensure_brand_store_tags,
+    hardoff_collocation_icon_key,
     is_brand_tag_name,
     is_quality_tag_name,
     merge_brand_tag_ids,
+    resolve_map_icon_key,
 )
 
 
@@ -46,6 +49,37 @@ class TestStoreBrandTagService(unittest.TestCase):
         )
         self.assertEqual(detect_brand_tag_name("ゲオ川口"), "その他")
         self.assertEqual(detect_brand_tag_name(""), "その他")
+
+    def test_detect_map_icon_key(self):
+        self.assertEqual(detect_map_icon_key("ブックオフ川口店"), "bookoff")
+        self.assertEqual(detect_map_icon_key("セカンドストリート草加店"), "secondstreet")
+        self.assertEqual(detect_map_icon_key("ハードオフ久喜店"), "hardoff")
+        self.assertEqual(detect_map_icon_key("ホビーオフ愛川店"), "hardoff")
+        self.assertEqual(detect_map_icon_key("オフハウス久喜店"), "hardoff")
+        self.assertEqual(detect_map_icon_key("オフモール八千代"), "hardoff")
+        self.assertEqual(detect_map_icon_key("トレファクスタイル"), "treasurefactory")
+        self.assertEqual(detect_map_icon_key("ゲオ川口"), "other")
+        self.assertEqual(detect_map_icon_key(""), "other")
+
+    def test_resolve_map_icon_key_falls_back_to_tag(self):
+        self.assertEqual(
+            resolve_map_icon_key("無名リサイクル", ["BOOKOFF系"]),
+            "bookoff",
+        )
+        self.assertEqual(
+            resolve_map_icon_key("ハードオフ久喜", ["その他"]),
+            "hardoff1",
+        )
+        self.assertEqual(
+            resolve_map_icon_key("無名リサイクル", ["ハードオフ系"]),
+            "hardoff1",
+        )
+
+    def test_hardoff_collocation_icon_key(self):
+        self.assertEqual(hardoff_collocation_icon_key(1), "hardoff1")
+        self.assertEqual(hardoff_collocation_icon_key(2), "hardoff2")
+        self.assertEqual(hardoff_collocation_icon_key(3), "hardoff3")
+        self.assertEqual(hardoff_collocation_icon_key(4), "hardoff3")
 
     def test_group_helpers(self):
         self.assertTrue(is_brand_tag_name("BOOKOFF系"))
