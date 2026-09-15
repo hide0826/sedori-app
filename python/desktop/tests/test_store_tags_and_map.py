@@ -110,6 +110,8 @@ def test_store_map_dict_includes_icon_key():
     )
     assert mapped is not None
     assert mapped["icon_key"] == "bookoff"
+    # 店舗種別だけのときは丸ピンは青（標準）
+    assert mapped["pin_color"] == "#1976d2"
 
     hardoff = _store_map_dict(
         {
@@ -123,6 +125,29 @@ def test_store_map_dict_includes_icon_key():
     )
     assert hardoff is not None
     assert hardoff["icon_key"] == "hardoff1"
+
+
+def test_pin_color_uses_quality_tag_only():
+    from ui.store_master.route_map_widget import DEFAULT_PIN_COLOR, _pin_color_for_store
+
+    assert (
+        _pin_color_for_store(
+            {
+                "tags": [
+                    {"name": "大型店舗", "color": "#e53935", "priority": 10},
+                    {"name": "BOOKOFF系", "color": "#c62828", "priority": 40},
+                ]
+            }
+        )
+        == "#e53935"
+    )
+    assert (
+        _pin_color_for_store(
+            {"tags": [{"name": "BOOKOFF系", "color": "#c62828", "priority": 40}]}
+        )
+        == DEFAULT_PIN_COLOR
+    )
+    assert _pin_color_for_store({"tags": []}) == DEFAULT_PIN_COLOR
 
 
 def test_leaflet_html_uses_store_labels_when_enabled():

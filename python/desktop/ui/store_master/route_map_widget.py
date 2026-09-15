@@ -22,7 +22,6 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QScrollArea,
     QFrame,
-    QTabWidget,
 )
 
 _desktop_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -57,6 +56,8 @@ try:
         MAP_ICON_DEFS,
         MAP_ICON_ORDER,
         hardoff_collocation_icon_key,
+        is_brand_tag_name,
+        is_quality_tag_name,
         resolve_map_icon_key,
     )
 except Exception:
@@ -65,6 +66,8 @@ except Exception:
             MAP_ICON_DEFS,
             MAP_ICON_ORDER,
             hardoff_collocation_icon_key,
+            is_brand_tag_name,
+            is_quality_tag_name,
             resolve_map_icon_key,
         )
     except Exception:
@@ -76,6 +79,16 @@ except Exception:
 
         def hardoff_collocation_icon_key(member_count: int) -> str:
             return "hardoff1"
+
+        def is_brand_tag_name(name: str) -> bool:
+            return False
+
+        def is_quality_tag_name(name: str) -> bool:
+            return name in (
+                "大型店舗",
+                "値付け甘い",
+                "あまり行かなくて良い",
+            )
 
 try:
     from services.hardoff_collocation_groups import (
@@ -195,12 +208,17 @@ def _checkbox_style_light(text_color: str) -> str:
 
 
 def _pin_color_for_store(store: Dict[str, Any]) -> str:
+    """丸ピン色は評価・メモタグのみ。店舗種別は店舗ラベル側で見る。"""
     tags = store.get("tags") or []
-    if not tags:
-        return DEFAULT_PIN_COLOR
     # attach_tags_to_stores は priority 昇順
-    color = (tags[0].get("color") or "").strip()
-    return color or DEFAULT_PIN_COLOR
+    for tag in tags:
+        name = str(tag.get("name") or "")
+        if is_brand_tag_name(name) or name == "その他":
+            continue
+        color = (tag.get("color") or "").strip()
+        if color:
+            return color
+    return DEFAULT_PIN_COLOR
 
 
 def _icon_key_for_store(store: Dict[str, Any]) -> str:
@@ -508,7 +526,7 @@ function hirioUpdateLegend(data) {{
                 text + '</span>' + (row.label || spec.label || '') + '</div>';
       }});
     }} else {{
-      html += '<div><span class="swatch" style="background:' + DEFAULT_PIN + '"></span>タグなし</div>';
+      html += '<div><span class="swatch" style="background:' + DEFAULT_PIN + '"></span>標準（青）</div>';
       (data.tag_legend || []).forEach(function(t) {{
         html += '<div><span class="swatch" style="background:' + (t.color||'#888') + '"></span>' +
                 (t.name||'') + '</div>';
@@ -659,7 +677,7 @@ class RouteMapWidget(QWidget):
         self.icon_check.setStyleSheet(_checkbox_style("#e0e0e0"))
         self.icon_check.setToolTip(
             "ON: BO / SS / TR / H1〜H3 の文字ラベルで表示します\n"
-            "OFF: 従来の色付き丸ピン（タグ色）"
+            "OFF: 青い丸ピン（評価・メモタグがある店だけその色）"
         )
         self.icon_check.toggled.connect(self._on_options_changed)
         toolbar.addWidget(self.icon_check)
@@ -702,53 +720,22 @@ class RouteMapWidget(QWidget):
         route_layout.addWidget(self.route_scroll)
         self.left_splitter.addWidget(route_group)
 
-        tag_group = QGroupBox("タグで絞り込み（未チェックは非表示）")
+        tag_group = QGroupBox("タグで絞り込み（評価・メモ）")
         tag_group.setStyleSheet(TAG_FILTER_GROUP_STYLE)
         tag_layout = QVBoxLayout(tag_group)
         tag_btns = QHBoxLayout()
         self.tag_select_all_btn = QPushButton("全選択")
-        self.tag_select_all_btn.setToolTip("いま表示中のタブ内だけ全選択します")
+        self.tag_select_all_btn.setToolTip("評価・メモタグをすべて選択します")
         self.tag_select_all_btn.clicked.connect(self.select_all_tags)
         tag_btns.addWidget(self.tag_select_all_btn)
         self.tag_clear_btn = QPushButton("全解除")
-        self.tag_clear_btn.setToolTip("いま表示中のタブ内だけ全解除します")
+        self.tag_clear_btn.setToolTip("評価・メモタグをすべて解除します")
         self.tag_clear_btn.clicked.connect(self.clear_tag_selection)
         tag_btns.addWidget(self.tag_clear_btn)
         tag_btns.addStretch()
         tag_layout.addLayout(tag_btns)
 
-        self.tag_tabs = QTabWidget()
-        self.tag_tabs.setStyleSheet(
-            "QTabWidget::pane { background: #ffffff; border: 1px solid #bdbdbd; }"
-            "QTabBar::tab { background: #eeeeee; color: #212121; padding: 6px 12px; }"
-            "QTabBar::tab:selected { background: #ffffff; font-weight: bold; }"
-        )
-
-        # 店舗種別タブ
-        brand_page = QWidget()
-        brand_page.setStyleSheet("background: #ffffff;")
-        brand_page_layout = QVBoxLayout(brand_page)
-        brand_page_layout.setContentsMargins(0, 0, 0, 0)
-        self.brand_tag_scroll = QScrollArea()
-        self.brand_tag_scroll.setWidgetResizable(True)
-        self.brand_tag_scroll.setFrameShape(QFrame.NoFrame)
-        self.brand_tag_scroll.setStyleSheet(
-            "QScrollArea { background: #ffffff; border: none; }"
-        )
-        self.brand_tag_host = QWidget()
-        self.brand_tag_host.setStyleSheet("background: #ffffff;")
-        self.brand_tag_box = QVBoxLayout(self.brand_tag_host)
-        self.brand_tag_box.setContentsMargins(4, 4, 4, 4)
-        self.brand_tag_box.setSpacing(2)
-        self.brand_tag_scroll.setWidget(self.brand_tag_host)
-        brand_page_layout.addWidget(self.brand_tag_scroll)
-        self.tag_tabs.addTab(brand_page, "店舗種別")
-
-        # 評価系タブ
-        quality_page = QWidget()
-        quality_page.setStyleSheet("background: #ffffff;")
-        quality_page_layout = QVBoxLayout(quality_page)
-        quality_page_layout.setContentsMargins(0, 0, 0, 0)
+        # 店舗種別は店舗ラベル（BO/SS/TR/H1〜）で見るため、ここでは評価・メモのみ
         self.quality_tag_scroll = QScrollArea()
         self.quality_tag_scroll.setWidgetResizable(True)
         self.quality_tag_scroll.setFrameShape(QFrame.NoFrame)
@@ -761,16 +748,19 @@ class RouteMapWidget(QWidget):
         self.quality_tag_box.setContentsMargins(4, 4, 4, 4)
         self.quality_tag_box.setSpacing(2)
         self.quality_tag_scroll.setWidget(self.quality_tag_host)
-        quality_page_layout.addWidget(self.quality_tag_scroll)
-        self.tag_tabs.addTab(quality_page, "評価・メモ")
+        tag_layout.addWidget(self.quality_tag_scroll, 1)
 
-        # 互換: 旧コード参照用（店舗種別ボックスをデフォルト）
-        self.tag_filter_box = self.brand_tag_box
-        tag_layout.addWidget(self.tag_tabs, 1)
+        # 互換: 旧コード参照用
+        self.tag_filter_box = self.quality_tag_box
+        self.tag_tabs = None
+        self.brand_tag_box = self.quality_tag_box
 
-        self.include_untagged_check = QCheckBox("タグなし店舗も表示")
+        self.include_untagged_check = QCheckBox("評価タグなし店舗も表示")
         self.include_untagged_check.setChecked(True)
         self.include_untagged_check.setStyleSheet(_checkbox_style_light("#212121"))
+        self.include_untagged_check.setToolTip(
+            "評価・メモタグが付いていない店舗も地図に出します"
+        )
         self.include_untagged_check.toggled.connect(self._on_options_changed)
         tag_layout.addWidget(self.include_untagged_check)
         self.left_splitter.addWidget(tag_group)
@@ -912,9 +902,7 @@ class RouteMapWidget(QWidget):
         self._refresh_map()
 
     def _current_tab_tag_ids(self) -> Set[int]:
-        if getattr(self, "tag_tabs", None) is not None and self.tag_tabs.currentIndex() == 1:
-            return set(getattr(self, "_quality_tag_ids", set()))
-        return set(getattr(self, "_brand_tag_ids", set()))
+        return set(getattr(self, "_quality_tag_ids", set())) or set(self._tag_checks.keys())
 
     def _on_options_changed(self, *_args) -> None:
         self._refresh_map()
@@ -1010,64 +998,30 @@ class RouteMapWidget(QWidget):
         }
         first_load = not self._tag_checks
 
-        self._clear_layout_widgets(self.brand_tag_box, keep_stretch=False)
         self._clear_layout_widgets(self.quality_tag_box, keep_stretch=False)
         self._tag_checks.clear()
         self._brand_tag_ids = set()
         self._quality_tag_ids = set()
 
-        try:
-            from services.store_brand_tag_service import (
-                is_brand_tag_name,
-                is_quality_tag_name,
-            )
-        except Exception:
-            try:
-                from store_brand_tag_service import (  # type: ignore
-                    is_brand_tag_name,
-                    is_quality_tag_name,
-                )
-            except Exception:
-                def is_brand_tag_name(name: str) -> bool:
-                    return False
-
-                def is_quality_tag_name(name: str) -> bool:
-                    return name in (
-                        "大型店舗",
-                        "値付け甘い",
-                        "あまり行かなくて良い",
-                    )
-
         tags = (self._payload_cache or {}).get("tags") or []
-        brand_tags = []
-        quality_tags = []
-        other_tags = []
+        memo_tags = []
         for tag in tags:
             name = str(tag.get("name") or "")
+            # 店舗種別（BOOKOFF系など）は店舗ラベル側。絞り込みは評価・メモのみ
             if is_brand_tag_name(name) or name == "その他":
-                brand_tags.append(tag)
-            elif is_quality_tag_name(name):
-                quality_tags.append(tag)
-            else:
-                other_tags.append(tag)
+                continue
+            memo_tags.append(tag)
 
-        def _add_checks(tag_list, layout, id_bucket: Set[int]) -> None:
-            for tag in tag_list:
-                tid = int(tag["id"])
-                color = str(tag.get("color") or DEFAULT_PIN_COLOR)
-                cb = QCheckBox(str(tag.get("name") or ""))
-                cb.setStyleSheet(_checkbox_style_light(color))
-                cb.setChecked(True if first_load else tid in previously)
-                cb.toggled.connect(self._on_options_changed)
-                layout.addWidget(cb)
-                self._tag_checks[tid] = cb
-                id_bucket.add(tid)
-
-        _add_checks(brand_tags, self.brand_tag_box, self._brand_tag_ids)
-        _add_checks(quality_tags, self.quality_tag_box, self._quality_tag_ids)
-        # 未分類タグは評価・メモ側へ
-        _add_checks(other_tags, self.quality_tag_box, self._quality_tag_ids)
-        self.brand_tag_box.addStretch()
+        for tag in memo_tags:
+            tid = int(tag["id"])
+            color = str(tag.get("color") or DEFAULT_PIN_COLOR)
+            cb = QCheckBox(str(tag.get("name") or ""))
+            cb.setStyleSheet(_checkbox_style_light(color))
+            cb.setChecked(True if first_load else tid in previously)
+            cb.toggled.connect(self._on_options_changed)
+            self.quality_tag_box.addWidget(cb)
+            self._tag_checks[tid] = cb
+            self._quality_tag_ids.add(tid)
         self.quality_tag_box.addStretch()
 
     def _selected_route_codes(self) -> Set[str]:
@@ -1080,17 +1034,20 @@ class RouteMapWidget(QWidget):
         return {tid for tid, cb in self._tag_checks.items() if cb.isChecked()}
 
     def _store_passes_tag_filter(self, store: Dict[str, Any]) -> bool:
+        """評価・メモタグだけで絞り込み（店舗種別タグは無視）。"""
         allowed = self._allowed_tag_ids()
-        tag_ids = []
+        filterable = set(self._tag_checks.keys())
+        quality_ids = []
         for t in store.get("tags") or []:
             try:
-                tag_ids.append(int(t["id"]))
+                tid = int(t["id"])
             except (TypeError, ValueError, KeyError):
-                pass
-        if not tag_ids:
+                continue
+            if tid in filterable:
+                quality_ids.append(tid)
+        if not quality_ids:
             return self.include_untagged_check.isChecked()
-        # いずれかの表示タグがあればOK
-        return any(tid in allowed for tid in tag_ids)
+        return any(tid in allowed for tid in quality_ids)
 
     _JS_GET_MAP_VIEW = """
 (function(){
