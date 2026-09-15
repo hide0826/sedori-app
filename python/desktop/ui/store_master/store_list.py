@@ -125,7 +125,9 @@ class StoreListWidget(QWidget):
         csv_import_btn = QPushButton("CSVインポート")
         csv_import_btn.setToolTip(
             "Google Takeout「お気に入りの場所.csv」から未登録店舗を取り込みます。\n"
-            "未所属ルートへ登録し、住所・電話・緯度経度を取得して店舗コードを自動付番します。"
+            "原則は未所属。ハードオフ／ホビーオフ／オフハウスが80m以内の併設なら\n"
+            "既存店と同じルートへ自動登録します。\n"
+            "住所・電話・緯度経度を取得し、店舗コードを自動付番します。"
         )
         csv_import_btn.clicked.connect(self.import_takeout_csv)
         csv_import_btn.setStyleSheet("""
@@ -1144,7 +1146,7 @@ class StoreListWidget(QWidget):
             if kind == "col_header":
                 colloc_item.setForeground(QColor("#90caf9"))
                 colloc_item.setToolTip(
-                    f"併設 {member_count} 店舗（ハードオフ／ホビーオフ／オフハウス・30m以内）\n"
+                    f"併設 {member_count} 店舗（ハードオフ／ホビーオフ／オフハウス・80m以内）\n"
                     "クリックで展開・折りたたみ"
                 )
             elif kind == "col_member":
@@ -1482,7 +1484,9 @@ class StoreListWidget(QWidget):
             f"「お気に入りの場所」形式の CSV を取り込みます。\n\n"
             f"件数: {len(preview_rows)} 件（タイトルあり）\n"
             f"・DBに無い店舗だけ追加\n"
-            f"・所属ルートは未所属\n"
+            f"・所属ルートは原則 未所属\n"
+            f"・例外: ハードオフ／ホビーオフ／オフハウスが\n"
+            f"　80m以内の併設なら、既存店と同じルートへ自動登録\n"
             f"・住所・電話・緯度経度を Google Maps から取得\n"
             f"・店舗コードを自動採番\n"
             f"・店名ゆれ／電話／住所／近接座標で重複スキップ\n\n"
@@ -1526,9 +1530,12 @@ class StoreListWidget(QWidget):
 
         progress.close()
 
+        colloc_count = sum(1 for row in result.added if (row.route_name or "").strip())
         lines = [
             f"解析: {result.parsed} 件",
-            f"追加: {len(result.added)} 件（未所属）",
+            f"追加: {len(result.added)} 件",
+            f"　うち併設でルート自動登録: {colloc_count} 件",
+            f"　うち未所属: {len(result.added) - colloc_count} 件",
             f"スキップ（重複など）: {len(result.skipped)} 件",
             f"失敗: {len(result.failed)} 件",
         ]
@@ -1538,7 +1545,13 @@ class StoreListWidget(QWidget):
             lines.append("\n【追加例】")
             for row in result.added[:8]:
                 code = row.store_code or "（コード未採番）"
-                lines.append(f"・{row.title} → {code}")
+                if row.route_name:
+                    extra = f" → {code} / {row.route_name}"
+                    if row.collocated_with:
+                        extra += f"（併設: {row.collocated_with}）"
+                else:
+                    extra = f" → {code} / 未所属"
+                lines.append(f"・{row.title}{extra}")
             if len(result.added) > 8:
                 lines.append(f"…他 {len(result.added) - 8} 件")
         if result.skipped:

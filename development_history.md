@@ -1,3 +1,13 @@
+## 2026-09-15: HA/HO/OF併設のCSV同ルート登録＋判定80m（完了）
+
+- **状況**: 完了。`feature/sp-api` へコミット／プッシュ
+- **含む**:
+  1. CSV取込でハードオフ／ホビーオフ／オフハウス併設は既存店のルートを引き継ぐ
+  2. 併設判定半径を30m→80m（Placesずれ対策・ルートURL側と同じ）
+- **実装**: `hardoff_collocation_groups.py` / `google_takeout_favorites_import.py` / `store_list.py` / `route_kanban.py`
+
+---
+
 ## 2026-09-15: ルート地図のタグ絞り込みを評価・メモのみに変更（完了）
 
 - **状況**: 完了。`feature/sp-api` へコミット／プッシュ

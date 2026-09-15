@@ -6,6 +6,7 @@
 - 緯度経度が指定距離以内の HA / HO / OF を1グループにまとめる
 - 代表店舗の優先順: ハードオフ(HA) → ホビーオフ(HO) → オフハウス(OF)
 - 座標なし・他チェーンは単独のまま
+- Places API の座標ずれ（実測で最大約65m）を踏まえ、既定半径は 80m
 """
 
 from __future__ import annotations
@@ -14,7 +15,8 @@ from dataclasses import dataclass, field
 from math import asin, cos, radians, sin, sqrt
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-COLOCATION_RADIUS_M = 30.0
+# ルート地図URL生成（google_maps_route_url_service）と同じ理由で 80m
+COLOCATION_RADIUS_M = 80.0
 
 # 小さいほど代表になりやすい
 BRAND_PRIORITY = {
@@ -115,6 +117,79 @@ def detect_hardoff_family_brand(store: Dict[str, Any]) -> Optional[str]:
     if has_of:
         return "OF"
     return None
+
+
+def find_collocated_hardoff_family_route(
+    *,
+    store_name: str,
+    store_code: str = "",
+    latitude: Optional[float],
+    longitude: Optional[float],
+    candidates: Sequence[Dict[str, Any]],
+    radius_m: float = COLOCATION_RADIUS_M,
+) -> Optional[Dict[str, Any]]:
+    """
+    HA/HO/OF が既定半径（80m）以内にいるとき、ルート所属済みの併設店から所属情報を返す。
+
+    戻り値例:
+      {
+        "affiliated_route_name": "八王子ルート",
+        "route_code": "H1",
+        "matched_store": "ハードオフ○○店",
+        "distance_m": 12.3,
+      }
+    見つからなければ None。
+    """
+    lat = _coerce_float(latitude)
+    lng = _coerce_float(longitude)
+    if lat is None or lng is None:
+        return None
+
+    probe = {
+        "store_name": store_name,
+        "store_code": store_code,
+        "supplier_code": store_code,
+    }
+    if detect_hardoff_family_brand(probe) is None:
+        return None
+
+    best: Optional[Dict[str, Any]] = None
+    best_key: Optional[Tuple[float, int, str]] = None
+
+    for store in candidates:
+        if detect_hardoff_family_brand(store) is None:
+            continue
+        other_lat = _coerce_float(store.get("latitude"))
+        other_lng = _coerce_float(store.get("longitude"))
+        if other_lat is None or other_lng is None:
+            continue
+        dist = _haversine_m(lat, lng, other_lat, other_lng)
+        if dist > radius_m:
+            continue
+
+        aff = str(store.get("affiliated_route_name") or "").strip()
+        codes = [
+            c.strip()
+            for c in str(store.get("route_code") or "").split(",")
+            if c.strip()
+        ]
+        if not aff and not codes:
+            continue
+
+        brand = detect_hardoff_family_brand(store) or "ZZ"
+        prio = BRAND_PRIORITY.get(brand, 99)
+        # 近い → ハードオフ優先
+        key = (dist, prio, str(store.get("store_code") or ""))
+        if best_key is None or key < best_key:
+            best_key = key
+            best = {
+                "affiliated_route_name": aff or None,
+                "route_code": str(store.get("route_code") or "").strip() or None,
+                "matched_store": str(store.get("store_name") or ""),
+                "distance_m": round(dist, 1),
+            }
+
+    return best
 
 
 def _brand_sort_key(store: Dict[str, Any]) -> Tuple[int, int, str]:

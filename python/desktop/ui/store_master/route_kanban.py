@@ -976,7 +976,7 @@ class RouteKanbanWidget(QWidget):
         layout.addLayout(focus_row)
 
         legend = QLabel(
-            f"凡例: 薄色 + [追加] = 副所属 / ＋2店舗併設・＋3店舗併設 = HA/HO/OF（30m）クリックで展開 / "
+            f"凡例: 薄色 + [追加] = 副所属 / ＋2店舗併設・＋3店舗併設 = HA/HO/OF（80m）クリックで展開 / "
             f"右クリックで店舗移動 / ヘッダの🗺リンクでGoogle Map / 「URL」で登録 / "
             f"ヘッダDnDで列並び替え / ルート名ダブルクリックで改名 / "
             f"戻る・進むは移動・並び替え用 / 横{COLUMNS_PER_ROW}列折り返し"
@@ -1863,7 +1863,7 @@ class RouteKanbanWidget(QWidget):
             )
             if is_group:
                 header.setToolTip(
-                    f"併設 {member_count} 店舗（ハードオフ／ホビーオフ／オフハウス・30m以内）\n"
+                    f"併設 {member_count} 店舗（ハードオフ／ホビーオフ／オフハウス・80m以内）\n"
                     "クリックで展開・折りたたみ"
                 )
                 header.setForeground(QBrush(QColor("#90caf9")))

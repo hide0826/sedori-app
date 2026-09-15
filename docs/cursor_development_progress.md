@@ -1,3 +1,12 @@
+## 2026-09-15 HA/HO/OF併設: CSV同ルート登録＋判定半径80m（完了・コミット）
+
+- **状況**: 完了。ブランチ `feature/sp-api` へコミット／プッシュ
+- **含む**:
+  1. CSV取込で HA/HO/OF 併設なら既存店と同じルートへ自動登録
+  2. 併設判定半径を 30m→80m（Places座標ずれ・ルートURL側と同値）
+- **実装**: `hardoff_collocation_groups.py` / `google_takeout_favorites_import.py` / `store_list.py` / `route_kanban.py`
+- **テスト**: `test_hardoff_collocation_groups.py` / `test_google_takeout_favorites_import.py`
+
 ## 2026-09-15 ルート地図: 絞り込みは評価・メモのみ／丸ピンは青が標準（完了・コミット）
 
 - **状況**: 完了。ブランチ `feature/sp-api` へコミット／プッシュ

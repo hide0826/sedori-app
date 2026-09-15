@@ -128,3 +128,59 @@ def test_import_skips_existing_and_adds_new(temp_store_db: StoreDatabase, tmp_pa
     assert not (added.get("affiliated_route_name") or "").strip()
     assert added.get("address")
     assert added.get("phone")
+
+
+def test_import_collocated_hardoff_inherits_route(temp_store_db: StoreDatabase, tmp_path):
+    temp_store_db.upsert_route("青葉ルート", "A1")
+    temp_store_db.add_store(
+        {
+            "store_name": "ハードオフ横浜青葉店",
+            "store_code": "HA-10",
+            "affiliated_route_name": "青葉ルート",
+            "route_code": "A1",
+            "latitude": 35.5520,
+            "longitude": 139.5410,
+        }
+    )
+    csv_path = tmp_path / "colloc.csv"
+    csv_path.write_text(
+        "タイトル,メモ,URL,タグ,コメント\n"
+        "ホビーオフ横浜青葉店,,https://x,,\n"
+        "オフハウス横浜青葉店,,https://y,,\n",
+        encoding="utf-8-sig",
+    )
+
+    def fake_fetch(name: str):
+        # 既存ハードオフから十数m以内
+        if "ホビー" in name:
+            return {
+                "address": "横浜市青葉区1",
+                "phone": "045-111-2222",
+                "latitude": 35.55205,
+                "longitude": 139.54105,
+            }
+        return {
+            "address": "横浜市青葉区2",
+            "phone": "045-111-3333",
+            "latitude": 35.55210,
+            "longitude": 139.54110,
+        }
+
+    result = import_takeout_favorites(
+        temp_store_db,
+        csv_path,
+        fetch_info=fake_fetch,
+        api_delay_sec=0,
+    )
+    assert len(result.added) == 2
+    for row in result.added:
+        store = temp_store_db.get_store(row.store_id)
+        assert store is not None
+        assert store.get("affiliated_route_name") == "青葉ルート"
+        assert store.get("route_code") == "A1"
+        assert row.route_name == "青葉ルート"
+        # 既存HA、または先に取り込まれた併設HOのどちらかを参照する
+        assert row.collocated_with
+        assert any(
+            key in row.collocated_with for key in ("ハードオフ", "ホビーオフ")
+        )

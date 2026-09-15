@@ -3,7 +3,8 @@
 """
 Google Takeout「お気に入りの場所.csv」から未登録店舗を取り込む。
 
-- ルートは未所属（affiliated_route_name / route_code は空）
+- ルートは原則未所属（affiliated_route_name / route_code は空）
+- ただし HA/HO/OF が 80m 以内の併設なら、既存店のルートを引き継ぐ
 - Places API で住所・電話・緯度経度を取得
 - 店舗コードはチェーンマッピングから自動採番
 - 重複判定: 店舗名（空白無視）／電話／住所／近接座標
@@ -30,6 +31,21 @@ except ImportError:
     except ImportError:
         get_store_info_from_google = None  # type: ignore
 
+try:
+    from services.hardoff_collocation_groups import (
+        COLOCATION_RADIUS_M,
+        find_collocated_hardoff_family_route,
+    )
+except ImportError:
+    try:
+        from hardoff_collocation_groups import (  # type: ignore
+            COLOCATION_RADIUS_M,
+            find_collocated_hardoff_family_route,
+        )
+    except ImportError:
+        COLOCATION_RADIUS_M = 80.0  # type: ignore
+        find_collocated_hardoff_family_route = None  # type: ignore
+
 
 @dataclass
 class TakeoutPlaceRow:
@@ -54,6 +70,8 @@ class ImportAdded:
     address: str
     phone: str
     store_id: int
+    route_name: str = ""
+    collocated_with: str = ""
 
 
 @dataclass
@@ -167,11 +185,12 @@ class _DuplicateIndex:
     """既存店舗の重複判定インデックス。"""
 
     def __init__(self, stores: Sequence[Dict[str, Any]]):
+        self.stores: List[Dict[str, Any]] = list(stores)
         self.by_name: Dict[str, Dict[str, Any]] = {}
         self.by_phone: Dict[str, Dict[str, Any]] = {}
         self.by_address: Dict[str, Dict[str, Any]] = {}
         self.coords: List[Tuple[Dict[str, Any], float, float]] = []
-        for store in stores:
+        for store in self.stores:
             name_key = normalize_store_name(str(store.get("store_name") or ""))
             if name_key and name_key not in self.by_name:
                 self.by_name[name_key] = store
@@ -221,6 +240,7 @@ class _DuplicateIndex:
 
     def register(self, store: Dict[str, Any]) -> None:
         """インポート中に追加した店舗も以降の重複判定に使う。"""
+        self.stores.append(store)
         name_key = normalize_store_name(str(store.get("store_name") or ""))
         if name_key:
             self.by_name[name_key] = store
@@ -269,8 +289,9 @@ def import_takeout_favorites(
     dry_run: bool = False,
 ) -> TakeoutImportResult:
     """
-    Takeout CSV から未登録店舗を未所属で取り込む。
+    Takeout CSV から未登録店舗を取り込む。
 
+    原則は未所属。HA/HO/OF が 80m 以内にルート所属済みの併設店があれば同ルートへ。
     progress_callback(current, total, label) -> continue?
     """
     result = TakeoutImportResult()
@@ -359,6 +380,8 @@ def import_takeout_favorites(
             continue
 
         store_code = _resolve_store_code(db, place.title)
+        route_name = ""
+        collocated_with = ""
         store_data: Dict[str, Any] = {
             "store_name": place.title,
             "store_code": store_code or None,
@@ -372,6 +395,22 @@ def import_takeout_favorites(
         if lat is not None and lng is not None:
             store_data["latitude"] = lat
             store_data["longitude"] = lng
+            if find_collocated_hardoff_family_route is not None:
+                colloc = find_collocated_hardoff_family_route(
+                    store_name=place.title,
+                    store_code=store_code or "",
+                    latitude=lat,
+                    longitude=lng,
+                    candidates=index.stores,
+                    radius_m=float(COLOCATION_RADIUS_M),
+                )
+                if colloc:
+                    store_data["affiliated_route_name"] = colloc.get(
+                        "affiliated_route_name"
+                    )
+                    store_data["route_code"] = colloc.get("route_code")
+                    route_name = str(colloc.get("affiliated_route_name") or "").strip()
+                    collocated_with = str(colloc.get("matched_store") or "").strip()
         if place.note or place.comment:
             store_data["notes"] = "\n".join(
                 x for x in [place.note, place.comment] if x
@@ -388,6 +427,8 @@ def import_takeout_favorites(
                     address=address,
                     phone=phone,
                     store_id=fake_id,
+                    route_name=route_name,
+                    collocated_with=collocated_with,
                 )
             )
             continue
@@ -414,6 +455,8 @@ def import_takeout_favorites(
                     address=address,
                     phone=phone,
                     store_id=int(new_id),
+                    route_name=route_name,
+                    collocated_with=collocated_with,
                 )
             )
         except Exception as e:
