@@ -101,6 +101,7 @@ from .support import (
     SHIPPING_METHOD_OPTIONS,
 )
 from .row_edit_dialog import InventoryRowEditDialog
+from services.flea_market_evidence_service import EVIDENCE_HIDDEN_COLUMNS
 
 
 class InventoryTableMixin:
@@ -185,9 +186,56 @@ class InventoryTableMixin:
         
         self.layout().addWidget(self.search_listing_group)
 
+    def _build_inventory_column_headers(self) -> List[str]:
+        """店舗まわりとネット仕入で列順を分ける。"""
+        headers = [
+            "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
+            "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
+        ]
+        online = getattr(self, "purchase_mode", "store") == "online"
+        if online:
+            headers.append("仕入チャネル")
+        headers += [
+            "発送方法", "販売チャネル", COL_PLATFORM_FEE, COL_SHIPPING, COL_TOTAL_COST,
+            "在庫保管手数料",
+        ]
+        if online:
+            headers += [
+                "取引ID", "ユーザー名", "出品URL", "伝票番号", "受取都道府県",
+                "仕入先",
+            ]
+            if getattr(self, "dev_mode", False):
+                headers.append("3-6-9")
+            headers += [*EVIDENCE_HIDDEN_COLUMNS, "価格改定", "その他詳細", "コンディション説明"]
+            return headers
+
+        headers += ["仕入先", "価格改定", "その他詳細", "コンディション説明"]
+        if getattr(self, "dev_mode", False):
+            try:
+                base_idx = headers.index("仕入先") + 1
+            except ValueError:
+                base_idx = len(headers)
+            headers[base_idx:base_idx] = ["3-6-9"]
+        try:
+            bi = headers.index("価格改定")
+            headers[bi:bi] = [
+                "プラットフォーム",
+                "取引ID",
+                "ユーザー名",
+                "出品URL",
+                "伝票番号",
+                "受取都道府県",
+                *EVIDENCE_HIDDEN_COLUMNS,
+            ]
+        except ValueError:
+            pass
+        return headers
+
     def setup_data_table(self):
         """データテーブルエリアの設定（折りたたみ対応）"""
-        self.data_group = QGroupBox("仕入データ一覧")
+        self.data_group = QGroupBox(
+            "ネット仕入一覧" if getattr(self, "purchase_mode", "store") == "online" else "仕入データ一覧"
+        )
         self.data_group.setCheckable(True)
         self.data_group.setChecked(True)
         outer_layout = QVBoxLayout(self.data_group)
@@ -220,48 +268,25 @@ class InventoryTableMixin:
         header.setStretchLastSection(True)
         header.setSectionResizeMode(QHeaderView.Interactive)
         
-        # 列の定義（17列対応・指定順序）
-        # DataFrame上の実際の列名は従来どおり「仕入先」を使用しつつ、
-        # 表示ラベルだけ「店舗コード」に差し替える（バックエンドとの互換性維持のため）
-        self.column_headers = [
-            "仕入れ日", "コンディション", "SKU", "ASIN", "JAN", "商品名", "仕入れ個数",
-            "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
-            "発送方法", "販売チャネル", COL_PLATFORM_FEE, COL_SHIPPING, COL_TOTAL_COST,
-            "在庫保管手数料", "仕入先", "価格改定", "その他詳細", "コンディション説明"
-        ]
-        # 開発用タブでは、店舗コードの右に「3-6-9」カラムを追加
-        if self.dev_mode:
-            try:
-                base_idx = self.column_headers.index("仕入先") + 1
-            except ValueError:
-                base_idx = len(self.column_headers)
-            extra_columns = ["3-6-9"]
-            self.column_headers[base_idx:base_idx] = extra_columns
-        try:
-            bi = self.column_headers.index("価格改定")
-            self.column_headers[bi:bi] = [
-                "プラットフォーム",
-                "取引ID",
-                "ユーザー名",
-                "出品URL",
-                "伝票番号",
-                "受取都道府県",
-            ]
-        except ValueError:
-            pass
+        # 列の定義。ネット仕入は「仕入チャネル」をコメントの右に出し、ルート用の店舗コードは後ろへ。
+        self.column_headers = self._build_inventory_column_headers()
 
         self.data_table.setColumnCount(len(self.column_headers))
-        # 表示用のヘッダーラベルを作成（「仕入先」→「店舗コード」に置き換え）
+        # 店舗まわりだけ「仕入先」を「店舗コード」と表示する
         display_headers = list(self.column_headers)
-        try:
-            idx = display_headers.index("仕入先")
-            display_headers[idx] = "店舗コード"
-        except ValueError:
-            pass
+        if getattr(self, "purchase_mode", "store") != "online":
+            try:
+                idx = display_headers.index("仕入先")
+                display_headers[idx] = "店舗コード"
+            except ValueError:
+                pass
         self.data_table.setHorizontalHeaderLabels(display_headers)
         # 在庫保管手数料はSP-API運用時に使う想定のため、現段階では一覧では非表示
         if "在庫保管手数料" in self.column_headers:
             self.data_table.setColumnHidden(self.column_headers.index("在庫保管手数料"), True)
+        for col in EVIDENCE_HIDDEN_COLUMNS:
+            if col in self.column_headers:
+                self.data_table.setColumnHidden(self.column_headers.index(col), True)
         
         # 選択変更時の自動スクロール・ハイライト機能
         self.data_table.itemSelectionChanged.connect(self.on_data_selection_changed)
@@ -827,9 +852,13 @@ class InventoryTableMixin:
         # filtered_data / inventory_data をテーブルから再取得して同期
         df = self.get_table_data()
         if df is not None and len(df) > 0 and self.filtered_data is not None:
-            # 現在の filtered_data のインデックス構造を維持して更新
             try:
                 idx = self.filtered_data.index[table_row_index]
+                for col in self.column_headers:
+                    if col not in self.filtered_data.columns:
+                        self.filtered_data[col] = ""
+                    if self.inventory_data is not None and col not in self.inventory_data.columns:
+                        self.inventory_data[col] = ""
                 for col in self.column_headers:
                     if col in df.columns and col in self.filtered_data.columns:
                         val = df.iloc[table_row_index][col]

@@ -1368,6 +1368,7 @@ class SinglePurchaseInputDialog(QDialog):
             "コメント": merged_comment,
             "発送方法": self.shipping_combo.currentText().strip() or "FBA",
             "販売チャネル": self.sales_channel_combo.currentText().strip() or "Amazon",
+            "仕入チャネル": source_channel,
             COL_PLATFORM_FEE: fee_storage_value(amazon_fee),
             COL_SHIPPING: fee_storage_value(shipping_cost),
             COL_TOTAL_COST: fee_storage_value(total_cost),

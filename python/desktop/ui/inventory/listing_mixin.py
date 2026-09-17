@@ -546,7 +546,8 @@ class InventoryListingMixin:
             self._auto_match_sku_from_product_db()
 
             # 仕入先の未登録店舗を店舗マスタへ反映（警告防止・Google Maps 情報付き）
-            self._auto_register_stores_from_inventory(show_message=False)
+            if getattr(self, "purchase_mode", "store") != "online":
+                self._auto_register_stores_from_inventory(show_message=False)
             
             # データを辞書形式に変換（除外商品を除く）
             all_list = self.filtered_data.to_dict('records')
@@ -561,8 +562,10 @@ class InventoryListingMixin:
             for item in data_list:
                 enriched_item = item.copy()
                 
-                # 「仕入先」列から仕入れ先コードを取得
-                supplier_code = item.get('仕入先', '').strip()
+                # 「仕入先」列から仕入れ先コードを取得（ネット仕入は仕入チャネルも見る）
+                supplier_code = str(item.get('仕入先', '') or '').strip()
+                if not supplier_code:
+                    supplier_code = str(item.get('仕入チャネル', '') or item.get('プラットフォーム', '') or '').strip()
                 
                 if supplier_code:
                     # 実店舗マスタ → 電脳店舗マスタの順で解決

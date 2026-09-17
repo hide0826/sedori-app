@@ -140,6 +140,10 @@ class MainWindow(QMainWindow):
             self.inventory_widget.save_settings()
         if hasattr(self, 'inventory_widget_dev') and hasattr(self.inventory_widget_dev, 'save_settings'):
             self.inventory_widget_dev.save_settings()
+        if hasattr(self, 'inventory_widget_online') and hasattr(self.inventory_widget_online, 'save_settings'):
+            self.inventory_widget_online.save_settings()
+        if hasattr(self, 'inventory_widget_dev_online') and hasattr(self.inventory_widget_dev_online, 'save_settings'):
+            self.inventory_widget_dev_online.save_settings()
         if hasattr(self, 'antique_widget') and hasattr(self.antique_widget, 'save_settings'):
             self.antique_widget.save_settings()
         if hasattr(self, 'route_summary_widget') and hasattr(self.route_summary_widget, 'save_settings'):
@@ -444,17 +448,21 @@ class MainWindow(QMainWindow):
             from ui.inventory_widget import InventoryWidget
             from ui.condition_template_widget import ConditionTemplateWidget
             self.inventory_widget = InventoryWidget(self.api_client)
+            self.inventory_widget_online = InventoryWidget(self.api_client, purchase_mode="online")
             self.condition_template_widget = ConditionTemplateWidget()
             inventory_tabs = QTabWidget()
             inventory_tabs.addTab(self.inventory_widget, "仕入データ")
+            inventory_tabs.addTab(self.inventory_widget_online, "ネット仕入")
             inventory_tabs.addTab(self.condition_template_widget, "コンディション説明")
             old_inventory_tab_index = self.tab_widget.addTab(inventory_tabs, "旧仕入管理")
             self.tab_widget.setTabVisible(old_inventory_tab_index, False)
             # 3-6-9仕入管理: 同一機能だが data_dev / 別QSettings で独立インスタンス（本番DBを壊さない）
             self.inventory_widget_dev = InventoryWidget(self.api_client, dev_mode=True)
+            self.inventory_widget_dev_online = InventoryWidget(self.api_client, dev_mode=True, purchase_mode="online")
             self.condition_template_widget_dev = ConditionTemplateWidget()
             inventory_tabs_dev = QTabWidget()
             inventory_tabs_dev.addTab(self.inventory_widget_dev, "仕入データ")
+            inventory_tabs_dev.addTab(self.inventory_widget_dev_online, "ネット仕入")
             inventory_tabs_dev.addTab(self.condition_template_widget_dev, "コンディション説明")
             self.tab_widget.addTab(inventory_tabs_dev, "仕入管理")
             return False
@@ -480,11 +488,15 @@ class MainWindow(QMainWindow):
             self.inventory_widget.set_route_summary_widget(self.route_summary_widget)
             self.inventory_widget.set_antique_widget(self.antique_widget)
             self.inventory_widget.spot_saved.connect(self.route_list_widget.load_routes)
+            if hasattr(self, "inventory_widget_online") and self.inventory_widget_online is not None:
+                self.inventory_widget_online.set_antique_widget(self.antique_widget)
             # 開発タブ側でもルートテンプレ読込・照合処理を使えるようにする
             if hasattr(self, "inventory_widget_dev") and self.inventory_widget_dev is not None:
                 self.inventory_widget_dev.set_route_summary_widget(self.route_summary_widget)
                 self.inventory_widget_dev.set_antique_widget(self.antique_widget)
                 self.inventory_widget_dev.spot_saved.connect(self.route_list_widget.load_routes)
+            if hasattr(self, "inventory_widget_dev_online") and self.inventory_widget_dev_online is not None:
+                self.inventory_widget_dev_online.set_antique_widget(self.antique_widget)
             self._connect_top_widget_refresh()
             return False
 
@@ -507,6 +519,10 @@ class MainWindow(QMainWindow):
             # 3-6-9仕入管理からDB保存したときも仕入DBタブに即反映するため参照を渡す
             if hasattr(self, "inventory_widget_dev") and self.inventory_widget_dev is not None:
                 self.inventory_widget_dev.set_product_widget(self.product_widget)
+            if hasattr(self, "inventory_widget_online") and self.inventory_widget_online is not None:
+                self.inventory_widget_online.set_product_widget(self.product_widget)
+            if hasattr(self, "inventory_widget_dev_online") and self.inventory_widget_dev_online is not None:
+                self.inventory_widget_dev_online.set_product_widget(self.product_widget)
             self.route_visit_widget = None
             db_management_tabs = QTabWidget()
             db_management_tabs.addTab(self.product_widget, "商品DB")
@@ -875,6 +891,8 @@ class MainWindow(QMainWindow):
         for widget_name in (
             "inventory_widget",
             "inventory_widget_dev",
+            "inventory_widget_online",
+            "inventory_widget_dev_online",
             "product_widget",
             "route_summary_widget",
             "route_list_widget",

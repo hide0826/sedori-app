@@ -13,8 +13,8 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QScrollArea, QFormLayout,
     QToolButton, QApplication, QAbstractItemView,
 )
-from PySide6.QtCore import Qt, QDate, QTime, QDateTime, Signal, QSettings, QThread, QTimer
-from PySide6.QtGui import QFont, QColor, QPalette, QStandardItemModel, QStandardItem, QDesktopServices
+from PySide6.QtCore import Qt, QDate, QTime, QDateTime, Signal, QSettings, QThread, QTimer, QEvent
+from PySide6.QtGui import QFont, QColor, QPalette, QStandardItemModel, QStandardItem, QDesktopServices, QKeySequence
 from PySide6.QtCore import QUrl
 import pandas as pd
 from pathlib import Path
@@ -48,6 +48,8 @@ try:
         get_pricetar_listing_url,
         is_pro_enabled,
         is_recording_mode,
+        get_purchase_evidence_local_root,
+        set_purchase_evidence_local_root,
     )
 except ImportError:
     from desktop.utils.route_utils import mark_route_flags_from_folder  # type: ignore
@@ -55,6 +57,8 @@ except ImportError:
         get_pricetar_listing_url,
         is_pro_enabled,
         is_recording_mode,
+        get_purchase_evidence_local_root,
+        set_purchase_evidence_local_root,
     )
 
 try:
@@ -95,6 +99,12 @@ from .support import (
     _to_stored_newlines,
     _is_repricing_enabled_value,
 )
+from .flea_evidence_panel import FleaEvidencePanel
+from services.flea_market_evidence_service import (
+    EVIDENCE_HIDDEN_COLUMNS,
+    record_fields_from_save,
+    save_evidence_bundle,
+)
 
 class InventoryRowEditDialog(QDialog):
     """仕入データ1行を編集するダイアログ（コンディション説明は複数行・呼び出しボタン付き）"""
@@ -110,6 +120,8 @@ class InventoryRowEditDialog(QDialog):
         self._ai_generate_thread: Optional[_ConditionNoteAiGenerateThread] = None
         self.other_details_edit: Optional[QLineEdit] = None
         self.call_condition_note_btn: Optional[QPushButton] = None
+        self.evidence_panel: Optional[FleaEvidencePanel] = None
+        self._evidence_extra_fields: Dict[str, Any] = {}
         self.setWindowTitle("行の編集")
         self.setMinimumWidth(520)
         self.setMinimumHeight(400)
@@ -117,6 +129,7 @@ class InventoryRowEditDialog(QDialog):
         self._apply_custom_missing_checkbox_labels()
         self._load_row_data()
         self._sync_missing_custom_checkboxes_enabled()
+        self._attach_evidence_panel()
     
     def _sync_missing_custom_checkboxes_enabled(self) -> None:
         """取説欠品・内箱欠品のどちらかがONのときはカスタムを選べない（テンプレ重複の不具合防止）。"""
@@ -141,8 +154,19 @@ class InventoryRowEditDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._scroll_area = scroll
         scroll_content = QWidget()
-        form = QFormLayout(scroll_content)
+        content_layout = QVBoxLayout(scroll_content)
+        content_layout.setContentsMargins(8, 8, 8, 8)
+        self._evidence_host = QWidget()
+        self._evidence_host.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        evidence_host_layout = QVBoxLayout(self._evidence_host)
+        evidence_host_layout.setContentsMargins(0, 0, 0, 0)
+        evidence_host_layout.setSpacing(0)
+        content_layout.addWidget(self._evidence_host)
+        form_widget = QWidget()
+        form = QFormLayout(form_widget)
+        self._form_layout = form
         self.missing_manual_checkbox = QCheckBox("取説欠品")
         self.missing_inner_box_checkbox = QCheckBox("内箱欠品")
         self.missing_custom1_checkbox = QCheckBox("カスタム1")
@@ -175,6 +199,8 @@ class InventoryRowEditDialog(QDialog):
         self.missing_inner_box_checkbox.toggled.connect(self._sync_missing_custom_checkboxes_enabled)
         
         for col in self.column_headers:
+            if col in EVIDENCE_HIDDEN_COLUMNS:
+                continue
             if col == "その他詳細":
                 continue
             if col == "コンディション説明":
@@ -244,6 +270,7 @@ class InventoryRowEditDialog(QDialog):
         btn_layout.addWidget(clear_condition_note_btn)
         btn_layout.addStretch()
         form.addRow("", btn_row)
+        content_layout.addWidget(form_widget)
         
         scroll.setWidget(scroll_content)
         layout.addWidget(scroll)
@@ -492,5 +519,163 @@ class InventoryRowEditDialog(QDialog):
             elif col == "販売チャネル":
                 val = val or "Amazon"
             result[col] = val
+        from services.flea_market_evidence_service import EVIDENCE_HIDDEN_COLUMNS
+        for col in EVIDENCE_HIDDEN_COLUMNS:
+            if col not in result:
+                result[col] = str(self.row_data.get(col) or "")
+        result.update(self._evidence_extra_fields)
         return result
+
+    def _widget_text(self, col: str) -> str:
+        w = self._widgets.get(col)
+        if isinstance(w, QLineEdit):
+            return w.text().strip()
+        if isinstance(w, QPlainTextEdit):
+            return w.toPlainText().strip()
+        if isinstance(w, QComboBox):
+            return w.currentText().strip()
+        return str(self.row_data.get(col) or "").strip()
+
+    def _set_widget_text(self, col: str, value: str) -> None:
+        if not value:
+            return
+        w = self._widgets.get(col)
+        if isinstance(w, QLineEdit):
+            w.setText(value)
+        elif isinstance(w, QPlainTextEdit):
+            w.setPlainText(value)
+
+    def _attach_evidence_panel(self) -> None:
+        """スクショ貼付パネルをスクロール先頭に出す（判定漏れで消えないように常時表示）。"""
+        current_dt = self._widget_text("仕入れ日") or str(self.row_data.get("仕入れ日") or "")
+        panel = FleaEvidencePanel(current_dt, self)
+        panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        panel.setMinimumHeight(280)
+        panel.load_existing_row(self.row_data)
+        panel.ocr_finished.connect(self._apply_ocr_fields_to_widgets)
+        host = getattr(self, "_evidence_host", None)
+        host_layout = host.layout() if host is not None else None
+        if host_layout is not None:
+            host_layout.addWidget(panel)
+        elif getattr(self, "_form_layout", None) is not None:
+            self._form_layout.insertRow(0, panel)
+        else:
+            layout = self.layout()
+            if layout is not None:
+                layout.insertWidget(0, panel)
+        self.evidence_panel = panel
+        self.setMinimumWidth(980)
+        self.setMinimumHeight(760)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+        scroll = getattr(self, "_scroll_area", None)
+        if scroll is not None:
+            QTimer.singleShot(0, lambda: scroll.verticalScrollBar().setValue(0))
+
+    def eventFilter(self, watched, event):
+        if self.evidence_panel is not None and event is not None:
+            try:
+                if event.type() == QEvent.KeyPress and event.matches(QKeySequence.Paste):
+                    w = watched if isinstance(watched, QWidget) else None
+                    if w is not None and (w is self or self.isAncestorOf(w)):
+                        clip = QApplication.clipboard()
+                        img = clip.image() if clip else None
+                        if img is not None and not img.isNull():
+                            self.evidence_panel.paste_clipboard_to_next()
+                            return True
+            except Exception:
+                pass
+        return super().eventFilter(watched, event)
+
+    def _remove_evidence_event_filter(self) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+
+    def _apply_ocr_fields_to_widgets(self, parsed) -> None:
+        if parsed is None:
+            return
+        self._set_widget_text("取引ID", getattr(parsed, "item_id", "") or "")
+        self._set_widget_text("出品URL", getattr(parsed, "listing_url", "") or "")
+        self._set_widget_text("ユーザー名", getattr(parsed, "seller_name", "") or "")
+
+    def accept(self):
+        if self.evidence_panel is not None:
+            if not self._commit_evidence_panel():
+                return
+        self._remove_evidence_event_filter()
+        super().accept()
+
+    def reject(self):
+        if self.evidence_panel is not None:
+            self.evidence_panel.cleanup_temps()
+        self._remove_evidence_event_filter()
+        super().reject()
+
+    def _commit_evidence_panel(self) -> bool:
+        panel = self.evidence_panel
+        if panel is None:
+            return True
+        parsed = panel.ocr_result()
+        if panel.has_any_image() and not parsed.has_core_fields():
+            parsed = panel.run_ocr()
+        self._apply_ocr_fields_to_widgets(parsed)
+        if panel.should_apply_datetime() and parsed.purchase_datetime:
+            self._set_widget_text("仕入れ日", parsed.purchase_datetime)
+        if not panel.has_any_image():
+            return True
+        try:
+            from utils.settings_helper import (
+                get_purchase_evidence_local_root,
+                set_purchase_evidence_local_root,
+            )
+        except ImportError:
+            from desktop.utils.settings_helper import (  # type: ignore
+                get_purchase_evidence_local_root,
+                set_purchase_evidence_local_root,
+            )
+        root = get_purchase_evidence_local_root()
+        if not root:
+            root = QFileDialog.getExistingDirectory(self, "仕入証憑の保存先フォルダを選択")
+            if not root:
+                QMessageBox.warning(
+                    self,
+                    "証憑",
+                    "スクショを保存するには、保存先フォルダを選んでください。",
+                )
+                return False
+            set_purchase_evidence_local_root(root)
+        asin = self._widget_text("ASIN")
+        store = self._widget_text("仕入先") or str(self.row_data.get("仕入先") or "")
+        dt = self._widget_text("仕入れ日")
+        temps = panel.export_slot_temp_paths()
+        try:
+            markets = StoreDatabase().list_flea_markets(active_only=False)
+        except Exception:
+            markets = []
+        try:
+            result = save_evidence_bundle(
+                root=root,
+                purchase_datetime=dt,
+                store_value=store,
+                asin=asin,
+                slot_sources=temps,
+                flea_markets=markets,
+                upload_to_gcs=True,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "証憑", f"ローカル保存に失敗しました:\n{exc}")
+            return False
+        finally:
+            panel.cleanup_temps()
+        self._evidence_extra_fields = record_fields_from_save(result)
+        if result.gcs_error:
+            QMessageBox.warning(
+                self,
+                "GCS",
+                "画像はパソコンに保存しましたが、クラウド（GCS）へのアップロードに失敗しました。\n"
+                f"{result.gcs_error}",
+            )
+        return True
 

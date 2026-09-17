@@ -315,6 +315,17 @@ class SettingsWidget(QWidget):
         result_browse_btn = QPushButton("参照")
         result_browse_btn.clicked.connect(lambda: self.browse_directory(self.result_dir_edit))
         dir_layout.addWidget(result_browse_btn, 1, 2)
+
+        dir_layout.addWidget(QLabel("仕入証憑の保存先:"), 2, 0)
+        self.evidence_dir_edit = QLineEdit()
+        self.evidence_dir_edit.setPlaceholderText(r"例: D:\HIRIO\仕入証憑")
+        self.evidence_dir_edit.setToolTip(
+            "メルカリ等の商品ページ・取引画面スクショを保存する親フォルダです。"
+        )
+        dir_layout.addWidget(self.evidence_dir_edit, 2, 1)
+        evidence_browse_btn = QPushButton("参照")
+        evidence_browse_btn.clicked.connect(lambda: self.browse_directory(self.evidence_dir_edit))
+        dir_layout.addWidget(evidence_browse_btn, 2, 2)
         
         layout.addWidget(dir_group)
         
@@ -1487,6 +1498,10 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         # ディレクトリ設定
         self.csv_dir_edit.setText(self.settings.value("directories/csv", ""))
         self.result_dir_edit.setText(self.settings.value("directories/result", ""))
+        if hasattr(self, "evidence_dir_edit"):
+            self.evidence_dir_edit.setText(
+                self.settings.value("purchase_evidence/local_root", "")
+            )
         
         # 表示設定
         self.row_height_spin.setValue(int(self.settings.value("display/row_height", 25)))
@@ -1591,6 +1606,11 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             # ディレクトリ設定
             self.settings.setValue("directories/csv", self.csv_dir_edit.text())
             self.settings.setValue("directories/result", self.result_dir_edit.text())
+            if hasattr(self, "evidence_dir_edit"):
+                self.settings.setValue(
+                    "purchase_evidence/local_root",
+                    self.evidence_dir_edit.text().strip(),
+                )
             
             # 表示設定
             self.settings.setValue("display/row_height", self.row_height_spin.value())
@@ -1692,6 +1712,8 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         self.timeout_spin.setValue(120)
         self.csv_dir_edit.setText("")
         self.result_dir_edit.setText("")
+        if hasattr(self, "evidence_dir_edit"):
+            self.evidence_dir_edit.setText("")
         self.row_height_spin.setValue(25)
         self.font_size_spin.setValue(9)
         self.alternating_colors_cb.setChecked(True)
@@ -1734,7 +1756,8 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             },
             "directories": {
                 "csv": self.csv_dir_edit.text(),
-                "result": self.result_dir_edit.text()
+                "result": self.result_dir_edit.text(),
+                "purchase_evidence": self.evidence_dir_edit.text() if hasattr(self, "evidence_dir_edit") else "",
             },
             "display": {
                 "row_height": self.row_height_spin.value(),

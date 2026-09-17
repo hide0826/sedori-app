@@ -1,3 +1,15 @@
+## 2026-09-17 フリマ証憑＋ネット仕入タブ（完了・コミット待ち）
+
+- **状況**: 実装完了。ブランチ `feature/sp-api`
+- **含む**:
+  1. 仕入行編集で商品ページ2枚＋取引画面を貼付。OCRで日時・取引ID・出品者を提案
+  2. ローカル親フォルダへ保存し、GCS は `purchase_evidence/` へアップロード（desktop/utils との衝突を回避）
+  3. 仕入管理に **ネット仕入** タブを追加（ルートなし）。コメント右に **仕入チャネル**（メルカリ等）
+  4. 古物台帳転送はネット仕入なら相手区分「フリマ」。仕入DBは店舗と共通
+- **操作**: 仕入管理 → ネット仕入。CSV取込 → 行ダブルクリックで証憑 → SKU → DB保存
+- **実装**: `flea_market_evidence_*.py` / `flea_evidence_panel.py` / `row_edit_dialog.py` / `inventory/widget.py` / `main_window.py` / `antique_widget.py`
+- **テスト**: `test_flea_market_evidence_ocr.py` / `test_flea_market_evidence_service.py` / `test_inventory_row_edit_evidence_panel.py`
+
 ## 2026-09-15 HA/HO/OF併設: CSV同ルート登録＋判定半径80m（完了・コミット）
 
 - **状況**: 完了。ブランチ `feature/sp-api` へコミット／プッシュ

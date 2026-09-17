@@ -1,3 +1,16 @@
+## 2026-09-17: フリマ仕入証憑とネット仕入タブ（完了）
+
+- **状況**: 実装完了。`feature/sp-api` へコミット
+- **含む**:
+  1. 仕入行編集でメルカリ等のスクショ3枚を貼付し、OCRで購入日時・取引IDを提案
+  2. パソコンの証憑フォルダが正。GCS は `purchase_evidence/`（used_items は使わない）
+  3. 仕入管理にネット仕入タブ（ルート非表示）。仕入チャネル列でメルカリ等を一目で確認
+  4. ネット仕入の古物台帳はフリマ区分。保存先の仕入DBは店舗まわりと共通
+- **実装**: `flea_market_evidence_service.py` / `flea_evidence_panel.py` / `inventory/` / `main_window.py` / `antique_widget.py`
+- **テスト**: 関連 pytest 通過
+
+---
+
 ## 2026-09-15: HA/HO/OF併設のCSV同ルート登録＋判定80m（完了）
 
 - **状況**: 完了。`feature/sp-api` へコミット／プッシュ

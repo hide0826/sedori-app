@@ -129,10 +129,11 @@ class InventoryWidget(
 
     spot_saved = Signal()  # スポット仕入をルートサマリーに保存した
 
-    def __init__(self, api_client, dev_mode: bool = False):
+    def __init__(self, api_client, dev_mode: bool = False, purchase_mode: str = "store"):
         super().__init__()
         self.api_client = api_client
         self.dev_mode = bool(dev_mode)
+        self.purchase_mode = "online" if purchase_mode == "online" else "store"
         self.inventory_data = None
         self.filtered_data = None
         self.excluded_highlight_on = False
@@ -165,6 +166,11 @@ class InventoryWidget(
         self.route_template_btn = None
         self.matching_btn = None
         self.setup_ui()
+        self._apply_purchase_mode_ui()
+
+    @property
+    def is_online_mode(self) -> bool:
+        return getattr(self, "purchase_mode", "store") == "online"
 
     def _close_db_connection(self, db: Any) -> None:
         if db is None:
@@ -220,9 +226,9 @@ class InventoryWidget(
             # 従来互換用ポインタも更新（本番優先 / なければ開発）
             widget.inventory_widget = widget.inventory_widget_main or widget.inventory_widget_dev
         if self.route_template_btn:
-            self.route_template_btn.setEnabled(widget is not None)
+            self.route_template_btn.setEnabled(widget is not None and not self.is_online_mode)
         if self.matching_btn:
-            self.matching_btn.setEnabled(widget is not None)
+            self.matching_btn.setEnabled(widget is not None and not self.is_online_mode)
 
     def set_antique_widget(self, widget):
         """古物台帳ウィジェットへの参照を設定"""
@@ -261,6 +267,33 @@ class InventoryWidget(
         
         # 初期表示モード適用
         self.on_view_mode_changed(self.view_mode_combo.currentIndex())
+
+    def _apply_purchase_mode_ui(self) -> None:
+        """ネット仕入タブではルート関連を隠す。"""
+        if not self.is_online_mode:
+            return
+        for attr in (
+            "route_template_btn",
+            "matching_btn",
+            "spot_purchase_btn",
+            "combined_save_btn",
+            "combined_load_btn",
+        ):
+            w = getattr(self, attr, None)
+            if w is not None:
+                w.setVisible(False)
+                w.setEnabled(False)
+        combo = getattr(self, "view_mode_combo", None)
+        if combo is not None:
+            idx = combo.findText("ルートテンプレートビュー")
+            if idx >= 0:
+                combo.removeItem(idx)
+        group = getattr(self, "route_template_group", None)
+        if group is not None:
+            group.setVisible(False)
+        if hasattr(self, "view_mode_combo"):
+            self.view_mode_combo.setCurrentIndex(0)
+            self.on_view_mode_changed(0)
 
     def setup_file_operations(self):
         """ファイル操作エリアの設定（改良版）"""
@@ -520,7 +553,7 @@ class InventoryWidget(
             if data_group:
                 data_group.setVisible(True)
             if template_group:
-                template_group.setVisible(True)
+                template_group.setVisible(not self.is_online_mode)
         elif mode == "仕入データビュー":
             if search_group:
                 search_group.setVisible(True)
@@ -534,7 +567,7 @@ class InventoryWidget(
             if data_group:
                 data_group.setVisible(False)
             if template_group:
-                template_group.setVisible(True)
+                template_group.setVisible(not self.is_online_mode)
         
         # 表示モード切り替え後にテーブルのサイズを再調整
         # レイアウトの再計算を促す
@@ -555,6 +588,10 @@ class InventoryWidget(
 
     def _get_qsettings(self) -> QSettings:
         # 開発モード時は別アプリ名で保存し、本番の設定と混在しないようにする
+        if self.is_online_mode and getattr(self, "dev_mode", False):
+            return QSettings("HIRIO", "SedoriDesktopApp_OnlineInventoryDev")
+        if self.is_online_mode:
+            return QSettings("HIRIO", "SedoriDesktopApp_OnlineInventory")
         if getattr(self, "dev_mode", False):
             return QSettings("HIRIO", "SedoriDesktopApp_InventoryDev")
         return QSettings("HIRIO", "SedoriDesktopApp")
@@ -566,11 +603,13 @@ class InventoryWidget(
         
         # エリアをスプリッターに追加
         self.area_splitter.addWidget(self.data_group)
-        self.area_splitter.addWidget(self.route_template_group)
-        
-        # 初期の高さ比率を設定（データエリア: ルートエリア = 3:1）
-        self.area_splitter.setStretchFactor(0, 3)  # データエリア
-        self.area_splitter.setStretchFactor(1, 1)  # ルートエリア
+        if not self.is_online_mode:
+            self.area_splitter.addWidget(self.route_template_group)
+            # 初期の高さ比率を設定（データエリア: ルートエリア = 3:1）
+            self.area_splitter.setStretchFactor(0, 3)  # データエリア
+            self.area_splitter.setStretchFactor(1, 1)  # ルートエリア
+        else:
+            self.area_splitter.setStretchFactor(0, 1)
         
         # スプリッターの状態変更を監視して保存
         self.area_splitter.splitterMoved.connect(self.save_splitter_state)
@@ -611,6 +650,8 @@ class InventoryWidget(
 
     def restore_splitter_state(self):
         """スプリッターの状態を復元"""
+        if self.is_online_mode:
+            return
         try:
             s = self._get_qsettings()
             data_height = s.value("inventory/splitter_data_height", None, type=int)
@@ -721,6 +762,16 @@ class InventoryWidget(
             inventory_widget=self,
             parent=self,
         )
+        if self.is_online_mode:
+            try:
+                idx = dlg.source_type_combo.findText("フリマ")
+                if idx >= 0:
+                    dlg.source_type_combo.setCurrentIndex(idx)
+                ch_idx = dlg.source_channel_combo.findText("メルカリ")
+                if ch_idx >= 0:
+                    dlg.source_channel_combo.setCurrentIndex(ch_idx)
+            except Exception:
+                pass
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 

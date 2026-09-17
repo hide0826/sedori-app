@@ -104,3 +104,16 @@ def is_recording_mode() -> bool:
 
 def set_recording_mode_enabled_flag(enabled: bool) -> None:
     _settings().setValue("recording/enabled", bool(enabled))
+
+
+PURCHASE_EVIDENCE_LOCAL_ROOT_KEY = "purchase_evidence/local_root"
+
+
+def get_purchase_evidence_local_root() -> str:
+    """フリマ仕入証憑スクショのローカル保存先（親フォルダ）。"""
+    v = _settings().value(PURCHASE_EVIDENCE_LOCAL_ROOT_KEY, "") or ""
+    return str(v).strip()
+
+
+def set_purchase_evidence_local_root(path: str) -> None:
+    _settings().setValue(PURCHASE_EVIDENCE_LOCAL_ROOT_KEY, str(path or "").strip())

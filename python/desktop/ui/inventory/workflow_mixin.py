@@ -90,8 +90,10 @@ from services.purchase_cost_calc import (
 from .support import (
     _PRICETAR_BROWSER_TITLE_KEYWORDS,
     _WORKFLOW_PIPELINE_SEGMENTS,
+    _ONLINE_WORKFLOW_PIPELINE_SEGMENTS,
     _WORKFLOW_PIPELINE_SEP,
     _ACTION_TO_PIPELINE_STEP,
+    _ONLINE_ACTION_TO_PIPELINE_STEP,
     _format_status_prefix_html,
     _format_workflow_pipeline_html,
     _normalize_condition_note_newlines,
@@ -111,7 +113,12 @@ class InventoryWorkflowMixin:
         emph = getattr(self, "_workflow_emphasize", False)
         step = getattr(self, "_workflow_active_step", None)
         prefix = _format_status_prefix_html(text, emph)
-        pipe = _format_workflow_pipeline_html(step)
+        segs = (
+            _ONLINE_WORKFLOW_PIPELINE_SEGMENTS
+            if getattr(self, "purchase_mode", "store") == "online"
+            else _WORKFLOW_PIPELINE_SEGMENTS
+        )
+        pipe = _format_workflow_pipeline_html(step, segs)
         sep = '<span style="color:#cccccc;">　</span>'
         self.workflow_status_label.setText(prefix + sep + pipe)
 
@@ -134,7 +141,11 @@ class InventoryWorkflowMixin:
 
     def _run_action_with_status(self, action_name: str, action_func):
         """押したボタン名をワークフロー表示に反映してから処理を実行"""
-        step = _ACTION_TO_PIPELINE_STEP.get(action_name)
+        step = (
+            _ONLINE_ACTION_TO_PIPELINE_STEP
+            if getattr(self, "purchase_mode", "store") == "online"
+            else _ACTION_TO_PIPELINE_STEP
+        ).get(action_name)
         try:
             if step is not None:
                 self._workflow_active_step = step
@@ -464,7 +475,10 @@ class InventoryWorkflowMixin:
                     pass
             
             # 古物台帳タブにデータを転送
-            self.antique_widget.import_inventory_data(data_list, route_info)
+            source_mode = "online" if getattr(self, "purchase_mode", "store") == "online" else "store"
+            if source_mode == "online":
+                route_info = None
+            self.antique_widget.import_inventory_data(data_list, route_info, source_mode=source_mode)
             
             # 古物台帳タブに切り替え
             # 親ウィジェット（MainWindow）のタブウィジェットを取得

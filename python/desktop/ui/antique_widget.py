@@ -812,13 +812,14 @@ class AntiqueWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"取込でエラーが発生しました:\n{e}")
     
-    def import_inventory_data(self, records: List[dict], route_info: Optional[dict] = None) -> None:
+    def import_inventory_data(self, records: List[dict], route_info: Optional[dict] = None, source_mode: str = "store") -> None:
         """
         仕入管理タブからデータを受け取って古物台帳タブに表示する
         
         Args:
             records: 仕入データのリスト（辞書形式）
             route_info: ルート情報（オプション）
+            source_mode: store=店舗まわり / online=ネット仕入
         """
         try:
             import pandas as pd
@@ -829,6 +830,11 @@ class AntiqueWidget(QWidget):
             
             # ルート情報を内部メンバーに保持（後続処理で活用可能）
             self._imported_route_info = route_info
+            online = source_mode == "online"
+            if online:
+                self._set_import_preview_columns("online")
+            else:
+                self._set_import_preview_columns("store")
             
             # データフレームに変換（既存の処理と互換性を保つ）
             df = pd.DataFrame(records)
@@ -846,6 +852,14 @@ class AntiqueWidget(QWidget):
             sku_s = pick_series("SKU")
             notes_s = pick_series("コメント")
             name_s = pick_series("仕入先")
+            channel_s = pick_series("仕入チャネル")
+            if channel_s.eq("").all() and "プラットフォーム" in df.columns:
+                channel_s = pick_series("プラットフォーム")
+            tx_s = pick_series("取引ID")
+            user_s = pick_series("ユーザー名")
+            url_s = pick_series("出品URL")
+            track_s = pick_series("伝票番号")
+            pref_s = pick_series("受取都道府県")
             
             user_dict = self._load_user_dictionary()
             # 法人マスタを一括取得（チェーン名→法人名）
@@ -954,7 +968,30 @@ class AntiqueWidget(QWidget):
                 date_val = str(date_s.iloc[i]) if pd.notna(date_s.iloc[i]) else ""
                 normalized_date = self._normalize_date(date_val) if date_val else ""
                 
-                rows.append({
+                if online:
+                    channel_val = str(channel_s.iloc[i] or "").strip() or supplier_code
+                    rows.append({
+                        "entry_date": normalized_date,
+                        "kobutsu_kind": cat,
+                        "hinmei": str(title_s.iloc[i]),
+                        "transaction_method": "買受",
+                        "qty": qty_v,
+                        "unit_price": unit_v,
+                        "amount": amount_v,
+                        "identifier": identifier_v,
+                        "counterparty_type": "フリマ",
+                        "notes": None,
+                        "counterparty_name": channel_val,
+                        "platform": channel_val,
+                        "platform_order_id": str(tx_s.iloc[i] or "").strip(),
+                        "platform_user": str(user_s.iloc[i] or "").strip(),
+                        "listing_url": str(url_s.iloc[i] or "").strip(),
+                        "tracking_no": str(track_s.iloc[i] or "").strip(),
+                        "ship_to_prefecture": str(pref_s.iloc[i] or "").strip(),
+                        "sku": str(sku_s.iloc[i] or '') if 'SKU' in df.columns else "",
+                    })
+                else:
+                    rows.append({
                     # 共通列
                     "entry_date": normalized_date,
                     "kobutsu_kind": cat,
@@ -976,9 +1013,10 @@ class AntiqueWidget(QWidget):
                     "sku": str(sku_s.iloc[i] or '') if 'SKU' in df.columns else "",
                 })
             
-            # 相手区分を「法人」に設定（実店舗ルート取込のデフォルト）
+            # 相手区分を設定
             if hasattr(self, 'cmb_counterparty'):
-                idx_store = self.cmb_counterparty.findText('法人')
+                want = "フリマ" if online else "法人"
+                idx_store = self.cmb_counterparty.findText(want)
                 if idx_store >= 0:
                     self.cmb_counterparty.setCurrentIndex(idx_store)
             
@@ -1159,12 +1197,29 @@ class AntiqueWidget(QWidget):
                 break
             parent = parent.parent()
 
+    def _set_import_preview_columns(self, mode: str) -> None:
+        """取込プレビューを店舗列またはフリマ列に切り替える。"""
+        if mode == "online":
+            cols = self.COMMON_COLUMNS + self.FLEA_COLUMNS
+            if hasattr(self, "grp_store_list"):
+                self.grp_store_list.setTitle("ネット仕入リスト（取込プレビュー）")
+        else:
+            cols = self.COMMON_COLUMNS + self.STORE_COLUMNS
+            if hasattr(self, "grp_store_list"):
+                self.grp_store_list.setTitle("店舗リスト（取込プレビュー）")
+        self.preview_columns = cols
+        self.preview_headers = [label for _, label in cols]
+        self.preview_keys = [key for key, _ in cols]
+        if hasattr(self, "table_store_list") and self.table_store_list is not None:
+            self.table_store_list.setColumnCount(len(self.preview_headers))
+            self.table_store_list.setHorizontalHeaderLabels(self.preview_headers)
+
     def _commit_imported_store_rows(self) -> None:
         """取込プレビューの店舗行を、現在の共通テンプレ値と合成して台帳へ一括登録"""
         try:
             cp_sel = self.cmb_counterparty.currentText()
-            if cp_sel != "法人":
-                QMessageBox.warning(self, "相手区分", "相手区分を『法人』にしてください。")
+            if cp_sel not in ("法人", "フリマ"):
+                QMessageBox.warning(self, "相手区分", "相手区分を『法人』または『フリマ』にしてください。")
                 return
             rows = getattr(self, '_imported_store_rows', [])
             if not rows:
@@ -1181,10 +1236,16 @@ class AntiqueWidget(QWidget):
                     missing.append("品名")
                 if not str(r.get('identifier', '')).strip():
                     missing.append("識別情報")
-                if not str(r.get('counterparty_name', '')).strip():
-                    missing.append("仕入先名")
                 if not str(r.get('kobutsu_kind', '')).strip():
                     missing.append("品目")
+                if cp_sel == "フリマ":
+                    if not str(r.get('platform_order_id', '') or '').strip():
+                        missing.append("取引ID")
+                    if not str(r.get('platform_user', '') or '').strip():
+                        missing.append("ユーザー名")
+                else:
+                    if not str(r.get('counterparty_name', '')).strip():
+                        missing.append("仕入先名")
                 
                 if missing:
                     missing_rows.append(f"行{idx}: {', '.join(missing)}")
@@ -1198,9 +1259,9 @@ class AntiqueWidget(QWidget):
                     'counterparty_type': cp_sel,
                     'counterparty_name': str(r.get('counterparty_name', '')).strip(),
                     'receipt_no': str(r.get('receipt_no', '')).strip() or None,
-                    'platform': None,
-                    'platform_order_id': None,
-                    'platform_user': None,
+                    'platform': str(r.get('platform', '') or '').strip() or None if cp_sel == "フリマ" else None,
+                    'platform_order_id': str(r.get('platform_order_id', '') or '').strip() or None if cp_sel == "フリマ" else None,
+                    'platform_user': str(r.get('platform_user', '') or '').strip() or None if cp_sel == "フリマ" else None,
                     'person_name': None,
                     'person_address': None,  # 店舗取引なので個人住所は常にNone
                     # 店舗用フィールドを正しく反映
@@ -1235,7 +1296,7 @@ class AntiqueWidget(QWidget):
                 QMessageBox.warning(self, "一部スキップ", msg)
 
             if not to_insert:
-                QMessageBox.information(self, "登録対象なし", "登録可能な行がありません（仕入先名の空行は除外されます）。")
+                QMessageBox.information(self, "登録対象なし", "登録可能な行がありません（必須項目の空行は除外されます）。")
                 return
 
             from desktop.database.ledger_db import LedgerDatabase

@@ -101,6 +101,10 @@ from .support import (
     SHIPPING_METHOD_OPTIONS,
 )
 from .snapshot_dialog import CombinedSnapshotDialog
+from services.flea_market_evidence_service import (
+    PURCHASE_DB_FLEA_COLUMNS,
+    transaction_id_match_key,
+)
 
 
 class InventoryPersistenceMixin:
@@ -217,7 +221,8 @@ class InventoryPersistenceMixin:
                 "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
                 "発送方法", "販売チャネル", COL_PLATFORM_FEE, COL_SHIPPING, COL_TOTAL_COST,
                 "在庫保管手数料",
-                "仕入先", "価格改定", "その他詳細", "コンディション説明"
+                "仕入先", "価格改定", "その他詳細", "コンディション説明",
+                *PURCHASE_DB_FLEA_COLUMNS,
             ]
             if self.filtered_data is not None and len(self.filtered_data) > 0:
                 cols = [c for c in BASE_COLUMNS_FOR_PURCHASE_DB if c in self.filtered_data.columns]
@@ -241,6 +246,15 @@ class InventoryPersistenceMixin:
             else:
                 # 保証・レシート情報を付与
                 purchase_records = self._augment_purchase_records_for_db(purchase_records)
+                from services.flea_market_evidence_service import (
+                    PURCHASE_CHANNEL_COL,
+                    infer_purchase_channel,
+                )
+                for rec in purchase_records:
+                    if not str(rec.get(PURCHASE_CHANNEL_COL) or "").strip():
+                        inferred = infer_purchase_channel(rec)
+                        if inferred:
+                            rec[PURCHASE_CHANNEL_COL] = inferred
                 
                 # 最新スナップショットから既存データを取得
                 snapshots = self.product_purchase_db.list_snapshots()
@@ -264,6 +278,9 @@ class InventoryPersistenceMixin:
                     key = self._get_purchase_record_key(rec)
                     if key:
                         existing_index[key] = idx
+                    tx_key = transaction_id_match_key(rec)
+                    if tx_key:
+                        existing_index[tx_key] = idx
 
                 updated_count = 0
                 new_count = 0
@@ -272,6 +289,19 @@ class InventoryPersistenceMixin:
                 for rec_idx, record in enumerate(purchase_records):
                     if rec_idx % 25 == 0:
                         QApplication.processEvents()
+                    tx_key = transaction_id_match_key(record)
+                    if tx_key and tx_key in existing_index:
+                        existing_rec = existing_all_records[existing_index[tx_key]]
+                        new_sku = str(record.get("SKU") or record.get("sku") or "").strip()
+                        existing_sku = str(existing_rec.get("SKU") or existing_rec.get("sku") or "").strip()
+                        if new_sku.endswith("...") and existing_sku and not existing_sku.endswith("..."):
+                            record = dict(record)
+                            record["SKU"] = existing_sku
+                            record["sku"] = existing_sku
+                        existing_all_records[existing_index[tx_key]] = record
+                        updated_count += 1
+                        continue
+
                     dt_asin_key = self._get_datetime_asin_key(record)
                     if dt_asin_key and dt_asin_key in existing_datetime_asin_keys:
                         # 同じ仕入時間・同じASINが既存にある場合はスキップ（重複登録・上書き防止）
@@ -294,8 +324,11 @@ class InventoryPersistenceMixin:
                     else:
                         # 新規データを追加
                         existing_all_records.append(record)
+                        new_idx = len(existing_all_records) - 1
                         if key:
-                            existing_index[key] = len(existing_all_records) - 1
+                            existing_index[key] = new_idx
+                        if tx_key:
+                            existing_index[tx_key] = new_idx
                         if dt_asin_key:
                             existing_datetime_asin_keys.add(dt_asin_key)
                         new_count += 1
@@ -330,7 +363,7 @@ class InventoryPersistenceMixin:
             traceback.print_exc()
         
         # 2. ルート情報をルート訪問DBに保存
-        if self.route_summary_widget:
+        if self.route_summary_widget and getattr(self, "purchase_mode", "store") != "online":
             try:
                 route_data = self.route_summary_widget.get_route_data()
                 visits = self.route_summary_widget.get_store_visits_data()

@@ -19,6 +19,13 @@ _WORKFLOW_PIPELINE_SEGMENTS = [
     "⑦古物台帳生成",
     "⑧出品CSV生成",
 ]
+_ONLINE_WORKFLOW_PIPELINE_SEGMENTS = [
+    "①CSV取込",
+    "②SKU生成",
+    "③DB保存",
+    "④古物台帳生成",
+    "⑤出品CSV生成",
+]
 _WORKFLOW_PIPELINE_SEP = "\u2010"
 _ACTION_TO_PIPELINE_STEP = {
     "CSV取込": 1,
@@ -28,6 +35,13 @@ _ACTION_TO_PIPELINE_STEP = {
     "DB保存": 6,
     "古物台帳生成": 7,
     "出品CSV生成": 8,
+}
+_ONLINE_ACTION_TO_PIPELINE_STEP = {
+    "CSV取込": 1,
+    "SKU生成": 2,
+    "DB保存": 3,
+    "古物台帳生成": 4,
+    "出品CSV生成": 5,
 }
 
 
@@ -44,9 +58,10 @@ def _format_status_prefix_html(text: str, emphasize: bool) -> str:
     return f'<span style="color:#ffd54f;font-weight:600;">{escape(text)}</span>'
 
 
-def _format_workflow_pipeline_html(active_step: Optional[int]) -> str:
+def _format_workflow_pipeline_html(active_step: Optional[int], segments: Optional[List[str]] = None) -> str:
     parts: List[str] = []
-    for i, seg in enumerate(_WORKFLOW_PIPELINE_SEGMENTS, start=1):
+    segs = segments if segments is not None else _WORKFLOW_PIPELINE_SEGMENTS
+    for i, seg in enumerate(segs, start=1):
         esc = escape(seg)
         if active_step == i:
             parts.append(

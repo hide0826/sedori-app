@@ -170,6 +170,7 @@ class InventoryCsvImportMixin:
             
             # 列マッピングと並び替え
             self.inventory_data = self._map_and_reorder_columns(df)
+            self._fill_purchase_channel_if_needed()
             # 開発タブの場合のみ、コメント列から 3-6-9 コードを自動判定して「3-6-9」列に反映
             # （ルールは services/sku_template.py の _get_rule369_code と同一）
             if self.dev_mode and self.inventory_data is not None and "3-6-9" in self.inventory_data.columns:
@@ -191,8 +192,9 @@ class InventoryCsvImportMixin:
             # SKU自動マッチング処理（商品DBから仕入れ日・ASINで検索）
             self._auto_match_sku_from_product_db()
 
-            # 仕入先に未登録店舗があれば店舗マスタへ自動登録（Google Maps 情報付き）
-            self._auto_register_stores_from_inventory()
+            # 仕入先に未登録店舗があれば店舗マスタへ自動登録（ネット仕入は店舗マスタに載せない）
+            if getattr(self, "purchase_mode", "store") != "online":
+                self._auto_register_stores_from_inventory()
             
             # テーブルの更新
             self.update_table()
@@ -324,6 +326,9 @@ class InventoryCsvImportMixin:
             "仕入元": "仕入先",
             "店舗": "仕入先",
             "supplier": "仕入先",
+            # 仕入チャネル（ネット仕入：メルカリ・楽天等）
+            "仕入チャネル": "仕入チャネル",
+            "source_channel": "仕入チャネル",
             # フリマ・電脳取引情報（単品仕入・CSV共通列名）
             "プラットフォーム": "プラットフォーム",
             "platform": "プラットフォーム",
@@ -336,6 +341,13 @@ class InventoryCsvImportMixin:
             "tracking_number": "伝票番号",
             "受取都道府県": "受取都道府県",
             "prefecture": "受取都道府県",
+            "証憑フォルダ": "証憑フォルダ",
+            "証憑画像1": "証憑画像1",
+            "証憑画像2": "証憑画像2",
+            "証憑画像3": "証憑画像3",
+            "証憑URL1": "証憑URL1",
+            "証憑URL2": "証憑URL2",
+            "証憑URL3": "証憑URL3",
             # その他詳細・コンディション説明
             "その他詳細": "その他詳細",
             "other_details": "その他詳細",
@@ -413,6 +425,28 @@ class InventoryCsvImportMixin:
         new_df = self._calculate_margin_and_roi(new_df)
         
         return new_df
+
+    def _fill_purchase_channel_if_needed(self) -> None:
+        """ネット仕入の仕入チャネルが空なら、仕入先やURLから埋める。"""
+        from services.flea_market_evidence_service import (
+            PURCHASE_CHANNEL_COL,
+            infer_purchase_channel,
+        )
+
+        df = self.inventory_data
+        if df is None or len(df) == 0:
+            return
+        if PURCHASE_CHANNEL_COL not in df.columns:
+            if getattr(self, "purchase_mode", "store") != "online":
+                return
+            df[PURCHASE_CHANNEL_COL] = ""
+        for idx, row in df.iterrows():
+            current = str(row.get(PURCHASE_CHANNEL_COL) or "").strip()
+            if current and current.lower() not in ("nan", "none"):
+                continue
+            inferred = infer_purchase_channel(row.to_dict())
+            if inferred:
+                df.at[idx, PURCHASE_CHANNEL_COL] = inferred
 
     @staticmethod
     def _cell_has_numeric_value(value) -> bool:
