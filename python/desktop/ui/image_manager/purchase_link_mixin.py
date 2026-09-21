@@ -110,6 +110,8 @@ from .support import (
     _normalize_jan_for_match,
     _normalize_image_path,
     _record_has_any_image_paths,
+    first_image_capture_dt,
+    resolve_link_image_paths,
     _apply_unlinked_item_style,
     _record_jan_matches_group,
     _candidate_is_known_linked_product,
@@ -428,36 +430,164 @@ class ImageManagerPurchaseLinkMixin:
             QMessageBox.critical(self, "エラー", f"確定処理中にエラーが発生しました:\n{e}")
 
 
-    def show_purchase_candidates_for_group(self, group: JanGroup):
+    def _selected_image_paths_from_list(self) -> List[str]:
+        paths: List[str] = []
+        image_list = getattr(self, "image_list", None)
+        if image_list is None:
+            return paths
+        for item in image_list.selectedItems():
+            path = item.data(Qt.UserRole)
+            if path:
+                paths.append(str(path))
+        return paths
+
+    def _find_jan_group_by_jan(self, jan: Optional[str]) -> Optional[JanGroup]:
+        if not jan:
+            return None
+        jan_norm = _normalize_jan_for_match(jan) if jan != "unknown" else "unknown"
+        for group in getattr(self, "jan_groups", None) or []:
+            if group.jan == jan or _normalize_jan_for_match(group.jan) == jan_norm:
+                return group
+        return None
+
+    def _find_jan_group_for_path(self, image_path: str) -> Optional[JanGroup]:
+        """画像パスが属するJANグループを、最新の jan_groups から返す。"""
+        if not image_path:
+            return None
+        target = _normalize_image_path(image_path)
+        for group in getattr(self, "jan_groups", None) or []:
+            for rec in group.images or []:
+                if rec.path == image_path or _normalize_image_path(rec.path) == target:
+                    return group
+        return None
+
+    def _resolve_live_jan_group(
+        self,
+        group: Optional[JanGroup] = None,
+        image_path: Optional[str] = None,
+        tree_item: Optional[QTreeWidgetItem] = None,
+    ) -> Optional[JanGroup]:
         """
-        JANグループを右クリックしたときに、
-        画像の撮影日時に近い仕入DBレコード候補を表示して手動で紐付ける
+        ツリーに保存した JanGroup は images が空になることがある。
+        必ず self.jan_groups の実体を使う。
+        """
+        if image_path:
+            found = self._find_jan_group_for_path(image_path)
+            if found and found.images:
+                return found
+
+        jan = None
+        if group is not None:
+            jan = getattr(group, "jan", None)
+            if group.images:
+                found = self._find_jan_group_by_jan(jan) or group
+                if found and found.images:
+                    return found
+
+        if tree_item is not None:
+            data = tree_item.data(0, Qt.UserRole)
+            extra_jan = tree_item.data(0, int(Qt.UserRole) + 1)
+            if isinstance(extra_jan, str) and extra_jan:
+                jan = extra_jan
+            if isinstance(data, JanGroup):
+                jan = jan or data.jan
+            elif isinstance(data, str):
+                found = self._find_jan_group_for_path(data)
+                if found and found.images:
+                    return found
+            found = self._find_jan_group_by_jan(jan)
+            if found and found.images:
+                return found
+            # 子ノードの画像パスから探す
+            for i in range(tree_item.childCount()):
+                child_path = tree_item.child(i).data(0, Qt.UserRole)
+                if isinstance(child_path, str) and child_path:
+                    found = self._find_jan_group_for_path(child_path)
+                    if found and found.images:
+                        return found
+            parent = tree_item.parent()
+            if parent:
+                return self._resolve_live_jan_group(tree_item=parent)
+
+        return None
+
+    def _link_purchase_from_current_image(self):
+        """表示中・選択中の画像からJANグループを特定して仕入DB候補紐付けを開く。"""
+        paths = self._selected_image_paths_from_list()
+        path = (paths[0] if paths else None) or getattr(self, "selected_image_path", None)
+        group = self._resolve_live_jan_group(
+            group=getattr(self, "selected_group", None),
+            image_path=path,
+        )
+        if not group or not group.images:
+            current = self.tree_widget.currentItem() if getattr(self, "tree_widget", None) else None
+            if current:
+                group = self._resolve_live_jan_group(tree_item=current)
+        if not group or not group.images:
+            QMessageBox.information(
+                self,
+                "情報",
+                "紐付け対象のJANグループが見つかりませんでした。\n"
+                "中央の画像を選ぶか、左のJANグループを選んでから再実行してください。",
+            )
+            return
+        self.show_purchase_candidates_for_group(group, image_paths=paths)
+
+    def show_purchase_candidates_for_group(
+        self,
+        group: JanGroup,
+        image_paths: Optional[List[str]] = None,
+        prefer_selected: bool = True,
+    ):
+        """
+        撮影日時に近い仕入DBレコード候補を表示して手動で紐付ける。
+        中央リストで画像が選ばれているときは、選んだ画像だけを付け替える。
         """
         if not self.product_widget:
             QMessageBox.warning(self, "エラー", "仕入DBタブ（商品データベース）への参照がありません。")
             return
 
+        live = self._resolve_live_jan_group(group=group)
+        if live:
+            group = live
+
         if not group or not group.images:
             QMessageBox.information(self, "情報", "画像が含まれていないJANグループです。")
             return
 
-        # グループ内の画像から代表となる撮影日時を決定（最も古いものを基準にする）
-        capture_times: List[datetime] = []
-        for record in group.images:
-            if record.capture_dt:
-                capture_times.append(record.capture_dt)
-
-        if not capture_times:
-            for record in group.images:
-                exif_dt = self.image_service.get_exif_datetime(record.path)
-                if exif_dt:
-                    capture_times.append(exif_dt)
-
-        if not capture_times:
-            QMessageBox.warning(self, "エラー", "このJANグループの画像から撮影日時を取得できませんでした。")
+        group_paths = [img.path for img in group.images if img.path]
+        selected_paths = list(image_paths or [])
+        if prefer_selected and not selected_paths:
+            selected_paths = self._selected_image_paths_from_list()
+        link_paths = resolve_link_image_paths(selected_paths, group_paths)
+        if not link_paths:
+            QMessageBox.information(self, "情報", "紐付けする画像がありません。")
             return
+        subset = len(link_paths) < len(group_paths)
 
-        base_dt = min(capture_times)
+        path_map = {_normalize_image_path(img.path): img for img in group.images if img.path}
+        link_records = []
+        for path in link_paths:
+            rec = path_map.get(_normalize_image_path(path))
+            if rec:
+                link_records.append(rec)
+        if not link_records:
+            link_records = list(group.images)
+
+        # 選んだ画像（なければグループ1枚目）の撮影日時を基準にする
+        first = link_records[0]
+        base_dt = first_image_capture_dt(link_records)
+        if not base_dt:
+            base_dt = self.image_service.get_exif_datetime(first.path)
+        if not base_dt:
+            for record in link_records[1:]:
+                base_dt = record.capture_dt or self.image_service.get_exif_datetime(record.path)
+                if base_dt:
+                    break
+
+        if not base_dt:
+            QMessageBox.warning(self, "エラー", "選択画像から撮影日時を取得できませんでした。")
+            return
 
         progress = QProgressDialog("仕入DB候補を検索中...", None, 0, 0, self)
         progress.setWindowTitle("仕入DB候補")
@@ -468,12 +598,15 @@ class ImageManagerPurchaseLinkMixin:
         QApplication.processEvents()
 
         # 画像撮影日時 ±7日以内の仕入DB候補を取得（軽量読み込み）
+        search_jan = group.jan if group.jan and group.jan != "unknown" else None
+        if not search_jan and first.jan_candidate and first.jan_candidate != "unknown":
+            search_jan = first.jan_candidate
         try:
             self._ensure_product_widget_data_loaded(full=False)
             candidates = self.product_widget.find_purchase_candidates_by_datetime(
                 base_dt,
                 days_window=7,
-                jan=group.jan,
+                jan=search_jan,
             )
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"仕入DB候補の取得中にエラーが発生しました:\n{e}")
@@ -517,8 +650,6 @@ class ImageManagerPurchaseLinkMixin:
             if reply != QMessageBox.Yes:
                 return
 
-        image_paths = [img.path for img in group.images]
-
         progress = QProgressDialog("仕入DBへ紐付け中...", None, 0, 0, self)
         progress.setWindowTitle("紐付け処理")
         progress.setWindowModality(Qt.WindowModal)
@@ -529,9 +660,17 @@ class ImageManagerPurchaseLinkMixin:
 
         try:
             all_records = self.product_widget.get_all_purchase_records()
+            try:
+                self.product_widget.remove_image_paths_from_purchase_records(
+                    link_paths,
+                    all_records,
+                    keep_sku=target_sku or None,
+                )
+            except Exception as e:
+                logger.warning("旧レコードからの画像パス解除に失敗: %s", e)
             success, added_count, record_snapshot = self.product_widget.update_image_paths_for_jan(
                 target_jan,
-                image_paths,
+                link_paths,
                 all_records,
                 skip_existing=True,
                 target_sku=target_sku or None,
@@ -553,38 +692,52 @@ class ImageManagerPurchaseLinkMixin:
             )
             return
 
+        first_group_path = group.images[0].path if group.images else ""
+        moving_first = _normalize_image_path(first_group_path) in {
+            _normalize_image_path(p) for p in link_paths
+        }
+        skip_barcode = moving_first and self._is_group_first_image_excluded(group)
         if record_snapshot:
             self.add_registration_entry(
                 record_snapshot,
-                skip_barcode_classification=self._is_group_first_image_excluded(group),
+                skip_barcode_classification=skip_barcode,
             )
 
         self._finalize_purchase_db_after_image_link()
 
-        # 必要であればJANグループのJANを仕入DB側のJANに合わせる
+        # 選択画像だけ別JANへ移す。グループ全体のときは確認してから全画像を更新する。
         if target_jan and group.jan != target_jan:
-            reply = QMessageBox.question(
-                self,
-                "JANグループJAN更新の確認",
-                f"このJANグループのJANを仕入DBのJAN {target_jan} に更新しますか？\n"
-                f"（グループ内の全画像が新しいJANで再グルーピングされます）",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-            if reply == QMessageBox.Yes:
-                for img_record in list(group.images):
-                    self.assign_image_to_jan(
-                        img_record.path, target_jan, refresh_tree=False
-                    )
+            if subset:
+                for path in link_paths:
+                    self.assign_image_to_jan(path, target_jan, refresh_tree=False)
                 self.jan_groups = self.image_service.group_by_jan(self.image_records)
                 self._jan_title_cache.pop(target_jan, None)
+            else:
+                reply = QMessageBox.question(
+                    self,
+                    "JANグループJAN更新の確認",
+                    f"このJANグループのJANを仕入DBのJAN {target_jan} に更新しますか？\n"
+                    f"（グループ内の全画像が新しいJANで再グルーピングされます）",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if reply == QMessageBox.Yes:
+                    for img_record in list(group.images):
+                        self.assign_image_to_jan(
+                            img_record.path, target_jan, refresh_tree=False
+                        )
+                    self.jan_groups = self.image_service.group_by_jan(self.image_records)
+                    self._jan_title_cache.pop(target_jan, None)
 
         try:
             self._jan_title_cache.clear()
         except Exception:
             self._jan_title_cache = {}
         self.update_tree_widget()
-        msg = "仕入DBレコードと画像グループを紐付けました。"
+        if subset:
+            msg = f"選択した {len(link_paths)} 枚だけを仕入DBレコードに紐付けました。"
+        else:
+            msg = "仕入DBレコードと画像グループを紐付けました。"
         if added_count > 0:
             msg += f"\n新しく登録された画像数: {added_count}枚"
         else:

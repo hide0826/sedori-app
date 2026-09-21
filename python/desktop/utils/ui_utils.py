@@ -15,6 +15,12 @@ from typing import Any, List, Optional, Sequence, TYPE_CHECKING
 from PySide6.QtCore import QObject, QEvent, QSettings, QTimer
 from PySide6.QtWidgets import QHeaderView, QTableView, QTableWidget, QTabWidget, QGroupBox, QWidget
 
+from .event_filter_safety import (
+    QEVENT_SHOW,
+    event_filter_guard,
+    qevent_type_int,
+)
+
 if TYPE_CHECKING:
     pass
 
@@ -307,21 +313,26 @@ class _TableColumnWidthShowFilter(QObject):
     """初回表示時に QTableWidget へ列幅永続化を自動取り付けする。"""
 
     def eventFilter(self, obj, event):  # noqa: N802
-        if event.type() == QEvent.Type.Show and isinstance(obj, QTableWidget):
+        with event_filter_guard() as allow:
+            if not allow:
+                return False
             try:
-                persistence = getattr(obj, "_hirio_column_width_persistence", None)
-                if persistence is None:
-                    legacy = getattr(obj, "_hirio_table_column_legacy_keys", None)
-                    persistence = attach_table_column_width_persistence(
-                        obj,
-                        legacy_keys=legacy,
-                    )
-                    persistence.apply(deferred=False, allow_defaults=True)
-                elif _table_column_count(obj) > 0:
-                    persistence.apply(deferred=False, allow_defaults=False)
+                if qevent_type_int(event) == QEVENT_SHOW and isinstance(obj, QTableWidget):
+                    persistence = getattr(obj, "_hirio_column_width_persistence", None)
+                    if persistence is None:
+                        legacy = getattr(obj, "_hirio_table_column_legacy_keys", None)
+                        persistence = attach_table_column_width_persistence(
+                            obj,
+                            legacy_keys=legacy,
+                        )
+                        persistence.apply(deferred=False, allow_defaults=True)
+                    elif _table_column_count(obj) > 0:
+                        persistence.apply(deferred=False, allow_defaults=False)
+            except RecursionError:
+                return False
             except Exception as exc:
                 print(f"[WARN] テーブル列幅の復元をスキップしました: {exc}")
-        return super().eventFilter(obj, event)
+            return super().eventFilter(obj, event)
 
 
 _show_filter: Optional[_TableColumnWidthShowFilter] = None

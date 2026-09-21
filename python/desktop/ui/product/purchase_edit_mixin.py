@@ -33,6 +33,96 @@ from desktop.utils.ui_utils import (
 
 logger = logging.getLogger(__name__)
 
+
+def merge_datetime_purchase_candidates(
+    date_matches: List[Tuple[int, Dict[str, Any]]],
+    jan_matches: List[Tuple[int, Dict[str, Any]]],
+) -> List[Tuple[int, Dict[str, Any]]]:
+    """
+    撮影日時ウィンドウ内の仕入候補を残しつつ、現在JAN一致を先頭に並べる。
+    別商品への付け替えができるよう、JAN一致だけで絞り込まない。
+    """
+    def rec_key(rec: Dict[str, Any]) -> Tuple[str, str, str]:
+        return (
+            str(rec.get("SKU") or rec.get("sku") or ""),
+            str(rec.get("JAN") or rec.get("jan") or rec.get("JANコード") or ""),
+            str(rec.get("仕入れ日") or rec.get("purchase_date") or ""),
+        )
+
+    jan_keys = {rec_key(rec) for _, rec in jan_matches}
+    merged: List[Tuple[int, Dict[str, Any]]] = []
+    seen = set()
+    for item in [*jan_matches, *date_matches]:
+        key = rec_key(item[1])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    merged.sort(
+        key=lambda item: (
+            0 if rec_key(item[1]) in jan_keys else 1,
+            item[0],
+            str(item[1].get("仕入れ日") or item[1].get("purchase_date") or ""),
+            str(item[1].get("SKU") or item[1].get("sku") or ""),
+        )
+    )
+    return merged
+
+
+PURCHASE_PRODUCT_IMAGE_COLUMNS = [f"画像{i}" for i in range(1, 7)]
+
+
+def _purchase_image_path_key(path: str) -> str:
+    if not path:
+        return ""
+    return os.path.normcase(os.path.normpath(str(path).strip()))
+
+
+def compact_purchase_image_columns(record: Dict[str, Any]) -> None:
+    """画像1〜6の空きを詰めて左詰めする。"""
+    kept: List[str] = []
+    for col in PURCHASE_PRODUCT_IMAGE_COLUMNS:
+        val = str(record.get(col) or "").strip()
+        if val:
+            kept.append(val)
+        record[col] = ""
+    for i, val in enumerate(kept):
+        record[PURCHASE_PRODUCT_IMAGE_COLUMNS[i]] = val
+
+
+def remove_image_paths_from_records(
+    image_paths: List[str],
+    records: List[Dict[str, Any]],
+    keep_sku: Optional[str] = None,
+) -> int:
+    """
+    指定画像パスを、移動先SKU以外の仕入レコードから外す。
+    選択画像だけ別商品へ付け替えるときに、元の商品に残らないようにする。
+    """
+    if not image_paths or not records:
+        return 0
+    remove_keys = {_purchase_image_path_key(p) for p in image_paths if p}
+    remove_keys.discard("")
+    if not remove_keys:
+        return 0
+    keep = str(keep_sku or "").strip()
+    removed = 0
+    for record in records:
+        sku = str(record.get("SKU") or record.get("sku") or "").strip()
+        if keep and sku == keep:
+            continue
+        changed = False
+        for col in PURCHASE_PRODUCT_IMAGE_COLUMNS:
+            val = str(record.get(col) or "").strip()
+            if val and _purchase_image_path_key(val) in remove_keys:
+                record[col] = ""
+                changed = True
+                removed += 1
+        if changed:
+            compact_purchase_image_columns(record)
+    return removed
+
+
 try:
     from utils._desktop_import_compat import (
         COL_PLATFORM_FEE,
@@ -163,8 +253,8 @@ class PurchaseEditMixin:
         """
         指定した日時に近い仕入レコード候補を返す
 
-        - 画像の撮影日時から「±N日以内」の仕入データを探すために使用
-        - JANが分かっている場合は一致レコードを優先（見つかればJAN一致のみ返す）
+        - 画像の撮影日時から「±N日以内」の仕入データを探す
+        - JANが分かっている場合はその行を先頭にするが、同じ期間の他商品も残す
         """
         if not hasattr(self, "purchase_all_records") or not self.purchase_all_records:
             return []
@@ -199,17 +289,7 @@ class PurchaseEditMixin:
                 if record_jan == jan_norm:
                     jan_matches.append((diff_days, record))
 
-        source = jan_matches if jan_matches else date_matches
-
-        def _sort_key(item: Tuple[int, Dict[str, Any]]):
-            diff_days, rec = item
-            return (
-                diff_days,
-                str(rec.get("仕入れ日") or rec.get("purchase_date") or ""),
-                str(rec.get("SKU") or rec.get("sku") or ""),
-            )
-
-        source.sort(key=_sort_key)
+        source = merge_datetime_purchase_candidates(date_matches, jan_matches)
 
         candidates: List[Dict[str, Any]] = []
         for diff_days, record in source:
@@ -351,6 +431,22 @@ class PurchaseEditMixin:
         # スナップショット用にコピーを返す
         record_snapshot = dict(target_record)
         return True, added_count, record_snapshot
+
+    def remove_image_paths_from_purchase_records(
+        self,
+        image_paths: List[str],
+        all_records: Optional[List[Dict[str, Any]]] = None,
+        keep_sku: Optional[str] = None,
+    ) -> int:
+        """指定画像パスを、移動先SKU以外の仕入レコードから外す。"""
+        records = all_records if all_records is not None else (
+            getattr(self, "purchase_all_records", None) or []
+        )
+        return remove_image_paths_from_records(
+            image_paths,
+            records,
+            keep_sku=keep_sku,
+        )
 
     def patch_purchase_records_by_sku_map(
         self, patches_by_sku: Dict[str, Dict[str, Any]]

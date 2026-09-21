@@ -238,17 +238,37 @@ class ImageManagerPreviewMixin:
             item.setIcon(pixmap)
             item.setData(Qt.UserRole, path)
             item.setToolTip(path)
+            item.setFlags(
+                Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled
+            )
             self.image_list.addItem(item)
 
 
     def on_image_clicked(self, item: QListWidgetItem):
-        """画像クリック時の処理"""
+        """画像クリック時の処理（連打時は最後の1枚だけプレビュー）"""
+        if not item:
+            return
+        self._pending_click_item = item
+        timer = getattr(self, "_image_click_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._apply_pending_image_click)
+            self._image_click_timer = timer
+        timer.start(40)
+
+    def _apply_pending_image_click(self):
+        item = getattr(self, "_pending_click_item", None)
+        if not item:
+            return
         image_path = item.data(Qt.UserRole)
         if not image_path:
             return
-        
+
+        path_changed = image_path != getattr(self, "selected_image_path", None)
         self.selected_image_path = image_path
-        self._refresh_image_previews()
+        if path_changed:
+            self._refresh_image_previews()
 
         # 詳細情報を更新
         record = next((r for r in self.image_records if r.path == image_path), None)
@@ -284,6 +304,7 @@ class ImageManagerPreviewMixin:
         self.rotate_right_btn.setEnabled(True)
         self.read_barcode_btn.setEnabled(self.image_service.is_barcode_reader_available())
         self.save_jan_btn.setEnabled(True)
+        self.link_purchase_btn.setEnabled(True)
 
 
     def rotate_image(self, degrees: int):
@@ -320,16 +341,15 @@ class ImageManagerPreviewMixin:
                 self,
                 "バーコードリーダー未インストール",
                 "バーコードリーダーを使用するには、以下のいずれかをインストールしてください:\n\n"
-                "【推奨】pyzxing（ZXingベース）:\n"
+                "【推奨】zxing-cpp（Java不要）:\n"
+                "  pip install zxing-cpp\n\n"
+                "【代替】pyzxing（ZXingベース）:\n"
                 "1. Java JRE 8以上をインストール\n"
                 "   https://www.java.com/ja/download/\n"
                 "2. pip install pyzxing\n\n"
                 "【代替】pyzbar（ZBarベース）:\n"
                 "1. pip install pyzbar\n"
-                "2. zbarライブラリをインストール:\n"
-                "   - Windows: zbar-w64をダウンロードしてインストール\n"
-                "   - Linux: sudo apt-get install libzbar0\n"
-                "   - macOS: brew install zbar"
+                "2. Windows では Visual C++ 2013 再頒布可能パッケージ（x64）が必要です"
             )
             return
         
@@ -535,6 +555,18 @@ class ImageManagerPreviewMixin:
             return
         
         menu = QMenu(self)
+
+        image_path = item.data(Qt.UserRole)
+        group = self._resolve_live_jan_group(image_path=image_path) if image_path else None
+        if group:
+            link_action = menu.addAction("仕入DB候補を表示して紐付け")
+            link_action.setToolTip("選んだ画像だけを仕入DB候補へ紐付けます。未選択ならこのJANグループ全体です。")
+            link_action.triggered.connect(
+                lambda checked=False, g=group: self.show_purchase_candidates_for_group(
+                    g, image_paths=self._selected_image_paths_from_list()
+                )
+            )
+            menu.addSeparator()
         
         delete_action = menu.addAction("画像を削除")
         delete_action.triggered.connect(lambda: self.delete_image_from_list(item))
@@ -608,6 +640,7 @@ class ImageManagerPreviewMixin:
                     self.rotate_right_btn.setEnabled(False)
                     self.read_barcode_btn.setEnabled(False)
                     self.save_jan_btn.setEnabled(False)
+                    self.link_purchase_btn.setEnabled(False)
                 
                 QMessageBox.information(self, "完了", f"画像 '{file_name}' を削除しました。")
 

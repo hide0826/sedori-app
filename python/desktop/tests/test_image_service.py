@@ -45,6 +45,34 @@ def test_extract_jan_no_match():
     assert svc.extract_jan_from_text("abc") is None
     assert svc.extract_jan_from_text("1234567") is None  # 7桁は非対象
     assert svc.extract_jan_from_text("123456789") is None  # 9桁は非対象
+    assert svc.extract_jan_from_text("PXL_20250919_11204763.jpg") is None  # Pixelファイル名はJANではない
+
+
+def test_normalize_barcode_upc12_to_ean13():
+    assert ImageService.normalize_barcode_to_jan("012345678905") == "0012345678905"
+    known = {"0012345678905"}
+    assert ImageService.normalize_barcode_to_jan("012345678905", known) == "0012345678905"
+
+
+def test_normalize_barcode_prefers_known_jan():
+    known = {"4901234567890"}
+    assert ImageService.normalize_barcode_to_jan("4901234567890", known) == "4901234567890"
+    # 12桁UPCが仕入DBの13桁と末尾一致
+    known = {"0490123456789"}
+    assert ImageService.normalize_barcode_to_jan("490123456789", known) == "0490123456789"
+
+
+def test_extract_jan_matches_known_from_filename():
+    svc = ImageService()
+    known = {"4901234567890"}
+    assert svc.extract_jan_from_text("foo_4901234567890_1.jpg", known) == "4901234567890"
+    assert svc.extract_jan_from_text("PXL_20250919_11204763.jpg", known) is None
+
+
+def test_barcode_backend_names_includes_zxingcpp():
+    names = ImageService.barcode_backend_names()
+    assert "zxing-cpp" in names
+    assert ImageService.is_barcode_reader_available() is True
 
 
 def test_group_by_jan_empty():

@@ -107,6 +107,7 @@ class MainWindow(QMainWindow):
         self.api_client = api_client
         self.api_server_thread = None
         self.server_running = False
+        self._api_start_silent = False
         
         # 設定管理
         self.settings = QSettings("HIRIO", "SedoriDesktopApp")
@@ -180,8 +181,8 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         
-        # FastAPIサーバーを停止
-        self.stop_fastapi_server()
+        # FastAPIサーバーを停止（起動時に自動起動したものも含む。閉じる確認は出さない）
+        self.stop_fastapi_server(silent=True)
         super().closeEvent(event)
         
     def setup_ui(self):
@@ -689,7 +690,8 @@ class MainWindow(QMainWindow):
         self.status_bar.addWidget(self.status_label)
         
         # API接続ステータス
-        self.api_status_label = QLabel("API: 未接続")
+        self.api_status_label = QLabel("API: 起動中…")
+        self.api_status_label.setStyleSheet("color: gray;")
         self.status_bar.addPermanentWidget(self.api_status_label)
 
         self.recording_status_label = QLabel("")
@@ -697,9 +699,9 @@ class MainWindow(QMainWindow):
             "color: #e53935; font-weight: bold; padding-right: 8px;"
         )
         self.status_bar.addPermanentWidget(self.recording_status_label)
-        
-        # API接続チェック
-        self.check_api_connection()
+
+        # 起動と同時に FastAPI を立ち上げ、ステータスを「接続済み」にする
+        QTimer.singleShot(0, self._ensure_api_server)
         self.update_recording_mode_ui()
         
         
@@ -750,14 +752,40 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "設定", "設定画面（開発予定）")
         
             
-    def start_fastapi_server(self):
+    def _ensure_api_server(self):
+        """起動時: 既に繋がっていれば接続済み、なければ FastAPI を静かに起動する"""
+        try:
+            if self.api_client and self.api_client.test_connection():
+                self.api_status_label.setText("API: 接続済み")
+                self.api_status_label.setStyleSheet("color: green;")
+                self.status_label.setText("準備完了")
+                return
+        except Exception:
+            pass
+        self.start_fastapi_server(silent=True)
+
+    def start_fastapi_server(self, silent: bool = False):
         """FastAPIサーバーの起動"""
+        self._api_start_silent = silent
         if self.server_running:
-            QMessageBox.information(self, "サーバー起動", "FastAPIサーバーは既に起動しています")
+            if not silent:
+                QMessageBox.information(self, "サーバー起動", "FastAPIサーバーは既に起動しています")
             return
+        try:
+            if self.api_client and self.api_client.test_connection():
+                self.api_status_label.setText("API: 接続済み")
+                self.api_status_label.setStyleSheet("color: green;")
+                self.status_label.setText("準備完了")
+                if not silent:
+                    QMessageBox.information(self, "サーバー起動", "FastAPIサーバーは既に起動しています")
+                return
+        except Exception:
+            pass
             
         try:
             self.status_label.setText("FastAPIサーバー起動中...")
+            self.api_status_label.setText("API: 起動中…")
+            self.api_status_label.setStyleSheet("color: gray;")
             
             # サーバースレッドの作成と起動
             self.api_server_thread = APIServerThread()
@@ -766,9 +794,15 @@ class MainWindow(QMainWindow):
             self.api_server_thread.start()
             
         except Exception as e:
-            QMessageBox.critical(self, "サーバー起動エラー", f"FastAPIサーバーの起動に失敗しました:\n{str(e)}")
+            if silent:
+                self.status_label.setText("FastAPIサーバー起動失敗")
+                self.api_status_label.setText("API: エラー")
+                self.api_status_label.setStyleSheet("color: red;")
+                print(f"FastAPIサーバーの起動に失敗しました: {e}")
+            else:
+                QMessageBox.critical(self, "サーバー起動エラー", f"FastAPIサーバーの起動に失敗しました:\n{str(e)}")
     
-    def stop_fastapi_server(self):
+    def stop_fastapi_server(self, silent: bool = False):
         """FastAPIサーバーの停止"""
         if not self.server_running:
             # サーバーが起動していない場合は何もしない（メッセージも表示しない）
@@ -788,10 +822,12 @@ class MainWindow(QMainWindow):
             self.api_status_label.setText("API: 停止")
             self.api_status_label.setStyleSheet("color: red;")
             
-            QMessageBox.information(self, "サーバー停止", "FastAPIサーバーを停止しました")
+            if not silent:
+                QMessageBox.information(self, "サーバー停止", "FastAPIサーバーを停止しました")
             
         except Exception as e:
-            QMessageBox.critical(self, "サーバー停止エラー", f"FastAPIサーバーの停止に失敗しました:\n{str(e)}")
+            if not silent:
+                QMessageBox.critical(self, "サーバー停止エラー", f"FastAPIサーバーの停止に失敗しました:\n{str(e)}")
     
     def on_server_started(self):
         """サーバー起動完了"""
@@ -799,11 +835,13 @@ class MainWindow(QMainWindow):
         self.start_server_action.setEnabled(False)
         self.stop_server_action.setEnabled(True)
         self.status_label.setText("FastAPIサーバー起動完了")
-        self.api_status_label.setText("API: 起動中")
-        self.api_status_label.setStyleSheet("color: orange;")
-        
-        # 接続テストを実行
-        QTimer.singleShot(2000, self.test_api_connection)
+        silent = getattr(self, "_api_start_silent", False)
+        if silent:
+            self.check_api_connection()
+        else:
+            self.api_status_label.setText("API: 起動中")
+            self.api_status_label.setStyleSheet("color: orange;")
+            QTimer.singleShot(2000, self.test_api_connection)
     
     def on_server_error(self, error_message):
         """サーバー起動エラー"""
@@ -814,6 +852,9 @@ class MainWindow(QMainWindow):
         self.api_status_label.setText("API: エラー")
         self.api_status_label.setStyleSheet("color: red;")
         
+        if getattr(self, "_api_start_silent", False):
+            print(f"FastAPIサーバーの起動に失敗しました: {error_message}")
+            return
         QMessageBox.critical(self, "サーバー起動エラー", f"FastAPIサーバーの起動に失敗しました:\n{error_message}")
     
     def test_api_connection(self):

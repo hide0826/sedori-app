@@ -225,21 +225,31 @@ class ImageManagerScanMixin:
                         f"画像をスキャン中... {current}/{total}枚（{percent:.1f}%）"
                     )
                 QApplication.processEvents()
+
+            # 仕入DBのJAN集合（照合用）。タブを開いていなくても読む
+            self._ensure_product_widget_data_loaded()
+            known_jans: set[str] = set()
+            if self.product_widget:
+                try:
+                    for rec in self.product_widget.get_all_purchase_records() or []:
+                        jan = _normalize_jan_for_match(
+                            rec.get("JAN") or rec.get("jan") or rec.get("JANコード")
+                        )
+                        if jan:
+                            known_jans.add(jan)
+                except Exception as e:
+                    logger.warning("仕入DB JAN集合の取得に失敗: %s", e)
             
-            # スキャン実行（高速化のためEXIF・画像サイズ・バーコード読み取りをスキップ）
-            # DBキャッシュを構築（スマートスキャン）
+            # スキャン実行。JAN不明のキャッシュは再読取する
             db_records = self.image_db.list_all()
             file_cache = {}
             for r in db_records:
                 path = r['file_path']
-                # mtimeはDBにないので含めない（無条件ヒットさせる）
-                # ただしファイルが存在しない場合はキャッシュに含めない方が安全だが、
-                # Service側でファイル存在チェックをしているのでここでは単純に構築する
                 rec = ImageRecord(
                     path=path,
                     capture_dt=datetime.fromisoformat(r['capture_time']) if r['capture_time'] else None,
                     jan_candidate=r['jan'],
-                    width=0,  # DBにないので0（表示時にロードされる）
+                    width=0,
                     height=0
                 )
                 file_cache[path] = {"record": rec}
@@ -250,7 +260,8 @@ class ImageManagerScanMixin:
                 skip_exif=False,             # EXIF撮影日時を取得
                 skip_image_size=False,       # 画像サイズも取得
                 progress_callback=progress_callback,
-                file_cache=file_cache        # キャッシュを渡す
+                file_cache=file_cache,
+                known_jans=known_jans,
             )
             self._jan_title_cache = {}
             
@@ -332,18 +343,48 @@ class ImageManagerScanMixin:
                         "rotation": 0
                     })
             
-            # UI更新
-            self.update_tree_widget()
+            # UI更新（イベントフィルタ再入で落ちないよう防御）
+            try:
+                self.update_tree_widget()
+            except RecursionError:
+                logger.exception("JANツリー更新中に RecursionError が発生しました")
 
             # スキャン完了後は手動工程③（画像紐付け調整）へ進む
             self._workflow_post_step = 3
+            
+            matched_count = 0
+            unknown_count = 0
+            purchase_records = None
+            if self.product_widget:
+                try:
+                    purchase_records = self.product_widget.get_all_purchase_records()
+                except Exception:
+                    purchase_records = None
+            for group in self.jan_groups:
+                if group.jan == "unknown":
+                    unknown_count += 1
+                elif self._group_has_jan_in_purchase_db(group, purchase_records):
+                    matched_count += 1
             
             # 全画像を一覧表示（遅延読み込み：スキャン完了後に非同期で実行）
             # 画像読み込みは重いので、まずスキャン完了を通知してから実行
             QMessageBox.information(
                 self, "スキャン完了",
                 f"{len(self.image_records)}件の画像をスキャンしました。\n"
-                f"JANグループ数: {len(self.jan_groups)}"
+                f"JANグループ数: {len(self.jan_groups)}\n"
+                f"仕入DBと一致したJAN: {matched_count}グループ\n"
+                f"JAN不明: {unknown_count}グループ"
+                + (
+                    "\n\n注意: このPCでは画像内のバーコードを読めないため、"
+                    "Pixel写真（PXL_*.jpg）は仕入DBのJANと照合できません。"
+                    if not self.image_service.is_barcode_reader_available()
+                    else (
+                        "\n\n※ ファイル名にJANが無い写真は、画像に写ったバーコードを読んで"
+                        "仕入DBと照合します。バーコードが写っていない写真は JAN不明 になります。"
+                        if unknown_count and matched_count == 0
+                        else ""
+                    )
+                )
             )
             
             # スキャン完了後、バックグラウンドで画像一覧を更新（ユーザーが待たない）
@@ -377,8 +418,9 @@ class ImageManagerScanMixin:
             )
             return
 
-        # 仕入データの準備
-        purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
+        # 仕入データの準備（データベース管理タブ未表示でも読む）
+        self._ensure_product_widget_data_loaded()
+        purchase_records = getattr(self.product_widget, 'purchase_all_records', []) if self.product_widget else []
         if not purchase_records:
             QMessageBox.warning(self, "情報", "照合対象の仕入データがありません。")
             return

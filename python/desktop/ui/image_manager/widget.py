@@ -411,10 +411,15 @@ class ImageManagerWidget(
         self.image_list.setResizeMode(QListWidget.Adjust)
         self.image_list.setIconSize(QSize(192, 192))
         self.image_list.setSpacing(10)
+        self.image_list.setToolTip(
+            "左クリックで複数選択（追加）／Ctrl+クリックで選択切替／"
+            "選んだ画像を左のJANグループへドラッグすると別商品に紐付けます。"
+        )
         self.image_list.itemClicked.connect(self.on_image_clicked)
-        self.image_list.setSelectionMode(QListWidget.ExtendedSelection)  # 複数選択（ドラッグ範囲・Ctrl/Shift）
-        self.image_list.setDragDropMode(QListWidget.DragOnly)  # ドラッグのみ許可
-        self.image_list.setDefaultDropAction(Qt.MoveAction)  # ドラッグ時の動作
+        self.image_list.setSelectionMode(QListWidget.ExtendedSelection)
+        self.image_list.setDragEnabled(True)
+        self.image_list.setDragDropMode(QListWidget.DragOnly)
+        self.image_list.setDefaultDropAction(Qt.MoveAction)
         self.image_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.image_list.customContextMenuRequested.connect(self.on_image_list_context_menu)
         center_layout.addWidget(self.image_list)
@@ -482,11 +487,19 @@ class ImageManagerWidget(
         
         self.save_jan_btn = QPushButton("JAN保存")
         self.save_jan_btn.clicked.connect(self.save_jan)
+
+        self.link_purchase_btn = QPushButton("仕入DB候補紐付け")
+        self.link_purchase_btn.setToolTip(
+            "中央で選んだ画像の撮影日時で仕入DB候補を表示し、選んだ画像だけを紐付けます。"
+            "未選択ならJANグループ全体です。"
+        )
+        self.link_purchase_btn.clicked.connect(self._link_purchase_from_current_image)
         
         button_layout.addWidget(self.rotate_left_btn)
         button_layout.addWidget(self.rotate_right_btn)
         button_layout.addWidget(self.read_barcode_btn)
         button_layout.addWidget(self.save_jan_btn)
+        button_layout.addWidget(self.link_purchase_btn)
         
         right_layout.addWidget(preview_group)
         right_layout.addLayout(detail_form)
@@ -510,6 +523,7 @@ class ImageManagerWidget(
         self.rotate_right_btn.setEnabled(False)
         self.read_barcode_btn.setEnabled(False)
         self.save_jan_btn.setEnabled(False)
+        self.link_purchase_btn.setEnabled(False)
         self.rename_btn.setEnabled(False)
         self.confirm_btn.setEnabled(False)
 

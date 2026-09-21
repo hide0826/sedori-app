@@ -10,24 +10,42 @@ from typing import Optional
 from PySide6.QtCore import QObject, QEvent
 from PySide6.QtWidgets import QApplication, QAbstractSpinBox, QComboBox
 
+try:
+    from utils.event_filter_safety import (
+        QEVENT_WHEEL,
+        event_filter_guard,
+        qevent_type_int,
+    )
+except ImportError:
+    from desktop.utils.event_filter_safety import (  # type: ignore
+        QEVENT_WHEEL,
+        event_filter_guard,
+        qevent_type_int,
+    )
+
 
 class ComboBoxWheelGuardFilter(QObject):
     """コンボ・スピン系のホイール誤操作を防ぐイベントフィルタ。"""
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
-        try:
-            if event.type() == QEvent.Wheel:
-                if isinstance(obj, QComboBox):
-                    # 誤スクロールで選択値が変わらないよう、ホイールイベントを握りつぶす
-                    event.ignore()
-                    return True
-                if isinstance(obj, QAbstractSpinBox):
-                    # 数値入力（QSpinBox/QDoubleSpinBox 等）の誤変更を防ぐ
-                    event.ignore()
-                    return True
-            return super().eventFilter(obj, event)
-        except Exception:
-            return super().eventFilter(obj, event)
+        with event_filter_guard() as allow:
+            if not allow:
+                return False
+            try:
+                if qevent_type_int(event) == QEVENT_WHEEL:
+                    if isinstance(obj, QComboBox):
+                        # 誤スクロールで選択値が変わらないよう、ホイールイベントを握りつぶす
+                        event.ignore()
+                        return True
+                    if isinstance(obj, QAbstractSpinBox):
+                        # 数値入力（QSpinBox/QDoubleSpinBox 等）の誤変更を防ぐ
+                        event.ignore()
+                        return True
+                return super().eventFilter(obj, event)
+            except RecursionError:
+                return False
+            except Exception:
+                return False
 
 
 _FILTER_INSTANCE: Optional[ComboBoxWheelGuardFilter] = None

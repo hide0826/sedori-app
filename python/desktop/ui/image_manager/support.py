@@ -18,10 +18,10 @@ from html import escape
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QMimeData, QUrl, QSettings, QFileInfo
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QMimeData, QUrl, QSettings, QFileInfo, QItemSelectionModel, QPoint
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QTreeWidget, QTreeWidgetItem, QListWidget,
+    QPushButton, QTreeWidget, QTreeWidgetItem, QListWidget, QListView,
     QListWidgetItem, QSplitter, QGroupBox, QFormLayout,
     QFileDialog, QMessageBox, QSizePolicy, QTextEdit, QProgressDialog,
     QInputDialog, QMenu, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
@@ -448,7 +448,8 @@ class PurchaseCandidateDialog(QDialog):
             jan_text = "（JAN不明）"
         info_label = QLabel(
             f"JANグループ: {jan_text}\n"
-            f"基準日時: {self.base_dt.strftime('%Y/%m/%d %H:%M:%S')} 付近の仕入データ候補を表示しています。\n"
+            f"基準日時: {self.base_dt.strftime('%Y/%m/%d %H:%M:%S')} 付近（±7日）の仕入データを表示しています。\n"
+            "今のJANと一致する行を先頭にしています。別の商品へ付け替える場合は、他の行を選んでください。\n"
             "黄色の行は、画像一覧でJAN・商品名がまだ紐付いていない商品の候補です。"
         )
         info_label.setWordWrap(True)
@@ -557,6 +558,93 @@ class PurchaseCandidateDialog(QDialog):
         super().accept()
 
 
+def _pos_from_mouse_event(event) -> QPoint:
+    """Qt5/Qt6 両対応のマウス座標。"""
+    if hasattr(event, "position"):
+        try:
+            return event.position().toPoint()
+        except Exception:
+            pass
+    return event.pos()
+
+
+def resolve_link_image_paths(
+    selected_paths: List[str],
+    group_paths: List[str],
+) -> List[str]:
+    """
+    中央で選んだ画像がグループ内にあれば、それだけを紐付け対象にする。
+    未選択ならグループ全画像。
+    """
+    group_list = [p for p in (group_paths or []) if p]
+    if not group_list:
+        return [p for p in (selected_paths or []) if p]
+    group_norm = {_normalize_image_path(p): p for p in group_list}
+    picked: List[str] = []
+    seen = set()
+    for path in selected_paths or []:
+        if not path:
+            continue
+        original = group_norm.get(_normalize_image_path(path))
+        if original and original not in seen:
+            seen.add(original)
+            picked.append(original)
+    return picked if picked else list(group_list)
+
+
+def first_image_capture_dt(images: list, fallback_dts: list | None = None):
+    """JANグループ1枚目の撮影日時。無ければ後続画像へフォールバック。"""
+    if not images:
+        return None
+    first = images[0]
+    dt = getattr(first, "capture_dt", None)
+    if dt:
+        return dt
+    for rec in images[1:]:
+        dt = getattr(rec, "capture_dt", None)
+        if dt:
+            return dt
+    if fallback_dts:
+        for dt in fallback_dts:
+            if dt:
+                return dt
+    return None
+
+
+def compute_image_multi_select(
+    *,
+    clicked_index: Optional[int],
+    selected: set[int],
+    ctrl: bool,
+    shift: bool,
+    anchor: Optional[int],
+) -> Tuple[set[int], Optional[int]]:
+    """
+    画像一覧の複数選択ルール。
+
+    - 左クリック: 既存選択を消さずに追加
+    - Ctrl+クリック: その1枚だけ選択/解除
+    - Shift+クリック: アンカーから範囲選択
+    - 空白クリック: clicked_index が None（呼び出し側で全解除）
+    """
+    if clicked_index is None:
+        return set(), None
+    if shift:
+        start = anchor if anchor is not None else clicked_index
+        lo, hi = (start, clicked_index) if start <= clicked_index else (clicked_index, start)
+        return set(range(lo, hi + 1)), start
+    if ctrl:
+        next_selected = set(selected)
+        if clicked_index in next_selected:
+            next_selected.discard(clicked_index)
+        else:
+            next_selected.add(clicked_index)
+        return next_selected, clicked_index
+    next_selected = set(selected)
+    next_selected.add(clicked_index)
+    return next_selected, clicked_index
+
+
 class JanGroupTreeWidget(QTreeWidget):
     """JANグループツリーウィジェット（ドロップ対応）"""
     
@@ -577,29 +665,114 @@ class JanGroupTreeWidget(QTreeWidget):
             event.acceptProposedAction()
         else:
             event.ignore()
+
+    def _item_at_drop(self, event) -> Optional[QTreeWidgetItem]:
+        pos = _pos_from_mouse_event(event)
+        item = self.itemAt(pos)
+        if item:
+            return item
+        try:
+            return self.itemAt(self.viewport().mapFrom(self, pos))
+        except Exception:
+            return None
     
     def dropEvent(self, event):
         """ドロップイベント（複数画像の改行区切りテキストに対応）"""
         if event.mimeData().hasText():
             text = event.mimeData().text().strip()
             image_paths = [p.strip() for p in text.split("\n") if p.strip()]
-            item = self.itemAt(event.pos())
+            item = self._item_at_drop(event)
             if item and self.parent_widget and image_paths:
                 if len(image_paths) == 1:
                     self.parent_widget.add_image_to_group(image_paths[0], item)
                 else:
                     self.parent_widget.add_images_to_group(image_paths, item)
+            elif self.parent_widget and image_paths:
+                QMessageBox.information(
+                    self.parent_widget,
+                    "ドロップ先が不明",
+                    "左のJANグループ名の上にドロップしてください。",
+                )
             event.acceptProposedAction()
         else:
             event.ignore()
 
 
 class ImageListWidget(QListWidget):
-    """画像リストウィジェット（ドラッグ対応）"""
+    """画像リスト（左クリック追加選択 / Ctrl切替 / 複数ドラッグ）"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent_widget = parent  # ImageManagerWidgetへの参照
+        self._drag_start_pos: Optional[QPoint] = None
+        self._shift_anchor_row: Optional[int] = None
+        self.setMovement(QListView.Static)
+        self.setDragEnabled(True)
+        self.setSelectionMode(QListWidget.ExtendedSelection)
+        self.setSelectionRectVisible(True)
+        self.setStyleSheet(
+            """
+            QListWidget::item:selected {
+                border: 3px solid #22c55e;
+                background: rgba(34, 197, 94, 90);
+            }
+            QListWidget::item:selected:!active {
+                border: 3px solid #22c55e;
+                background: rgba(34, 197, 94, 90);
+            }
+            """
+        )
+
+    def _apply_row_selection(self, rows: set[int], current: Optional[QListWidgetItem]) -> None:
+        self.clearSelection()
+        for row in rows:
+            it = self.item(row)
+            if it:
+                it.setSelected(True)
+        if current is not None:
+            self.setCurrentItem(current, QItemSelectionModel.NoUpdate)
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            super().mousePressEvent(event)
+            return
+
+        pos = _pos_from_mouse_event(event)
+        item = self.itemAt(pos)
+        mods = event.modifiers()
+        ctrl = bool(mods & Qt.ControlModifier)
+        shift = bool(mods & Qt.ShiftModifier)
+
+        # Ctrl / Shift / 空白は Qt 標準（速い・安定）
+        if item is None or ctrl or shift:
+            if item is None:
+                self._shift_anchor_row = None
+                self._drag_start_pos = None
+            else:
+                self._shift_anchor_row = self.row(item)
+                self._drag_start_pos = QPoint(pos)
+            super().mousePressEvent(event)
+            return
+
+        # 修飾なし左クリック: 既存選択を消さずに追加（全件再構築しない）
+        item.setSelected(True)
+        self.setCurrentItem(item, QItemSelectionModel.NoUpdate)
+        self._shift_anchor_row = self.row(item)
+        self._drag_start_pos = QPoint(pos)
+        self.itemClicked.emit(item)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start_pos is not None and event.buttons() & Qt.LeftButton:
+            pos = _pos_from_mouse_event(event)
+            if (pos - self._drag_start_pos).manhattanLength() >= QApplication.startDragDistance():
+                self.startDrag(Qt.MoveAction)
+                self._drag_start_pos = None
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start_pos = None
+        super().mouseReleaseEvent(event)
     
     def startDrag(self, supportedActions):
         """ドラッグ開始時の処理（複数選択時は全選択画像のパスを渡す）"""
@@ -615,14 +788,15 @@ class ImageListWidget(QListWidget):
         if not paths:
             return
         
-        # MIMEデータを作成（複数パスは改行区切り）
         mime_data = QMimeData()
         mime_data.setText("\n".join(paths))
         
-        # ドラッグを開始
         drag = QDrag(self)
         drag.setMimeData(mime_data)
-        drag.exec_(supportedActions)
+        first_icon = items[0].icon()
+        if not first_icon.isNull():
+            drag.setPixmap(first_icon.pixmap(64, 64))
+        drag.exec(supportedActions if supportedActions else Qt.MoveAction)
 
 
 class RegistrationTableWidget(QTableWidget):

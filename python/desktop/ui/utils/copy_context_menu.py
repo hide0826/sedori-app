@@ -21,38 +21,48 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+try:
+    from utils.event_filter_safety import (
+        QEVENT_CONTEXT_MENU,
+        event_filter_guard,
+        qevent_type_int,
+    )
+except ImportError:
+    from desktop.utils.event_filter_safety import (  # type: ignore
+        QEVENT_CONTEXT_MENU,
+        event_filter_guard,
+        qevent_type_int,
+    )
+
 
 class CopyContextMenuFilter(QObject):
     """任意のウィジェットにコピー項目を追加するイベントフィルタ"""
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
-        try:
-            if (
-                event.type() == QEvent.ContextMenu
-                and isinstance(obj, QWidget)
-                and obj.contextMenuPolicy() == Qt.DefaultContextMenu
-            ):
-                if isinstance(obj, (QLineEdit, QTextEdit, QPlainTextEdit)):
-                    self._show_text_widget_menu(obj, event)
-                    return True
-                if isinstance(obj, QAbstractItemView):
-                    self._show_item_view_menu(obj, event)
-                    return True
-                if isinstance(obj, (QLabel, QPushButton)):
-                    if obj.text().strip():
-                        self._show_simple_copy_menu(obj, event)
+        with event_filter_guard() as allow:
+            if not allow:
+                return False
+            try:
+                if (
+                    qevent_type_int(event) == QEVENT_CONTEXT_MENU
+                    and isinstance(obj, QWidget)
+                    and obj.contextMenuPolicy() == Qt.DefaultContextMenu
+                ):
+                    if isinstance(obj, (QLineEdit, QTextEdit, QPlainTextEdit)):
+                        self._show_text_widget_menu(obj, event)
                         return True
-            return super().eventFilter(obj, event)
-        except KeyboardInterrupt:
-            # KeyboardInterruptは再発生させる（アプリケーション終了のため）
-            raise
-        except Exception as e:
-            # その他の例外はログに記録して処理を継続
-            import traceback
-            print(f"[ERROR] copy_context_menu eventFilter エラー: {e}")
-            print(f"[ERROR] トレースバック:\n{traceback.format_exc()}")
-            # エラーが発生してもアプリケーションを継続させる
-            return super().eventFilter(obj, event)
+                    if isinstance(obj, QAbstractItemView):
+                        self._show_item_view_menu(obj, event)
+                        return True
+                    if isinstance(obj, (QLabel, QPushButton)):
+                        if obj.text().strip():
+                            self._show_simple_copy_menu(obj, event)
+                            return True
+                return super().eventFilter(obj, event)
+            except RecursionError:
+                return False
+            except Exception:
+                return False
 
     def _show_text_widget_menu(self, widget, event: QEvent):
         try:

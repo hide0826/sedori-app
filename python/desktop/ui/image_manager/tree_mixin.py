@@ -150,6 +150,7 @@ class ImageManagerTreeMixin:
                 title_text = f" - {title}" if title else ""
                 parent_item = QTreeWidgetItem([f"{jan_text}{title_text} ({len(group.images)}枚)"])
                 parent_item.setData(0, Qt.UserRole, group)
+                parent_item.setData(0, int(Qt.UserRole) + 1, group.jan)
                 needs_highlight = self._should_highlight_jan_group(group, purchase_records)
                 if needs_highlight:
                     _apply_unlinked_item_style(parent_item)
@@ -477,30 +478,52 @@ class ImageManagerTreeMixin:
 
         menu = QMenu(self)
 
-        group = item.data(0, Qt.UserRole)
+        live_group = self._resolve_live_jan_group(tree_item=item)
+        group = live_group or item.data(0, Qt.UserRole)
         if isinstance(group, JanGroup):
             # JANグループが選択された
             # 仕入DB候補表示（画像日時に近い仕入レコードから手動で紐付け）
             link_action = menu.addAction("仕入DB候補を表示して紐付け")
-            link_action.triggered.connect(lambda: self.show_purchase_candidates_for_group(group))
+            link_action.triggered.connect(
+                lambda checked=False, g=group: self.show_purchase_candidates_for_group(
+                    g, prefer_selected=False
+                )
+            )
 
             # SKUを指定してこのグループの画像をリネーム
             rename_with_sku_action = menu.addAction("SKUを指定してこのJANグループの画像をリネーム")
-            rename_with_sku_action.triggered.connect(lambda: self.rename_images_for_group_with_sku(group))
+            rename_with_sku_action.triggered.connect(
+                lambda checked=False, g=group: self.rename_images_for_group_with_sku(g)
+            )
 
             rerename_action = menu.addAction("このグループを再リネーム")
             rerename_action.setToolTip(
                 "_1 画像削除などで _2 から始まっている場合、"
                 "2枚目以降を _1, _2… に振り直します"
             )
-            rerename_action.triggered.connect(lambda: self.rerename_images_for_group(group))
+            rerename_action.triggered.connect(
+                lambda checked=False, g=group: self.rerename_images_for_group(g)
+            )
 
             menu.addSeparator()
 
             delete_action = menu.addAction("JANグループを削除")
-            delete_action.triggered.connect(lambda: self.delete_jan_group(group))
+            delete_action.triggered.connect(
+                lambda checked=False, g=group: self.delete_jan_group(g)
+            )
         else:
-            # 個別画像が選択された
+            # 1枚目を含む個別画像
+            parent = item.parent()
+            parent_group = self._resolve_live_jan_group(tree_item=parent or item)
+            if isinstance(parent_group, JanGroup):
+                child_path = item.data(0, Qt.UserRole)
+                link_paths = [child_path] if isinstance(child_path, str) and child_path else None
+                link_action = menu.addAction("仕入DB候補を表示して紐付け")
+                link_action.triggered.connect(
+                    lambda checked=False, g=parent_group, p=link_paths: self.show_purchase_candidates_for_group(
+                        g, image_paths=p, prefer_selected=False
+                    )
+                )
             remove_action = menu.addAction("グループから削除")
             remove_action.triggered.connect(lambda: self.remove_image_from_group(item))
 
