@@ -2,9 +2,9 @@
 
 更新日: 2026-09-22  
 リポジトリ: `C:\HIRIO\repo\sedori-app.github`  
-作業枝: `feature/route-web-template`（ベース: `feature/sp-api`）
+作業枝: **`feature/sp-api`**（旧 `feature/route-web-template` から 2026-09-22 にマージ済・`b4a7c22`）
 
-**いまここ:** Phase 1.5 実装済（サンドボックス検証OK）→ スマホ実機で確認可
+**いまここ:** Phase 1＋1.5 は `feature/sp-api` に取り込み済。実運用で問題が出たら都度修正
 
 ### サンドボックス（レシート未投入・撮影テスト用）
 
@@ -156,7 +156,8 @@ D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳\
 - [x] 固定URL運用のまま
 - [x] サムネ表示（GET receipts）
 - [x] 各店「仕入点数」任意入力 → `purchase_item_count` を route.json に保存
-- [ ] スマホ実機でカメラ／アルバムからの追加確認（ユーザー）
+- [x] マージ先: `feature/sp-api`（2026-09-22・問題は都度修正方針）
+- [ ] スマホ実機でカメラ／アルバムからの追加確認（ユーザー・運用しながら）
 - [ ] OCR はまだ無くてよい（1.5b）
 - [ ] 証憑管理でのアマサーチ件数との差異確認（後回し）
 
@@ -173,7 +174,7 @@ D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳\
 - 変更主戦場: `python/route_web/static/route.html` + `python/route_web/app.py` + registry
 - 画像はルート箱の絶対パス（`route.json` の `folder_path`）配下へ書く
 - Tailscale 経由のアップロードはサイズ制限に注意 → クライアントで長辺縮小（例: 1920）してから POST（store-cam / 証憑OCRと同様）
-- 枝: 同 `feature/route-web-template` で継続してよい
+- 枝: 以降は `feature/sp-api` 上で修正してよい（旧 `feature/route-web-template` はマージ済）
 
 ---
 

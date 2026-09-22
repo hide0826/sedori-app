@@ -2,13 +2,13 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-09-22（現場ルートWeb Phase 1.5）
+更新日: 2026-09-22（現場ルートWeb → feature/sp-api マージ）
 
 ---
 
 ## いまの状態
 
-**2026-09-22（現場ルートWeb）:** Phase 1.5 ✅＋各店「仕入点数」任意入力（`purchase_item_count` → route.json）。アマサーチ件数との差異チェックは証憑管理いじり時。サンドボックス: `http://houseserver:8792/route/sandbox_20260919_kamakura_empty`。仕様 [`field_route_web_spec.md`](docs/specs/field_route_web_spec.md)。
+**2026-09-22（現場ルートWeb）:** Phase 1＋1.5 を **`feature/sp-api` へマージ済**（fast-forward・`b4a7c22`）。問題は都度修正。仕入点数 `purchase_item_count`、証憑でのアマサーチ差異は後回し。サンドボックス: `http://houseserver:8792/route/sandbox_20260919_kamakura_empty`。仕様 [`field_route_web_spec.md`](docs/specs/field_route_web_spec.md)。
 
 **2026-09-22（証憑OCR）:** ミニPCで全件OCRを実機確認。一覧に10件前後が載り、BOOK OFF 等は日付・合計まで入る。Tesseract は動作。日本語レシートは精度が低い行あり（Gemini API 設定で改善可）。一括マッチング以降はユーザー確認済み。
 
@@ -19,7 +19,7 @@
 
 **2026-09-21 夜（画像管理）:** スキャンのJAN照合・複数選択・仕入DB候補紐付けを直した。**中央で選んだ画像だけ**別商品へ付け替える。反映には HIRIO 再起動が必要。
 
-- ブランチ: `feature/route-web-template`（ベース `feature/sp-api`）
+- ブランチ: **`feature/sp-api`**（旧作業枝 `feature/route-web-template` はマージ済・同コミット）
 - 起動: `start_hirio.bat` または `.venv\Scripts\python.exe python\desktop\main.py`
 - ルート時刻Web: `python\route_web\start_route_web.bat`（`:8792`）
 - Python: 3.13.15 / venv はこのマシンで作り直し済み
@@ -198,10 +198,9 @@ ok phase1-api-verify（GET/PUT departure_time・HTMLに今の時刻）
 
 ## 次
 
-1. **現場ルートWeb Phase 1.5 スマホ実機** … カメラ／アルバム・仕入点数。URL `http://houseserver:8792/route/sandbox_20260919_kamakura_empty`
-2. Phase 1＋1.5 のマージ判断
-3. 証憑管理いじり時: `purchase_item_count` vs アマサーチ件数の差異チェック（OCRは証憑側で十分）
-4. Phase 2（仕入CSV）など
+1. 現場ルートWeb … 実運用で不具合が出たら都度修正（`:8792` / サンドボックス可）
+2. 証憑管理いじり時: `purchase_item_count` vs アマサーチ件数の差異チェック（OCRは証憑側で十分）
+3. Phase 2（仕入CSV）など
 
 ---
 
