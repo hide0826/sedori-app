@@ -82,6 +82,15 @@ def test_load_env_override(tmp_path: Path, monkeypatch=None):
         os.environ.pop("HIRIO_RCLONE_REMOTE", None)
 
 
+def test_find_rclone_winget_links(tmp_path: Path):
+    """WinGet Links 相当のパスを候補に含むこと（実ファイルが無くても候補構築は落ちない）。"""
+    from services import rclone_route_drive as m
+
+    exe = m.find_rclone_exe("rclone")
+    # このPCでは WinGet 導入済み想定。無ければ None でもよいが、クラッシュしないこと。
+    assert exe is None or exe.lower().endswith("rclone.exe")
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -91,4 +100,5 @@ if __name__ == "__main__":
         test_skipped_when_disabled(p / "a")
         test_push_ok_mocked(p / "b")
         test_load_env_override(p / "c")
+        test_find_rclone_winget_links(p / "d")
     print("ok rclone_route_drive")

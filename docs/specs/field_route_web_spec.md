@@ -225,17 +225,21 @@ D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳\
 
 ### rclone で Drive 上に箱を作成（配布向け・Desktop アプリ不要）
 
+**Google Drive デスクトップの常時同期は不要。** HIRIO がテンプレ作成時だけ送る。
+
 Webテンプレ作成の最後に:
 
 1. ローカル箱を従来どおり作成（route.json / Excel / サブフォルダ）
-2. **`rclone mkdir` + `rclone copy --create-empty-src-dirs`** で Drive 上の同じパスへ送る
-3. mount は使わない
+2. **バックグラウンド**で `rclone copy --create-empty-src-dirs`（UI を止めない）
+3. **`rclone mkdir` は使わない**（Drive API で固まりやすい。copy がフォルダを作る）
+4. mount は使わない。完了／失敗は別ダイアログ
 
 設定:
 
 - 例: [`config/rclone_route_drive.example.json`](../../config/rclone_route_drive.example.json) → `config/rclone_route_drive.json`
+- GUI から見つからないときは `rclone_exe` にフルパス
 - または環境変数 `HIRIO_RCLONE_ENABLED=1` / `HIRIO_RCLONE_REMOTE=gdrive`
-- 実装: `python/desktop/services/rclone_route_drive.py`
+- 実装: `python/desktop/services/rclone_route_drive.py` ＋ `template_mixin._RclonePushWorker`
 - 確認 bat: `python/route_web/check_rclone.bat`
 - 未導入・無効時は **スキップ**（ローカル箱作成は成功のまま）
 
@@ -325,7 +329,8 @@ C:\HIRIO\repo\sedori-app.github\docs\specs\field_route_web_spec.md を読んで�
 
 | 日付 | 内容 |
 |------|------|
-| 2026-09-22 | Webテンプレ作成時に rclone mkdir+copy で Drive 上へ箱送信（Desktopアプリ不要・未設定時スキップ） |
+| 2026-09-22 | rclone 安定化: 裏送信＋copyのみ（mkdir省略）。GUI PATH／地図埋め込み失敗案内。常時Drive同期は不要 |
+| 2026-09-22 | Webテンプレ作成時に rclone で Drive 上へ箱送信（Desktopアプリ不要・未設定時スキップ） |
 | 2026-09-22 | CSV は Drive 直送を正に。Webテンプレ作成時に Excel も同時生成（ミニPCダウン時の滞在時刻保険）。受信箱は副次 |
 | 2026-09-22 | Phase 2（受信箱→仕入CSV）・Phase 3（ルート箱取込）・Phase 5（商品撮影＋任意JAN）。1.5b は見送り |
 | 2026-09-22 | 各店「仕入点数」任意入力 → `purchase_item_count`。アマサーチ差異UIは証憑管理時に後回し |

@@ -2,11 +2,13 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-09-22（現場ルートWeb Phase 2/3/5）
+更新日: 2026-09-22（現場ルートWeb rclone安定化）
 
 ---
 
 ## いまの状態
+
+**2026-09-22（rclone安定化）:** Drive は Google Drive デスクトップの常時同期不要。Webテンプレ作成後に **バックグラウンドで `rclone copy`**（mkdir 省略・フォルダは copy が作る）。GUI から rclone を探す（WinGet Links／フルパス）。地図埋め込み失敗時は「ブラウザで開く」案内。ホワイトアウト対策済。`config/rclone_route_drive.json` はローカルのみ（gitignore）。
 
 **2026-09-22（現場ルートWeb）:** CSV は Drive 直送が正。Webテンプレで **Excel 同時生成**＋**rclone で Drive 上に箱作成**（未設定時スキップ）。1.5b 見送り。枝 `feature/sp-api`。仕様 [`field_route_web_spec.md`](docs/specs/field_route_web_spec.md)。
 
@@ -198,10 +200,37 @@ ok phase1-api-verify（GET/PUT departure_time・HTMLに今の時刻）
 
 ## 次
 
-1. 現場ルートWeb … **次の仕入で実機確認**（受信箱CSV・商品撮影・帰宅後ルート箱取込）
-2. 不具合は都度 `feature/sp-api` で修正
-3. 証憑管理いじり時: `purchase_item_count` vs アマサーチ件数の差異チェック
-4. 1.5b 撮影直後OCRは当面やらない
+1. **HIRIO 再起動** → Webテンプレ作成 → Drive「送信完了」ダイアログ／地図失敗時の案内を確認
+2. 現場ルートWeb … **次の仕入で実機確認**（Drive CSV・商品撮影・帰宅後ルート箱取込）
+3. 不具合は都度 `feature/sp-api` で修正
+4. 証憑管理いじり時: `purchase_item_count` vs アマサーチ件数の差異チェック
+5. 1.5b 撮影直後OCRは当面やらない
+6. （任意）rclone 共有 client_id 廃止（2026）前に自分の Google Cloud クライアントへ切替
+
+---
+
+## 2026-09-22 rclone 安定化（ホワイトアウト対策）
+
+### 症状と対処
+
+| 症状 | 原因 | 対処 |
+|------|------|------|
+| Drive スキップ | GUI の PATH に rclone 無し | `find_rclone_exe` が WinGet Links／Packages も探す。`rclone_exe` フルパス可 |
+| Webテンプレ後に白画面 | UI スレッドで `rclone mkdir`（60s×2）が固まる | **バックグラウンド QThread**＋**mkdir 省略・copy のみ** |
+| 地図が真っ黒／切断 | WebEngine 内 Google Maps | 失敗時プレースホルダ＋「ブラウザで開く」案内 |
+
+### 触ったファイル
+
+- `python/desktop/services/rclone_route_drive.py`
+- `python/desktop/ui/route_summary/template_mixin.py`（`_RclonePushWorker`）
+- `python/desktop/ui/route_summary/map_mixin.py`
+- `config/rclone_route_drive.example.json`
+- `python/desktop/tests/test_rclone_route_drive.py`
+
+### 運用の理解
+
+- **ローカル仕入帳を Google Drive アプリで常時同期する必要はない**
+- HIRIO がテンプレ作成時に **必要な箱だけ rclone で送る**（一方向・そのタイミング）
 
 ---
 
@@ -220,20 +249,21 @@ ok phase1-api-verify（GET/PUT departure_time・HTMLに今の時刻）
 
 ### 運用メモ
 
-1. Webテンプレ作成 → ローカル箱＋Excel。**rclone 有効なら Drive 上にも同じ箱**
+1. Webテンプレ作成 → ローカル箱＋Excel。**rclone 有効なら裏で Drive にも同じ箱**（完了時ダイアログ）
 2. CSV はスマホから Drive の `仕入CSV\` へ直送
 3. ミニPC生存時: ルートWebで IN/OUT・レシート・商品撮影
 4. ミニPCダウン時: Drive 上の Excel で滞在時刻
 5. 帰宅後: 仕入タブ「ルート箱から取込」
 
-rclone 初回: `python\route_web\check_rclone.bat` → example を `config\rclone_route_drive.json` にコピーして enabled
+rclone 初回: `python\route_web\check_rclone.bat` → example を `config\rclone_route_drive.json` にコピーして enabled（フルパス推奨）
 
 ### やらない（確定）
 
 - 1.5b 撮影直後OCR
 - スマホのバーコード自動読取（Phase 5 第1弾）
 - Tailscale 共有で受信箱パスを固定する運用（技術的に不可）
-- rclone mount（配布時は mkdir+copy のみ）
+- rclone mount（配布は **copy のみ**。mkdir は使わない）
+- Google Drive デスクトップでの常時フォルダ同期（不要）
 
 ---
 

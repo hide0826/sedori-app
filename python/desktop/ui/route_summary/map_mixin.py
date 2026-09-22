@@ -295,33 +295,55 @@ class RouteSummaryMapMixin:
             "</body></html>"
         )
 
-    def _on_map_view_load_finished(self, _ok: bool) -> None:
-        """Embed API エラー時は従来表示へ自動フォールバック"""
-        if not self._last_load_was_embed or not self._use_embed_map_display():
-            return
-        seg = self._pending_map_segment
-        if not seg or not seg.embed_url:
+    def _on_map_view_load_finished(self, ok: bool) -> None:
+        """Embed API エラー時は従来表示へ。従来 URL が落ちたときは案内を出す。"""
+        if self._last_load_was_embed and self._use_embed_map_display():
+            seg = self._pending_map_segment
+            if not seg or not seg.embed_url:
+                return
+
+            def _check_embed_error(text: str) -> None:
+                if not text:
+                    return
+                lowered = text.lower()
+                if (
+                    "rejected" not in lowered
+                    and "not activated" not in lowered
+                    and "iframe" not in lowered
+                ):
+                    return
+                self._fallback_to_legacy_map(seg)
+
+            try:
+                self.map_view.page().runJavaScript(
+                    "document.body ? document.body.innerText : ''",
+                    _check_embed_error,
+                )
+            except Exception:
+                pass
             return
 
-        def _check_embed_error(text: str) -> None:
-            if not text:
-                return
-            lowered = text.lower()
-            if (
-                "rejected" not in lowered
-                and "not activated" not in lowered
-                and "iframe" not in lowered
-            ):
-                return
-            self._fallback_to_legacy_map(seg)
+        # 従来の maps.google.com/dir 埋め込みは WebEngine で切断されやすい
+        if not ok and not self._last_load_was_embed:
+            self._show_map_embed_unstable_placeholder()
 
-        try:
-            self.map_view.page().runJavaScript(
-                "document.body ? document.body.innerText : ''",
-                _check_embed_error,
-            )
-        except Exception:
-            pass
+    def _show_map_embed_unstable_placeholder(self) -> None:
+        """QWebEngine 内の Google Maps が不安定なときの案内。"""
+        if not self.map_view:
+            return
+        self.map_view.setHtml(
+            "<html><body style='background:#2b2b2b;color:#e9ecef;padding:28px;"
+            "font-family:Segoe UI,Meiryo,sans-serif;line-height:1.6;'>"
+            "<h3 style='margin-top:0;color:#ffc107;'>地図の埋め込み表示に失敗しました</h3>"
+            "<p>Google Maps をアプリ内に直接開くと、接続が切れることがあります"
+            "（ERR_CONNECTION_CLOSED など）。</p>"
+            "<p><b>いちばん確実な見方:</b> 上の "
+            "<span style='color:#5bc0de;'>「ブラウザで開く」</span> を押してください。</p>"
+            "<p style='color:#adb5bd;font-size:0.9em;'>"
+            "安定した埋め込みが必要な場合は「Embed API」を ON にし、"
+            "設定タブの Google Maps API キー（Maps Embed API 有効）を使います。"
+            "</p></body></html>"
+        )
 
     def _fallback_to_legacy_map(self, seg) -> None:
         """Embed 失敗時に従来の /dir/ URL 表示へ切り替え"""

@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QDialog, QFormLayout, QDialogButtonBox, QTabWidget, QStyledItemDelegate, QStyle, QInputDialog,
     QSplitter, QApplication,
 )
-from PySide6.QtCore import Qt, QDateTime, QTime, Signal, QSettings, QUrl
+from PySide6.QtCore import Qt, QDateTime, QTime, Signal, QSettings, QUrl, QThread
 from PySide6.QtGui import QColor, QShortcut, QKeySequence, QDrag, QGuiApplication, QBrush
 
 from ui.star_rating_widget import StarRatingWidget
@@ -68,6 +68,25 @@ from .support import (
     generate_route_map_urls,
     resolve_maps_api_key,
 )
+
+
+class _RclonePushWorker(QThread):
+    """Webテンプレ作成後の Drive 送信を UI スレッド外で実行する。"""
+
+    finished_result = Signal(str, str)  # status, message
+
+    def __init__(self, folder: str, parent=None):
+        super().__init__(parent)
+        self._folder = folder
+
+    def run(self) -> None:
+        try:
+            from services.rclone_route_drive import push_route_folder_to_drive
+
+            res = push_route_folder_to_drive(Path(self._folder))
+            self.finished_result.emit(res.status, res.message)
+        except Exception as exc:
+            self.finished_result.emit("error", f"rclone 連携例外: {exc}")
 
 
 
@@ -843,20 +862,19 @@ class RouteSummaryTemplateMixin:
                 route_date=route_date_iso,
             )
 
-            # Google Drive へ箱を作成・送信（rclone mkdir + copy。未設定時はスキップ）
-            rclone_status = "skipped"
-            rclone_msg = ""
+            # Google Drive 送信はバックグラウンド（UI を止めない）
+            drive_line = "  - Google Drive: バックグラウンド送信中…（完了時に別ダイアログ）\n"
             try:
-                from services.rclone_route_drive import push_route_folder_to_drive
+                from services.rclone_route_drive import load_rclone_config
 
-                rclone_res = push_route_folder_to_drive(route_folder)
-                rclone_status = rclone_res.status
-                rclone_msg = rclone_res.message
-                print(f"rclone Drive: {rclone_status} — {rclone_msg}")
+                cfg = load_rclone_config()
+                if not cfg.get("enabled"):
+                    drive_line = "  - Google Drive: スキップ（enabled=false）\n"
+                else:
+                    self._start_rclone_push_background(str(route_folder))
             except Exception as exc:
-                rclone_status = "error"
-                rclone_msg = f"rclone 連携例外: {exc}"
-                print(rclone_msg)
+                drive_line = f"  - Google Drive: 起動失敗（{exc}）\n"
+                print(f"rclone worker start failed: {exc}")
 
             ok, srv_msg = ensure_route_web_running()
             fixed = home_url()
@@ -872,12 +890,6 @@ class RouteSummaryTemplateMixin:
                 if excel_ok
                 else f"  - Excel 未作成: {excel_msg}\n"
             )
-            if rclone_status == "ok":
-                drive_line = f"  - Google Drive: {rclone_msg}\n"
-            elif rclone_status == "skipped":
-                drive_line = f"  - Google Drive: スキップ（{rclone_msg}）\n"
-            else:
-                drive_line = f"  - Google Drive: 失敗（{rclone_msg}）\n"
 
             detail = (
                 f"保存先（ローカル仕入帳）:\n{route_folder}\n\n"
@@ -898,12 +910,10 @@ class RouteSummaryTemplateMixin:
                 f"他の開き方:\n" + "\n".join(alts) + "\n\n"
                 f"時刻Web: {srv_msg}"
             )
-            need_warn = (not ok) or (not excel_ok) or (rclone_status == "error")
+            need_warn = (not ok) or (not excel_ok)
             if need_warn:
                 if not excel_ok and excel_msg:
                     detail += f"\n\n※ Excel 保険: {excel_msg}"
-                if rclone_status == "error":
-                    detail += f"\n\n※ Drive 送信: {rclone_msg}"
                 if not ok:
                     detail += (
                         "\n\n※ Web が起動していない場合は\n"
@@ -924,6 +934,32 @@ class RouteSummaryTemplateMixin:
                 f"Webテンプレート作成中にエラーが発生しました:\n{str(e)}",
             )
             return None
+
+    def _start_rclone_push_background(self, folder: str) -> None:
+        """Drive 送信を別スレッドで実行。完了後に小さな通知を出す。"""
+        # 前回のワーカーが残っていれば待つ（短時間）／破棄
+        prev = getattr(self, "_rclone_push_worker", None)
+        if prev is not None and prev.isRunning():
+            print("rclone: 前回の送信がまだ実行中のため、今回は重ねて開始します")
+
+        worker = _RclonePushWorker(folder, parent=self)
+        self._rclone_push_worker = worker
+
+        def _on_done(status: str, message: str) -> None:
+            print(f"rclone Drive: {status} — {message}")
+            if status == "ok":
+                QMessageBox.information(self, "Google Drive 送信完了", message)
+            elif status == "skipped":
+                QMessageBox.information(self, "Google Drive", f"スキップしました。\n{message}")
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Google Drive 送信失敗",
+                    f"{message}\n\nローカル箱は作成済みです。後から再送するか、Drive に手動で置いてください。",
+                )
+
+        worker.finished_result.connect(_on_done)
+        worker.start()
 
     def set_template_root_directory(self):
         """テンプレート保存用のデフォルト（起点）フォルダを設定"""

@@ -66,21 +66,49 @@ def load_rclone_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
 
 
 def find_rclone_exe(preferred: str = "rclone") -> Optional[str]:
-    """PATH またはよくある配置から rclone を探す。"""
-    if preferred and Path(preferred).is_file():
-        return str(Path(preferred))
+    """PATH またはよくある配置から rclone を探す。
+
+    GUI 起動の HIRIO は PowerShell と PATH が違うことがあるため、
+    WinGet の Links / Packages も明示的に探す。
+    """
+    if preferred and preferred not in ("rclone", "rclone.exe"):
+        p = Path(preferred)
+        if p.is_file():
+            return str(p.resolve())
+
     which = shutil.which(preferred) or shutil.which("rclone") or shutil.which("rclone.exe")
     if which:
-        return which
-    candidates = [
-        Path(os.environ.get("LOCALAPPDATA", "")) / "rclone" / "rclone.exe",
+        return str(Path(which).resolve())
+
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    user_profile = Path(os.environ.get("USERPROFILE", ""))
+    candidates: List[Path] = [
+        local / "Microsoft" / "WinGet" / "Links" / "rclone.exe",
+        local / "rclone" / "rclone.exe",
+        user_profile / "scoop" / "shims" / "rclone.exe",
+        Path(r"C:\Program Files\rclone\rclone.exe"),
         Path(r"C:\rclone\rclone.exe"),
         _REPO_ROOT / "tools" / "rclone" / "rclone.exe",
         Path(r"C:\HIRIO\tools\rclone\rclone.exe"),
     ]
+    # WinGet Packages 配下（バージョン付きフォルダ）
+    winget_pkgs = local / "Microsoft" / "WinGet" / "Packages"
+    if winget_pkgs.is_dir():
+        try:
+            for hit in sorted(winget_pkgs.glob("Rclone.Rclone*/rclone*/rclone.exe"), reverse=True):
+                candidates.append(hit)
+            for hit in sorted(winget_pkgs.glob("**/rclone.exe"), reverse=True):
+                if hit not in candidates:
+                    candidates.append(hit)
+        except OSError:
+            pass
+
     for p in candidates:
-        if p.is_file():
-            return str(p)
+        try:
+            if p.is_file():
+                return str(p.resolve())
+        except OSError:
+            continue
     return None
 
 
@@ -123,7 +151,11 @@ def push_route_folder_to_drive(
     *,
     config_path: Optional[Path] = None,
 ) -> RclonePushResult:
-    """ローカルルート箱を Drive 上の remote_root/箱名 へ mkdir + copy。"""
+    """ローカルルート箱を Drive 上の remote_root/箱名 へ copy。
+
+    mkdir は省略（copy が親パスを作る）。UI を止めないよう呼び出し側で
+    バックグラウンド実行すること。
+    """
     cfg = load_rclone_config(config_path)
     if not cfg.get("enabled"):
         return RclonePushResult(
@@ -153,19 +185,7 @@ def push_route_folder_to_drive(
     remote_root = str(cfg.get("remote_root") or "").strip()
     dest = remote_dest(remote, remote_root, local.name)
 
-    # 親（仕入帳）を確保
-    if remote_root:
-        root_norm = remote_root.strip().replace("\\", "/").strip("/")
-        parent = f"{remote.strip().rstrip(':')}:{root_norm}"
-        code, _out, err = _run(exe, ["mkdir", parent], timeout_sec=min(60, timeout))
-        # 既存でも rclone mkdir はだいたい 0。失敗しても copy で再挑戦
-        if code not in (0,):
-            print(f"rclone mkdir parent warn ({code}): {err.strip()}")
-
-    code, _out, err = _run(exe, ["mkdir", dest], timeout_sec=min(60, timeout))
-    if code not in (0,):
-        print(f"rclone mkdir dest warn ({code}): {err.strip()}")
-
+    # mkdir は Google Drive API で固まりやすいので省略。copy がディレクトリを作る。
     code, out, err = _run(
         exe,
         [
@@ -177,6 +197,14 @@ def push_route_folder_to_drive(
             "4",
             "--checkers",
             "8",
+            "--retries",
+            "2",
+            "--low-level-retries",
+            "3",
+            "--contimeout",
+            "20s",
+            "--timeout",
+            "60s",
         ],
         timeout_sec=timeout,
     )
