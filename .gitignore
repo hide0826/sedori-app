@@ -229,3 +229,8 @@ python/python/
 
 # 現場ルートWeb: マシン固有のルート箱インデックス
 python/route_web/data/index.json
+
+# rclone route Drive (local enable; example is committed)
+config/rclone_route_drive.json
+tools/rclone/
+

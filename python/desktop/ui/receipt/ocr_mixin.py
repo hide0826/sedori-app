@@ -204,7 +204,22 @@ class ReceiptOcrMixin:
                 "このフォルダに OCR できる画像がありません。\n"
                 "jpg / jpeg / png / webp / bmp / tif / heic を置いてから、もう一度フォルダ選択してください。",
             )
-    
+
+    def prepare_folder_for_batch(self, folder: Path, *, show_empty_message: bool = False) -> int:
+        """ルート箱の レシート画像/ などをダイアログなしでキューに載せる（Phase 3）。"""
+        self._reset_post_rename_workflow_gate()
+        self.current_folder = Path(folder)
+        image_paths = collect_receipt_image_paths(self.current_folder)
+        self.ocr_queue = image_paths
+        self.update_folder_label()
+        if show_empty_message and not image_paths:
+            QMessageBox.information(
+                self,
+                "画像なし",
+                "このフォルダに OCR できる画像がありません。",
+            )
+        return len(image_paths)
+
     def process_selected_file(self):
         """OCRキューから最初のファイルを処理（フォルダ選択後）"""
         if self._is_batch_ocr_busy():

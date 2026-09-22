@@ -1,15 +1,29 @@
-# -*- coding: utf-8 -*-
-"""ルート時刻入力 FastAPI（:8792）。"""
+﻿# -*- coding: utf-8 -*-
+"""ルート時刻入力 FastAPI（:8792）。Phase 1〜1.5 / 2 / 5。"""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from pydantic import BaseModel
 
 from route_web import ROUTE_WEB_PORT
+from route_web.csv_inbox import (
+    append_csv_file,
+    inbox_dir,
+    list_inbox_files,
+    list_route_csv_files,
+    move_from_inbox,
+    save_csv_upload,
+)
+from route_web.product_images import (
+    product_dir,
+    save_product_upload,
+    append_product_file,
+)
 from route_web.receipts import (
     append_receipt_file,
     find_store,
@@ -28,7 +42,11 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 PAGE_PATH = STATIC_DIR / "route.html"
 INDEX_PATH = STATIC_DIR / "index.html"
 
-app = FastAPI(title="HIRIO Route Web", version="0.1.5")
+app = FastAPI(title="HIRIO Route Web", version="0.2.0")
+
+
+class InboxMoveBody(BaseModel):
+    filename: str
 
 
 def _page_html(web_id: str) -> str:
@@ -44,9 +62,23 @@ def _index_html() -> str:
     return INDEX_PATH.read_text(encoding="utf-8")
 
 
+def _require_doc(web_id: str) -> Dict[str, Any]:
+    doc = load_route_json(web_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail=f"route not found: {web_id}")
+    return doc
+
+
+def _require_folder(web_id: str) -> Path:
+    folder = resolve_folder(web_id)
+    if folder is None:
+        raise HTTPException(status_code=404, detail="folder missing")
+    return folder
+
+
 @app.get("/health")
 def health() -> Dict[str, str]:
-    return {"status": "ok", "service": "route_web"}
+    return {"status": "ok", "service": "route_web", "version": "0.2.0"}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -60,27 +92,30 @@ def api_routes() -> JSONResponse:
     return JSONResponse({"routes": list_route_summaries()})
 
 
+@app.get("/api/csv-inbox")
+def api_csv_inbox() -> JSONResponse:
+    try:
+        path = str(inbox_dir())
+        files = list_inbox_files()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"inbox error: {exc}") from exc
+    return JSONResponse({"inbox_path": path, "files": files})
+
+
 @app.get("/route/{web_id}", response_class=HTMLResponse)
 def route_page(web_id: str) -> HTMLResponse:
-    doc = load_route_json(web_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail=f"route not found: {web_id}")
+    _require_doc(web_id)
     return HTMLResponse(_page_html(web_id))
 
 
 @app.get("/api/route/{web_id}")
 def get_route(web_id: str) -> JSONResponse:
-    doc = load_route_json(web_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail=f"route not found: {web_id}")
-    return JSONResponse(doc)
+    return JSONResponse(_require_doc(web_id))
 
 
 @app.put("/api/route/{web_id}")
 def put_route(web_id: str, body: Dict[str, Any]) -> JSONResponse:
-    existing = load_route_json(web_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail=f"route not found: {web_id}")
+    existing = _require_doc(web_id)
     body = dict(body)
     body["web_id"] = web_id
     body["folder_path"] = existing.get("folder_path") or body.get("folder_path")
@@ -90,18 +125,73 @@ def put_route(web_id: str, body: Dict[str, Any]) -> JSONResponse:
     return JSONResponse(body)
 
 
+@app.get("/api/route/{web_id}/csv")
+def get_route_csv(web_id: str) -> JSONResponse:
+    folder = _require_folder(web_id)
+    return JSONResponse({"files": list_route_csv_files(folder)})
+
+
+@app.post("/api/route/{web_id}/csv/from-inbox")
+def move_csv_from_inbox(web_id: str, body: InboxMoveBody) -> JSONResponse:
+    doc = _require_doc(web_id)
+    folder = _require_folder(web_id)
+    name = Path(body.filename or "").name
+    if not name:
+        raise HTTPException(status_code=400, detail="filename required")
+    try:
+        saved = move_from_inbox(folder, name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"move failed: {exc}") from exc
+    doc = append_csv_file(doc, saved)
+    doc = stamp_updated(doc)
+    save_route_json(web_id, doc)
+    return JSONResponse(
+        {
+            "ok": True,
+            "filename": saved,
+            "csv_files": doc.get("csv_files") or [],
+            "route": doc,
+            "inbox": list_inbox_files(),
+            "route_csv": list_route_csv_files(folder),
+        }
+    )
+
+
+@app.post("/api/route/{web_id}/csv")
+async def upload_csv(web_id: str, file: UploadFile = File(...)) -> JSONResponse:
+    doc = _require_doc(web_id)
+    folder = _require_folder(web_id)
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="empty file")
+    try:
+        saved = save_csv_upload(folder, raw, original_name=file.filename or "")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"save failed: {exc}") from exc
+    doc = append_csv_file(doc, saved)
+    doc = stamp_updated(doc)
+    save_route_json(web_id, doc)
+    return JSONResponse(
+        {
+            "ok": True,
+            "filename": saved,
+            "csv_files": doc.get("csv_files") or [],
+            "route": doc,
+            "route_csv": list_route_csv_files(folder),
+        }
+    )
+
+
 @app.post("/api/route/{web_id}/stores/{store_code}/receipts")
 async def upload_receipt(
     web_id: str,
     store_code: str,
     file: UploadFile = File(...),
 ) -> JSONResponse:
-    doc = load_route_json(web_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail=f"route not found: {web_id}")
-    folder = resolve_folder(web_id)
-    if folder is None:
-        raise HTTPException(status_code=404, detail="folder missing")
+    doc = _require_doc(web_id)
+    folder = _require_folder(web_id)
     if find_store(doc, store_code) is None:
         raise HTTPException(status_code=404, detail=f"store not found: {store_code}")
 
@@ -138,12 +228,64 @@ async def upload_receipt(
 
 @app.get("/api/route/{web_id}/receipts/{filename}")
 def get_receipt_file(web_id: str, filename: str):
-    folder = resolve_folder(web_id)
-    if folder is None:
-        raise HTTPException(status_code=404, detail="folder missing")
-    # パストラバーサル防止
+    folder = _require_folder(web_id)
     name = Path(filename).name
     path = receipt_dir(folder) / name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="file not found")
+    return FileResponse(path)
+
+
+@app.post("/api/route/{web_id}/stores/{store_code}/products")
+async def upload_product(
+    web_id: str,
+    store_code: str,
+    file: UploadFile = File(...),
+    jan: Optional[str] = Form(None),
+) -> JSONResponse:
+    doc = _require_doc(web_id)
+    folder = _require_folder(web_id)
+    if find_store(doc, store_code) is None:
+        raise HTTPException(status_code=404, detail=f"store not found: {store_code}")
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="empty file")
+    try:
+        filename = save_product_upload(
+            folder,
+            str(doc.get("route_date") or ""),
+            store_code,
+            raw,
+            original_name=file.filename or "",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"save failed: {exc}") from exc
+
+    try:
+        doc = append_product_file(doc, store_code, filename, jan=jan or "")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    doc = stamp_updated(doc)
+    save_route_json(web_id, doc)
+    st = find_store(doc, store_code)
+    return JSONResponse(
+        {
+            "ok": True,
+            "filename": filename,
+            "store_code": store_code,
+            "jan": (jan or "").strip(),
+            "product_files": (st or {}).get("product_files") or [],
+            "route": doc,
+        }
+    )
+
+
+@app.get("/api/route/{web_id}/products/{filename}")
+def get_product_file(web_id: str, filename: str):
+    folder = _require_folder(web_id)
+    name = Path(filename).name
+    path = product_dir(folder) / name
     if not path.is_file():
         raise HTTPException(status_code=404, detail="file not found")
     return FileResponse(path)

@@ -2,9 +2,9 @@
 
 更新日: 2026-09-22  
 リポジトリ: `C:\HIRIO\repo\sedori-app.github`  
-作業枝: **`feature/sp-api`**（旧 `feature/route-web-template` から 2026-09-22 にマージ済・`b4a7c22`）
+作業枝: **`feature/sp-api`**
 
-**いまここ:** Phase 1＋1.5 は `feature/sp-api` に取り込み済。実運用で問題が出たら都度修正
+**いまここ:** Phase 1〜5 実装済。**CSV は Google Drive でルート箱の `仕入CSV/` へ直送**。Webテンプレ作成時に **Excel も同時生成**（ミニPCダウン時の滞在時刻保険）。1.5b は見送り。
 
 ### サンドボックス（レシート未投入・撮影テスト用）
 
@@ -18,6 +18,18 @@
 - 画面上は **店舗名＋店舗コード** を表示（`store_name` 入り JSON）
 
 （旧 `_sandbox` コピーやレシート入り試験用 ID は使わない）
+
+### 仕入CSV（Phase 2・運用正）
+
+- **主:** スマホ共有 → **Google Drive** → 当該ルート箱の `仕入CSV\`（フォルダ指定できる）
+- **保険:** ルートWebからの直接 Upload／（任意）受信箱 UI
+- Tailscale 共有だけではフォルダ指定できないため、受信箱固定運用は主にしない
+
+### ミニPCダウン時の保険
+
+- Webテンプレ作成時に同じ箱へ `route_template_*.xlsx` も生成
+- ルート箱を Drive 同期しておけば、落ちている間は **従来どおり Excel で滞在時刻入力**
+- Web（:8792）はミニPC上のため、ダウン中は開けない
 
 ---
 
@@ -33,9 +45,9 @@
 
 | 工程 | いま | 目指す姿 |
 |------|------|----------|
-| ルート時刻 | Excel → Drive → スマホ | Web（固定URL一覧→タップ）。今の時刻ボタンあり ✅ |
-| レシート | Googleフォト → 帰宅後DL → 証憑取込 | **時刻入力と同じ画面で店舗つき撮影** → `レシート画像/` へ直保存（Phase 1.5） |
-| 仕入CSV | アマサーチ → LINE → PC | Tailscale 仮置き → ルート箱へ（Phase 2） |
+| ルート時刻 | Excel → Drive → スマホ | **普段:** Web。**保険:** 同箱の Excel（Drive同期・ミニPCダウン時） |
+| レシート | Googleフォト → 帰宅後DL → 証憑取込 | 時刻入力と同じ画面で店舗つき撮影 → `レシート画像/` |
+| 仕入CSV | アマサーチ → LINE → PC | **Google Drive でルート箱 `仕入CSV/` へ直送**（Web直接Uploadは保険） |
 | 取込 | 各タブで個別指定 | ルートフォルダ指定で読込（Phase 3） |
 | レシートOCR | 帰宅後に証憑タブ | 撮影後にサーバOCR／Gemini（Phase 1.5b または証憑連携） |
 | 商品画像 | Googleフォト → 画像管理 | 撮影時 JAN／直近DB（Phase 5） |
@@ -46,14 +58,12 @@
 
 ```
 D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳\
-  └── YYYYMMDDルート名\
-        route_template_*.xlsx     … Excel（従来ボタン・任意）
+  └── YYYYMMDDルート名\          … Google Drive 同期推奨
+        route_template_*.xlsx     … Webテンプレ作成時にも生成（ダウン時の時刻入力保険）
         route.json                … Web時刻・経費（Phase 1）
         商品画像\
-        レシート画像\             … Phase 1.5 で Web から直接保存
-          YYYY-MM-DD-{店舗コード}-01.jpg
-          …
-        仕入CSV\                  … Phase 2
+        レシート画像\
+        仕入CSV\                  … Drive 直送先（Phase 2）
 ```
 
 - Webテンプレ作成時の起点: **常に** `D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳`（D: がある限りフォルダ選択ダイアログは出さない）
@@ -89,12 +99,12 @@ D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳\
 |:-----:|------|:----:|
 | 0 | 本仕様書 | ✅ |
 | 1 | Webテンプレ＋箱＋`route.json`＋時刻Web＋固定一覧URL | ✅ |
-| **1.5** | **時刻入力画面でレシート撮影→`レシート画像/` 保存（店舗紐付け）** | ✅ API/UI（サンドボックス検証） |
-| 1.5b | 撮影直後の OCR／Gemini（総額・時刻・登録番号）→ `route.json` または証憑DB下書き | ⬜ |
-| 2 | 仕入CSV仮置き→ルート箱 `仕入CSV/` へ移動 | ⬜ |
-| 3 | 仕入／画像／証憑がルートフォルダ指定で読込 | ⬜ |
+| **1.5** | **時刻入力画面でレシート撮影→`レシート画像/` 保存（店舗紐付け）** | ✅ |
+| 1.5b | 撮影直後の OCR／Gemini | **見送り**（帰宅後の証憑OCR） |
+| **2** | **仕入CSV: Drive 直送 → ルート箱 `仕入CSV/`**（Web Upload／受信箱は保険） | ✅ |
+| **3** | **仕入／画像／証憑がルートフォルダ指定で読込** | ✅ |
 | 4 | （統合済）旧「別画面でレシート撮影」は **1.5 に吸収** | — |
-| 5 | 商品撮影時 JAN／直近DB候補確定 | ⬜ |
+| **5** | **商品撮影＋任意JAN（手入力）→ `商品画像/`** | ✅（バーコード自動読取は第1弾なし） |
 
 ### Phase 1 受け入れ（実績）
 
@@ -178,12 +188,101 @@ D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳\
 
 ---
 
+## 5b. Phase 2（仕入CSV）
+
+### ねらい
+
+アマサーチの `StockList_*.csv` を、**Google Drive 経由でルート箱の `仕入CSV/` へ直送**する。  
+（Tailscale の共有シートではフォルダ指定できないため、受信箱固定は主運用にしない。）
+
+### 操作（正）
+
+1. Webテンプレ作成でルート箱を作る（仕入帳。**Drive 同期推奨**）
+2. 店でアマサーチ CSV を共有 → **Google Drive** → その日のルート箱の `仕入CSV\`
+3. 帰宅後「ルート箱から取込」またはスタートで読込
+
+### 保険
+
+- ルートWebの「CSVを直接追加」（ミニPCが生きているとき）
+- 受信箱 API／UI（任意・副次）
+
+### API（副次・そのまま）
+
+| 方法 | パス | 内容 |
+|------|------|------|
+| `GET` | `/api/csv-inbox` | 受信箱一覧（任意） |
+| `POST` | `/api/route/{web_id}/csv/from-inbox` | 受信箱から移動（任意） |
+| `POST` | `/api/route/{web_id}/csv` | multipart 直接保存 |
+| `GET` | `/api/route/{web_id}/csv` | ルート箱内 CSV 一覧 |
+
+`route.json` の `csv_files` は任意追記（フォルダ実体が正）。
+
+### Webテンプレ作成時の Excel 保険
+
+- `generate_web_template` が同じ箱に `route_template_{ルート名}_{YYYYMMDD}.xlsx` も生成
+- ミニPCダウン中は Web 不可 → **Drive 上の Excel で従来どおり滞在時刻入力**
+- 既存の「テンプレート生成」ボタンも残す（単体で Excel だけ作りたいとき用）
+
+### rclone で Drive 上に箱を作成（配布向け・Desktop アプリ不要）
+
+Webテンプレ作成の最後に:
+
+1. ローカル箱を従来どおり作成（route.json / Excel / サブフォルダ）
+2. **`rclone mkdir` + `rclone copy --create-empty-src-dirs`** で Drive 上の同じパスへ送る
+3. mount は使わない
+
+設定:
+
+- 例: [`config/rclone_route_drive.example.json`](../../config/rclone_route_drive.example.json) → `config/rclone_route_drive.json`
+- または環境変数 `HIRIO_RCLONE_ENABLED=1` / `HIRIO_RCLONE_REMOTE=gdrive`
+- 実装: `python/desktop/services/rclone_route_drive.py`
+- 確認 bat: `python/route_web/check_rclone.bat`
+- 未導入・無効時は **スキップ**（ローカル箱作成は成功のまま）
+
+初回準備（1回だけ）:
+
+1. `winget install Rclone.Rclone`（または `tools/rclone/rclone.exe`）
+2. `rclone config` で Google Drive リモート作成（例: 名前 `gdrive`）
+3. example をコピーして `"enabled": true`
+
+---
+
+## 5c. Phase 3（ルート箱一括取込）
+
+デスクトップ仕入タブ **「ルート箱から取込」**:
+
+| サブフォルダ | 振り分け |
+|--------------|----------|
+| `仕入CSV/`（無ければ直下 `StockList_*`） | CSV取込 |
+| `商品画像/` | 画像管理のカレントフォルダ |
+| `レシート画像/` | 証憑 OCR キュー |
+| `route_template_*.xlsx` | あればテンプレ読込 |
+
+スタートワークフローの CSV 探索も **`仕入CSV/` 優先**。
+
+実装: `python/desktop/services/route_folder_import.py` + `inventory/workflow_mixin.import_from_route_box`
+
+---
+
+## 5d. Phase 5（商品撮影）
+
+各店舗カードに「商品を撮る」「アルバムから」＋任意 JAN（手入力）。
+
+- 保存先: `{ルート箱}/商品画像/`
+- ファイル名: `{route_date}-{store_code}-item-{連番}.jpg`
+- `stores[].product_files`: `[{"file":"…jpg","jan":"…"}]`（jan は任意）
+- API: `POST /api/route/{web_id}/stores/{store_code}/products`（form: file + jan）
+- バーコード自動読取は第1弾ではやらない（帰宅後の画像管理スキャン）
+
+---
+
 ## 6. Phase 1 技術詳細（実装済み・要約）
 
 ### 6.1 デスクトップ
 
-- `Webテンプレート作成` … `generate_web_template`（Excel `generate_template` は触らない）
-- 保存先固定: `D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳`
+- `Webテンプレート作成` … `generate_web_template`（**route.json＋保険 Excel＋サブフォルダ**）
+- 保存先固定: `D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳`（Drive 同期推奨）
+- 既存 `テンプレート生成` … Excel のみ（従来どおり残す）
 
 ### 6.2 時刻 Web（:8792）
 
@@ -200,15 +299,14 @@ D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳\
 
 ## 7. ブランチ／マージ方針
 
-- ベース: `feature/sp-api`
-- 作業枝: `feature/route-web-template`
-- Phase 1.5 実機 OK 後、まとめてマージ判断可
+- 作業枝: **`feature/sp-api`**
 - commit / push 時は全体 PROGRESS・本リポ PROGRESS・（あれば Notion）をセット
 
-| よい | 触らない（1.5） |
-|------|----------------|
-| `python/route_web/**` | 証憑デスクトップの確定・GCS本線 |
-| 本仕様・PROGRESS | 事務 PWA |
+| よい | 触らない |
+|------|----------|
+| `python/route_web/**` | 証憑の確定・GCS本線の自動起動 |
+| 仕入「ルート箱から取込」 | 事務 PWA |
+| 本仕様・PROGRESS | 撮影直後OCR（1.5b） |
 
 ---
 
@@ -216,8 +314,9 @@ D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳\
 
 ```
 C:\HIRIO\repo\sedori-app.github\docs\specs\field_route_web_spec.md を読んで、
-いまここ（Phase 1.5 時刻入力画面でレシート撮影）を実装して。
-枝は feature/route-web-template。固定URLと時刻入力は壊さない。
+現場ルートWebの不具合修正または次フェーズを進めて。
+枝は feature/sp-api。固定URLと既存 Phase 1〜5 を壊さない。
+1.5b 撮影直後OCRは見送り。
 ```
 
 ---
@@ -226,6 +325,9 @@ C:\HIRIO\repo\sedori-app.github\docs\specs\field_route_web_spec.md を読んで�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-09-22 | Webテンプレ作成時に rclone mkdir+copy で Drive 上へ箱送信（Desktopアプリ不要・未設定時スキップ） |
+| 2026-09-22 | CSV は Drive 直送を正に。Webテンプレ作成時に Excel も同時生成（ミニPCダウン時の滞在時刻保険）。受信箱は副次 |
+| 2026-09-22 | Phase 2（受信箱→仕入CSV）・Phase 3（ルート箱取込）・Phase 5（商品撮影＋任意JAN）。1.5b は見送り |
 | 2026-09-22 | 各店「仕入点数」任意入力 → `purchase_item_count`。アマサーチ差異UIは証憑管理時に後回し |
 | 2026-09-22 | Phase 1.5 実装。サンドボックス `sandbox_20260919_kamakura`（本番鎌倉ルートのコピー）でアップロード検証 |
 | 2026-09-22 | **仕様変更:** レシート撮影を時刻入力画面に統合（Phase 1.5）。旧 Phase 4 を吸収。OCR は 1.5b |

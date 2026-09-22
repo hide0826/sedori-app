@@ -681,9 +681,10 @@ class RouteSummaryTemplateMixin:
             QMessageBox.critical(self, "エラー", f"テンプレート生成中にエラーが発生しました:\n{str(e)}\n\n詳細はコンソールを確認してください。")
 
     def generate_web_template(self):
-        """Web用ルート箱＋route.json を生成し、時刻入力WebのURLを案内する。
+        """Web用ルート箱＋route.json＋保険用 Excel を生成し、時刻入力WebのURLを案内する。
 
-        既存の Excel「テンプレート生成」は変更しない。同じフォルダ命名規則を使う。
+        Excel「テンプレート生成」と同じ xlsx を同じ箱に置く。
+        ミニPCダウン時は Drive 同期された xlsx で従来どおり滞在時刻を入力できる。
         """
         try:
             import json
@@ -734,6 +735,13 @@ class RouteSummaryTemplateMixin:
             (route_folder / "商品画像").mkdir(exist_ok=True)
             (route_folder / "レシート画像").mkdir(exist_ok=True)
             (route_folder / "仕入CSV").mkdir(exist_ok=True)
+            # 任意: 旧受信箱（Drive直送が主。Tailscale用の保険として残す）
+            try:
+                from route_web.csv_inbox import inbox_dir
+
+                inbox_dir()
+            except Exception as exc:
+                print(f"仕入CSV受信箱の作成をスキップ: {exc}")
 
             if self.store_visits_table.rowCount() > 0:
                 self._persist_visit_table_notes_to_store_master()
@@ -771,6 +779,36 @@ class RouteSummaryTemplateMixin:
                 QMessageBox.warning(self, "警告", "テンプレートに出力する店舗がありません。")
                 return None
 
+            # 保険: 通常の Excel テンプレも同じ箱へ（ミニPCダウン時は Drive 同期の xlsx で滞在時刻入力）
+            excel_name = f"route_template_{safe_route_name}_{route_date_str}.xlsx"
+            excel_path = route_folder / excel_name
+            excel_ok = False
+            excel_msg = ""
+            try:
+                route_date = datetime(
+                    route_qdate.year(), route_qdate.month(), route_qdate.day()
+                ).date()
+            except Exception:
+                route_date = None
+            if not TemplateGenerator:
+                excel_msg = "TemplateGenerator が使えないため Excel 未作成"
+            else:
+                try:
+                    excel_ok = bool(
+                        TemplateGenerator.generate_excel_template(
+                            str(excel_path),
+                            route_name,
+                            store_codes,
+                            stores,
+                            route_date,
+                        )
+                    )
+                    if not excel_ok:
+                        excel_msg = "Excel テンプレ生成に失敗（コンソール参照）"
+                except Exception as exc:
+                    excel_msg = f"Excel 生成エラー: {exc}"
+                    print(f"Webテンプレ時の Excel 生成失敗: {exc}")
+
             python_dir = Path(__file__).resolve().parents[3]
             if str(python_dir) not in sys.path:
                 sys.path.insert(0, str(python_dir))
@@ -805,6 +843,21 @@ class RouteSummaryTemplateMixin:
                 route_date=route_date_iso,
             )
 
+            # Google Drive へ箱を作成・送信（rclone mkdir + copy。未設定時はスキップ）
+            rclone_status = "skipped"
+            rclone_msg = ""
+            try:
+                from services.rclone_route_drive import push_route_folder_to_drive
+
+                rclone_res = push_route_folder_to_drive(route_folder)
+                rclone_status = rclone_res.status
+                rclone_msg = rclone_res.message
+                print(f"rclone Drive: {rclone_status} — {rclone_msg}")
+            except Exception as exc:
+                rclone_status = "error"
+                rclone_msg = f"rclone 連携例外: {exc}"
+                print(rclone_msg)
+
             ok, srv_msg = ensure_route_web_running()
             fixed = home_url()
             this_route = route_page_url(web_id)
@@ -814,26 +867,48 @@ class RouteSummaryTemplateMixin:
             except Exception:
                 pass
 
+            excel_line = (
+                f"  - {excel_name}（保険・Drive。ミニPCダウン時の滞在時刻入力）\n"
+                if excel_ok
+                else f"  - Excel 未作成: {excel_msg}\n"
+            )
+            if rclone_status == "ok":
+                drive_line = f"  - Google Drive: {rclone_msg}\n"
+            elif rclone_status == "skipped":
+                drive_line = f"  - Google Drive: スキップ（{rclone_msg}）\n"
+            else:
+                drive_line = f"  - Google Drive: 失敗（{rclone_msg}）\n"
+
             detail = (
-                f"保存先（仕入帳と同じルール）:\n{route_folder}\n\n"
+                f"保存先（ローカル仕入帳）:\n{route_folder}\n\n"
                 f"作ったもの:\n"
                 f"  - route.json（Webの入力値＝出発/帰宅/店舗IN・OUT など）\n"
+                f"{excel_line}"
+                f"{drive_line}"
                 f"  - 商品画像\\\n"
                 f"  - レシート画像\\\n"
-                f"  - 仕入CSV\\\n\n"
-                f"【スマホはこれをブックマーク（固定URL）】\n{fixed}\n"
+                f"  - 仕入CSV\\  … スマホは Drive 上の同じ箱へ直送（StockList_*.csv）\n\n"
+                f"【普段】スマホは固定URLをブックマーク\n{fixed}\n"
                 f"（クリップボードにコピー済み）\n\n"
-                f"一覧に「{route_date_iso} / {route_name}」が出ます。"
-                f"タップして時刻入力へ。保存するとこのフォルダの route.json が更新されます。\n"
+                f"一覧に「{route_date_iso} / {route_name}」→ 時刻・レシート・商品撮影。\n"
                 f"（個別URL: {this_route}）\n\n"
+                f"【保険】ミニPCが落ちたら Web は開けないので、\n"
+                f"Drive 上の Excel（{excel_name if excel_ok else 'route_template_*.xlsx'}）で\n"
+                f"従来どおり滞在時刻を入力してください。\n\n"
                 f"他の開き方:\n" + "\n".join(alts) + "\n\n"
                 f"時刻Web: {srv_msg}"
             )
-            if not ok:
-                detail += (
-                    "\n\n※ Web が起動していない場合は\n"
-                    "python\\route_web\\start_route_web.bat を実行してください。"
-                )
+            need_warn = (not ok) or (not excel_ok) or (rclone_status == "error")
+            if need_warn:
+                if not excel_ok and excel_msg:
+                    detail += f"\n\n※ Excel 保険: {excel_msg}"
+                if rclone_status == "error":
+                    detail += f"\n\n※ Drive 送信: {rclone_msg}"
+                if not ok:
+                    detail += (
+                        "\n\n※ Web が起動していない場合は\n"
+                        "python\\route_web\\start_route_web.bat を実行してください。"
+                    )
                 QMessageBox.warning(self, "Webテンプレート作成（要確認）", detail)
             else:
                 QMessageBox.information(self, "Webテンプレート作成", detail)

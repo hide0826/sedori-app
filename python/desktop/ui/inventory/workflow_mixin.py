@@ -267,7 +267,7 @@ class InventoryWorkflowMixin:
         base_dir = self._get_default_batch_root_dir()
         selected_dir = QFileDialog.getExistingDirectory(
             self,
-            "仕入処理フォルダを選択（StockList_ と route_template_ を含むフォルダ）",
+            "仕入処理フォルダを選択（ルート箱。仕入CSV/ または直下に StockList_）",
             base_dir
         )
         if not selected_dir:
@@ -283,21 +283,17 @@ class InventoryWorkflowMixin:
         except Exception:
             pass
         
-        # 2. StockList_ で始まる CSV を探して読み込み
-        csv_candidates = sorted(folder_path.glob("StockList_*.csv"))
-        if not csv_candidates:
+        # 2. StockList_ で始まる CSV を探して読み込み（仕入CSV/ 優先）
+        from services.route_folder_import import find_stocklist_csv
+
+        csv_path = find_stocklist_csv(folder_path)
+        if csv_path is None:
             QMessageBox.warning(
                 self,
                 "CSVファイル未検出",
-                f"選択したフォルダ内に『StockList_』で始まるCSVファイルが見つかりませんでした。\n\nフォルダ: {selected_dir}"
+                f"選択したフォルダ（または 仕入CSV/）に『StockList_』で始まるCSVが見つかりませんでした。\n\nフォルダ: {selected_dir}"
             )
             return
-        
-        # 最も新しいファイルを優先
-        try:
-            csv_path = max(csv_candidates, key=lambda p: p.stat().st_mtime)
-        except Exception:
-            csv_path = csv_candidates[0]
         
         # 工程1: CSV取込
         if not self._should_run_step(
@@ -596,4 +592,98 @@ class InventoryWorkflowMixin:
         
         # ワークフローグループをレイアウトに追加
         self.layout().addWidget(workflow_group)
+
+    def _find_main_window(self):
+        win = self.window()
+        if win is not None and hasattr(win, "image_manager_widget"):
+            return win
+        return None
+
+    def import_from_route_box(self):
+        """ルート箱を1回選んで CSV／商品画像／レシート画像を既存タブへ振り分ける（Phase 3）。"""
+        from services.route_folder_import import resolve_route_folder_layout
+
+        base_dir = self._get_default_batch_root_dir()
+        # 仕入帳を優先
+        ledger = Path(r"D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳")
+        if ledger.is_dir():
+            base_dir = str(ledger)
+
+        selected_dir = QFileDialog.getExistingDirectory(
+            self,
+            "ルート箱を選択（商品画像・レシート画像・仕入CSV を含むフォルダ）",
+            base_dir,
+        )
+        if not selected_dir:
+            return
+
+        folder_path = Path(selected_dir)
+        try:
+            s = self._get_qsettings()
+            s.setValue("inventory/last_csv_folder", str(folder_path))
+        except Exception:
+            pass
+
+        layout = resolve_route_folder_layout(folder_path)
+        lines: List[str] = [f"ルート箱: {folder_path}"]
+
+        # 仕入CSV
+        if layout.csv_path is None:
+            QMessageBox.warning(
+                self,
+                "CSV未検出",
+                "仕入CSV/ または直下に StockList_*.csv がありません。\n"
+                + "\n".join(layout.notes),
+            )
+            return
+
+        self._update_workflow_status("ルート箱取込: CSV…", emphasize=True)
+        QApplication.processEvents()
+        self._import_csv_from_path(str(layout.csv_path))
+        lines.append(f"CSV: {layout.csv_path.name}")
+
+        # ルートテンプレ（あれば）
+        if self.route_summary_widget and layout.route_template is not None:
+            try:
+                self.route_summary_widget.load_template(str(layout.route_template))
+                lines.append(f"ルートテンプレ: {layout.route_template.name}")
+            except Exception as exc:
+                lines.append(f"ルートテンプレ読込失敗: {exc}")
+        elif layout.route_json is not None:
+            lines.append(f"route.json あり（テンプレxlsx無し）: {layout.route_json.name}")
+
+        main = self._find_main_window()
+        # 商品画像
+        if main is not None and layout.product_dir is not None:
+            img = getattr(main, "image_manager_widget", None)
+            if img is not None and hasattr(img, "set_directory"):
+                ok = img.set_directory(str(layout.product_dir), scan=False)
+                lines.append(
+                    f"画像管理: {layout.product_dir.name}/ をセット"
+                    + ("（スキャンは画像管理タブで実行）" if ok else "（失敗）")
+                )
+            else:
+                lines.append("画像管理ウィジェット未初期化")
+        elif layout.product_dir is None:
+            lines.append("商品画像/ なし")
+
+        # レシート
+        if main is not None and layout.receipt_dir is not None:
+            evidence = getattr(main, "evidence_widget", None)
+            receipt = getattr(evidence, "receipt_widget", None) if evidence else None
+            if receipt is not None and hasattr(receipt, "prepare_folder_for_batch"):
+                n = receipt.prepare_folder_for_batch(layout.receipt_dir)
+                lines.append(f"証憑: レシート画像/ をキュー（{n}枚）。全件OCRは証憑タブで実行")
+            else:
+                lines.append("証憑（レシート）ウィジェット未初期化")
+        elif layout.receipt_dir is None:
+            lines.append("レシート画像/ なし")
+
+        self._update_workflow_status("ルート箱取込: 完了")
+        QMessageBox.information(
+            self,
+            "ルート箱から取込",
+            "\n".join(lines)
+            + "\n\n続けて「照合処理実行」など既存の工程を実行してください。",
+        )
 

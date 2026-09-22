@@ -68,7 +68,7 @@
     button:active, label.btn:active { opacity: 0.85; }
     .store-title { font-weight: 600; margin-bottom: 8px; }
     .store-code { color: var(--muted); font-size: 0.8rem; font-weight: 400; }
-    .receipt-block { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+    .receipt-block, .product-block { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
     .thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
     .thumbs a {
       display: block;
@@ -80,6 +80,13 @@
       background: #0d121a;
     }
     .thumbs img { width: 100%; height: 100%; object-fit: cover; }
+    .file-list { margin: 6px 0 0; padding: 0; list-style: none; font-size: 0.85rem; }
+    .file-list li {
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+      padding: 8px 0; border-bottom: 1px solid var(--border);
+    }
+    .file-list li:last-child { border-bottom: none; }
+    .file-list .name { flex: 1; min-width: 8rem; word-break: break-all; }
     .bar {
       position: fixed;
       left: 0; right: 0; bottom: 0;
@@ -95,6 +102,7 @@
     #status.err { color: #ff7b72; }
     #status.ok { color: #3fb950; }
     input[type="file"] { display: none; }
+    .hint { color: var(--muted); font-size: 0.8rem; margin: 0 0 8px; }
   </style>
 </head>
 <body>
@@ -126,6 +134,22 @@
       <label>備考</label>
       <input type="text" id="notes" placeholder="天候など" />
     </div>
+  </div>
+
+  <div class="card" id="csvCard">
+    <h2>仕入CSV</h2>
+    <p class="hint" id="inboxPathHint">受信箱: 読み込み中…</p>
+    <p class="hint">正: アマサーチCSVは Google Drive でこのルートの 仕入CSV\ へ直送。下は保険（直接Upload／受信箱）。</p>
+    <div class="row" style="margin-bottom:4px">
+      <button type="button" class="secondary" id="refreshInboxBtn" style="flex:1">受信箱を更新</button>
+      <label class="btn" style="min-width:auto;flex:1">
+        CSVを直接追加<input type="file" accept=".csv,text/csv" id="csvUpload" />
+      </label>
+    </div>
+    <h2 style="margin-top:12px">受信箱</h2>
+    <ul class="file-list" id="inboxList"></ul>
+    <h2 style="margin-top:12px">このルートの仕入CSV</h2>
+    <ul class="file-list" id="routeCsvList"></ul>
   </div>
 
   <div id="stores"></div>
@@ -161,16 +185,34 @@
         .replace(/"/g, "&quot;");
     }
 
-    function thumbsHtml(st) {
-      const files = st.receipt_files || [];
+    function productFileName(item) {
+      if (item && typeof item === "object") return item.file || "";
+      return String(item || "");
+    }
+
+    function productJan(item) {
+      if (item && typeof item === "object") return item.jan || "";
+      return "";
+    }
+
+    function thumbsHtml(st, kind) {
+      const isProduct = kind === "product";
+      const files = isProduct ? (st.product_files || []) : (st.receipt_files || []);
+      const apiSeg = isProduct ? "products" : "receipts";
+      const emptyLabel = isProduct ? "商品画像未登録" : "レシート未登録";
       if (!files.length) {
-        return '<div class="sub" style="margin:6px 0 0">レシート未登録</div>';
+        return '<div class="sub" style="margin:6px 0 0">' + emptyLabel + "</div>";
       }
       let html = '<div class="thumbs">';
-      files.forEach((fn) => {
-        const url = "/api/route/" + encodeURIComponent(WEB_ID) + "/receipts/" + encodeURIComponent(fn);
+      files.forEach((item) => {
+        const fn = isProduct ? productFileName(item) : item;
+        if (!fn) return;
+        const url =
+          "/api/route/" + encodeURIComponent(WEB_ID) + "/" + apiSeg + "/" + encodeURIComponent(fn);
+        const jan = isProduct ? productJan(item) : "";
+        const title = jan ? fn + " JAN:" + jan : fn;
         html +=
-          '<a href="' + url + '" target="_blank" rel="noopener">' +
+          '<a href="' + url + '" target="_blank" rel="noopener" title="' + escapeHtml(title) + '">' +
           '<img src="' + url + '" alt="' + escapeHtml(fn) + '" loading="lazy" />' +
           "</a>";
       });
@@ -178,10 +220,52 @@
       return html;
     }
 
+    function renderFileList(el, files, mode) {
+      el.innerHTML = "";
+      if (!files || !files.length) {
+        el.innerHTML = '<li class="sub">（なし）</li>';
+        return;
+      }
+      files.forEach((f) => {
+        const li = document.createElement("li");
+        const name = f.filename || f;
+        li.innerHTML = '<span class="name">' + escapeHtml(name) + "</span>";
+        if (mode === "inbox") {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.textContent = "このルートへ";
+          btn.dataset.inboxMove = name;
+          li.appendChild(btn);
+        }
+        el.appendChild(li);
+      });
+    }
+
+    async function refreshCsvLists() {
+      try {
+        const [inboxRes, routeRes] = await Promise.all([
+          fetch("/api/csv-inbox"),
+          fetch("/api/route/" + encodeURIComponent(WEB_ID) + "/csv"),
+        ]);
+        if (inboxRes.ok) {
+          const data = await inboxRes.json();
+          document.getElementById("inboxPathHint").textContent =
+            "受信箱: " + (data.inbox_path || "");
+          renderFileList(document.getElementById("inboxList"), data.files || [], "inbox");
+        }
+        if (routeRes.ok) {
+          const data = await routeRes.json();
+          renderFileList(document.getElementById("routeCsvList"), data.files || [], "route");
+        }
+      } catch (e) {
+        setStatus("CSV一覧取得失敗: " + e.message, "err");
+      }
+    }
+
     function fillForm(data) {
       doc = data;
       document.getElementById("title").textContent =
-        (data.route_name || "ルート") + " 時刻・レシート";
+        (data.route_name || "ルート") + " 時刻・撮影";
       document.getElementById("subtitle").textContent =
         (data.route_date || "") + " / " + (data.route_code || "") + " / " + WEB_ID;
 
@@ -214,17 +298,33 @@
           (st.purchase_item_count != null && st.purchase_item_count !== "" ? String(st.purchase_item_count) : "") +
           '" /></div>' +
           '<div class="receipt-block">' +
+          '<div class="sub" style="margin:0 0 6px">レシート</div>' +
           '<div class="row" style="margin-bottom:4px">' +
           '<label class="btn" style="min-width:auto;flex:1">' +
-          'レシートを撮る<input type="file" accept="image/*" capture="environment" data-upload="' + i + '" data-code="' + escapeHtml(code) + '" />' +
+          'レシートを撮る<input type="file" accept="image/*" capture="environment" data-upload="receipt" data-store="' + i + '" data-code="' + escapeHtml(code) + '" />' +
           "</label>" +
           '<label class="btn secondary" style="min-width:auto;flex:1">' +
-          'アルバムから<input type="file" accept="image/*" data-upload="' + i + '" data-code="' + escapeHtml(code) + '" />' +
+          'アルバムから<input type="file" accept="image/*" data-upload="receipt" data-store="' + i + '" data-code="' + escapeHtml(code) + '" />' +
           "</label></div>" +
-          thumbsHtml(st) +
+          thumbsHtml(st, "receipt") +
+          "</div>" +
+          '<div class="product-block">' +
+          '<div class="sub" style="margin:0 0 6px">商品画像</div>' +
+          '<div class="row"><label>JAN</label>' +
+          '<input type="text" inputmode="numeric" placeholder="任意（手入力）" data-store="' + i + '" data-field="jan_draft" />' +
+          "</div>" +
+          '<div class="row" style="margin-bottom:4px">' +
+          '<label class="btn" style="min-width:auto;flex:1">' +
+          '商品を撮る<input type="file" accept="image/*" capture="environment" data-upload="product" data-store="' + i + '" data-code="' + escapeHtml(code) + '" />' +
+          "</label>" +
+          '<label class="btn secondary" style="min-width:auto;flex:1">' +
+          'アルバムから<input type="file" accept="image/*" data-upload="product" data-store="' + i + '" data-code="' + escapeHtml(code) + '" />' +
+          "</label></div>" +
+          thumbsHtml(st, "product") +
           "</div>";
         wrap.appendChild(card);
       });
+      refreshCsvLists();
     }
 
     function collectForm() {
@@ -250,6 +350,7 @@
           copy.purchase_item_count = null;
         }
         copy.receipt_files = st.receipt_files || [];
+        copy.product_files = st.product_files || [];
         return copy;
       });
       return next;
@@ -312,6 +413,69 @@
       setStatus("レシート保存: " + data.filename, "ok");
     }
 
+    async function uploadProduct(storeCode, file, jan) {
+      setStatus("商品画像送信中… " + (file.name || ""));
+      let blob = file;
+      try {
+        blob = await resizeToJpegBlob(file, 1920);
+      } catch (e) {
+        blob = file;
+      }
+      const fd = new FormData();
+      fd.append("file", blob, (file.name || "product").replace(/\.\w+$/, "") + ".jpg");
+      if (jan) fd.append("jan", jan);
+      const res = await fetch(
+        "/api/route/" + encodeURIComponent(WEB_ID) +
+          "/stores/" + encodeURIComponent(storeCode) + "/products",
+        { method: "POST", body: fd }
+      );
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(res.status + " " + t);
+      }
+      const data = await res.json();
+      fillForm(data.route);
+      setStatus("商品画像保存: " + data.filename + (jan ? " JAN " + jan : ""), "ok");
+    }
+
+    async function moveInboxFile(filename) {
+      setStatus("受信箱から移動中… " + filename);
+      const res = await fetch(
+        "/api/route/" + encodeURIComponent(WEB_ID) + "/csv/from-inbox",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename: filename }),
+        }
+      );
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(res.status + " " + t);
+      }
+      const data = await res.json();
+      if (data.route) fillForm(data.route);
+      else await refreshCsvLists();
+      setStatus("仕入CSVを取り込みました: " + data.filename, "ok");
+    }
+
+    async function uploadCsvFile(file) {
+      setStatus("CSV送信中… " + (file.name || ""));
+      const fd = new FormData();
+      fd.append("file", file, file.name || "StockList.csv");
+      const res = await fetch(
+        "/api/route/" + encodeURIComponent(WEB_ID) + "/csv",
+        { method: "POST", body: fd }
+      );
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(res.status + " " + t);
+      }
+      const data = await res.json();
+      if (data.route) fillForm(data.route);
+      else await refreshCsvLists();
+      setStatus("CSV保存: " + data.filename, "ok");
+    }
+
     async function loadRoute() {
       setStatus("読み込み中…");
       const res = await fetch("/api/route/" + encodeURIComponent(WEB_ID));
@@ -340,7 +504,7 @@
       setStatus("保存しました " + new Date().toLocaleTimeString(), "ok");
     }
 
-    document.body.addEventListener("click", (ev) => {
+    document.body.addEventListener("click", async (ev) => {
       const btn = ev.target.closest("button");
       if (!btn) return;
       if (btn.dataset.now) {
@@ -353,19 +517,50 @@
           'input[data-store="' + btn.dataset.nowStore + '"][data-field="' + btn.dataset.field + '"]';
         const el = document.querySelector(sel);
         if (el) el.value = nowHHmm();
+        return;
+      }
+      if (btn.dataset.inboxMove) {
+        try {
+          await moveInboxFile(btn.dataset.inboxMove);
+        } catch (e) {
+          setStatus("移動失敗: " + e.message, "err");
+        }
       }
     });
 
     document.body.addEventListener("change", async (ev) => {
       const input = ev.target;
       if (!(input instanceof HTMLInputElement) || input.type !== "file") return;
-      if (input.dataset.upload == null) return;
+
+      if (input.id === "csvUpload") {
+        const file = input.files && input.files[0];
+        input.value = "";
+        if (!file) return;
+        try {
+          await uploadCsvFile(file);
+        } catch (e) {
+          setStatus("CSVアップロード失敗: " + e.message, "err");
+        }
+        return;
+      }
+
+      const kind = input.dataset.upload;
+      if (!kind) return;
       const file = input.files && input.files[0];
       const code = input.dataset.code || "";
+      const storeIdx = input.dataset.store;
       input.value = "";
       if (!file || !code) return;
       try {
-        await uploadReceipt(code, file);
+        if (kind === "receipt") {
+          await uploadReceipt(code, file);
+        } else if (kind === "product") {
+          const janEl = document.querySelector(
+            'input[data-store="' + storeIdx + '"][data-field="jan_draft"]'
+          );
+          const jan = janEl ? String(janEl.value || "").trim() : "";
+          await uploadProduct(code, file, jan);
+        }
       } catch (e) {
         setStatus("アップロード失敗: " + e.message, "err");
       }
@@ -373,6 +568,7 @@
 
     document.getElementById("saveBtn").addEventListener("click", () => saveRoute());
     document.getElementById("reloadBtn").addEventListener("click", () => loadRoute());
+    document.getElementById("refreshInboxBtn").addEventListener("click", () => refreshCsvLists());
     loadRoute();
   </script>
 </body>

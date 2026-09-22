@@ -157,6 +157,21 @@ class ImageManagerScanMixin:
             self.scan_unknown_btn.setEnabled(True)
             self.save_last_directory()
 
+    def set_directory(self, directory: str, *, scan: bool = False) -> bool:
+        """ルート箱の 商品画像/ をダイアログなしでセット（Phase 3）。"""
+        if not directory or not os.path.isdir(directory):
+            return False
+        self.current_directory = directory
+        if hasattr(self, "folder_path_label"):
+            self.folder_path_label.setText(directory)
+        if hasattr(self, "scan_btn"):
+            self.scan_btn.setEnabled(True)
+        if hasattr(self, "scan_unknown_btn"):
+            self.scan_unknown_btn.setEnabled(True)
+        self.save_last_directory()
+        if scan:
+            self.scan_directory()
+        return True
 
     def set_default_root_directory(self):
         """画像管理タブの起点となるデフォルトフォルダを設定"""

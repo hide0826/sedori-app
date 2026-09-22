@@ -1,0 +1,8 @@
+{
+  "enabled": false,
+  "rclone_exe": "rclone",
+  "remote": "gdrive",
+  "remote_root": "せどり総合/店舗せどり仕入リスト入れ/仕入帳",
+  "timeout_sec": 180,
+  "_comment": "このファイルを config/rclone_route_drive.json にコピーして enabled を true に。remote は rclone config で作った名前。"
+}

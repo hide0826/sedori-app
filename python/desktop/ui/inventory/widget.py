@@ -278,6 +278,7 @@ class InventoryWidget(
             "spot_purchase_btn",
             "combined_save_btn",
             "combined_load_btn",
+            "route_box_import_btn",
         ):
             w = getattr(self, attr, None)
             if w is not None:
@@ -324,6 +325,16 @@ class InventoryWidget(
         self.import_btn.clicked.connect(lambda: self._run_action_with_status("CSV取込", self.import_csv))
         self.import_btn.setStyleSheet(green_button_style)
         workflow_layout.addWidget(self.import_btn)
+
+        self.route_box_import_btn = QPushButton("ルート箱から取込")
+        self.route_box_import_btn.setToolTip(
+            "ルート箱を1回選んで、仕入CSV・商品画像・レシート画像を各タブへ振り分けます"
+        )
+        self.route_box_import_btn.clicked.connect(
+            lambda: self._run_action_with_status("ルート箱から取込", self.import_from_route_box)
+        )
+        self.route_box_import_btn.setStyleSheet(green_button_style)
+        workflow_layout.addWidget(self.route_box_import_btn)
 
         self.route_template_btn = QPushButton("ルートテンプレ読込")
         self.route_template_btn.clicked.connect(

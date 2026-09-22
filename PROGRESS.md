@@ -2,13 +2,13 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-09-22（現場ルートWeb → feature/sp-api マージ）
+更新日: 2026-09-22（現場ルートWeb Phase 2/3/5）
 
 ---
 
 ## いまの状態
 
-**2026-09-22（現場ルートWeb）:** Phase 1＋1.5 を **`feature/sp-api` へマージ済**（fast-forward・`b4a7c22`）。問題は都度修正。仕入点数 `purchase_item_count`、証憑でのアマサーチ差異は後回し。サンドボックス: `http://houseserver:8792/route/sandbox_20260919_kamakura_empty`。仕様 [`field_route_web_spec.md`](docs/specs/field_route_web_spec.md)。
+**2026-09-22（現場ルートWeb）:** CSV は Drive 直送が正。Webテンプレで **Excel 同時生成**＋**rclone で Drive 上に箱作成**（未設定時スキップ）。1.5b 見送り。枝 `feature/sp-api`。仕様 [`field_route_web_spec.md`](docs/specs/field_route_web_spec.md)。
 
 **2026-09-22（証憑OCR）:** ミニPCで全件OCRを実機確認。一覧に10件前後が載り、BOOK OFF 等は日付・合計まで入る。Tesseract は動作。日本語レシートは精度が低い行あり（Gemini API 設定で改善可）。一括マッチング以降はユーザー確認済み。
 
@@ -198,9 +198,42 @@ ok phase1-api-verify（GET/PUT departure_time・HTMLに今の時刻）
 
 ## 次
 
-1. 現場ルートWeb … 実運用で不具合が出たら都度修正（`:8792` / サンドボックス可）
-2. 証憑管理いじり時: `purchase_item_count` vs アマサーチ件数の差異チェック（OCRは証憑側で十分）
-3. Phase 2（仕入CSV）など
+1. 現場ルートWeb … **次の仕入で実機確認**（受信箱CSV・商品撮影・帰宅後ルート箱取込）
+2. 不具合は都度 `feature/sp-api` で修正
+3. 証憑管理いじり時: `purchase_item_count` vs アマサーチ件数の差異チェック
+4. 1.5b 撮影直後OCRは当面やらない
+
+---
+
+## 2026-09-22 現場ルートWeb Phase 2 / 3 / 5
+
+### 追加
+
+| 何 | 場所 |
+|----|------|
+| CSV受信箱 | `python/route_web/csv_inbox.py` … `D:\…\仕入CSV_受信` |
+| 商品画像 | `python/route_web/product_images.py` |
+| API | `python/route_web/app.py` v0.2.0 |
+| UI | `python/route_web/static/route.html`（仕入CSV＋商品撮影） |
+| ルート箱取込 | `python/desktop/services/route_folder_import.py` + 仕入「ルート箱から取込」 |
+| 試験 | `python/desktop/tests/test_route_web_phase235.py` |
+
+### 運用メモ
+
+1. Webテンプレ作成 → ローカル箱＋Excel。**rclone 有効なら Drive 上にも同じ箱**
+2. CSV はスマホから Drive の `仕入CSV\` へ直送
+3. ミニPC生存時: ルートWebで IN/OUT・レシート・商品撮影
+4. ミニPCダウン時: Drive 上の Excel で滞在時刻
+5. 帰宅後: 仕入タブ「ルート箱から取込」
+
+rclone 初回: `python\route_web\check_rclone.bat` → example を `config\rclone_route_drive.json` にコピーして enabled
+
+### やらない（確定）
+
+- 1.5b 撮影直後OCR
+- スマホのバーコード自動読取（Phase 5 第1弾）
+- Tailscale 共有で受信箱パスを固定する運用（技術的に不可）
+- rclone mount（配布時は mkdir+copy のみ）
 
 ---
 
