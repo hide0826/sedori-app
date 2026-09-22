@@ -183,6 +183,17 @@ class RouteSummaryWidget(
         self.template_btn.setStyleSheet("background-color: #28a745; color: white;")
         button_layout.addWidget(self.template_btn)
 
+        self.web_template_btn = QPushButton("Webテンプレート作成")
+        self.web_template_btn.setToolTip(
+            "ルート箱と route.json を作り、スマホ用の時刻入力Web（:8792）を開きます。"
+            "既存の Excel「テンプレート生成」はそのまま使えます。"
+        )
+        self.web_template_btn.clicked.connect(
+            lambda: self._run_workflow_action(5, self.generate_web_template)
+        )
+        self.web_template_btn.setStyleSheet("background-color: #0d6efd; color: white;")
+        button_layout.addWidget(self.web_template_btn)
+
         self.load_route_btn = QPushButton("選択ルート読み込み")
         self.load_route_btn.clicked.connect(
             lambda: self._run_workflow_action(3, self.auto_add_stores)

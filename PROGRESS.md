@@ -2,13 +2,15 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-09-22
+更新日: 2026-09-22（現場ルートWeb Phase 1.5）
 
 ---
 
 ## いまの状態
 
-**2026-09-22（証憑OCR）:** ミニPCで全件OCRを実機確認。一覧に10件前後が載り、BOOK OFF 等は日付・合計まで入る。Tesseract は動作。日本語レシートは精度が低い行あり（Gemini API 設定で改善可）。次は③一括マッチング。
+**2026-09-22（現場ルートWeb）:** Phase 1.5 ✅＋各店「仕入点数」任意入力（`purchase_item_count` → route.json）。アマサーチ件数との差異チェックは証憑管理いじり時。サンドボックス: `http://houseserver:8792/route/sandbox_20260919_kamakura_empty`。仕様 [`field_route_web_spec.md`](docs/specs/field_route_web_spec.md)。
+
+**2026-09-22（証憑OCR）:** ミニPCで全件OCRを実機確認。一覧に10件前後が載り、BOOK OFF 等は日付・合計まで入る。Tesseract は動作。日本語レシートは精度が低い行あり（Gemini API 設定で改善可）。一括マッチング以降はユーザー確認済み。
 
 **2026-09-21 夜（証憑OCR）:** 全件OCRが処理せず完了していた。ミニPCに Tesseract 本体と日本語データが無く、失敗を黙って飛ばしていた。導入して開始前点検を入れた。
 
@@ -17,8 +19,9 @@
 
 **2026-09-21 夜（画像管理）:** スキャンのJAN照合・複数選択・仕入DB候補紐付けを直した。**中央で選んだ画像だけ**別商品へ付け替える。反映には HIRIO 再起動が必要。
 
-- ブランチ: `feature/sp-api`
+- ブランチ: `feature/route-web-template`（ベース `feature/sp-api`）
 - 起動: `start_hirio.bat` または `.venv\Scripts\python.exe python\desktop\main.py`
+- ルート時刻Web: `python\route_web\start_route_web.bat`（`:8792`）
 - Python: 3.13.15 / venv はこのマシンで作り直し済み
 - FastAPI: デスクトップ起動時に自動起動（失敗しても仕入画面は動く）
 
@@ -165,13 +168,40 @@ ok test_merge_keeps_other_jans_and_puts_current_first
 
 ---
 
+## 2026-09-22 現場ルートWeb Phase 1
+
+### 追加したもの
+
+| 何 | 場所 |
+|----|------|
+| 仕様書 | `docs/specs/field_route_web_spec.md` |
+| 時刻Web | `python/route_web/`（`:8792`） |
+| **固定URL** | `http://houseserver:8792/`（一覧。スマホはこれだけブックマーク） |
+| 起動 | `python/route_web/start_route_web.bat` または Webテンプレ作成時に自動起動 |
+| ボタン | ルート選択「テンプレート生成」の右隣「Webテンプレート作成」 |
+
+### 試験
+
+```
+ok route_web schema/registry
+ok phase1-api-verify（GET/PUT departure_time・HTMLに今の時刻）
+```
+
+### ユーザー確認（残り）
+
+1. スマホで **一度だけ** `http://houseserver:8792/` をブックマーク（Tailscale ON）
+2. HIRIO 再起動 → ルート選択で「Webテンプレート作成」
+3. 固定URLを開き、日付＋ルート名をタップ →「今の時刻」→ 保存
+4. 既存「テンプレート生成」で xlsx が今までどおりできること
+
+---
+
 ## 次
 
-1. 証憑管理 **一括マッチング** 以降のワークフローを実機確認
-2. 画像管理の「選んだ写真だけ仕入紐付け」も、まだなら確認
-3. 日常の仕入・改定はミニPCのこのコピーで行う。**メインPCで同じ DB を開かない**
-4. 画像・CSV が要る作業の前に `D:\せどり総合` をミニPCの D: へ（未コピーなら）
-5. FastAPI は起動時に自動。ダメならメニュー「ツール → FastAPIサーバー起動」
+1. **現場ルートWeb Phase 1.5 スマホ実機** … カメラ／アルバム・仕入点数。URL `http://houseserver:8792/route/sandbox_20260919_kamakura_empty`
+2. Phase 1＋1.5 のマージ判断
+3. 証憑管理いじり時: `purchase_item_count` vs アマサーチ件数の差異チェック（OCRは証憑側で十分）
+4. Phase 2（仕入CSV）など
 
 ---
 

@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>HIRIO ルート時刻</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --card: #1a2332;
+      --text: #e7ecf3;
+      --muted: #8b9bb4;
+      --accent: #3d8bfd;
+      --ok: #2ea043;
+      --border: #2a3548;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+      padding: 12px;
+      padding-bottom: 88px;
+    }
+    h1 { font-size: 1.15rem; margin: 0 0 4px; }
+    .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 16px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    .card h2 { font-size: 0.95rem; margin: 0 0 10px; color: var(--muted); font-weight: 600; }
+    .row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+    label { min-width: 5.5rem; font-size: 0.9rem; }
+    input[type="time"], input[type="text"], input[type="number"] {
+      flex: 1;
+      min-width: 6rem;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #0d121a;
+      color: var(--text);
+      font-size: 1rem;
+    }
+    button, label.btn {
+      border: none;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 0.9rem;
+      cursor: pointer;
+      background: var(--accent);
+      color: #fff;
+      white-space: nowrap;
+      display: inline-block;
+      text-align: center;
+    }
+    button.secondary, label.btn.secondary { background: #3a4558; }
+    button:active, label.btn:active { opacity: 0.85; }
+    .store-title { font-weight: 600; margin-bottom: 8px; }
+    .store-code { color: var(--muted); font-size: 0.8rem; font-weight: 400; }
+    .receipt-block { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+    .thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .thumbs a {
+      display: block;
+      width: 72px;
+      height: 72px;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      background: #0d121a;
+    }
+    .thumbs img { width: 100%; height: 100%; object-fit: cover; }
+    .bar {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+      background: rgba(15, 20, 25, 0.95);
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 8px;
+    }
+    .bar button { flex: 1; padding: 14px; font-weight: 600; }
+    .bar .save { background: var(--ok); }
+    #status { font-size: 0.85rem; color: var(--muted); margin-top: 8px; min-height: 1.2em; }
+    #status.err { color: #ff7b72; }
+    #status.ok { color: #3fb950; }
+    input[type="file"] { display: none; }
+  </style>
+</head>
+<body>
+  <h1 id="title">ルート時刻</h1>
+  <div class="sub" id="subtitle">読み込み中…</div>
+  <p style="margin:0 0 12px"><a href="/" style="color:#9ecbff;text-decoration:none">← ルート一覧（固定URL）</a></p>
+
+  <div class="card">
+    <h2>全体</h2>
+    <div class="row">
+      <label>出発</label>
+      <input type="time" id="departure_time" />
+      <button type="button" class="secondary" data-now="departure_time">今の時刻</button>
+    </div>
+    <div class="row">
+      <label>帰宅</label>
+      <input type="time" id="return_time" />
+      <button type="button" class="secondary" data-now="return_time">今の時刻</button>
+    </div>
+    <div class="row">
+      <label>往路高速</label>
+      <input type="text" id="toll_outbound" inputmode="numeric" placeholder="円" />
+    </div>
+    <div class="row">
+      <label>復路高速</label>
+      <input type="text" id="toll_return" inputmode="numeric" placeholder="円" />
+    </div>
+    <div class="row">
+      <label>備考</label>
+      <input type="text" id="notes" placeholder="天候など" />
+    </div>
+  </div>
+
+  <div id="stores"></div>
+  <div id="status"></div>
+
+  <div class="bar">
+    <button type="button" class="secondary" id="reloadBtn">再読込</button>
+    <button type="button" class="save" id="saveBtn">保存</button>
+  </div>
+
+  <script>
+    const WEB_ID = "__WEB_ID__";
+    let doc = null;
+
+    function nowHHmm() {
+      const d = new Date();
+      const h = String(d.getHours()).padStart(2, "0");
+      const m = String(d.getMinutes()).padStart(2, "0");
+      return h + ":" + m;
+    }
+
+    function setStatus(msg, kind) {
+      const el = document.getElementById("status");
+      el.textContent = msg || "";
+      el.className = kind || "";
+    }
+
+    function escapeHtml(s) {
+      return String(s || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function thumbsHtml(st) {
+      const files = st.receipt_files || [];
+      if (!files.length) {
+        return '<div class="sub" style="margin:6px 0 0">レシート未登録</div>';
+      }
+      let html = '<div class="thumbs">';
+      files.forEach((fn) => {
+        const url = "/api/route/" + encodeURIComponent(WEB_ID) + "/receipts/" + encodeURIComponent(fn);
+        html +=
+          '<a href="' + url + '" target="_blank" rel="noopener">' +
+          '<img src="' + url + '" alt="' + escapeHtml(fn) + '" loading="lazy" />' +
+          "</a>";
+      });
+      html += "</div>";
+      return html;
+    }
+
+    function fillForm(data) {
+      doc = data;
+      document.getElementById("title").textContent =
+        (data.route_name || "ルート") + " 時刻・レシート";
+      document.getElementById("subtitle").textContent =
+        (data.route_date || "") + " / " + (data.route_code || "") + " / " + WEB_ID;
+
+      document.getElementById("departure_time").value = data.departure_time || "";
+      document.getElementById("return_time").value = data.return_time || "";
+      document.getElementById("toll_outbound").value = data.toll_outbound || "";
+      document.getElementById("toll_return").value = data.toll_return || "";
+      document.getElementById("notes").value = data.notes || "";
+
+      const wrap = document.getElementById("stores");
+      wrap.innerHTML = "";
+      (data.stores || []).forEach((st, i) => {
+        const code = st.store_code || "";
+        const card = document.createElement("div");
+        card.className = "card";
+        card.dataset.storeIndex = String(i);
+        card.innerHTML =
+          '<div class="store-title">' +
+          (st.order || i + 1) + ". " + escapeHtml(st.store_name || code) +
+          ' <span class="store-code">' + escapeHtml(code) + "</span></div>" +
+          '<div class="row"><label>IN</label>' +
+          '<input type="time" data-store="' + i + '" data-field="in_time" value="' + (st.in_time || "") + '" />' +
+          '<button type="button" class="secondary" data-now-store="' + i + '" data-field="in_time">今の時刻</button></div>' +
+          '<div class="row"><label>OUT</label>' +
+          '<input type="time" data-store="' + i + '" data-field="out_time" value="' + (st.out_time || "") + '" />' +
+          '<button type="button" class="secondary" data-now-store="' + i + '" data-field="out_time">今の時刻</button></div>' +
+          '<div class="row"><label>仕入点数</label>' +
+          '<input type="number" inputmode="numeric" min="0" step="1" placeholder="任意（空欄可）" ' +
+          'data-store="' + i + '" data-field="purchase_item_count" value="' +
+          (st.purchase_item_count != null && st.purchase_item_count !== "" ? String(st.purchase_item_count) : "") +
+          '" /></div>' +
+          '<div class="receipt-block">' +
+          '<div class="row" style="margin-bottom:4px">' +
+          '<label class="btn" style="min-width:auto;flex:1">' +
+          'レシートを撮る<input type="file" accept="image/*" capture="environment" data-upload="' + i + '" data-code="' + escapeHtml(code) + '" />' +
+          "</label>" +
+          '<label class="btn secondary" style="min-width:auto;flex:1">' +
+          'アルバムから<input type="file" accept="image/*" data-upload="' + i + '" data-code="' + escapeHtml(code) + '" />' +
+          "</label></div>" +
+          thumbsHtml(st) +
+          "</div>";
+        wrap.appendChild(card);
+      });
+    }
+
+    function collectForm() {
+      const next = Object.assign({}, doc);
+      next.departure_time = document.getElementById("departure_time").value || "";
+      next.return_time = document.getElementById("return_time").value || "";
+      next.toll_outbound = document.getElementById("toll_outbound").value || "";
+      next.toll_return = document.getElementById("toll_return").value || "";
+      next.notes = document.getElementById("notes").value || "";
+      next.stores = (doc.stores || []).map((st, i) => {
+        const copy = Object.assign({}, st);
+        const inEl = document.querySelector('input[data-store="' + i + '"][data-field="in_time"]');
+        const outEl = document.querySelector('input[data-store="' + i + '"][data-field="out_time"]');
+        const countEl = document.querySelector(
+          'input[data-store="' + i + '"][data-field="purchase_item_count"]'
+        );
+        copy.in_time = inEl ? inEl.value || "" : "";
+        copy.out_time = outEl ? outEl.value || "" : "";
+        if (countEl && String(countEl.value).trim() !== "") {
+          const n = parseInt(countEl.value, 10);
+          copy.purchase_item_count = Number.isFinite(n) ? n : null;
+        } else {
+          copy.purchase_item_count = null;
+        }
+        copy.receipt_files = st.receipt_files || [];
+        return copy;
+      });
+      return next;
+    }
+
+    function resizeToJpegBlob(file, maxSide) {
+      return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => {
+          URL.revokeObjectURL(url);
+          let w = img.width;
+          let h = img.height;
+          const longSide = Math.max(w, h);
+          if (longSide > maxSide) {
+            const scale = maxSide / longSide;
+            w = Math.round(w * scale);
+            h = Math.round(h * scale);
+          }
+          const canvas = document.createElement("canvas");
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, w, h);
+          canvas.toBlob(
+            (blob) => (blob ? resolve(blob) : reject(new Error("toBlob failed"))),
+            "image/jpeg",
+            0.85
+          );
+        };
+        img.onerror = () => {
+          URL.revokeObjectURL(url);
+          reject(new Error("image load failed"));
+        };
+        img.src = url;
+      });
+    }
+
+    async function uploadReceipt(storeCode, file) {
+      setStatus("レシート送信中… " + (file.name || ""));
+      let blob = file;
+      try {
+        blob = await resizeToJpegBlob(file, 1920);
+      } catch (e) {
+        blob = file;
+      }
+      const fd = new FormData();
+      fd.append("file", blob, (file.name || "receipt").replace(/\.\w+$/, "") + ".jpg");
+      const res = await fetch(
+        "/api/route/" + encodeURIComponent(WEB_ID) +
+          "/stores/" + encodeURIComponent(storeCode) + "/receipts",
+        { method: "POST", body: fd }
+      );
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(res.status + " " + t);
+      }
+      const data = await res.json();
+      fillForm(data.route);
+      setStatus("レシート保存: " + data.filename, "ok");
+    }
+
+    async function loadRoute() {
+      setStatus("読み込み中…");
+      const res = await fetch("/api/route/" + encodeURIComponent(WEB_ID));
+      if (!res.ok) {
+        setStatus("読み込み失敗: " + res.status, "err");
+        return;
+      }
+      fillForm(await res.json());
+      setStatus("読み込み完了", "ok");
+    }
+
+    async function saveRoute() {
+      const body = collectForm();
+      setStatus("保存中…");
+      const res = await fetch("/api/route/" + encodeURIComponent(WEB_ID), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        setStatus("保存失敗: " + res.status + " " + t, "err");
+        return;
+      }
+      fillForm(await res.json());
+      setStatus("保存しました " + new Date().toLocaleTimeString(), "ok");
+    }
+
+    document.body.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("button");
+      if (!btn) return;
+      if (btn.dataset.now) {
+        const el = document.getElementById(btn.dataset.now);
+        if (el) el.value = nowHHmm();
+        return;
+      }
+      if (btn.dataset.nowStore != null) {
+        const sel =
+          'input[data-store="' + btn.dataset.nowStore + '"][data-field="' + btn.dataset.field + '"]';
+        const el = document.querySelector(sel);
+        if (el) el.value = nowHHmm();
+      }
+    });
+
+    document.body.addEventListener("change", async (ev) => {
+      const input = ev.target;
+      if (!(input instanceof HTMLInputElement) || input.type !== "file") return;
+      if (input.dataset.upload == null) return;
+      const file = input.files && input.files[0];
+      const code = input.dataset.code || "";
+      input.value = "";
+      if (!file || !code) return;
+      try {
+        await uploadReceipt(code, file);
+      } catch (e) {
+        setStatus("アップロード失敗: " + e.message, "err");
+      }
+    });
+
+    document.getElementById("saveBtn").addEventListener("click", () => saveRoute());
+    document.getElementById("reloadBtn").addEventListener("click", () => loadRoute());
+    loadRoute();
+  </script>
+</body>
+</html>

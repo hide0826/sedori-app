@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>HIRIO ルート一覧</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --card: #1a2332;
+      --text: #e7ecf3;
+      --muted: #8b9bb4;
+      --accent: #3d8bfd;
+      --border: #2a3548;
+      --ok: #2ea043;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+      padding: 14px;
+      padding-bottom: 40px;
+    }
+    h1 { font-size: 1.2rem; margin: 0 0 6px; }
+    .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 14px; }
+    .hint {
+      background: #132033;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-bottom: 14px;
+    }
+    .hint code {
+      color: #9ecbff;
+      word-break: break-all;
+    }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+    button {
+      border: none;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 0.9rem;
+      cursor: pointer;
+      background: var(--accent);
+      color: #fff;
+    }
+    button.secondary { background: #3a4558; }
+    a.card {
+      display: block;
+      text-decoration: none;
+      color: inherit;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
+      margin-bottom: 10px;
+    }
+    a.card:active { opacity: 0.9; }
+    a.card.disabled { opacity: 0.45; pointer-events: none; }
+    .date { font-size: 1.05rem; font-weight: 700; }
+    .name { margin-top: 4px; font-size: 1rem; }
+    .meta { margin-top: 6px; color: var(--muted); font-size: 0.8rem; }
+    .badge {
+      display: inline-block;
+      margin-top: 8px;
+      font-size: 0.75rem;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #243247;
+      color: var(--muted);
+    }
+    .badge.ok { background: #1f3d2a; color: #3fb950; }
+    #status { margin-top: 10px; color: var(--muted); font-size: 0.85rem; min-height: 1.2em; }
+    #status.err { color: #ff7b72; }
+  </style>
+</head>
+<body>
+  <h1>ルート時刻一覧</h1>
+  <div class="sub">このページをスマホのホーム／ブックマークに固定してください</div>
+  <div class="hint">
+    固定URL（この画面）:<br />
+    <code id="fixedUrl"></code><br /><br />
+    HIRIO で「Webテンプレート作成」したルートがここに並びます。日付とルート名をタップして時刻入力へ。
+  </div>
+  <div class="toolbar">
+    <button type="button" id="reloadBtn">再読込</button>
+  </div>
+  <div id="list"></div>
+  <div id="status"></div>
+
+  <script>
+    function setStatus(msg, kind) {
+      const el = document.getElementById("status");
+      el.textContent = msg || "";
+      el.className = kind || "";
+    }
+
+    function escapeHtml(s) {
+      return String(s || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    async function loadList() {
+      setStatus("読み込み中…");
+      const res = await fetch("/api/routes");
+      if (!res.ok) {
+        setStatus("読み込み失敗: " + res.status, "err");
+        return;
+      }
+      const data = await res.json();
+      const routes = data.routes || [];
+      const wrap = document.getElementById("list");
+      wrap.innerHTML = "";
+      if (!routes.length) {
+        wrap.innerHTML =
+          '<div class="hint">まだルートがありません。PCのHIRIOで「Webテンプレート作成」を押してください。</div>';
+        setStatus("0件");
+        return;
+      }
+      routes.forEach((r) => {
+        const a = document.createElement("a");
+        a.className = "card" + (r.available ? "" : " disabled");
+        a.href = r.available ? "/route/" + encodeURIComponent(r.web_id) : "#";
+        a.innerHTML =
+          '<div class="date">' + escapeHtml(r.route_date || "(日付なし)") + "</div>" +
+          '<div class="name">' + escapeHtml(r.route_name || r.web_id) + "</div>" +
+          '<div class="meta">' +
+          escapeHtml(r.route_code || "") +
+          (r.updated_at ? " · 更新 " + escapeHtml(r.updated_at) : "") +
+          "</div>" +
+          '<span class="badge ' + (r.available ? "ok" : "") + '">' +
+          (r.available ? "時刻入力へ" : "ファイルなし") +
+          "</span>";
+        wrap.appendChild(a);
+      });
+      setStatus(routes.length + " 件");
+    }
+
+    document.getElementById("fixedUrl").textContent = location.origin + "/";
+    document.getElementById("reloadBtn").addEventListener("click", () => loadList());
+    loadList();
+  </script>
+</body>
+</html>

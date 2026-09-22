@@ -1,0 +1,3 @@
+# route_web local index (machine-specific paths)
+python/route_web/data/index.json
+!python/route_web/data/.gitkeep

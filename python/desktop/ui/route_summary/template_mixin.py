@@ -680,6 +680,176 @@ class RouteSummaryTemplateMixin:
             print(f"テンプレート生成エラー詳細:\n{error_detail}")
             QMessageBox.critical(self, "エラー", f"テンプレート生成中にエラーが発生しました:\n{str(e)}\n\n詳細はコンソールを確認してください。")
 
+    def generate_web_template(self):
+        """Web用ルート箱＋route.json を生成し、時刻入力WebのURLを案内する。
+
+        既存の Excel「テンプレート生成」は変更しない。同じフォルダ命名規則を使う。
+        """
+        try:
+            import json
+            import sys
+            from pathlib import Path
+
+            route_code = self.get_selected_route_code()
+            if not route_code:
+                QMessageBox.warning(self, "エラー", "ルートコードを選択してください。")
+                return None
+
+            route_name = self.store_db.get_route_name_by_code(route_code) or route_code
+            route_qdate = self.route_date_edit.date()
+            route_date_str = route_qdate.toString("yyyyMMdd")
+            route_date_iso = route_qdate.toString("yyyy-MM-dd")
+
+            # Webテンプレは常に仕入帳へ（Excelと同じ箱）。原則フォルダ選択ダイアログは出さない。
+            standard_ledger = Path(r"D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳")
+            base_dir = ""
+            if Path("D:/").exists() or Path("D:\\").exists():
+                try:
+                    standard_ledger.mkdir(parents=True, exist_ok=True)
+                    base_dir = str(standard_ledger.resolve())
+                    self.update_template_save_default_dir(base_dir)
+                except OSError as exc:
+                    print(f"仕入帳フォルダを作成できません: {exc}")
+            if not base_dir:
+                # D: が無い／作れないときだけ選択
+                start = (
+                    str(standard_ledger)
+                    if standard_ledger.parent.is_dir()
+                    else str(Path.home())
+                )
+                base_dir = QFileDialog.getExistingDirectory(
+                    self,
+                    "テンプレート保存用のデフォルトフォルダを選択（通常は D:\\せどり総合\\...\\仕入帳）",
+                    start,
+                )
+                if not base_dir:
+                    return None
+                self.update_template_save_default_dir(base_dir)
+
+            unsafe_chars = '\\/:*?"<>|'
+            safe_route_name = "".join("_" if ch in unsafe_chars else ch for ch in route_name.strip())
+            folder_name = f"{route_date_str}{safe_route_name}"
+            route_folder = Path(base_dir) / folder_name
+            route_folder.mkdir(parents=True, exist_ok=True)
+            (route_folder / "商品画像").mkdir(exist_ok=True)
+            (route_folder / "レシート画像").mkdir(exist_ok=True)
+            (route_folder / "仕入CSV").mkdir(exist_ok=True)
+
+            if self.store_visits_table.rowCount() > 0:
+                self._persist_visit_table_notes_to_store_master()
+
+            table_stores = self.get_stores_from_table(for_template_output=True)
+            if table_stores:
+                stores = table_stores
+            elif self.store_visits_table.rowCount() > 0:
+                QMessageBox.warning(
+                    self,
+                    "警告",
+                    "テンプレートに出力する店舗が選択されていません。\n"
+                    "「出力」列のチェックを確認してください。",
+                )
+                return None
+            else:
+                stores = [
+                    store
+                    for store in self.get_stores_for_route(route_name)
+                    if _template_include_from_db_value(store.get("template_include"))
+                ]
+                for store in stores:
+                    any_code = self._visit_store_code_from_dict(store)
+                    if any_code:
+                        store_info = self.store_db.get_store_by_code(any_code)
+                        if store_info:
+                            store["notes"] = self._resolve_store_master_notes(store_info)
+
+            store_codes = [
+                (store.get("store_code") or store.get("supplier_code"))
+                for store in stores
+                if store.get("store_code") or store.get("supplier_code")
+            ]
+            if not store_codes:
+                QMessageBox.warning(self, "警告", "テンプレートに出力する店舗がありません。")
+                return None
+
+            python_dir = Path(__file__).resolve().parents[3]
+            if str(python_dir) not in sys.path:
+                sys.path.insert(0, str(python_dir))
+
+            from route_web.registry import make_web_id, register_route
+            from route_web.schema import build_route_document
+            from route_web.server_helper import (
+                ensure_route_web_running,
+                home_url,
+                public_base_urls,
+                route_page_url,
+            )
+
+            web_id = make_web_id(route_date_str, safe_route_name)
+            doc = build_route_document(
+                web_id=web_id,
+                folder_path=str(route_folder),
+                route_date=route_date_iso,
+                route_code=route_code,
+                route_name=route_name,
+                stores=stores,
+            )
+            route_json = route_folder / "route.json"
+            route_json.write_text(
+                json.dumps(doc, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            register_route(
+                web_id,
+                str(route_folder),
+                route_name=route_name,
+                route_date=route_date_iso,
+            )
+
+            ok, srv_msg = ensure_route_web_running()
+            fixed = home_url()
+            this_route = route_page_url(web_id)
+            alts = [home_url(b) for b in public_base_urls()[1:]]
+            try:
+                QGuiApplication.clipboard().setText(fixed)
+            except Exception:
+                pass
+
+            detail = (
+                f"保存先（仕入帳と同じルール）:\n{route_folder}\n\n"
+                f"作ったもの:\n"
+                f"  - route.json（Webの入力値＝出発/帰宅/店舗IN・OUT など）\n"
+                f"  - 商品画像\\\n"
+                f"  - レシート画像\\\n"
+                f"  - 仕入CSV\\\n\n"
+                f"【スマホはこれをブックマーク（固定URL）】\n{fixed}\n"
+                f"（クリップボードにコピー済み）\n\n"
+                f"一覧に「{route_date_iso} / {route_name}」が出ます。"
+                f"タップして時刻入力へ。保存するとこのフォルダの route.json が更新されます。\n"
+                f"（個別URL: {this_route}）\n\n"
+                f"他の開き方:\n" + "\n".join(alts) + "\n\n"
+                f"時刻Web: {srv_msg}"
+            )
+            if not ok:
+                detail += (
+                    "\n\n※ Web が起動していない場合は\n"
+                    "python\\route_web\\start_route_web.bat を実行してください。"
+                )
+                QMessageBox.warning(self, "Webテンプレート作成（要確認）", detail)
+            else:
+                QMessageBox.information(self, "Webテンプレート作成", detail)
+            return str(route_folder)
+
+        except Exception as e:
+            import traceback
+
+            print(f"Webテンプレート作成エラー詳細:\n{traceback.format_exc()}")
+            QMessageBox.critical(
+                self,
+                "エラー",
+                f"Webテンプレート作成中にエラーが発生しました:\n{str(e)}",
+            )
+            return None
+
     def set_template_root_directory(self):
         """テンプレート保存用のデフォルト（起点）フォルダを設定"""
         current_dir = self.template_save_default_dir if self.template_save_default_dir and os.path.isdir(self.template_save_default_dir) else str(Path.home())

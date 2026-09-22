@@ -226,3 +226,6 @@ python/desktop/data/customer_support_sessions.json
 *google*.json
 
 python/python/
+
+# 現場ルートWeb: マシン固有のルート箱インデックス
+python/route_web/data/index.json
