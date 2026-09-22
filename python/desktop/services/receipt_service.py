@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 class ReceiptService:
     def __init__(self, base_dir: Optional[str | Path] = None, tesseract_cmd: Optional[str] = None, gcv_credentials_path: Optional[str] = None, tessdata_dir: Optional[str] = None):
-        self.base_dir = Path(base_dir) if base_dir else Path(__file__).resolve().parents[2] / "python" / "desktop" / "data" / "receipts"
+        self.base_dir = Path(base_dir) if base_dir else Path(__file__).resolve().parents[1] / "data" / "receipts"
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.db = ReceiptDatabase()
         self.ocr = OCRService(tesseract_cmd=tesseract_cmd, gcv_credentials_path=gcv_credentials_path, tessdata_dir=tessdata_dir)
@@ -631,7 +631,7 @@ class ReceiptService:
 
         # デバッグ用ログ: OCRテキストと抽出結果を記録（原因調査用）
         try:
-            log_path = Path(__file__).resolve().parents[2] / "python" / "desktop" / "desktop_error.log"
+            log_path = Path(__file__).resolve().parents[1] / "desktop_error.log"
             with open(log_path, "a", encoding="utf-8") as f:
                 from datetime import datetime
 
@@ -717,7 +717,7 @@ class ReceiptService:
         except Exception as e:
             # リネーム失敗時はログ出力して続行（元のパスを使用）
             try:
-                log_path = Path(__file__).resolve().parents[2] / "python" / "desktop" / "desktop_error.log"
+                log_path = Path(__file__).resolve().parents[1] / "desktop_error.log"
                 with open(log_path, "a", encoding="utf-8") as f:
                     from datetime import datetime
                     f.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ReceiptService: Failed to rename receipt image: {e}\n")

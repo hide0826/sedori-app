@@ -82,6 +82,11 @@ from .support import (
     WarrantyProductDelegate,
 )
 
+try:
+    from utils.ocr_runtime import collect_receipt_image_paths
+except ImportError:
+    from desktop.utils.ocr_runtime import collect_receipt_image_paths  # type: ignore
+
 
 class ReceiptOcrMixin:
     def select_image(self):
@@ -92,7 +97,7 @@ class ReceiptOcrMixin:
             self,
             "レシート画像を選択",
             default_dir,
-            "画像ファイル (*.jpg *.jpeg *.png *.bmp)"
+            "画像ファイル (*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.webp *.heic *.heif)"
         )
         if file_path:
             self.current_folder = Path(file_path).parent
@@ -161,23 +166,13 @@ class ReceiptOcrMixin:
         """フォルダラベルを更新"""
         if not hasattr(self, "folder_label"):
             return
+        queued = len(getattr(self, "ocr_queue", []) or [])
         if self.current_folder and self.current_folder.exists():
-            # 画像ファイル数をカウント
-            image_paths = []
-            try:
-                for entry in sorted(self.current_folder.iterdir()):
-                    if not entry.is_file():
-                        continue
-                    suffix = entry.suffix.lower()
-                    if suffix in (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"):
-                        image_paths.append(str(entry))
-            except Exception:
-                pass
-            self.folder_label.setText(f"{str(self.current_folder)} ({len(image_paths)}件)")
+            self.folder_label.setText(f"{str(self.current_folder)} （OCR対象 {queued}件）")
         elif self.default_folder and self.default_folder.exists():
             self.folder_label.setText(f"デフォルト: {str(self.default_folder)}")
         else:
-            self.folder_label.setText("未選択")
+            self.folder_label.setText("フォルダ未選択")
     
     def select_folder_for_batch(self):
         """フォルダを選択して、フォルダ内の全画像をOCRキューに追加"""
@@ -199,17 +194,16 @@ class ReceiptOcrMixin:
         self._reset_post_rename_workflow_gate()
         self.current_folder = Path(folder)
         
-        # OCRキューを更新
-        image_paths: List[str] = []
-        for entry in sorted(self.current_folder.iterdir()):
-            if not entry.is_file():
-                continue
-            suffix = entry.suffix.lower()
-            if suffix in (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"):
-                image_paths.append(str(entry))
-        
+        image_paths = collect_receipt_image_paths(self.current_folder)
         self.ocr_queue = image_paths
         self.update_folder_label()
+        if not image_paths:
+            QMessageBox.information(
+                self,
+                "画像なし",
+                "このフォルダに OCR できる画像がありません。\n"
+                "jpg / jpeg / png / webp / bmp / tif / heic を置いてから、もう一度フォルダ選択してください。",
+            )
     
     def process_selected_file(self):
         """OCRキューから最初のファイルを処理（フォルダ選択後）"""
@@ -233,25 +227,64 @@ class ReceiptOcrMixin:
         if self.batch_running:
             QMessageBox.information(self, "情報", "すでに一括OCR処理を実行中です。")
             return
+        ready, reason = self.receipt_service.ocr.ensure_ready()
+        if not ready:
+            QMessageBox.warning(self, "OCRを開始できません", reason)
+            return
         self._reset_post_rename_workflow_gate()
         self.batch_running = True
         self.batch_total_count = len(self.ocr_queue)
         self.batch_processed_count = 0
+        self.batch_success_count = 0
+        self.batch_errors: List[str] = []
         self._sync_action_buttons_state()
         self._update_workflow_status("ワークフロー: 全件OCR実行中", emphasize=True)
         self._process_next_in_queue()
 
+    def _finish_batch_ocr(self) -> None:
+        """全件OCRの締め。失敗を隠して『完了』だけ出さない。"""
+        self.batch_running = False
+        self._sync_action_buttons_state()
+        if hasattr(self, "folder_label"):
+            folder = self.current_folder or ""
+            self.folder_label.setText(f"{folder} - 一括OCR完了")
+        self._workflow_active_step = 3
+        self._update_workflow_status("ワークフロー: 待機", emphasize=False)
+        try:
+            self.refresh_receipt_list()
+        except Exception as exc:
+            logger.warning("batch OCR refresh failed: %s", exc)
+
+        success = getattr(self, "batch_success_count", 0)
+        errors = getattr(self, "batch_errors", []) or []
+        total = getattr(self, "batch_total_count", 0)
+        if success == 0 and errors:
+            preview = "\n".join(errors[:8])
+            more = f"\n…他 {len(errors) - 8} 件" if len(errors) > 8 else ""
+            QMessageBox.warning(
+                self,
+                "一括OCR失敗",
+                "1件も処理できませんでした。Tesseract や日本語データ、画像パスを確認してください。\n\n"
+                f"{preview}{more}",
+            )
+            return
+        if errors:
+            QMessageBox.information(
+                self,
+                "一括OCR完了（一部失敗）",
+                f"{total} 件中 {success} 件を処理しました。失敗 {len(errors)} 件。",
+            )
+            return
+        QMessageBox.information(
+            self,
+            "一括OCR完了",
+            f"選択フォルダ内の {success} 件を処理しました。",
+        )
+
     def _process_next_in_queue(self):
         """OCRキューから次の1枚を取り出して処理"""
         if not self.ocr_queue:
-            self.batch_running = False
-            self._sync_action_buttons_state()
-            if hasattr(self, "folder_label"):
-                self.folder_label.setText(f"{str(self.current_folder)} - 一括OCR完了")
-            # 全件OCR完了後は次の工程③（一括マッチング）へ
-            self._workflow_active_step = 3
-            self._update_workflow_status("ワークフロー: 待機", emphasize=False)
-            QMessageBox.information(self, "一括OCR完了", "選択されたフォルダ内のすべての画像の処理が完了しました。")
+            self._finish_batch_ocr()
             return
         next_path = self.ocr_queue.pop(0)
         remaining = len(self.ocr_queue)
@@ -260,7 +293,10 @@ class ReceiptOcrMixin:
         current_processed = self.batch_processed_count + 1
         progress_percent = int((current_processed / self.batch_total_count) * 100) if self.batch_total_count > 0 else 0
         if hasattr(self, "folder_label"):
-            self.folder_label.setText(f"{str(self.current_folder)} - 処理中: {Path(next_path).name} （進捗: {progress_percent}% - {current_processed}/{self.batch_total_count}件、残り {remaining} 件）")
+            self.folder_label.setText(
+                f"{str(self.current_folder)} - 処理中: {Path(next_path).name} "
+                f"（進捗: {progress_percent}% - {current_processed}/{self.batch_total_count}件、残り {remaining} 件）"
+            )
         self.process_image(next_path)
     
     def process_image(self, image_path: str):
@@ -268,9 +304,18 @@ class ReceiptOcrMixin:
         if hasattr(self, 'process_btn'):
             self.process_btn.setEnabled(False)
             self.process_btn.setText("処理中...")
+
+        if not self.batch_running:
+            ready, reason = self.receipt_service.ocr.ensure_ready()
+            if not ready:
+                if hasattr(self, 'process_btn'):
+                    self.process_btn.setEnabled(True)
+                    self.process_btn.setText("OCR処理")
+                QMessageBox.warning(self, "OCRを開始できません", reason)
+                return
         
-        self.ocr_thread = ReceiptOCRThread(self.receipt_service, image_path)
-        self.ocr_thread.finished.connect(self.on_ocr_finished)
+        self.ocr_thread = ReceiptOCRThread(self.receipt_service, image_path, parent=self)
+        self.ocr_thread.result_ready.connect(self.on_ocr_finished)
         self.ocr_thread.error.connect(self.on_ocr_error)
         self.ocr_thread.start()
     
@@ -374,13 +419,21 @@ class ReceiptOcrMixin:
         if self.notifications_enabled and not self.batch_running:
             QMessageBox.information(self, "OCR完了", "レシート情報を抽出しました。")
         self.receipt_processed.emit(result)
-        # レシート一覧にも即反映
-        self.refresh_receipt_list()
+        # レシート一覧にも即反映（全件中は毎回だとミニPCが重いので間引く）
+        if self.batch_running:
+            self.batch_success_count = getattr(self, "batch_success_count", 0) + 1
+            if self.batch_success_count % 5 == 0:
+                try:
+                    self.refresh_receipt_list()
+                except Exception as exc:
+                    logger.warning("batch OCR mid refresh failed: %s", exc)
+        else:
+            self.refresh_receipt_list()
 
         # 一括処理中であれば次の画像を処理
         if self.batch_running:
             self.batch_processed_count += 1
-            self._process_next_in_queue()
+            QTimer.singleShot(0, self._process_next_in_queue)
     
     def on_ocr_error(self, error_msg: str):
         """OCRエラー時の処理"""
@@ -390,10 +443,15 @@ class ReceiptOcrMixin:
         # 一括処理中でない場合のみ通知を表示
         if self.notifications_enabled and not self.batch_running:
             QMessageBox.critical(self, "OCRエラー", f"OCR処理に失敗しました:\n{error_msg}")
-        # 一括処理中ならスキップして次へ
+        # 一括処理中なら記録して次へ（失敗を握りつぶして完了だけ出さない）
         if self.batch_running:
+            errors = getattr(self, "batch_errors", None)
+            if errors is None:
+                self.batch_errors = []
+                errors = self.batch_errors
+            errors.append(str(error_msg))
             self.batch_processed_count += 1
-            self._process_next_in_queue()
+            QTimer.singleShot(0, self._process_next_in_queue)
     
     def reprocess_ocr_for_receipt(self, receipt_id: int, receipt: Dict[str, Any]):
         """選択されたレシートに対してOCR処理を再実行"""

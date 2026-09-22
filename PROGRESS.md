@@ -2,11 +2,15 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-09-21 夜
+更新日: 2026-09-22
 
 ---
 
 ## いまの状態
+
+**2026-09-22（証憑OCR）:** ミニPCで全件OCRを実機確認。一覧に10件前後が載り、BOOK OFF 等は日付・合計まで入る。Tesseract は動作。日本語レシートは精度が低い行あり（Gemini API 設定で改善可）。次は③一括マッチング。
+
+**2026-09-21 夜（証憑OCR）:** 全件OCRが処理せず完了していた。ミニPCに Tesseract 本体と日本語データが無く、失敗を黙って飛ばしていた。導入して開始前点検を入れた。
 
 **方針転換（2026-09-21）:** このリポジトリの**実装をミニPCに置き、開発も日常運用もここで行う。**  
 理由: `C:\HIRIO` にある watcher / store-cam / judgment / shared などの資産を、同じワークスペースで使いながらシームレスに進めるため。全体Web化の完了は待たない。
@@ -31,6 +35,56 @@
 | 画像・CSV | `D:\せどり総合`（USB SSD。パス置換しない） |
 | NASバックアップ | `Z:`（HIRIOから直接開かない） |
 | 直下の `data` | 本番DBではない |
+
+---
+
+## 2026-09-21 夜にやったこと（証憑・全件OCR）
+
+### 症状
+
+証憑管理 → レシート・領収書・保証書 でフォルダ選択して全件OCRすると、**中身を読まずに完了**していた。
+
+### 原因（ミニPC移植）
+
+1. **Tesseract OCR 本体が未導入**（`pytesseract` だけ入っていて `tesseract.exe` が無い）
+2. 入れた直後は **日本語データ `jpn.traineddata` も無かった**（英語だけ）
+3. 全件OCRは失敗してもダイアログを出さず次へ進み、最後に「完了」と出していた
+4. Windows 版 Tesseract は `TESSDATA_PREFIX` を tessdata **フォルダ自体**にする（親フォルダだと言語を読めない）
+
+### このPCに入れたもの
+
+| 何 | 場所 |
+|----|------|
+| Tesseract 5.4.0 | `C:\Program Files\Tesseract-OCR\tesseract.exe` |
+| 日本語（tessdata_fast） | 同じ `tessdata\jpn.traineddata` |
+| 予備コピー | `C:\HIRIO\tools\tessdata` |
+| pillow-heif | venv（iPhone の HEIC 用） |
+
+### コードの直し
+
+| ファイル | 役割 |
+|----------|------|
+| `python/desktop/utils/ocr_runtime.py` | exe / tessdata 自動検出、画像収集、日本語データ補完 |
+| `python/desktop/services/ocr_service.py` | 開始前点検、無効な前PCパスを捨てる |
+| `python/desktop/ui/receipt/ocr_mixin.py` | 失敗を隠さない。進捗ラベル。HEIC対応 |
+| `python/desktop/ui/receipt/support.py` | QThread の `finished` 衝突を回避（`result_ready`） |
+| `python/desktop/utils/image_processor.py` | 長辺1920へ縮小（ミニPCのメモリ対策） |
+| `python/desktop/services/receipt_service.py` | 保存先を `python/desktop/data/receipts` に修正 |
+
+### 試験
+
+```
+ok collect_top / collect_recursive / prefix / limit
+ok smoke_ocr_digits  → TOTAL 1234 を Tesseract が読めた
+ok receipt parse tests
+```
+
+**2026-09-22 実機:** フォルダ選択→全件OCR OK。レシート一覧に反映。一部は日付・合計が空（OCR精度）。
+
+### 次（実機）
+
+1. **一括マッチング** → 手動調整 → 一括リネーム → GCS → 確定
+2. 精度を上げたい行は設定の **Gemini APIキー** を入れる（レシート解析は Gemini 優先）
 
 ---
 
@@ -113,11 +167,11 @@ ok test_merge_keeps_other_jans_and_puts_current_first
 
 ## 次
 
-1. **HIRIO 再起動** → 選んだ写真だけの仕入紐付けを実機確認
-2. 日常の仕入・改定はミニPCのこのコピーで行う。**メインPCで同じ DB を開かない**
-3. 画像・CSV が要る作業の前に `D:\せどり総合` をミニPCの D: へ（未コピーなら）
-4. FastAPI は起動時に自動。ダメならメニュー「ツール → FastAPIサーバー起動」
-5. 開発は `C:\HIRIO` ワークスペースのまま（隣の store-cam 等を読んでよい）
+1. 証憑管理 **一括マッチング** 以降のワークフローを実機確認
+2. 画像管理の「選んだ写真だけ仕入紐付け」も、まだなら確認
+3. 日常の仕入・改定はミニPCのこのコピーで行う。**メインPCで同じ DB を開かない**
+4. 画像・CSV が要る作業の前に `D:\せどり総合` をミニPCの D: へ（未コピーなら）
+5. FastAPI は起動時に自動。ダメならメニュー「ツール → FastAPIサーバー起動」
 
 ---
 

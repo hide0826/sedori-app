@@ -34,7 +34,7 @@ class WarrantyService:
         tessdata_dir: Optional[str] = None,
         default_warranty_days: int = 365,  # デフォルト1年
     ):
-        self.base_dir = Path(base_dir) if base_dir else Path(__file__).resolve().parents[2] / "python" / "desktop" / "data" / "warranties"
+        self.base_dir = Path(base_dir) if base_dir else Path(__file__).resolve().parents[1] / "data" / "warranties"
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.default_warranty_days = default_warranty_days
         self.product_db = ProductDatabase()

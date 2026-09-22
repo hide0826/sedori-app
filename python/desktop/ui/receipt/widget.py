@@ -136,6 +136,8 @@ class ReceiptWidget(
         self.batch_running: bool = False
         self.batch_total_count: int = 0  # 一括OCR処理の全体件数
         self.batch_processed_count: int = 0  # 一括OCR処理の処理済み件数
+        self.batch_success_count: int = 0
+        self.batch_errors: List[str] = []
         self._store_name_cache: dict[str, str] = {}
         self.current_receipt_id = None
         self.current_receipt_data = None
@@ -447,6 +449,11 @@ class ReceiptWidget(
         self.workflow_status_label.setStyleSheet("padding: 2px 0px;")
         self._sync_workflow_status_label()
         action_outer.addWidget(self.workflow_status_label)
+
+        self.folder_label = QLabel("フォルダ未選択")
+        self.folder_label.setWordWrap(True)
+        self.folder_label.setStyleSheet("color: #cccccc; padding: 0px 0px 4px 0px;")
+        action_outer.addWidget(self.folder_label)
 
         aux_layout = QHBoxLayout()
         self.process_btn = QPushButton("OCR処理")

@@ -1433,38 +1433,19 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                         explain_api_error("ocr_gcv", "google-cloud-vision パッケージ未インストール")
                     )
                 
-                # Tesseractの確認
-                if OCRService.is_tesseract_available():
-                    if tesseract_cmd:
-                        if Path(tesseract_cmd).exists():
-                            messages.append(f"✅ Tesseract OCR: 設定済み ({tesseract_cmd})")
-                        else:
-                            messages.append(f"❌ Tesseract OCR: 実行ファイルが見つかりません ({tesseract_cmd})")
-                            error_details.append(
-                                explain_api_error(
-                                    "ocr_tesseract",
-                                    f"実行ファイルが見つかりません: {tesseract_cmd}",
-                                )
-                            )
-                    else:
-                        messages.append("✅ Tesseract OCR: 利用可能（デフォルト設定）")
-                    
-                    if tessdata_dir:
-                        if Path(tessdata_dir).exists():
-                            messages.append(f"✅ Tessdataディレクトリ: {tessdata_dir}")
-                        else:
-                            messages.append(f"⚠️  Tessdataディレクトリが見つかりません: {tessdata_dir}")
-                            error_details.append(
-                                explain_api_error(
-                                    "ocr_tesseract",
-                                    f"tessdata ディレクトリが見つかりません: {tessdata_dir}",
-                                )
-                            )
+                # Tesseractの確認（本体 exe と日本語データの実在まで見る）
+                ready, ready_msg = ocr_service.ensure_ready()
+                if ready:
+                    messages.append("✅ Tesseract OCR: 本体と日本語データが利用可能です")
+                    messages.append(ready_msg)
+                    if ocr_service.tesseract_cmd:
+                        self.tesseract_cmd_edit.setText(ocr_service.tesseract_cmd)
+                    if ocr_service.tessdata_dir:
+                        self.tessdata_dir_edit.setText(ocr_service.tessdata_dir)
                 else:
-                    messages.append("❌ Tesseract OCR: pytesseractがインストールされていません")
-                    error_details.append(
-                        explain_api_error("ocr_tesseract", "pytesseract がインストールされていません")
-                    )
+                    messages.append("❌ Tesseract OCR: まだ使えません")
+                    messages.append(ready_msg)
+                    error_details.append(explain_api_error("ocr_tesseract", ready_msg))
                 
                 # メッセージを表示
                 message_text = "OCR設定テスト結果\n\n" + "\n".join(messages)

@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 import logging
+import os
 
 # 画像処理
 try:
@@ -48,6 +49,31 @@ except ImportError:
     except ImportError:
         preprocess_image_for_ocr = None
 
+try:
+    from utils.ocr_runtime import (
+        describe_ocr_readiness,
+        discover_tessdata_dir,
+        discover_tesseract_cmd,
+        ensure_japanese_tessdata,
+        tessdata_has_japanese,
+        tessdata_prefix_for_env,
+        tesseract_lang_string,
+        LOCAL_TESSDATA_DIR,
+        register_heif_opener,
+    )
+except ImportError:
+    from desktop.utils.ocr_runtime import (  # type: ignore
+        describe_ocr_readiness,
+        discover_tessdata_dir,
+        discover_tesseract_cmd,
+        ensure_japanese_tessdata,
+        tessdata_has_japanese,
+        tessdata_prefix_for_env,
+        tesseract_lang_string,
+        LOCAL_TESSDATA_DIR,
+        register_heif_opener,
+    )
+
 logger = logging.getLogger(__name__)
 
 
@@ -74,25 +100,85 @@ class OCRService:
                     gcv_credentials_path = settings.value("ocr/gcv_credentials", "") or None
             except Exception as e:
                 logger.debug(f"Failed to load OCR settings from QSettings: {e}")
-        
+
+        # 前PCのパスが残っていても、このPC上に実在するものだけ使う
+        if tesseract_cmd and not Path(str(tesseract_cmd)).is_file():
+            logger.warning("Configured tesseract_cmd does not exist: %s", tesseract_cmd)
+            tesseract_cmd = None
+        if tessdata_dir and not Path(str(tessdata_dir)).is_dir():
+            logger.warning("Configured tessdata_dir does not exist: %s", tessdata_dir)
+            tessdata_dir = None
+
+        tesseract_cmd = discover_tesseract_cmd(tesseract_cmd)
+        tessdata_dir = discover_tessdata_dir(tessdata_dir, tesseract_cmd=tesseract_cmd)
+
         self.tesseract_cmd = tesseract_cmd
+        self.tessdata_dir = tessdata_dir
         if tesseract_cmd and TESSERACT_AVAILABLE:
             pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
         
-        # Tessdataディレクトリの設定（tessdata_best用）
+        # Tessdataディレクトリの設定
+        # TESSDATA_PREFIX は tessdata フォルダの「親」を指す必要がある
         if tessdata_dir:
-            import os
-            os.environ['TESSDATA_PREFIX'] = tessdata_dir
-            logger.info(f"TESSDATA_PREFIX set to: {tessdata_dir}")
+            os.environ["TESSDATA_PREFIX"] = tessdata_prefix_for_env(tessdata_dir)
+            logger.info("TESSDATA_PREFIX set to: %s (tessdata=%s)", os.environ["TESSDATA_PREFIX"], tessdata_dir)
+
+        if tesseract_cmd or tessdata_dir:
+            self._persist_discovered_paths(tesseract_cmd, tessdata_dir)
         
         self.gcv_client = None
-        if gcv_credentials_path and GCV_AVAILABLE:
+        if gcv_credentials_path and GCV_AVAILABLE and Path(str(gcv_credentials_path)).is_file():
             try:
-                import os
                 os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = gcv_credentials_path
                 self.gcv_client = vision.ImageAnnotatorClient()
             except Exception as e:
                 logger.warning(f"Failed to initialize GCV client: {e}")
+        elif gcv_credentials_path:
+            logger.warning("GCV credentials path does not exist: %s", gcv_credentials_path)
+
+    @staticmethod
+    def _persist_discovered_paths(tesseract_cmd: Optional[str], tessdata_dir: Optional[str]) -> None:
+        try:
+            from PySide6.QtCore import QSettings
+            settings = QSettings("HIRIO", "DesktopApp")
+            if tesseract_cmd:
+                settings.setValue("ocr/tesseract_cmd", tesseract_cmd)
+            if tessdata_dir:
+                settings.setValue("ocr/tessdata_dir", tessdata_dir)
+        except Exception as exc:
+            logger.debug("Could not persist OCR paths: %s", exc)
+
+    def ensure_ready(self) -> Tuple[bool, str]:
+        """
+        全件OCR前の点検。日本語データが無ければ取得を試みる。
+        Returns: (ok, ユーザー向けメッセージ)
+        """
+        if not self.tesseract_cmd:
+            self.tesseract_cmd = discover_tesseract_cmd()
+            if self.tesseract_cmd and TESSERACT_AVAILABLE:
+                pytesseract.pytesseract.tesseract_cmd = self.tesseract_cmd
+
+        if not self.tessdata_dir:
+            self.tessdata_dir = discover_tessdata_dir(tesseract_cmd=self.tesseract_cmd)
+
+        if self.tessdata_dir and not tessdata_has_japanese(self.tessdata_dir):
+            target = Path(self.tessdata_dir)
+            if not target.is_dir():
+                target = LOCAL_TESSDATA_DIR
+            if ensure_japanese_tessdata(target):
+                self.tessdata_dir = str(target)
+            elif ensure_japanese_tessdata(LOCAL_TESSDATA_DIR):
+                self.tessdata_dir = str(LOCAL_TESSDATA_DIR)
+
+        if self.tessdata_dir:
+            os.environ["TESSDATA_PREFIX"] = tessdata_prefix_for_env(self.tessdata_dir)
+
+        self._persist_discovered_paths(self.tesseract_cmd, self.tessdata_dir)
+        return describe_ocr_readiness(
+            self.tesseract_cmd,
+            self.tessdata_dir,
+            pytesseract_imported=TESSERACT_AVAILABLE,
+        )
     
     def extract_text(self, image_path: str | Path, use_preprocessing: bool = True) -> Dict[str, Any]:
         """
@@ -112,6 +198,8 @@ class OCRService:
         image_path = Path(image_path)
         if not image_path.exists():
             raise FileNotFoundError(f"Image not found: {image_path}")
+
+        register_heif_opener()
         
         # GCVが利用可能な場合は優先（精度が高いため）
         if GCV_AVAILABLE and self.gcv_client:
@@ -124,7 +212,7 @@ class OCRService:
                 logger.warning(f"GCV OCR failed: {e}, falling back to Tesseract")
         
         # Tesseractフォールバック
-        if TESSERACT_AVAILABLE:
+        if TESSERACT_AVAILABLE and self.tesseract_cmd:
             try:
                 result = self._extract_with_tesseract(image_path, use_preprocessing)
                 if result:
@@ -134,6 +222,9 @@ class OCRService:
                 logger.warning(f"Tesseract OCR failed: {e}")
         
         # どちらも失敗
+        ready, reason = self.ensure_ready()
+        if not ready:
+            raise RuntimeError(f"OCR failed: {reason}")
         if GCV_AVAILABLE and self.gcv_client:
             raise RuntimeError("OCR failed: Both GCV and Tesseract failed")
         elif TESSERACT_AVAILABLE:
@@ -145,18 +236,25 @@ class OCRService:
         """Tesseract OCRで抽出"""
         if not TESSERACT_AVAILABLE or not Image:
             return None
+        if not self.tesseract_cmd:
+            return None
         
         try:
             if use_preprocessing and preprocess_image_for_ocr:
                 img = preprocess_image_for_ocr(image_path)
             else:
+                register_heif_opener()
                 img = Image.open(image_path)
 
-            # 日本語優先でOCR（必要なら英数字向けに eng を追加）
+            lang = tesseract_lang_string(self.tessdata_dir)
+            # --tessdata-dir に引用符を付けると Windows でパスが壊れ、
+            # 「処理せず完了」と同じ空振りになる。TESSDATA_PREFIX だけ使う。
+            config = "--oem 1 --psm 6"
+
             text = pytesseract.image_to_string(
                 img,
-                lang='jpn',
-                config='--oem 1 --psm 6'
+                lang=lang,
+                config=config,
             )
             
             # OCR結果の正規化
@@ -229,11 +327,19 @@ class OCRService:
     
     @staticmethod
     def is_tesseract_available() -> bool:
-        """Tesseract OCRが利用可能か"""
+        """pytesseract が import できるか（本体の有無は ensure_ready で見る）"""
         return TESSERACT_AVAILABLE
+
+    def is_tesseract_engine_ready(self) -> bool:
+        """tesseract.exe と日本語データが揃っているか"""
+        ok, _ = describe_ocr_readiness(
+            self.tesseract_cmd,
+            self.tessdata_dir,
+            pytesseract_imported=TESSERACT_AVAILABLE,
+        )
+        return ok
     
     @staticmethod
     def is_gcv_available() -> bool:
         """Google Cloud Vision APIが利用可能か"""
         return GCV_AVAILABLE
-

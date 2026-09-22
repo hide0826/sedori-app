@@ -43,11 +43,11 @@ from desktop.utils.ui_utils import save_table_header_state, restore_table_header
 
 class WarrantyOCRThread(QThread):
     """保証書OCR処理をバックグラウンドで実行するスレッド"""
-    finished = Signal(dict)
+    result_ready = Signal(dict)
     error = Signal(str)
     
-    def __init__(self, warranty_service: WarrantyService, image_path: str, sku: Optional[str] = None, warranty_period_days: Optional[int] = None):
-        super().__init__()
+    def __init__(self, warranty_service: WarrantyService, image_path: str, sku: Optional[str] = None, warranty_period_days: Optional[int] = None, parent=None):
+        super().__init__(parent)
         self.warranty_service = warranty_service
         self.image_path = image_path
         self.sku = sku
@@ -60,7 +60,7 @@ class WarrantyOCRThread(QThread):
                 sku=self.sku,
                 warranty_period_days=self.warranty_period_days,
             )
-            self.finished.emit(result)
+            self.result_ready.emit(result)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -231,9 +231,10 @@ class WarrantyWidget(QWidget):
         self.ocr_thread = WarrantyOCRThread(
             self.warranty_service,
             image_path,
-            warranty_period_days=self.warranty_days_spin.value()
+            warranty_period_days=self.warranty_days_spin.value(),
+            parent=self,
         )
-        self.ocr_thread.finished.connect(self.on_ocr_finished)
+        self.ocr_thread.result_ready.connect(self.on_ocr_finished)
         self.ocr_thread.error.connect(self.on_ocr_error)
         self.ocr_thread.start()
     
@@ -326,9 +327,10 @@ class WarrantyWidget(QWidget):
                     self.warranty_service,
                     self.last_image_path,
                     sku=sku,
-                    warranty_period_days=self.warranty_days_spin.value()
+                    warranty_period_days=self.warranty_days_spin.value(),
+                    parent=self,
                 )
-                self.ocr_thread.finished.connect(self.on_confirm_finished)
+                self.ocr_thread.result_ready.connect(self.on_confirm_finished)
                 self.ocr_thread.error.connect(self.on_ocr_error)
                 self.ocr_thread.start()
         else:

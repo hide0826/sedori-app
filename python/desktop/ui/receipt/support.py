@@ -463,18 +463,19 @@ class ReceiptSnapshotDialog(QDialog):
 
 class ReceiptOCRThread(QThread):
     """OCR処理をバックグラウンドで実行するスレッド"""
-    finished = Signal(dict)
+    # QThread.finished と名前が衝突すると、処理せず即完了になることがある
+    result_ready = Signal(dict)
     error = Signal(str)
     
-    def __init__(self, receipt_service: ReceiptService, image_path: str):
-        super().__init__()
+    def __init__(self, receipt_service: ReceiptService, image_path: str, parent=None):
+        super().__init__(parent)
         self.receipt_service = receipt_service
         self.image_path = image_path
     
     def run(self):
         try:
             result = self.receipt_service.process_receipt(self.image_path)
-            self.finished.emit(result)
+            self.result_ready.emit(result)
         except Exception as e:
             self.error.emit(str(e))
 
