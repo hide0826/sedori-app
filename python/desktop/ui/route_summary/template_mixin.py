@@ -427,6 +427,8 @@ class RouteSummaryTemplateMixin:
             self.route_data["return_time"] = model["return_time"]
         self.route_data["toll_fee_outbound"] = model.get("toll_fee_outbound") or 0
         self.route_data["toll_fee_return"] = model.get("toll_fee_return") or 0
+        # 以前保存した別ルートのIDが残っていると、仕入タブが古いDBを表示してしまう
+        self.current_route_id = None
 
         visits = model.get("visits") or []
         self.store_visits_table.blockSignals(True)

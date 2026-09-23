@@ -86,11 +86,45 @@ def resolve_route_folder_layout(route_folder: Path) -> RouteFolderLayout:
     return layout
 
 
+def route_json_is_usable(path: Path) -> bool:
+    """route.json に、人が入れた時刻・メモ・高速代・仕入点数があるか。
+
+    箱を作っただけの JSON（店名だけ）は False。そのときは Excel を開く。
+    """
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return False
+    if not isinstance(doc, dict):
+        return False
+    if _hhmm(doc.get("departure_time")) or _hhmm(doc.get("return_time")):
+        return True
+    if _fee(doc.get("toll_outbound")) or _fee(doc.get("toll_return")):
+        return True
+    for store in doc.get("stores") or []:
+        if not isinstance(store, dict):
+            continue
+        if not str(store.get("store_code") or "").strip():
+            continue
+        if _hhmm(store.get("in_time")) or _hhmm(store.get("out_time")):
+            return True
+        if str(store.get("notes") or "").strip():
+            return True
+        count = store.get("purchase_item_count")
+        if count not in (None, "", 0):
+            return True
+    return False
+
+
 def choose_route_time_source(layout: RouteFolderLayout) -> str:
-    """時刻の読み込み元。route.json があれば Excel より優先する。"""
-    if layout.route_json is not None and Path(layout.route_json).is_file():
+    """時刻の読み込み元。中身のある route.json を Excel より優先する。"""
+    json_path = layout.route_json
+    xlsx_path = layout.route_template
+    json_file = json_path is not None and Path(json_path).is_file()
+    xlsx_file = xlsx_path is not None and Path(xlsx_path).is_file()
+    if json_file and route_json_is_usable(Path(json_path)):
         return "json"
-    if layout.route_template is not None and Path(layout.route_template).is_file():
+    if xlsx_file:
         return "xlsx"
     return "none"
 

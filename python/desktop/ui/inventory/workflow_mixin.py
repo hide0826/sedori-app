@@ -599,6 +599,28 @@ class InventoryWorkflowMixin:
             return win
         return None
 
+    def _open_loaded_route_template(self) -> None:
+        """読み込んだルートを、仕入データタブのルート情報として開く。"""
+        try:
+            if hasattr(self, "refresh_route_template_view"):
+                self.refresh_route_template_view()
+        except Exception as exc:
+            print(f"ルート情報の表示更新に失敗: {exc}")
+        try:
+            if hasattr(self, "_auto_register_stores_from_route_template"):
+                self._auto_register_stores_from_route_template()
+        except Exception as exc:
+            print(f"店舗の自動登録に失敗: {exc}")
+        group = getattr(self, "route_template_group", None)
+        if group is not None:
+            group.setVisible(True)
+            group.setChecked(True)
+        combo = getattr(self, "view_mode_combo", None)
+        if combo is not None and combo.currentText() == "仕入データビュー":
+            idx = combo.findText("デフォルト")
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+
     def import_from_route_box(self):
         """ルート箱を1回選んで CSV／商品画像／レシート画像を既存タブへ振り分ける（Phase 3）。"""
         from services.route_folder_import import choose_route_time_source, resolve_route_folder_layout
@@ -642,22 +664,37 @@ class InventoryWorkflowMixin:
         self._import_csv_from_path(str(layout.csv_path))
         lines.append(f"CSV: {layout.csv_path.name}")
 
-        # 時刻は route.json 優先。無いときだけ Excel。
+        # 時刻は中身のある route.json を優先。無ければ Excel のルートテンプレ。
         time_source = choose_route_time_source(layout)
+        loaded_route = False
         if self.route_summary_widget and time_source == "json":
             try:
                 store_count = self.route_summary_widget.load_route_json_file(str(layout.route_json))
                 lines.append(f"route.json から読み込み（店舗{store_count}件）")
+                loaded_route = True
             except Exception as exc:
                 lines.append(f"route.json 読込失敗: {exc}")
-        elif self.route_summary_widget and layout.route_template is not None:
+        if (
+            self.route_summary_widget
+            and not loaded_route
+            and layout.route_template is not None
+        ):
             try:
-                self.route_summary_widget.load_template(str(layout.route_template))
-                lines.append(f"ルートテンプレ: {layout.route_template.name}")
+                loaded_path = self.route_summary_widget.load_template(str(layout.route_template))
+                if loaded_path:
+                    lines.append(f"ルートテンプレ: {layout.route_template.name}")
+                    loaded_route = True
+                else:
+                    lines.append("ルートテンプレを開けませんでした")
             except Exception as exc:
                 lines.append(f"ルートテンプレ読込失敗: {exc}")
-        elif layout.route_json is not None:
+        elif not loaded_route and layout.route_json is not None and not self.route_summary_widget:
             lines.append(f"route.json あり（ルート画面未初期化）: {layout.route_json.name}")
+        elif not loaded_route:
+            lines.append("ルートテンプレなし（route.json に時刻などが無く、Excel もありません）")
+
+        if loaded_route:
+            self._open_loaded_route_template()
 
         main = self._find_main_window()
         # 商品画像

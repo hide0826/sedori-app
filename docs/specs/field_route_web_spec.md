@@ -260,7 +260,7 @@ Webテンプレ作成の最後に:
 | `仕入CSV/`（無ければ直下 `StockList_*`） | CSV取込 |
 | `商品画像/` | 画像管理のカレントフォルダ |
 | `レシート画像/` | 証憑 OCR キュー |
-| `route_template_*.xlsx` | あればテンプレ読込 |
+| `route_template_*.xlsx` | JSON に時刻などが無いときテンプレ読込 |
 
 スタートワークフローの CSV 探索も **`仕入CSV/` 優先**。
 
@@ -280,7 +280,7 @@ Webテンプレ作成の最後に:
 - 巡回画面: 時刻・仕入点数・レシート。ボタン「事前処理を実行」でレシートOCR（`prep_status.json` と証憑DB。リネームしない）
 - 商品撮影: `/route/{web_id}/photos`。JANあり／JANなし。「撮影終了」で `product_files[].confirmed`。仕入レコードの画像列はここでは書き換えない
 - 「スキャン実行」は `python/route_web/data/pending_scans.json` に依頼を書く。起動中の HIRIO が確定JANを画像DBへ先に書き、スキャンする
-- ルート箱取込は `route.json` があれば Excel より優先
+- ルート箱取込は、仕入データタブのルート情報も開く。中身のある `route.json`（時刻・メモ・高速代・仕入点数）を Excel より優先。店名だけの JSON や空の JSON は Excel を開く
 
 ---
 

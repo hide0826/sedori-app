@@ -39,7 +39,13 @@ SANDBOX = Path(r"D:\せどり総合\店舗せどり仕入リスト入れ\仕入�
 def test_json_wins_over_xlsx(tmp: Path) -> None:
     folder = tmp / "box"
     folder.mkdir(parents=True)
-    (folder / "route.json").write_text("{}", encoding="utf-8")
+    (folder / "route.json").write_text(
+        json.dumps(
+            {"stores": [{"store_code": "BO-04", "in_time": "10:06", "out_time": "11:00"}]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     (folder / "route_template_demo.xlsx").write_bytes(b"not-a-real-xlsx")
     layout = RouteFolderLayout(
         root=folder,
@@ -49,6 +55,26 @@ def test_json_wins_over_xlsx(tmp: Path) -> None:
     assert choose_route_time_source(layout) == "json"
     layout.route_json = None
     assert choose_route_time_source(layout) == "xlsx"
+
+
+def test_empty_json_falls_back_to_xlsx(tmp: Path) -> None:
+    folder = tmp / "box"
+    folder.mkdir(parents=True)
+    (folder / "route.json").write_text("{}", encoding="utf-8")
+    (folder / "route_template_demo.xlsx").write_bytes(b"not-a-real-xlsx")
+    layout = RouteFolderLayout(
+        root=folder,
+        route_template=folder / "route_template_demo.xlsx",
+        route_json=folder / "route.json",
+    )
+    assert choose_route_time_source(layout) == "xlsx"
+    (folder / "route.json").write_text(
+        json.dumps({"stores": [{"store_code": "BO-04", "store_name": "ブックオフ"}]}),
+        encoding="utf-8",
+    )
+    assert choose_route_time_source(layout) == "xlsx"
+    layout.route_template = None
+    assert choose_route_time_source(layout) == "none"
 
 
 def test_route_json_model(tmp: Path) -> None:
@@ -328,6 +354,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="hirio_route_prep_") as raw:
         tmp = Path(raw)
         test_json_wins_over_xlsx(tmp / "src")
+        test_empty_json_falls_back_to_xlsx(tmp / "fallback")
         test_route_json_model(tmp / "model")
         test_prepare_does_not_rename_and_skips_second_time(tmp / "prep")
         test_confirm_and_scan_skips_barcode(tmp / "scan")
