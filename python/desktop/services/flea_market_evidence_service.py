@@ -147,6 +147,16 @@ def normalize_purchase_channel(value: Optional[str]) -> str:
     return raw
 
 
+def purchase_channel_from_supplier(record: Optional[Dict[str, Any]]) -> str:
+    """仕入先（CSV見出しの仕入れ先を含む）だけから仕入チャネルを取る。コメントは見ない。"""
+    row = record or {}
+    for key in ("仕入先", "仕入れ先"):
+        found = normalize_purchase_channel(str(row.get(key) or ""))
+        if found:
+            return found
+    return ""
+
+
 def infer_purchase_channel(record: Optional[Dict[str, Any]]) -> str:
     """行データから仕入チャネル（メルカリ・楽天等）を推定する。"""
     row = record or {}

@@ -15,6 +15,7 @@ from desktop.services.flea_market_evidence_service import (
     channel_code_for_source,
     gcs_blob_name,
     infer_purchase_channel,
+    purchase_channel_from_supplier,
     is_flea_purchase_row,
     is_flea_purchase_source,
     normalize_purchase_channel,
@@ -59,6 +60,12 @@ def test_is_flea_purchase_row_from_url_and_item_id():
     assert is_flea_purchase_row({"取引ID": "m91911023587"}, _MARKETS) is True
     assert is_flea_purchase_row({"仕入先": "HA01", "コメント": "[単品仕入][フリマ:メルカリ]"}, _MARKETS) is True
     assert is_flea_purchase_row({"仕入先": "HA01"}, _MARKETS) is False
+
+
+def test_purchase_channel_from_supplier_ignores_comment():
+    assert purchase_channel_from_supplier({"仕入先": "メルカリ", "コメント": "ヤフオク"}) == "メルカリ"
+    assert purchase_channel_from_supplier({"仕入れ先": "楽天", "コメント": "メルカリ"}) == "楽天"
+    assert purchase_channel_from_supplier({"コメント": "メルカリ"}) == ""
 
 
 def test_infer_purchase_channel_from_supplier_and_url():

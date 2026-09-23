@@ -323,6 +323,7 @@ class InventoryCsvImportMixin:
             "storage_fee": "在庫保管手数料",
             # 仕入先
             "仕入先": "仕入先",
+            "仕入れ先": "仕入先",
             "仕入元": "仕入先",
             "店舗": "仕入先",
             "supplier": "仕入先",
@@ -427,24 +428,32 @@ class InventoryCsvImportMixin:
         return new_df
 
     def _fill_purchase_channel_if_needed(self) -> None:
-        """ネット仕入の仕入チャネルが空なら、仕入先やURLから埋める。"""
+        """仕入チャネルが空なら埋める。ネット仕入は仕入先（CSVの仕入れ先）だけを使う。"""
         from services.flea_market_evidence_service import (
             PURCHASE_CHANNEL_COL,
             infer_purchase_channel,
+            purchase_channel_from_supplier,
         )
 
         df = self.inventory_data
         if df is None or len(df) == 0:
             return
+        online = getattr(self, "purchase_mode", "store") == "online"
         if PURCHASE_CHANNEL_COL not in df.columns:
-            if getattr(self, "purchase_mode", "store") != "online":
+            if not online:
                 return
             df[PURCHASE_CHANNEL_COL] = ""
         for idx, row in df.iterrows():
+            record = row.to_dict()
+            if online:
+                inferred = purchase_channel_from_supplier(record)
+                if inferred:
+                    df.at[idx, PURCHASE_CHANNEL_COL] = inferred
+                continue
             current = str(row.get(PURCHASE_CHANNEL_COL) or "").strip()
             if current and current.lower() not in ("nan", "none"):
                 continue
-            inferred = infer_purchase_channel(row.to_dict())
+            inferred = infer_purchase_channel(record)
             if inferred:
                 df.at[idx, PURCHASE_CHANNEL_COL] = inferred
 

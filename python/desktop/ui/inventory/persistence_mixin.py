@@ -257,10 +257,16 @@ class InventoryPersistenceMixin:
                 from services.flea_market_evidence_service import (
                     PURCHASE_CHANNEL_COL,
                     infer_purchase_channel,
+                    purchase_channel_from_supplier,
                 )
+                online = getattr(self, "purchase_mode", "store") == "online"
                 for rec in purchase_records:
                     if not str(rec.get(PURCHASE_CHANNEL_COL) or "").strip():
-                        inferred = infer_purchase_channel(rec)
+                        inferred = (
+                            purchase_channel_from_supplier(rec)
+                            if online
+                            else infer_purchase_channel(rec)
+                        )
                         if inferred:
                             rec[PURCHASE_CHANNEL_COL] = inferred
                 
