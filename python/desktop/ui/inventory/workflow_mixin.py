@@ -621,6 +621,45 @@ class InventoryWorkflowMixin:
             if idx >= 0:
                 combo.setCurrentIndex(idx)
 
+    def import_csv_only_from_route_box(self):
+        """ネット仕入向け。ルート箱の仕入CSVだけを読み込む。"""
+        from services.route_folder_import import resolve_route_folder_layout
+
+        base_dir = self._get_default_batch_root_dir()
+        ledger = Path(r"D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳")
+        if ledger.is_dir():
+            base_dir = str(ledger)
+
+        selected_dir = QFileDialog.getExistingDirectory(
+            self,
+            "ルート箱を選択（仕入CSV だけ読み込みます）",
+            base_dir,
+        )
+        if not selected_dir:
+            return
+
+        folder_path = Path(selected_dir)
+        try:
+            s = self._get_qsettings()
+            s.setValue("inventory/last_csv_folder", str(folder_path))
+        except Exception:
+            pass
+
+        layout = resolve_route_folder_layout(folder_path)
+        if layout.csv_path is None:
+            QMessageBox.warning(
+                self,
+                "CSV未検出",
+                "仕入CSV/ または直下に StockList_*.csv がありません。\n"
+                + "\n".join(layout.notes),
+            )
+            return
+
+        self._update_workflow_status("ルート箱CSV: 取込中…", emphasize=True)
+        QApplication.processEvents()
+        self._import_csv_from_path(str(layout.csv_path))
+        self._update_workflow_status("ルート箱CSV: 完了")
+
     def import_from_route_box(self):
         """ルート箱を1回選んで CSV／商品画像／レシート画像を既存タブへ振り分ける（Phase 3）。"""
         from services.route_folder_import import choose_route_time_source, resolve_route_folder_layout

@@ -284,6 +284,10 @@ class InventoryWidget(
             if w is not None:
                 w.setVisible(False)
                 w.setEnabled(False)
+        csv_only = getattr(self, "route_box_csv_btn", None)
+        if csv_only is not None:
+            csv_only.setVisible(True)
+            csv_only.setEnabled(True)
         combo = getattr(self, "view_mode_combo", None)
         if combo is not None:
             idx = combo.findText("ルートテンプレートビュー")
@@ -325,6 +329,19 @@ class InventoryWidget(
         self.import_btn.clicked.connect(lambda: self._run_action_with_status("CSV取込", self.import_csv))
         self.import_btn.setStyleSheet(green_button_style)
         workflow_layout.addWidget(self.import_btn)
+
+        self.route_box_csv_btn = QPushButton("ルート箱からCSV取込")
+        self.route_box_csv_btn.setToolTip(
+            "ルート箱の仕入CSVだけを読み込みます。ルート情報・画像・レシートは開きません。"
+        )
+        self.route_box_csv_btn.clicked.connect(
+            lambda: self._run_action_with_status(
+                "ルート箱からCSV取込", self.import_csv_only_from_route_box
+            )
+        )
+        self.route_box_csv_btn.setStyleSheet(green_button_style)
+        self.route_box_csv_btn.setVisible(self.is_online_mode)
+        workflow_layout.addWidget(self.route_box_csv_btn)
 
         self.route_box_import_btn = QPushButton("ルート箱から取込")
         self.route_box_import_btn.setToolTip(
