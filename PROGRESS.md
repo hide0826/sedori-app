@@ -2,11 +2,13 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-09-23（現場ルート 先読み・撮影分離）
+更新日: 2026-09-23（ルート一覧の番人）
 
 ---
 
 ## いまの状態
+
+**2026-09-23（ルート一覧の番人）:** `:8792` が落ちたら `python/route_web/watch.ps1` が約15秒で起動し直す。タスク `HIRIO_route_web`（ログオン時・起動2分後・5分おき）。再起動後は watcher の `HIRIO_boot_recover` もこの番人を起こす。`houseserver` は IPv6 が先に返るので、待ち受けは IPv4 と IPv6 の両方。ホーム画面アイコンは `static/icon.png`（表示名「ルート巡回」）。ログ `python/route_web/logs/route_web_watchdog.log`。
 
 **2026-09-23（先読み・撮影分離）:** 巡回Webは時刻とレシートだけ。商品撮影は `/route/{web_id}/photos`（仕入保存後）。「事前処理」はレシートをリネームせずOCRし、2回目は読み直さない。ルート箱取込は `route.json` を Excel より優先。確定した商品JANは画像DBに先に書き、スキャンはバーコードを読まない。サンドボックス `20260919鎌倉ルートサンドボックス` で、本番鎌倉ルートをコピーして確認（本番フォルダは未変更）。仕入の保存とプライスター送信は自動テストしていない。
 
@@ -25,9 +27,31 @@
 
 - ブランチ: **`feature/sp-api`**（旧作業枝 `feature/route-web-template` はマージ済・同コミット）
 - 起動: `start_hirio.bat` または `.venv\Scripts\python.exe python\desktop\main.py`
-- ルート時刻Web: `python\route_web\start_route_web.bat`（`:8792`）
+- ルート時刻Web: 番人 `python\route_web\watch.ps1`（`:8792`。落ちたら起動し直す）。手動は `start_route_web.bat`
 - Python: 3.13.15 / venv はこのマシンで作り直し済み
 - FastAPI: デスクトップ起動時に自動起動（失敗しても仕入画面は動く）
+
+---
+
+## 2026-09-23 ルート一覧の番人とアイコン
+
+### 追加・変更
+
+| 何 | 場所 |
+|----|------|
+| 番人 | `python/route_web/watch.ps1`（15秒ごとに 8792 を見る） |
+| タスク | `HIRIO_route_web`（ログオン・起動2分後・5分おき）。登録は `watch.ps1 -Install` |
+| 再起動後 | watcher の `hirio_boot_recover.ps1` がこの番人も起こす |
+| 待ち受け | `app.py` の `main()` が IPv4 と IPv6 の両方で 8792 を待つ（`houseserver` は IPv6 が先） |
+| アイコン | `python/route_web/static/icon.png`（表示名「ルート巡回」） |
+| ログ | `python/route_web/logs/`（gitignore） |
+
+### 試験
+
+- プロセスを止めると、約9秒後に `http://127.0.0.1:8792/health` が戻った
+- `http://houseserver:8792/health` は IPv4 と IPv6 の両方で 200
+- `/icon.png` `/apple-touch-icon.png` `/manifest.webmanifest` が 200
+- スマホのホームに既にある場合は、一度外して追加し直すとアイコンが変わる
 
 ---
 
@@ -181,7 +205,7 @@ ok test_merge_keeps_other_jans_and_puts_current_first
 | 仕様書 | `docs/specs/field_route_web_spec.md` |
 | 時刻Web | `python/route_web/`（`:8792`） |
 | **固定URL** | `http://houseserver:8792/`（一覧。スマホはこれだけブックマーク） |
-| 起動 | `python/route_web/start_route_web.bat` または Webテンプレ作成時に自動起動 |
+| 起動 | 番人 `python/route_web/watch.ps1`（タスク `HIRIO_route_web`）。手動は `start_route_web.bat`。Webテンプレ作成時も自動起動 |
 | ボタン | ルート選択「テンプレート生成」の右隣「Webテンプレート作成」 |
 
 ### 試験

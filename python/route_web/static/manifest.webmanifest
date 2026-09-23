@@ -1,0 +1,17 @@
+{
+  "name": "HIRIO ルート巡回",
+  "short_name": "ルート巡回",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f7fb",
+  "theme_color": "#2a9fe0",
+  "icons": [
+    {
+      "src": "/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

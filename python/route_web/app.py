@@ -47,6 +47,8 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 PAGE_PATH = STATIC_DIR / "route.html"
 PHOTOS_PATH = STATIC_DIR / "route_photos.html"
 INDEX_PATH = STATIC_DIR / "index.html"
+ICON_PATH = STATIC_DIR / "icon.png"
+MANIFEST_PATH = STATIC_DIR / "manifest.webmanifest"
 
 app = FastAPI(title="HIRIO Route Web", version="0.3.0")
 _prepare_guard = threading.Lock()
@@ -91,6 +93,23 @@ def _require_folder(web_id: str) -> Path:
 @app.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok", "service": "route_web", "version": "0.3.0"}
+
+
+@app.get("/icon.png")
+@app.get("/apple-touch-icon.png")
+@app.get("/apple-touch-icon-precomposed.png")
+@app.get("/favicon.ico")
+def route_icon() -> FileResponse:
+    if not ICON_PATH.is_file():
+        raise HTTPException(status_code=404, detail="icon missing")
+    return FileResponse(ICON_PATH, media_type="image/png")
+
+
+@app.get("/manifest.webmanifest")
+def route_manifest() -> FileResponse:
+    if not MANIFEST_PATH.is_file():
+        raise HTTPException(status_code=404, detail="manifest missing")
+    return FileResponse(MANIFEST_PATH, media_type="application/manifest+json")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -401,15 +420,41 @@ def create_app() -> FastAPI:
     return app
 
 
-def main() -> None:
-    import uvicorn
+def _bind_route_socket():
+    """IPv4 と IPv6 の両方で 8792 を待つ。
 
-    uvicorn.run(
+    houseserver という名前は IPv6 が先に返ることがある。
+    uvicorn にホスト名だけ渡すと、Windows では IPv6 だけになり IPv4 が届かない。
+    """
+    import socket
+
+    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("::", ROUTE_WEB_PORT))
+    except OSError:
+        sock.close()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("0.0.0.0", ROUTE_WEB_PORT))
+    sock.set_inheritable(True)
+    return sock
+
+
+def main() -> None:
+    from uvicorn import Config, Server
+
+    sock = _bind_route_socket()
+    config = Config(
         "route_web.app:app",
-        host="0.0.0.0",
+        host="::",
         port=ROUTE_WEB_PORT,
         reload=False,
     )
+    config.load_app()
+    server = Server(config=config)
+    server.run(sockets=[sock])
 
 
 if __name__ == "__main__":

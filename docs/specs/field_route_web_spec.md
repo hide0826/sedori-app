@@ -29,7 +29,7 @@
 
 - Webテンプレ作成時に同じ箱へ `route_template_*.xlsx` も生成
 - ルート箱を Drive 同期しておけば、落ちている間は **従来どおり Excel で滞在時刻入力**
-- Web（:8792）はミニPC上のため、ダウン中は開けない
+- Web（:8792）はミニPC上。プロセスが落ちたら番人 `python/route_web/watch.ps1` が約15秒で起動し直す（タスク `HIRIO_route_web`。再起動後は `HIRIO_boot_recover` もこの番人を起こす）。ミニPCの電源が切れている間は開けないので、その間は Excel
 
 ---
 
@@ -296,6 +296,8 @@ Webテンプレ作成の最後に:
 
 - 固定URL: `http://houseserver:8792/`
 - `route.json` 読み書き
+- 番人: `python/route_web/watch.ps1`（15秒ごとに 8792 を見て、落ちていれば `python -m route_web` を起動し直す）
+- ホーム画面アイコン: `static/icon.png`（表示名「ルート巡回」）。反映にはホームから一度外して追加し直す
 
 ### 6.3 スマホ運用
 
