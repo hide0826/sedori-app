@@ -197,7 +197,7 @@ class InventoryWorkflowMixin:
         3. 同じフォルダ内の route_template_*.xlsx を読み込み（ルートテンプレ読込と同等）
         4. 照合処理実行
         5. SKU生成
-        6. 統合保存
+        6. ストック保存
         7. DB保存
         8. 出品CSV生成（保存先は選択フォルダまたは既定設定）
         9. 古物台帳生成
@@ -390,10 +390,10 @@ class InventoryWorkflowMixin:
         QApplication.processEvents()
         self.generate_sku()
         
-        # 6. 統合保存
+        # 6. ストック保存
         if not self._should_run_step(
-            "工程5: 統合保存",
-            "現在の仕入データとルート情報を統合スナップショットとして保存します。"
+            "工程5: ストック保存",
+            "現在の仕入データとルート情報をストックとして保存します。"
         ):
             return
         self._set_workflow_pipeline_highlight(None)

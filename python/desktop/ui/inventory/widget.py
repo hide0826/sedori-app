@@ -276,8 +276,6 @@ class InventoryWidget(
             "route_template_btn",
             "matching_btn",
             "spot_purchase_btn",
-            "combined_save_btn",
-            "combined_load_btn",
             "route_box_import_btn",
         ):
             w = getattr(self, attr, None)
@@ -440,15 +438,21 @@ class InventoryWidget(
         self.clear_btn.setEnabled(False)
         aux_layout.addWidget(self.clear_btn)
 
-        self.combined_save_btn = QPushButton("統合保存")
+        self.combined_save_btn = QPushButton("ストック保存")
+        self.combined_save_btn.setToolTip(
+            "いまの仕入一覧とルート情報を、ルート名つきで保存します。出品CSVをあとでまとめるときに使います。"
+        )
         self.combined_save_btn.clicked.connect(
-            lambda: self._run_action_with_status("統合保存", self.save_combined_snapshot)
+            lambda: self._run_action_with_status("ストック保存", self.save_combined_snapshot)
         )
         aux_layout.addWidget(self.combined_save_btn)
 
-        self.combined_load_btn = QPushButton("統合読込")
+        self.combined_load_btn = QPushButton("ストック読込")
+        self.combined_load_btn.setToolTip(
+            "保存したストックから商品を選び、いま開いている仕入一覧のうしろに追加します。"
+        )
         self.combined_load_btn.clicked.connect(
-            lambda: self._run_action_with_status("統合読込", self.open_combined_snapshot_history)
+            lambda: self._run_action_with_status("ストック読込", self.open_combined_snapshot_history)
         )
         aux_layout.addWidget(self.combined_load_btn)
 

@@ -97,25 +97,23 @@ from .support import (
 )
 
 class CombinedSnapshotDialog(QDialog):
-    """統合スナップショットの一覧から選択して読込するダイアログ"""
-    
+    """保存したストックの一覧から、追加元を選ぶダイアログ"""
+
     def __init__(self, route_snapshot_db, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("統合スナップショット読込")
-        self.resize(720, 420)
+        self.setWindowTitle("ストック読込")
+        self.resize(760, 420)
         self.route_snapshot_db = route_snapshot_db
         self._selected_snapshot_id = None
-        
+
         layout = QVBoxLayout(self)
-        
-        # 説明ラベル
-        info_label = QLabel("読み込むスナップショットを選択してください:")
+
+        info_label = QLabel("追加したいストック（ルートやネット仕入）を選んでください:")
         layout.addWidget(info_label)
-        
-        # 一覧テーブル
+
         self.table = QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["ID", "保存名", "作成日時"])
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["ID", "保存名", "件数", "作成日時"])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         header = self.table.horizontalHeader()
@@ -143,13 +141,15 @@ class CombinedSnapshotDialog(QDialog):
             
             self.table.setRowCount(len(snapshots))
             for i, snap in enumerate(snapshots):
-                snapshot_id = str(snap.get('id', ''))
-                snapshot_name = str(snap.get('snapshot_name', ''))
-                created_at = str(snap.get('created_at', ''))
-                
+                snapshot_id = str(snap.get("id", ""))
+                snapshot_name = str(snap.get("snapshot_name", ""))
+                item_count = str(snap.get("item_count", ""))
+                created_at = str(snap.get("created_at", ""))
+
                 self.table.setItem(i, 0, QTableWidgetItem(snapshot_id))
                 self.table.setItem(i, 1, QTableWidgetItem(snapshot_name))
-                self.table.setItem(i, 2, QTableWidgetItem(created_at))
+                self.table.setItem(i, 2, QTableWidgetItem(item_count))
+                self.table.setItem(i, 3, QTableWidgetItem(created_at))
             
             self.table.resizeColumnsToContents()
         except Exception as e:
@@ -171,7 +171,7 @@ class CombinedSnapshotDialog(QDialog):
         """読み込みボタンクリック"""
         snapshot_id = self._selected_id()
         if snapshot_id is None:
-            QMessageBox.information(self, "情報", "読み込むスナップショットを選択してください")
+            QMessageBox.information(self, "情報", "追加するストックを選択してください")
             return
         self._selected_snapshot_id = snapshot_id
         self.accept()
@@ -179,4 +179,112 @@ class CombinedSnapshotDialog(QDialog):
     def get_selected_snapshot_id(self):
         """選択されたスナップショットIDを取得"""
         return self._selected_snapshot_id
+
+
+def _stock_field(record: Dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = record.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text and text.lower() not in ("nan", "none"):
+            return text
+    return ""
+
+
+class StockProductPickDialog(QDialog):
+    """ストックの中から、いまの仕入一覧に足す商品を選ぶ。"""
+
+    def __init__(self, records: List[Dict[str, Any]], stock_name: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("ストックの商品を選ぶ")
+        self.resize(920, 480)
+        self.records = list(records or [])
+
+        layout = QVBoxLayout(self)
+        title = stock_name or "ストック"
+        layout.addWidget(QLabel(
+            f"{title}\n追加する商品にチェックを入れてください。最初はすべて選択されています。"
+        ))
+
+        tools = QHBoxLayout()
+        all_btn = QPushButton("すべて選択")
+        none_btn = QPushButton("すべて解除")
+        all_btn.clicked.connect(lambda: self._set_all(True))
+        none_btn.clicked.connect(lambda: self._set_all(False))
+        tools.addWidget(all_btn)
+        tools.addWidget(none_btn)
+        tools.addStretch()
+        layout.addLayout(tools)
+
+        self.table = QTableWidget()
+        headers = ["追加", "仕入れ日", "商品名", "ASIN", "JAN", "仕入れ価格", "仕入れ個数"]
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+        self.table.setRowCount(len(self.records))
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        for col in (0, 1, 3, 4, 5, 6):
+            header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+
+        for row, record in enumerate(self.records):
+            box = QCheckBox()
+            box.setChecked(True)
+            holder = QWidget()
+            holder_layout = QHBoxLayout(holder)
+            holder_layout.setContentsMargins(0, 0, 0, 0)
+            holder_layout.setAlignment(Qt.AlignCenter)
+            holder_layout.addWidget(box)
+            self.table.setCellWidget(row, 0, holder)
+            values = [
+                _stock_field(record, "仕入れ日", "purchase_date"),
+                _stock_field(record, "商品名", "product_name", "title"),
+                _stock_field(record, "ASIN", "asin"),
+                _stock_field(record, "JAN", "jan"),
+                _stock_field(record, "仕入れ価格", "purchase_price"),
+                _stock_field(record, "仕入れ個数", "quantity"),
+            ]
+            for col, text in enumerate(values, start=1):
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.table.setItem(row, col, item)
+        layout.addWidget(self.table)
+
+        btns = QDialogButtonBox()
+        ok_btn = QPushButton("追加")
+        cancel_btn = QPushButton("キャンセル")
+        btns.addButton(ok_btn, QDialogButtonBox.AcceptRole)
+        btns.addButton(cancel_btn, QDialogButtonBox.RejectRole)
+        ok_btn.clicked.connect(self._on_ok)
+        cancel_btn.clicked.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _checkbox(self, row: int) -> Optional[QCheckBox]:
+        holder = self.table.cellWidget(row, 0)
+        if holder is None:
+            return None
+        box = holder.findChild(QCheckBox)
+        return box
+
+    def _set_all(self, checked: bool) -> None:
+        for row in range(self.table.rowCount()):
+            box = self._checkbox(row)
+            if box is not None:
+                box.setChecked(checked)
+
+    def _on_ok(self) -> None:
+        if not self.selected_records():
+            QMessageBox.information(self, "ストック読込", "商品が選ばれていません。")
+            return
+        self.accept()
+
+    def selected_records(self) -> List[Dict[str, Any]]:
+        chosen: List[Dict[str, Any]] = []
+        for row, record in enumerate(self.records):
+            box = self._checkbox(row)
+            if box is not None and box.isChecked():
+                chosen.append(record)
+        return chosen
+
 

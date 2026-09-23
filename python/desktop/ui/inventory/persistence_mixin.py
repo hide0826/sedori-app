@@ -100,7 +100,7 @@ from .support import (
     SALES_CHANNEL_OPTIONS,
     SHIPPING_METHOD_OPTIONS,
 )
-from .snapshot_dialog import CombinedSnapshotDialog
+from .snapshot_dialog import CombinedSnapshotDialog, StockProductPickDialog
 from services.flea_market_evidence_service import (
     PURCHASE_DB_FLEA_COLUMNS,
     transaction_id_match_key,
@@ -110,47 +110,55 @@ from services.flea_market_evidence_service import (
 class InventoryPersistenceMixin:
     def save_combined_snapshot(self):
         if self.inventory_data is None or len(self.inventory_data) == 0:
-            QMessageBox.information(self, "統合保存", "仕入データがありません。")
-            return
-        if not self.route_summary_widget:
-            QMessageBox.information(self, "統合保存", "ルートテンプレートが未ロードです。")
+            QMessageBox.information(self, "ストック保存", "仕入データがありません。")
             return
         try:
             purchase_records = self.inventory_data.fillna("").to_dict(orient="records")
         except Exception:
             purchase_records = []
-        route_data = self.route_summary_widget.get_route_data()
-        visits = self.route_summary_widget.get_store_visits_data()
+        route_data: Dict[str, Any] = {}
+        visits: List[Dict[str, Any]] = []
+        if self.route_summary_widget:
+            try:
+                route_data = self.route_summary_widget.get_route_data() or {}
+                visits = self.route_summary_widget.get_store_visits_data() or []
+            except Exception:
+                route_data = {}
+                visits = []
         payload = {"route": route_data, "visits": visits}
-        route_date = route_data.get('route_date', '')
-        route_code = route_data.get('route_code', '')
-        
-        # ルートコードを日本語名に変換
+        route_date = str(route_data.get("route_date") or "").strip()
+        route_code = str(route_data.get("route_code") or "").strip()
+
         route_name = None
-        if route_code:
+        if route_code and hasattr(self, "store_db"):
             route_name = self.store_db.get_route_name_by_code(route_code)
-        
-        # 保存名を生成（日付 + 日本語ルート名）
-        snapshot_name = (route_date or "未設定").strip()
+
+        snapshot_name = route_date
         if route_name:
             snapshot_name = f"{snapshot_name} {route_name}".strip()
         elif route_code:
-            # 日本語名が取得できない場合はコードをそのまま使用
             snapshot_name = f"{snapshot_name} {route_code}".strip()
-        
-        if not snapshot_name or snapshot_name == "未設定":
+        if not snapshot_name:
+            purchase_date = ""
+            if purchase_records:
+                purchase_date = str(purchase_records[0].get("仕入れ日") or "").strip()[:10]
             from datetime import datetime
-            snapshot_name = datetime.now().strftime("Snapshot %Y-%m-%d %H:%M:%S")
-        
-        # 日付とルートが同じ場合は上書き保存、それ以外は新規保存
+            day = purchase_date or datetime.now().strftime("%Y-%m-%d")
+            label = "ネット仕入" if getattr(self, "is_online_mode", False) else "ストック"
+            snapshot_name = f"{day} {label}"
+
         self.route_snapshot_db.save_snapshot(
-            snapshot_name, 
-            purchase_records, 
+            snapshot_name,
+            purchase_records,
             payload,
             route_date=route_date,
-            route_code=route_code
+            route_code=route_code,
         )
-        QMessageBox.information(self, "統合保存", f"統合スナップショットを保存しました。\n{snapshot_name}")
+        QMessageBox.information(
+            self,
+            "ストック保存",
+            f"ストックを保存しました。\n{snapshot_name}\n{len(purchase_records)}件",
+        )
 
     def _confirm_condition_edit_then_save_to_databases(self) -> bool:
         """
@@ -633,20 +641,70 @@ class InventoryPersistenceMixin:
     def open_combined_snapshot_history(self):
         snapshots = self.route_snapshot_db.list_snapshots()
         if not snapshots:
-            QMessageBox.information(self, "統合読込", "統合スナップショットがありません。")
+            QMessageBox.information(self, "ストック読込", "ストックがありません。先にストック保存してください。")
             return
-        
-        # カスタムダイアログを使用
+
         dlg = CombinedSnapshotDialog(self.route_snapshot_db, self)
+        dlg.setWindowTitle("ストック読込")
         res = dlg.exec()
-        if res == QDialog.Accepted:
-            snapshot_id = dlg.get_selected_snapshot_id()
-            if snapshot_id:
-                snapshot = self.route_snapshot_db.get_snapshot(snapshot_id)
-                if not snapshot:
-                    QMessageBox.warning(self, "統合読込", "選択したスナップショットを取得できませんでした。")
-                    return
-                self._restore_combined_snapshot(snapshot)
+        if res != QDialog.Accepted:
+            return
+        snapshot_id = dlg.get_selected_snapshot_id()
+        if not snapshot_id:
+            return
+        snapshot = self.route_snapshot_db.get_snapshot(snapshot_id)
+        if not snapshot:
+            QMessageBox.warning(self, "ストック読込", "選択したストックを取得できませんでした。")
+            return
+        records = snapshot.get("purchase_data") or []
+        if not records:
+            QMessageBox.information(self, "ストック読込", "このストックに商品がありません。")
+            return
+        pick = StockProductPickDialog(records, str(snapshot.get("snapshot_name") or ""), self)
+        if pick.exec() != QDialog.Accepted:
+            return
+        chosen = pick.selected_records()
+        if not chosen:
+            QMessageBox.information(self, "ストック読込", "商品が選ばれていません。")
+            return
+        self._append_stock_records(chosen)
+
+    def _append_stock_records(self, records: List[Dict[str, Any]]) -> None:
+        """選んだ商品を、いま開いている仕入一覧のうしろに足す。ルート情報は変えない。"""
+        try:
+            extra = pd.DataFrame(records)
+            if self.inventory_data is None or len(self.inventory_data) == 0:
+                self.inventory_data = extra
+            else:
+                self.inventory_data = pd.concat(
+                    [self.inventory_data, extra],
+                    ignore_index=True,
+                )
+            self.inventory_data = self.inventory_data.fillna("")
+            self.filtered_data = self.inventory_data.copy()
+            try:
+                self._auto_match_sku_from_product_db()
+            except Exception:
+                pass
+            self.filtered_data = self.inventory_data.copy()
+            self.update_table()
+            self.update_data_count()
+            if len(self.inventory_data) > 0:
+                self.export_btn.setEnabled(True)
+                self.clear_btn.setEnabled(True)
+                if hasattr(self, "clear_sku_btn"):
+                    self.clear_sku_btn.setEnabled(True)
+                self.generate_sku_btn.setEnabled(True)
+                self.export_listing_btn.setEnabled(True)
+                self.antique_register_btn.setEnabled(True)
+            QMessageBox.information(
+                self,
+                "ストック読込",
+                f"{len(records)}件を、いまの仕入一覧のうしろに追加しました。\n"
+                "このまま出品CSVを生成できます。",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "ストック読込エラー", f"ストックの追加に失敗しました:\n{e}")
 
     def _restore_combined_snapshot(self, snapshot: Dict[str, Any]):
         try:
