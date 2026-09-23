@@ -96,3 +96,22 @@ def test_prune_old_backups(tmp_path: Path) -> None:
     assert len(removed) == 3
     remaining = list_backup_archives(tmp_path)
     assert len(remaining) == 2
+
+
+def test_nightly_restart_due_only_inside_window() -> None:
+    from datetime import datetime
+
+    from desktop.services.backup_service import nightly_restart_due
+
+    at_three = datetime(2026, 9, 24, 3, 0)
+    assert nightly_restart_due(at_three, True, "03:00", "") is True
+    assert nightly_restart_due(at_three, True, "03:00", "2026-09-24") is False
+    assert nightly_restart_due(at_three, False, "03:00", "") is False
+    afternoon = datetime(2026, 9, 24, 17, 40)
+    assert nightly_restart_due(afternoon, True, "03:00", "") is False
+    just_before = datetime(2026, 9, 24, 2, 59)
+    assert nightly_restart_due(just_before, True, "03:00", "") is False
+    still_open = datetime(2026, 9, 24, 5, 59)
+    assert nightly_restart_due(still_open, True, "03:00", "") is True
+    closed = datetime(2026, 9, 24, 6, 0)
+    assert nightly_restart_due(closed, True, "03:00", "") is False

@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import zipfile
 from dataclasses import dataclass
@@ -92,6 +95,113 @@ def get_backup_keep_count() -> int:
 
 def is_backup_include_config_enabled() -> bool:
     return _settings().value("backup/include_config", True, type=bool)
+
+
+def is_nightly_restart_enabled() -> bool:
+    """常時起動でも、夜に一度終了して起動し直す。未設定時はオン。"""
+    return _settings().value("backup/nightly_restart", True, type=bool)
+
+
+def get_nightly_restart_hhmm() -> str:
+    return str(_settings().value("backup/nightly_restart_time", "03:00") or "03:00")
+
+
+def get_nightly_restart_done_date() -> str:
+    return str(_settings().value("backup/nightly_restart_done", "") or "")
+
+
+def mark_nightly_restart_done(day: str) -> None:
+    settings = _settings()
+    settings.setValue("backup/nightly_restart_done", day)
+    settings.sync()
+
+
+def parse_hhmm(text: str) -> Tuple[int, int]:
+    try:
+        hour_text, minute_text = str(text).strip().split(":", 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour, minute
+    except (TypeError, ValueError):
+        pass
+    return 3, 0
+
+
+def is_within_nightly_window(
+    now: datetime,
+    hour: int,
+    minute: int,
+    window_minutes: int = 180,
+) -> bool:
+    """指定時刻から最大3時間。日をまたいだ分は含めない。"""
+    now_minutes = now.hour * 60 + now.minute
+    start = hour * 60 + minute
+    end = min(start + window_minutes, 24 * 60)
+    return start <= now_minutes < end
+
+
+def nightly_restart_due(
+    now: datetime,
+    enabled: bool,
+    hhmm: str,
+    done_date: str,
+) -> bool:
+    if not enabled:
+        return False
+    if done_date == now.strftime("%Y-%m-%d"):
+        return False
+    hour, minute = parse_hhmm(hhmm)
+    return is_within_nightly_window(now, hour, minute)
+
+
+def nightly_restart_is_due(now: Optional[datetime] = None) -> bool:
+    current = now or datetime.now()
+    return nightly_restart_due(
+        current,
+        is_nightly_restart_enabled(),
+        get_nightly_restart_hhmm(),
+        get_nightly_restart_done_date(),
+    )
+
+
+def begin_nightly_restart() -> bool:
+    """時刻が来ていれば、終了後の再起動を予約して真を返す。"""
+    if not nightly_restart_is_due():
+        return False
+    if not schedule_relaunch_after_exit():
+        return False
+    mark_nightly_restart_done(datetime.now().strftime("%Y-%m-%d"))
+    return True
+
+
+def schedule_relaunch_after_exit() -> bool:
+    """このプロセスが終わったあと、start_hirio.bat を起動する。"""
+    bat = _repo_root() / "start_hirio.bat"
+    script = Path(__file__).resolve().parent.parent / "restart_hirio_after_exit.ps1"
+    if not bat.is_file() or not script.is_file():
+        logger.warning("nightly restart skipped: bat=%s script=%s", bat, script)
+        return False
+    flags = 0
+    if sys.platform == "win32":
+        flags = subprocess.CREATE_NO_WINDOW
+    subprocess.Popen(
+        [
+            "powershell",
+            "-NoProfile",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+            str(script),
+            "-WaitPid",
+            str(os.getpid()),
+            "-BatPath",
+            str(bat),
+        ],
+        creationflags=flags,
+        close_fds=False,
+    )
+    return True
 
 
 def inspect_sqlite_db(path: Path) -> Dict[str, Any]:

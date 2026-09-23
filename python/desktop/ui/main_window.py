@@ -130,8 +130,31 @@ class MainWindow(QMainWindow):
         self._route_scan_timer.setInterval(5000)
         self._route_scan_timer.timeout.connect(self._poll_route_scan_requests)
         self._route_scan_timer.start()
+
+        # 常時起動でも、夜に一度閉じて終了時バックアップのあと起動し直す
+        self._nightly_restart_busy = False
+        self._nightly_timer = QTimer(self)
+        self._nightly_timer.setInterval(30_000)
+        self._nightly_timer.timeout.connect(self._check_nightly_restart)
+        self._nightly_timer.start()
         
         # タブの順序は _deferred_setup_tabs 完了後に復元する
+
+    def _check_nightly_restart(self) -> None:
+        if self._nightly_restart_busy:
+            return
+        try:
+            from services.backup_service import begin_nightly_restart
+        except ImportError:
+            from desktop.services.backup_service import begin_nightly_restart  # type: ignore
+        try:
+            if not begin_nightly_restart():
+                return
+        except Exception:
+            return
+        self._nightly_restart_busy = True
+        print("[HIRIO] 夜の再起動を開始します")
+        self.close()
         
     def closeEvent(self, event):
         """ウィンドウが閉じるときのイベント"""

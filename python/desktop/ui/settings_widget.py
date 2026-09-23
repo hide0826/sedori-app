@@ -16,9 +16,9 @@ from PySide6.QtWidgets import (
     QGroupBox, QTabWidget, QTextEdit, QFileDialog,
     QMessageBox, QComboBox, QSlider, QTableWidget,
     QTableWidgetItem, QHeaderView, QDialog, QProgressDialog,
-    QApplication,
+    QApplication, QTimeEdit,
 )
-from PySide6.QtCore import Qt, QSettings, Signal, QThread
+from PySide6.QtCore import Qt, QSettings, QTime, Signal, QThread
 from PySide6.QtGui import QFont
 import json
 from datetime import datetime
@@ -736,7 +736,8 @@ class SettingsWidget(QWidget):
         info_label = QLabel(
             "業務データ（DB・設定JSON）を ZIP でバックアップします。\n"
             "保存先を Google Drive などの同期フォルダに指定すると、クラウドにも自動コピーできます。\n"
-            "※ 使用中の hirio.db を直接同期しないでください。完成した ZIP のみを同期してください。"
+            "※ 使用中の hirio.db を直接同期しないでください。完成した ZIP のみを同期してください。\n"
+            "常時起動のときは、夜中に一度終了して起動し直します。終了時バックアップがオンなら、そのときに ZIP を作ります。"
         )
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
@@ -772,11 +773,28 @@ class SettingsWidget(QWidget):
         self.backup_include_config_cb.setChecked(True)
         folder_layout.addWidget(self.backup_include_config_cb, 3, 0, 1, 3)
 
+        self.backup_nightly_restart_cb = QCheckBox("毎日、夜中に一度終了して起動し直す")
+        self.backup_nightly_restart_cb.setChecked(True)
+        self.backup_nightly_restart_cb.setToolTip(
+            "指定した時刻から3時間のあいだに、PCが起きていれば1回だけ閉じます。"
+            "終了時に自動バックアップがオンなら ZIP を作り、そのあと HIRIO を起動し直します。"
+        )
+        folder_layout.addWidget(self.backup_nightly_restart_cb, 4, 0, 1, 3)
+
+        folder_layout.addWidget(QLabel("再起動する時刻:"), 5, 0)
+        self.backup_nightly_time_edit = QTimeEdit()
+        self.backup_nightly_time_edit.setDisplayFormat("HH:mm")
+        self.backup_nightly_time_edit.setTime(QTime(3, 0))
+        self.backup_nightly_time_edit.setToolTip("初期値は 03:00 です。")
+        folder_layout.addWidget(self.backup_nightly_time_edit, 5, 1, 1, 2)
+
         for widget in (
             self.backup_folder_edit,
             self.backup_auto_on_exit_cb,
             self.backup_keep_count_spin,
             self.backup_include_config_cb,
+            self.backup_nightly_restart_cb,
+            self.backup_nightly_time_edit,
         ):
             if hasattr(widget, "editingFinished"):
                 widget.editingFinished.connect(self._save_backup_settings_to_qsettings)
@@ -784,6 +802,8 @@ class SettingsWidget(QWidget):
                 widget.toggled.connect(self._save_backup_settings_to_qsettings)
             if hasattr(widget, "valueChanged"):
                 widget.valueChanged.connect(self._save_backup_settings_to_qsettings)
+            if hasattr(widget, "timeChanged"):
+                widget.timeChanged.connect(self._save_backup_settings_to_qsettings)
 
         layout.addWidget(folder_group)
 
@@ -832,6 +852,11 @@ class SettingsWidget(QWidget):
         self.settings.setValue("backup/auto_on_exit", self.backup_auto_on_exit_cb.isChecked())
         self.settings.setValue("backup/keep_count", self.backup_keep_count_spin.value())
         self.settings.setValue("backup/include_config", self.backup_include_config_cb.isChecked())
+        self.settings.setValue("backup/nightly_restart", self.backup_nightly_restart_cb.isChecked())
+        self.settings.setValue(
+            "backup/nightly_restart_time",
+            self.backup_nightly_time_edit.time().toString("HH:mm"),
+        )
 
     def _get_backup_service(self):
         return create_backup, get_backup_folder, list_backup_archives, restore_from_zip
@@ -863,6 +888,11 @@ class SettingsWidget(QWidget):
             lines.append(f"最終成功: {last_at}")
         if last_path:
             lines.append(f"最終ファイル: {last_path}")
+        if self.backup_nightly_restart_cb.isChecked():
+            restart_at = self.backup_nightly_time_edit.time().toString("HH:mm")
+            lines.append(f"夜の再起動: 毎日 {restart_at}（PCが起きていれば1回）")
+        else:
+            lines.append("夜の再起動: オフ")
 
         self.backup_status_label.setText("\n".join(lines))
 
@@ -1566,6 +1596,12 @@ PySide6 バージョン: {__import__('PySide6').__version__}
             self.backup_include_config_cb.setChecked(
                 self.settings.value("backup/include_config", True, type=bool)
             )
+            self.backup_nightly_restart_cb.setChecked(
+                self.settings.value("backup/nightly_restart", True, type=bool)
+            )
+            restart_at = str(self.settings.value("backup/nightly_restart_time", "03:00") or "03:00")
+            parsed = QTime.fromString(restart_at, "HH:mm")
+            self.backup_nightly_time_edit.setTime(parsed if parsed.isValid() else QTime(3, 0))
             self._refresh_backup_status()
             
     def save_settings(self):
