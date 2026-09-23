@@ -27,7 +27,14 @@ _SELLER_SKIP_FRAGMENTS = (
     "取引完了",
     "コピーする",
     "ゆうゆうメルカリ便",
+    "ゆうパケット",
+    "でお届け",
+    "らくらくメルカリ便",
+    "専用資材",
+    "匿名配送",
     "出品者負担",
+    "出品者レベル",
+    "送料",
 )
 
 _DATE_LABEL_RE = re.compile(
@@ -181,3 +188,11 @@ def _extract_seller_name(text: str) -> str:
 
 def _is_seller_skip_line(line: str) -> bool:
     return any(frag in line for frag in _SELLER_SKIP_FRAGMENTS)
+
+
+def is_delivery_label_name(name: str) -> bool:
+    """配送方法の文言を、出品者名とみなさない。"""
+    text = str(name or "").strip()
+    if not text:
+        return False
+    return _is_seller_skip_line(text)

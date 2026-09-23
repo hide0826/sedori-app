@@ -8,11 +8,12 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QEvent, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -55,6 +56,8 @@ class _SlotWidget(QWidget):
             "QLabel { background:#2b2b2b; border:1px solid #555; color:#aaa; }"
         )
         self.thumb.setScaledContents(False)
+        self.thumb.setToolTip("ダブルクリックで拡大します")
+        self.thumb.installEventFilter(self)
         layout.addWidget(self.thumb)
         btn_row = QHBoxLayout()
         paste_btn = QPushButton("貼り付け")
@@ -68,6 +71,35 @@ class _SlotWidget(QWidget):
         btn_row.addWidget(file_btn)
         btn_row.addWidget(clear_btn)
         layout.addLayout(btn_row)
+
+    def eventFilter(self, watched, event):
+        if watched is self.thumb and event.type() == QEvent.Type.MouseButtonDblClick:
+            self._open_large()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _open_large(self) -> None:
+        if self.image is None or self.image.isNull():
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.title)
+        label = QLabel()
+        label.setAlignment(Qt.AlignCenter)
+        pixmap = QPixmap.fromImage(self.image)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            pixmap = pixmap.scaled(
+                int(area.width() * 0.9),
+                int(area.height() * 0.9),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        label.setPixmap(pixmap)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(label)
+        dialog.resize(pixmap.width() + 24, pixmap.height() + 24)
+        dialog.exec()
 
     def mousePressEvent(self, event):
         self.selected.emit(self.index)

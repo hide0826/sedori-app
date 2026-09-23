@@ -536,8 +536,10 @@ class InventoryRowEditDialog(QDialog):
             return w.currentText().strip()
         return str(self.row_data.get(col) or "").strip()
 
-    def _set_widget_text(self, col: str, value: str) -> None:
+    def _set_widget_text(self, col: str, value: str, only_if_empty: bool = False) -> None:
         if not value:
+            return
+        if only_if_empty and self._widget_text(col):
             return
         w = self._widgets.get(col)
         if isinstance(w, QLineEdit):
@@ -593,12 +595,18 @@ class InventoryRowEditDialog(QDialog):
         if app is not None:
             app.removeEventFilter(self)
 
-    def _apply_ocr_fields_to_widgets(self, parsed) -> None:
+    def _apply_ocr_fields_to_widgets(self, parsed, only_if_empty: bool = False) -> None:
         if parsed is None:
             return
-        self._set_widget_text("取引ID", getattr(parsed, "item_id", "") or "")
-        self._set_widget_text("出品URL", getattr(parsed, "listing_url", "") or "")
-        self._set_widget_text("ユーザー名", getattr(parsed, "seller_name", "") or "")
+        self._set_widget_text(
+            "取引ID", getattr(parsed, "item_id", "") or "", only_if_empty=only_if_empty
+        )
+        self._set_widget_text(
+            "出品URL", getattr(parsed, "listing_url", "") or "", only_if_empty=only_if_empty
+        )
+        self._set_widget_text(
+            "ユーザー名", getattr(parsed, "seller_name", "") or "", only_if_empty=only_if_empty
+        )
 
     def accept(self):
         if self.evidence_panel is not None:
@@ -620,7 +628,7 @@ class InventoryRowEditDialog(QDialog):
         parsed = panel.ocr_result()
         if panel.has_any_image() and not parsed.has_core_fields():
             parsed = panel.run_ocr()
-        self._apply_ocr_fields_to_widgets(parsed)
+        self._apply_ocr_fields_to_widgets(parsed, only_if_empty=True)
         if panel.should_apply_datetime() and parsed.purchase_datetime:
             self._set_widget_text("仕入れ日", parsed.purchase_datetime)
         if not panel.has_any_image():

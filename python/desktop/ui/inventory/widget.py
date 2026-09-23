@@ -107,6 +107,7 @@ from .route_match_mixin import InventoryRouteMatchMixin
 from .persistence_mixin import InventoryPersistenceMixin
 from .listing_mixin import InventoryListingMixin
 from .workflow_mixin import InventoryWorkflowMixin
+from .mercari_capture_mixin import InventoryMercariCaptureMixin
 from .row_edit_dialog import InventoryRowEditDialog  # noqa: F401
 from .spot_purchase_dialog import SpotPurchaseDialog
 from .single_purchase_dialog import SinglePurchaseInputDialog
@@ -120,6 +121,7 @@ class InventoryWidget(
     InventoryPersistenceMixin,
     InventoryListingMixin,
     InventoryWorkflowMixin,
+    InventoryMercariCaptureMixin,
     QWidget,
 ):
     """仕入管理ウィジェット"""
@@ -340,6 +342,20 @@ class InventoryWidget(
         self.route_box_csv_btn.setStyleSheet(green_button_style)
         self.route_box_csv_btn.setVisible(self.is_online_mode)
         workflow_layout.addWidget(self.route_box_csv_btn)
+
+        self.info_capture_btn = QPushButton("情報撮影")
+        self.info_capture_btn.setToolTip(
+            "出品URLのメルカリ商品を、いま開いているChromeで3枚撮って証憑に保存します。"
+            "最初に拡張機能を一度入れます。ヤフオクは未対応です。"
+        )
+        self.info_capture_btn.clicked.connect(
+            lambda: self._run_action_with_status(
+                "情報撮影", self.capture_mercari_listing_evidence
+            )
+        )
+        self.info_capture_btn.setStyleSheet(green_button_style)
+        self.info_capture_btn.setVisible(self.is_online_mode)
+        workflow_layout.addWidget(self.info_capture_btn)
 
         self.route_box_import_btn = QPushButton("ルート箱から取込")
         self.route_box_import_btn.setToolTip(

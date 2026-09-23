@@ -2,11 +2,13 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-09-23（仕入チャネル）
+更新日: 2026-09-23（情報撮影）
 
 ---
 
 ## いまの状態
+
+**2026-09-23（情報撮影）:** ネット仕入の「情報撮影」は、いま開いているログイン済みChromeでメルカリを3枚撮る。拡張 `python/desktop/mercari_capture_extension`（表示名「HIRIO メルカリ撮影」1.0.2）を一度読み込む。撮影はゆっくり。サムネはダブルクリックで拡大。ユーザー名は「ゆうパケットプラスでお届け」などを飛ばす。行の編集で直したユーザー名・取引ID・出品URLは、OKを押しても空欄のときだけ画像の読み取りで埋める。反映には HIRIO 再起動。拡張の中身を変えたあとは chrome://extensions で再読み込み。ヤフオクは未対応。
 
 **2026-09-23（仕入チャネル）:** ネット仕入の仕入チャネルは、CSVの「仕入れ先」から入れる。コメントは見ない。反映には HIRIO 再起動。
 
@@ -40,6 +42,44 @@
 - ルート時刻Web: 番人 `python\route_web\watch.ps1`（`:8792`。落ちたら起動し直す）。手動は `start_route_web.bat`
 - Python: 3.13.15 / venv はこのマシンで作り直し済み
 - FastAPI: デスクトップ起動時に自動起動（失敗しても仕入画面は動く）
+
+---
+
+## 2026-09-23 情報撮影（メルカリ証憑）
+
+ネット仕入で、出品URL（`https://jp.mercari.com/item/m...`）がある行を、ログイン済みの普段のChromeで3枚撮る。新しい空のChromeは使わない（ログインが切れるため）。パスワードは保存しない。
+
+### 動き
+
+1. 行を選んで「情報撮影」（未選択なら、メルカリURLがある行全部）
+2. HIRIO が `127.0.0.1:8765` で待ち、いまの Chrome にそのページを開く
+3. 拡張が商品の上、説明までスクロール、取引画面の3枚を撮る
+4. 証憑フォルダへ保存し、取引IDが空なら入れ、ユーザー名が空か配送表示なら入れ直す
+5. ログインを求められたら「続ける／中止」。人がログインしてから続ける
+
+### 追加・変更
+
+| 何 | 場所 |
+|----|------|
+| ボタン | `python/desktop/ui/inventory/widget.py`（ネット仕入のときだけ） |
+| 待ち受けと保存 | `python/desktop/ui/inventory/mercari_capture_mixin.py` |
+| 拡張 | `python/desktop/mercari_capture_extension`（manifest 1.0.2） |
+| URLの正規化 | `python/desktop/services/mercari_evidence_capture.py` |
+| 出品者名 | `python/desktop/services/flea_market_evidence_ocr.py`（配送表示を飛ばす） |
+| サムネ拡大 | `python/desktop/ui/inventory/flea_evidence_panel.py` |
+| 手入力を残す | `python/desktop/ui/inventory/row_edit_dialog.py`（OK時は空欄だけ埋める。「取引画面をOCRして入力」は上書き） |
+
+### 使う前
+
+1. HIRIO を終了して起動し直す
+2. `chrome://extensions` で「HIRIO メルカリ撮影」を読み込む（更新したあとは再読み込み。サイトへのアクセスを許可）
+3. 出品URLが空の行は撮らない
+
+### 試験
+
+- ログイン済みChromeで3枚保存できた（商品・説明・取引画面）
+- 出品者「よう」の前に「ゆうパケットプラスでお届け」があっても、読み取りは「よう」
+- 行の編集でユーザー名を直してOKすると、その名前が残る（コード上。再起動後に画面で確認）
 
 ---
 

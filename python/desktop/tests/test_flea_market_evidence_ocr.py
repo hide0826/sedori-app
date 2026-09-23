@@ -51,6 +51,22 @@ def test_parse_mercari_transaction_sample():
     assert "本人確認" not in result.seller_name
 
 
+def test_seller_name_skips_yu_packet_delivery_label():
+    text = """
+取引が完了しました
+ゆうパケットプラスでお届け
+専用資材
+出品者情報
+ゆうパケットプラスでお届け
+よう
+本人確認済
+出品者レベル10
+商品ID m62420345061
+"""
+    result = parse_transaction_ocr_text(text)
+    assert result.seller_name == "よう"
+
+
 def test_listing_page_is_not_transaction():
     assert looks_like_transaction_page(_SAMPLE_LISTING) is False
     result = parse_transaction_ocr_text(_SAMPLE_LISTING)
