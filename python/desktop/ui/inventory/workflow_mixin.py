@@ -601,7 +601,7 @@ class InventoryWorkflowMixin:
 
     def import_from_route_box(self):
         """ルート箱を1回選んで CSV／商品画像／レシート画像を既存タブへ振り分ける（Phase 3）。"""
-        from services.route_folder_import import resolve_route_folder_layout
+        from services.route_folder_import import choose_route_time_source, resolve_route_folder_layout
 
         base_dir = self._get_default_batch_root_dir()
         # 仕入帳を優先
@@ -642,15 +642,22 @@ class InventoryWorkflowMixin:
         self._import_csv_from_path(str(layout.csv_path))
         lines.append(f"CSV: {layout.csv_path.name}")
 
-        # ルートテンプレ（あれば）
-        if self.route_summary_widget and layout.route_template is not None:
+        # 時刻は route.json 優先。無いときだけ Excel。
+        time_source = choose_route_time_source(layout)
+        if self.route_summary_widget and time_source == "json":
+            try:
+                store_count = self.route_summary_widget.load_route_json_file(str(layout.route_json))
+                lines.append(f"route.json から読み込み（店舗{store_count}件）")
+            except Exception as exc:
+                lines.append(f"route.json 読込失敗: {exc}")
+        elif self.route_summary_widget and layout.route_template is not None:
             try:
                 self.route_summary_widget.load_template(str(layout.route_template))
                 lines.append(f"ルートテンプレ: {layout.route_template.name}")
             except Exception as exc:
                 lines.append(f"ルートテンプレ読込失敗: {exc}")
         elif layout.route_json is not None:
-            lines.append(f"route.json あり（テンプレxlsx無し）: {layout.route_json.name}")
+            lines.append(f"route.json あり（ルート画面未初期化）: {layout.route_json.name}")
 
         main = self._find_main_window()
         # 商品画像
@@ -666,6 +673,15 @@ class InventoryWorkflowMixin:
                 lines.append("画像管理ウィジェット未初期化")
         elif layout.product_dir is None:
             lines.append("商品画像/ なし")
+
+        try:
+            from services.route_product_seed import seed_confirmed_jans
+
+            seeded = seed_confirmed_jans(folder_path)
+            if seeded:
+                lines.append(f"商品画像: 確定JAN {seeded}件を先に登録（スキャン時はバーコードを読み直さない）")
+        except Exception as exc:
+            lines.append(f"商品JAN先登録スキップ: {exc}")
 
         # レシート
         if main is not None and layout.receipt_dir is not None:

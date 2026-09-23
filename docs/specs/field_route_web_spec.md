@@ -1,10 +1,10 @@
 # 現場ルートWeb 仕様書（Cursor 横断用）
 
-更新日: 2026-09-22  
+更新日: 2026-09-23  
 リポジトリ: `C:\HIRIO\repo\sedori-app.github`  
 作業枝: **`feature/sp-api`**
 
-**いまここ:** Phase 1〜5 実装済。**CSV は Google Drive でルート箱の `仕入CSV/` へ直送**。Webテンプレ作成時に **Excel も同時生成**（ミニPCダウン時の滞在時刻保険）。1.5b は見送り。
+**いまここ:** Phase 1〜5 実装済。巡回画面は時刻とレシート。商品撮影は仕入保存後の別画面。事前処理はレシートOCRのみ（ファイル名は変えない）。1.5b は見送り。
 
 ### サンドボックス（レシート未投入・撮影テスト用）
 
@@ -270,13 +270,17 @@ Webテンプレ作成の最後に:
 
 ## 5d. Phase 5（商品撮影）
 
-各店舗カードに「商品を撮る」「アルバムから」＋任意 JAN（手入力）。
+巡回中の各店舗カードには商品撮影を出さない。仕入を保存したあとの別画面で撮る。
 
 - 保存先: `{ルート箱}/商品画像/`
 - ファイル名: `{route_date}-{store_code}-item-{連番}.jpg`
 - `stores[].product_files`: `[{"file":"…jpg","jan":"…"}]`（jan は任意）
 - API: `POST /api/route/{web_id}/stores/{store_code}/products`（form: file + jan）
-- バーコード自動読取は第1弾ではやらない（帰宅後の画像管理スキャン）
+- バーコード自動読取は、仕入保存後の商品撮影画面で行う（巡回中の画面には出さない）
+- 巡回画面: 時刻・仕入点数・レシート。ボタン「事前処理を実行」でレシートOCR（`prep_status.json` と証憑DB。リネームしない）
+- 商品撮影: `/route/{web_id}/photos`。JANあり／JANなし。「撮影終了」で `product_files[].confirmed`。仕入レコードの画像列はここでは書き換えない
+- 「スキャン実行」は `python/route_web/data/pending_scans.json` に依頼を書く。起動中の HIRIO が確定JANを画像DBへ先に書き、スキャンする
+- ルート箱取込は `route.json` があれば Excel より優先
 
 ---
 
@@ -329,6 +333,7 @@ C:\HIRIO\repo\sedori-app.github\docs\specs\field_route_web_spec.md を読んで�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-09-23 | 巡回と商品撮影を分離。route.json 優先。レシート先読み。確定JANはスキャンで読み直さない |
 | 2026-09-22 | rclone 安定化: 裏送信＋copyのみ（mkdir省略）。GUI PATH／地図埋め込み失敗案内。常時Drive同期は不要 |
 | 2026-09-22 | Webテンプレ作成時に rclone で Drive 上へ箱送信（Desktopアプリ不要・未設定時スキップ） |
 | 2026-09-22 | CSV は Drive 直送を正に。Webテンプレ作成時に Excel も同時生成（ミニPCダウン時の滞在時刻保険）。受信箱は副次 |

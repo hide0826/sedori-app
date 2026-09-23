@@ -132,6 +132,39 @@ def append_product_file(
     return doc
 
 
+def confirm_product_group(doc: Dict[str, Any], store_code: str, jan: str) -> Dict[str, Any]:
+    """同じ店舗・同じJANの商品画像を、撮影終了として確定する。"""
+    code = (store_code or "").strip()
+    jan_s = _safe_jan(jan)
+    if not jan_s:
+        raise ValueError("jan required")
+    stores: List[Dict[str, Any]] = list(doc.get("stores") or [])
+    found = False
+    confirmed = 0
+    for st in stores:
+        if str(st.get("store_code") or "").strip().upper() != code.upper():
+            continue
+        found = True
+        files: List[Any] = []
+        for item in st.get("product_files") or []:
+            if isinstance(item, dict) and _safe_jan(str(item.get("jan") or "")) == jan_s:
+                updated = dict(item)
+                updated["confirmed"] = True
+                files.append(updated)
+                confirmed += 1
+            else:
+                files.append(item)
+        st["product_files"] = files
+        break
+    if not found:
+        raise KeyError(f"store not found: {store_code}")
+    if confirmed == 0:
+        raise ValueError("confirm target not found")
+    doc = dict(doc)
+    doc["stores"] = stores
+    return doc
+
+
 def product_filenames(store: Optional[Dict[str, Any]]) -> List[str]:
     if not store:
         return []

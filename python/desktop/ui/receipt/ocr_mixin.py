@@ -296,12 +296,36 @@ class ReceiptOcrMixin:
             f"選択フォルダ内の {success} 件を処理しました。",
         )
 
+    def _receipt_already_prepared(self, image_path: str) -> bool:
+        """先読みで同じファイルの OCR 結果が残っていれば、全件OCRでは読み直さない。"""
+        try:
+            db = getattr(self.receipt_service, "db", None)
+            if db is None or not hasattr(db, "find_by_exact_path"):
+                return False
+            resolved = str(Path(image_path).resolve())
+            row = db.find_by_exact_path(resolved) or db.find_by_exact_path(str(image_path))
+            if not row:
+                return False
+            return bool(str(row.get("ocr_text") or "").strip() or row.get("total_amount") is not None)
+        except Exception as exc:
+            logger.warning("先読み済み判定に失敗: %s", exc)
+            return False
+
     def _process_next_in_queue(self):
         """OCRキューから次の1枚を取り出して処理"""
         if not self.ocr_queue:
             self._finish_batch_ocr()
             return
         next_path = self.ocr_queue.pop(0)
+        if self._receipt_already_prepared(next_path):
+            self.batch_processed_count += 1
+            self.batch_success_count = getattr(self, "batch_success_count", 0) + 1
+            if hasattr(self, "folder_label"):
+                self.folder_label.setText(
+                    f"{str(self.current_folder)} - 先読み済みをスキップ: {Path(next_path).name}"
+                )
+            QTimer.singleShot(0, self._process_next_in_queue)
+            return
         remaining = len(self.ocr_queue)
         # 進捗率を計算（処理済み件数 / 全体件数）
         # 現在処理中の画像を含めて計算（処理済み + 1）

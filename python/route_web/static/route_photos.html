@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>HIRIO 商品撮影</title>
+  <style>
+    :root { --bg:#0f1419; --card:#1a2332; --text:#e7ecf3; --muted:#8b9bb4; --accent:#3d8bfd; --ok:#2ea043; --border:#2a3548; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif; background:var(--bg); color:var(--text); padding:12px 12px 96px; }
+    a { color:#9ecbff; text-decoration:none; }
+    h1 { font-size:1.15rem; margin:0 0 4px; }
+    .sub { color:var(--muted); font-size:.85rem; margin-bottom:12px; }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:12px; }
+    button, .btn { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 12px; font-size:1rem; }
+    button.secondary, .btn.secondary { background:#243044; }
+    button:disabled { opacity:.5; }
+    .row { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+    .hint { color:var(--muted); font-size:.85rem; }
+    #status.ok { color:#3fb950; }
+    #status.err { color:#ff7b72; }
+    input[type="file"] { display:none; }
+    ul { padding-left:18px; }
+    li { margin:6px 0; }
+  </style>
+</head>
+<body>
+  <p><a id="backLink" href="#">← 時刻・レシートの画面</a></p>
+  <h1 id="title">商品撮影</h1>
+  <div class="sub" id="subtitle">仕入DBが確定したあと</div>
+  <div class="card">
+    <p class="hint">店を回っているあいだの画面ではありません。仕入を保存してから使います。</p>
+    <div class="row">
+      <button type="button" id="modeJan">JANあり</button>
+      <button type="button" class="secondary" id="modeNoJan">JANなし</button>
+    </div>
+    <label class="hint">店舗</label>
+    <select id="storeSelect" style="width:100%;padding:8px;margin:6px 0 10px"></select>
+    <div id="janBox">
+      <label class="btn">JANを撮る<input id="janShot" type="file" accept="image/*" capture="environment" /></label>
+      <p class="hint" id="janRead">まだ読んでいません</p>
+      <ul id="candidates"></ul>
+    </div>
+    <div id="noJanBox" style="display:none">
+      <p class="hint">このルートの商品から選んでください。</p>
+      <ul id="productList"></ul>
+    </div>
+  </div>
+  <div class="card">
+    <h2 style="margin:0 0 8px;font-size:.95rem;color:var(--muted)">選んだ商品の写真</h2>
+    <p class="hint" id="selectedLabel">商品が未選択です</p>
+    <div class="row">
+      <label class="btn">写真を撮る<input id="productShot" type="file" accept="image/*" capture="environment" /></label>
+      <button type="button" class="secondary" id="finishBtn" disabled>撮影終了</button>
+    </div>
+    <ul id="shotList"></ul>
+  </div>
+  <div class="card">
+    <button type="button" id="scanBtn">スキャン実行</button>
+    <p class="hint">HIRIOが起動していれば、付いているJANを使って画像管理のスキャンを実行します。</p>
+  </div>
+  <div id="status"></div>
+  <script>
+    const WEB_ID = "__WEB_ID__";
+    let purchases = [];
+    let selected = null;
+    let shotCount = 0;
+
+    document.getElementById("backLink").href = "/route/" + encodeURIComponent(WEB_ID);
+
+    function setStatus(msg, kind) {
+      const el = document.getElementById("status");
+      el.textContent = msg || "";
+      el.className = kind || "";
+    }
+
+    function storeCode() {
+      return document.getElementById("storeSelect").value || "";
+    }
+
+    function showSelected() {
+      const label = document.getElementById("selectedLabel");
+      const finish = document.getElementById("finishBtn");
+      if (!selected) {
+        label.textContent = "商品が未選択です";
+        finish.disabled = true;
+        return;
+      }
+      label.textContent = (selected.product_name || selected.sku || "商品") + " / JAN " + (selected.jan || "なし");
+      finish.disabled = !selected.jan || shotCount < 1;
+    }
+
+    function fillStores(stores) {
+      const sel = document.getElementById("storeSelect");
+      sel.innerHTML = "";
+      (stores || []).forEach((st) => {
+        const opt = document.createElement("option");
+        opt.value = st.store_code || "";
+        opt.textContent = (st.store_code || "") + " " + (st.store_name || "");
+        sel.appendChild(opt);
+      });
+    }
+
+    function renderProducts() {
+      const code = storeCode();
+      const list = document.getElementById("productList");
+      list.innerHTML = "";
+      purchases.filter((row) => !code || row.store_code === code).forEach((row) => {
+        const li = document.createElement("li");
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "secondary";
+        btn.textContent = (row.product_name || row.sku || "名称なし") + " / " + (row.jan || "JANなし");
+        btn.addEventListener("click", () => {
+          if (!row.jan) {
+            setStatus("この商品にはJANがありません", "err");
+            return;
+          }
+          selected = row;
+          shotCount = 0;
+          document.getElementById("shotList").innerHTML = "";
+          showSelected();
+          setStatus("商品を選びました", "ok");
+        });
+        li.appendChild(btn);
+        list.appendChild(li);
+      });
+    }
+
+    async function loadAll() {
+      const routeRes = await fetch("/api/route/" + encodeURIComponent(WEB_ID));
+      const route = await routeRes.json();
+      document.getElementById("title").textContent = (route.route_name || "ルート") + " 商品撮影";
+      document.getElementById("subtitle").textContent = (route.route_date || "") + " / 仕入保存後";
+      fillStores(route.stores || []);
+      const buyRes = await fetch("/api/route/" + encodeURIComponent(WEB_ID) + "/purchases");
+      const buy = await buyRes.json();
+      purchases = buy.purchases || [];
+      if (buy.empty) setStatus(buy.message || "先に仕入管理で箱を保存してください", "err");
+      renderProducts();
+    }
+
+    async function readJanFile(file) {
+      let jan = "";
+      if ("BarcodeDetector" in window) {
+        try {
+          const bitmap = await createImageBitmap(file);
+          const det = new BarcodeDetector({ formats: ["ean_13", "ean_8"] });
+          const codes = await det.detect(bitmap);
+          if (codes && codes[0]) jan = String(codes[0].rawValue || "").replace(/\D/g, "");
+        } catch (e) { /* サーバ読みに回す */ }
+      }
+      const fd = new FormData();
+      fd.append("file", file, file.name || "jan.jpg");
+      const res = await fetch("/api/route/" + encodeURIComponent(WEB_ID) + "/barcode", { method: "POST", body: fd });
+      const data = await res.json();
+      if (!jan) jan = data.jan || "";
+      document.getElementById("janRead").textContent = jan ? ("読めたJAN: " + jan) : "JANを読めませんでした";
+      const ul = document.getElementById("candidates");
+      ul.innerHTML = "";
+      const hits = (data.candidates || []).filter((row) => !jan || row.jan === jan);
+      if (data.purchases_empty) {
+        setStatus(data.message || "先に仕入管理で箱を保存してください", "err");
+        return;
+      }
+      if (!hits.length) {
+        setStatus("このルートの仕入に同じJANがありません", "err");
+        return;
+      }
+      hits.forEach((row) => {
+        const li = document.createElement("li");
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = (row.product_name || row.sku) + " を選ぶ";
+        btn.addEventListener("click", () => {
+          selected = row;
+          shotCount = 0;
+          document.getElementById("shotList").innerHTML = "";
+          if (row.store_code) document.getElementById("storeSelect").value = row.store_code;
+          showSelected();
+          setStatus("候補を選びました", "ok");
+        });
+        li.appendChild(btn);
+        ul.appendChild(li);
+      });
+    }
+
+    async function uploadProduct(file) {
+      if (!selected || !selected.jan) {
+        setStatus("先に商品を選んでください", "err");
+        return;
+      }
+      const code = selected.store_code || storeCode();
+      const fd = new FormData();
+      fd.append("file", file, file.name || "product.jpg");
+      fd.append("jan", selected.jan);
+      const res = await fetch(
+        "/api/route/" + encodeURIComponent(WEB_ID) + "/stores/" + encodeURIComponent(code) + "/products",
+        { method: "POST", body: fd }
+      );
+      if (!res.ok) {
+        setStatus("写真の保存に失敗しました", "err");
+        return;
+      }
+      const data = await res.json();
+      shotCount += 1;
+      const li = document.createElement("li");
+      li.textContent = data.filename || "保存";
+      document.getElementById("shotList").appendChild(li);
+      showSelected();
+      setStatus("写真を保存しました", "ok");
+    }
+
+    document.getElementById("modeJan").addEventListener("click", () => {
+      document.getElementById("janBox").style.display = "";
+      document.getElementById("noJanBox").style.display = "none";
+    });
+    document.getElementById("modeNoJan").addEventListener("click", () => {
+      document.getElementById("janBox").style.display = "none";
+      document.getElementById("noJanBox").style.display = "";
+      renderProducts();
+    });
+    document.getElementById("storeSelect").addEventListener("change", () => renderProducts());
+    document.getElementById("janShot").addEventListener("change", async (ev) => {
+      const file = ev.target.files && ev.target.files[0];
+      ev.target.value = "";
+      if (file) await readJanFile(file);
+    });
+    document.getElementById("productShot").addEventListener("change", async (ev) => {
+      const file = ev.target.files && ev.target.files[0];
+      ev.target.value = "";
+      if (file) await uploadProduct(file);
+    });
+    document.getElementById("finishBtn").addEventListener("click", async () => {
+      if (!selected) return;
+      const code = selected.store_code || storeCode();
+      const res = await fetch(
+        "/api/route/" + encodeURIComponent(WEB_ID) + "/stores/" + encodeURIComponent(code) + "/products/confirm",
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jan: selected.jan }) }
+      );
+      if (!res.ok) {
+        setStatus("撮影終了を保存できませんでした", "err");
+        return;
+      }
+      setStatus("この商品の画像グループを確定しました", "ok");
+    });
+    document.getElementById("scanBtn").addEventListener("click", async () => {
+      const res = await fetch("/api/route/" + encodeURIComponent(WEB_ID) + "/products/scan-request", { method: "POST" });
+      setStatus(res.ok ? "HIRIOへスキャンを依頼しました" : "依頼に失敗しました", res.ok ? "ok" : "err");
+    });
+    loadAll().catch((e) => setStatus("読み込み失敗: " + e.message, "err"));
+  </script>
+</body>
+</html>

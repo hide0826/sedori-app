@@ -152,6 +152,14 @@
     <ul class="file-list" id="routeCsvList"></ul>
   </div>
 
+  <div class="card" id="prepareCard">
+    <h2>事前処理</h2>
+    <p class="hint">CSVをこの箱へ送ったあと押します。レシートの文字読みだけを裏で行い、商品写真は撮りません。</p>
+    <button type="button" id="prepareBtn">事前処理を実行</button>
+    <p class="hint" id="prepareStatus">未実行</p>
+    <p class="hint">仕入を保存したあと: <a id="photosLink" href="#" style="color:#9ecbff">商品画像の撮影</a></p>
+  </div>
+
   <div id="stores"></div>
   <div id="status"></div>
 
@@ -307,20 +315,6 @@
           'アルバムから<input type="file" accept="image/*" data-upload="receipt" data-store="' + i + '" data-code="' + escapeHtml(code) + '" />' +
           "</label></div>" +
           thumbsHtml(st, "receipt") +
-          "</div>" +
-          '<div class="product-block">' +
-          '<div class="sub" style="margin:0 0 6px">商品画像</div>' +
-          '<div class="row"><label>JAN</label>' +
-          '<input type="text" inputmode="numeric" placeholder="任意（手入力）" data-store="' + i + '" data-field="jan_draft" />' +
-          "</div>" +
-          '<div class="row" style="margin-bottom:4px">' +
-          '<label class="btn" style="min-width:auto;flex:1">' +
-          '商品を撮る<input type="file" accept="image/*" capture="environment" data-upload="product" data-store="' + i + '" data-code="' + escapeHtml(code) + '" />' +
-          "</label>" +
-          '<label class="btn secondary" style="min-width:auto;flex:1">' +
-          'アルバムから<input type="file" accept="image/*" data-upload="product" data-store="' + i + '" data-code="' + escapeHtml(code) + '" />' +
-          "</label></div>" +
-          thumbsHtml(st, "product") +
           "</div>";
         wrap.appendChild(card);
       });
@@ -569,7 +563,55 @@
     document.getElementById("saveBtn").addEventListener("click", () => saveRoute());
     document.getElementById("reloadBtn").addEventListener("click", () => loadRoute());
     document.getElementById("refreshInboxBtn").addEventListener("click", () => refreshCsvLists());
+    document.getElementById("photosLink").href = "/route/" + encodeURIComponent(WEB_ID) + "/photos";
+    let prepareTimer = null;
+    document.getElementById("prepareBtn").addEventListener("click", () => startPrepare());
+    refreshPrepare();
     loadRoute();
+
+    function renderPrepare(data) {
+      const el = document.getElementById("prepareStatus");
+      if (!data || !data.status || data.status === "idle") {
+        el.textContent = "未実行";
+        return;
+      }
+      const receipts = data.receipts || [];
+      const failed = receipts.filter((row) => row.error).length;
+      const skipped = receipts.filter((row) => row.skipped).length;
+      el.textContent =
+        "状態: " + data.status +
+        " / CSV: " + (data.csv_present ? (data.csv_name || "あり") : "なし") +
+        " / レシート " + receipts.length + "件（読まずに済んだ " + skipped + " / 失敗 " + failed + "）";
+    }
+
+    async function refreshPrepare() {
+      try {
+        const res = await fetch("/api/route/" + encodeURIComponent(WEB_ID) + "/prepare");
+        if (!res.ok) return;
+        const data = await res.json();
+        renderPrepare(data);
+        if (data.status === "running" || data.status === "started") {
+          if (!prepareTimer) prepareTimer = setInterval(refreshPrepare, 2000);
+        } else if (prepareTimer) {
+          clearInterval(prepareTimer);
+          prepareTimer = null;
+        }
+      } catch (e) {
+        /* 表示だけなので止める */
+      }
+    }
+
+    async function startPrepare() {
+      setStatus("事前処理を開始しています…", "");
+      const res = await fetch("/api/route/" + encodeURIComponent(WEB_ID) + "/prepare", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        setStatus("事前処理を開始できません", "err");
+        return;
+      }
+      setStatus(data.status === "running" ? "すでに実行中です" : "裏でレシートを読んでいます", "ok");
+      refreshPrepare();
+    }
   </script>
 </body>
 </html>

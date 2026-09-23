@@ -1,10 +1,11 @@
 ﻿# -*- coding: utf-8 -*-
-"""ルート時刻入力 FastAPI（:8792）。Phase 1〜1.5 / 2 / 5。"""
+"""ルート時刻入力 FastAPI（:8792）。Phase 1〜1.5 / 2 / 5。巡回と商品撮影は別画面。"""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, Optional
+import threading
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -23,7 +24,11 @@ from route_web.product_images import (
     product_dir,
     save_product_upload,
     append_product_file,
+    confirm_product_group,
 )
+from route_web.prepare import load_prep_status, prepare_route_folder
+from route_web.route_purchases import list_route_purchases
+from route_web.scan_requests import enqueue_scan
 from route_web.receipts import (
     append_receipt_file,
     find_store,
@@ -40,13 +45,20 @@ from route_web.schema import stamp_updated
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PAGE_PATH = STATIC_DIR / "route.html"
+PHOTOS_PATH = STATIC_DIR / "route_photos.html"
 INDEX_PATH = STATIC_DIR / "index.html"
 
-app = FastAPI(title="HIRIO Route Web", version="0.2.0")
+app = FastAPI(title="HIRIO Route Web", version="0.3.0")
+_prepare_guard = threading.Lock()
+_prepare_running: set[str] = set()
 
 
 class InboxMoveBody(BaseModel):
     filename: str
+
+
+class ConfirmBody(BaseModel):
+    jan: str = ""
 
 
 def _page_html(web_id: str) -> str:
@@ -78,7 +90,7 @@ def _require_folder(web_id: str) -> Path:
 
 @app.get("/health")
 def health() -> Dict[str, str]:
-    return {"status": "ok", "service": "route_web", "version": "0.2.0"}
+    return {"status": "ok", "service": "route_web", "version": "0.3.0"}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -100,6 +112,15 @@ def api_csv_inbox() -> JSONResponse:
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"inbox error: {exc}") from exc
     return JSONResponse({"inbox_path": path, "files": files})
+
+
+@app.get("/route/{web_id}/photos", response_class=HTMLResponse)
+def route_photos_page(web_id: str) -> HTMLResponse:
+    _require_doc(web_id)
+    if not PHOTOS_PATH.is_file():
+        raise HTTPException(status_code=500, detail="route_photos.html missing")
+    html = PHOTOS_PATH.read_text(encoding="utf-8")
+    return HTMLResponse(html.replace("__WEB_ID__", web_id))
 
 
 @app.get("/route/{web_id}", response_class=HTMLResponse)
@@ -289,6 +310,91 @@ def get_product_file(web_id: str, filename: str):
     if not path.is_file():
         raise HTTPException(status_code=404, detail="file not found")
     return FileResponse(path)
+
+
+def _run_prepare(web_id: str, folder: Path) -> None:
+    try:
+        prepare_route_folder(folder)
+    finally:
+        with _prepare_guard:
+            _prepare_running.discard(web_id)
+
+
+@app.post("/api/route/{web_id}/prepare")
+def start_prepare(web_id: str) -> JSONResponse:
+    folder = _require_folder(web_id)
+    with _prepare_guard:
+        if web_id in _prepare_running:
+            return JSONResponse({"status": "running", "prep": load_prep_status(folder)})
+        _prepare_running.add(web_id)
+    threading.Thread(target=_run_prepare, args=(web_id, folder), daemon=True).start()
+    return JSONResponse({"status": "started", "prep": load_prep_status(folder)})
+
+
+@app.get("/api/route/{web_id}/prepare")
+def get_prepare(web_id: str) -> JSONResponse:
+    folder = _require_folder(web_id)
+    status = load_prep_status(folder)
+    with _prepare_guard:
+        if web_id in _prepare_running and status.get("status") != "running":
+            status = dict(status)
+            status["status"] = "running"
+    return JSONResponse(status)
+
+
+@app.get("/api/route/{web_id}/purchases")
+def get_route_purchases(web_id: str) -> JSONResponse:
+    doc = _require_doc(web_id)
+    rows = list_route_purchases(doc)
+    return JSONResponse(
+        {
+            "purchases": rows,
+            "empty": not rows,
+            "message": "" if rows else "先に仕入管理で箱を保存してください",
+        }
+    )
+
+
+@app.post("/api/route/{web_id}/barcode")
+async def read_route_barcode(web_id: str, file: UploadFile = File(...)) -> JSONResponse:
+    doc = _require_doc(web_id)
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="empty file")
+    from route_web.barcode_read import decode_jan_bytes
+
+    jan = decode_jan_bytes(raw)
+    purchases = list_route_purchases(doc)
+    candidates = [row for row in purchases if jan and row.get("jan") == jan]
+    return JSONResponse(
+        {
+            "jan": jan or "",
+            "candidates": candidates,
+            "purchases_empty": not purchases,
+            "message": "" if purchases else "先に仕入管理で箱を保存してください",
+        }
+    )
+
+
+@app.post("/api/route/{web_id}/stores/{store_code}/products/confirm")
+def confirm_products(web_id: str, store_code: str, body: ConfirmBody) -> JSONResponse:
+    doc = _require_doc(web_id)
+    try:
+        doc = confirm_product_group(doc, store_code, body.jan or "")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    doc = stamp_updated(doc)
+    save_route_json(web_id, doc)
+    return JSONResponse({"ok": True, "route": doc})
+
+
+@app.post("/api/route/{web_id}/products/scan-request")
+def request_product_scan(web_id: str) -> JSONResponse:
+    folder = _require_folder(web_id)
+    item = enqueue_scan(web_id, folder)
+    return JSONResponse({"ok": True, "request": item})
 
 
 def create_app() -> FastAPI:

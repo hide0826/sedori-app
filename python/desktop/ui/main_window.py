@@ -124,6 +124,12 @@ class MainWindow(QMainWindow):
         
         # 中央配置
         self.center_window()
+
+        # Webの「スキャン実行」依頼を、起動中だけ数秒おきに見る
+        self._route_scan_timer = QTimer(self)
+        self._route_scan_timer.setInterval(5000)
+        self._route_scan_timer.timeout.connect(self._poll_route_scan_requests)
+        self._route_scan_timer.start()
         
         # タブの順序は _deferred_setup_tabs 完了後に復元する
         
@@ -703,6 +709,20 @@ class MainWindow(QMainWindow):
         # 起動と同時に FastAPI を立ち上げ、ステータスを「接続済み」にする
         QTimer.singleShot(0, self._ensure_api_server)
         self.update_recording_mode_ui()
+
+    def _poll_route_scan_requests(self) -> None:
+        """仕入確定後の撮影Webが書いたスキャン依頼を1件処理する。"""
+        try:
+            from services.route_product_seed import consume_one_scan_request
+
+            image_widget = getattr(self, "image_manager_widget", None)
+            result = consume_one_scan_request(image_widget)
+            if result and result.get("scanned"):
+                self.status_label.setText("ルート商品画像のスキャンを実行しました")
+            elif result and result.get("error") and image_widget is not None:
+                print(f"route scan: {result.get('error')}")
+        except Exception as exc:
+            print(f"route scan watch failed: {exc}")
         
         
     def center_window(self):

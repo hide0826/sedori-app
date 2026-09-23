@@ -125,6 +125,30 @@ class ReceiptDatabase:
         )
         self.conn.commit()
         return cur.lastrowid
+
+    def find_by_exact_path(self, file_path: str) -> Optional[Dict[str, Any]]:
+        """file_path または original_file_path が完全一致するレシート。"""
+        if not file_path:
+            return None
+        candidates = []
+        for raw in (file_path, file_path.replace("/", "\\"), file_path.replace("\\", "/")):
+            if raw and raw not in candidates:
+                candidates.append(raw)
+        cur = self.conn.cursor()
+        for candidate in candidates:
+            cur.execute(
+                """
+                SELECT * FROM receipts
+                WHERE file_path = ? OR original_file_path = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (candidate, candidate),
+            )
+            row = cur.fetchone()
+            if row:
+                return dict(row)
+        return None
     
     def get_file_name_from_path(self, file_path: str) -> str:
         """ファイルパスからファイル名（拡張子なし）を取得"""

@@ -405,6 +405,52 @@ class RouteSummaryTemplateMixin:
         except Exception as e:
             raise Exception(f"Excelファイルの読み込みエラー: {str(e)}")
 
+    def load_route_json_file(self, file_path: str) -> int:
+        """route.json の時刻・店舗をルート画面へ入れる。成功ダイアログは出さない。"""
+        from services.route_folder_import import load_route_json_model
+
+        model = load_route_json_model(Path(file_path))
+        if not hasattr(self, "route_data") or not self.route_data:
+            self.route_data = {}
+        route_date = model.get("route_date") or ""
+        if route_date:
+            self.route_data["route_date"] = route_date
+            try:
+                self.route_date_edit.setDate(datetime.strptime(route_date, "%Y-%m-%d").date())
+            except Exception:
+                pass
+        self.route_data["route_code"] = model.get("route_code") or ""
+        self._set_route_name_from_template(model.get("route_name") or "", file_path)
+        if model.get("departure_time"):
+            self.route_data["departure_time"] = model["departure_time"]
+        if model.get("return_time"):
+            self.route_data["return_time"] = model["return_time"]
+        self.route_data["toll_fee_outbound"] = model.get("toll_fee_outbound") or 0
+        self.route_data["toll_fee_return"] = model.get("toll_fee_return") or 0
+
+        visits = model.get("visits") or []
+        self.store_visits_table.blockSignals(True)
+        try:
+            self.store_visits_table.setRowCount(len(visits))
+            for i, visit in enumerate(visits):
+                self._fill_visit_table_row(
+                    i,
+                    store_code=visit.get("store_code", ""),
+                    store_name=visit.get("store_name", ""),
+                    in_time=visit.get("in_time", ""),
+                    out_time=visit.get("out_time", ""),
+                    notes=visit.get("notes", ""),
+                    include_checked=True,
+                )
+        finally:
+            self.store_visits_table.blockSignals(False)
+        try:
+            self.recalc_travel_times()
+            self.update_visit_order()
+        except Exception:
+            pass
+        return len(visits)
+
     def _load_csv_template(self, file_path: str):
         """CSVテンプレートファイルを読み込む"""
         try:
