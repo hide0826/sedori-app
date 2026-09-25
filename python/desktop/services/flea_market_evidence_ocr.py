@@ -35,6 +35,11 @@ _SELLER_SKIP_FRAGMENTS = (
     "出品者負担",
     "出品者レベル",
     "送料",
+    "サイズ",
+    "厚さ",
+    "重さ",
+    "kg以内",
+    "cm以内",
 )
 
 _DATE_LABEL_RE = re.compile(

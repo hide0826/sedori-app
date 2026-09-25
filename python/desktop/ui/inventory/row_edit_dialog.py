@@ -100,6 +100,7 @@ from .support import (
     _is_repricing_enabled_value,
 )
 from .flea_evidence_panel import FleaEvidencePanel
+from services.flea_market_evidence_ocr import is_delivery_label_name
 from services.flea_market_evidence_service import (
     EVIDENCE_HIDDEN_COLUMNS,
     record_fields_from_save,
@@ -604,9 +605,13 @@ class InventoryRowEditDialog(QDialog):
         self._set_widget_text(
             "出品URL", getattr(parsed, "listing_url", "") or "", only_if_empty=only_if_empty
         )
-        self._set_widget_text(
-            "ユーザー名", getattr(parsed, "seller_name", "") or "", only_if_empty=only_if_empty
-        )
+        seller = getattr(parsed, "seller_name", "") or ""
+        if is_delivery_label_name(seller):
+            seller = ""
+        current_seller = self._widget_text("ユーザー名")
+        # 配送表示だけ入っているときは、読み取った出品者名で入れ直してよい
+        seller_only_if_empty = only_if_empty and not is_delivery_label_name(current_seller)
+        self._set_widget_text("ユーザー名", seller, only_if_empty=seller_only_if_empty)
 
     def accept(self):
         if self.evidence_panel is not None:
@@ -627,7 +632,18 @@ class InventoryRowEditDialog(QDialog):
             return True
         parsed = panel.ocr_result()
         if panel.has_any_image() and not parsed.has_core_fields():
-            parsed = panel.run_ocr()
+            # ここでOCR完了通知を出すと、手入力したユーザー名が上書きされる
+            blocked = False
+            try:
+                panel.ocr_finished.disconnect(self._apply_ocr_fields_to_widgets)
+                blocked = True
+            except (TypeError, RuntimeError):
+                blocked = False
+            try:
+                parsed = panel.run_ocr()
+            finally:
+                if blocked:
+                    panel.ocr_finished.connect(self._apply_ocr_fields_to_widgets)
         self._apply_ocr_fields_to_widgets(parsed, only_if_empty=True)
         if panel.should_apply_datetime() and parsed.purchase_datetime:
             self._set_widget_text("仕入れ日", parsed.purchase_datetime)

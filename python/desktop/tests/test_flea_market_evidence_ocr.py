@@ -67,6 +67,20 @@ def test_seller_name_skips_yu_packet_delivery_label():
     assert result.seller_name == "よう"
 
 
+def test_seller_name_skips_yu_packet_size_label():
+    text = """
+取引が完了しました
+サイズ:厚さ7cm以内重さ2kg以内
+出品者情報
+サイズ:厚さ7cm以内重さ2kg以内
+よう
+本人確認済
+商品ID m62420345061
+"""
+    result = parse_transaction_ocr_text(text)
+    assert result.seller_name == "よう"
+
+
 def test_listing_page_is_not_transaction():
     assert looks_like_transaction_page(_SAMPLE_LISTING) is False
     result = parse_transaction_ocr_text(_SAMPLE_LISTING)

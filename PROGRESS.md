@@ -2,11 +2,13 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-09-25（夜の再起動が戻らない）
+更新日: 2026-09-25（行の編集のユーザー名）
 
 ---
 
 ## いまの状態
+
+**2026-09-25（行の編集のユーザー名）:** OKを押すと、画像がある行は OCR がもう一度走り、その完了通知がユーザー名を上書きしていた。`row_edit_dialog.py` の OK では通知を切ってから読み、空欄だけ埋める。配送表示に「サイズ」「厚さ」「重さ」「kg以内」「cm以内」を追加し、「サイズ:厚さ7cm以内重さ2kg以内」はユーザー名にしない。反映には HIRIO を一度閉じてもう一度開く。
 
 **2026-09-25（夜の再起動が戻らない）:** 9/25 3:00 の再起動は記録上実行済みだが、朝から本体が落ちたまま。`nightly_restart_done=2026-09-25`。待ちの PowerShell が HIRIO と同じコンソールに付いていて、終了で一緒に消えていた。`schedule_relaunch_after_exit` を `DETACHED_PROCESS` で切り離し、`python/desktop/logs/nightly_restart.log` に結果を残す。反映には、いま開いている HIRIO を一度閉じてもう一度開く。バックアップ先 `Z:\HIRIObackup` は現在見えていない（最終成功は 9/23 16:31）。
 
@@ -69,7 +71,7 @@
 | URLの正規化 | `python/desktop/services/mercari_evidence_capture.py` |
 | 出品者名 | `python/desktop/services/flea_market_evidence_ocr.py`（配送表示を飛ばす） |
 | サムネ拡大 | `python/desktop/ui/inventory/flea_evidence_panel.py` |
-| 手入力を残す | `python/desktop/ui/inventory/row_edit_dialog.py`（OK時は空欄だけ埋める。「取引画面をOCRして入力」は上書き） |
+| 手入力を残す | `python/desktop/ui/inventory/row_edit_dialog.py`（OK時は OCR 通知を切る。空欄だけ埋める。「取引画面をOCRして入力」は上書き） |
 
 ### 使う前
 
@@ -81,7 +83,8 @@
 
 - ログイン済みChromeで3枚保存できた（商品・説明・取引画面）
 - 出品者「よう」の前に「ゆうパケットプラスでお届け」があっても、読み取りは「よう」
-- 行の編集でユーザー名を直してOKすると、その名前が残る（コード上。再起動後に画面で確認）
+- 行の編集でユーザー名を直してOKすると、その名前が残る（2026-09-25: OK時の再OCRが上書きしていたのを止めた。再起動後に画面で確認）
+- 「サイズ:厚さ7cm以内重さ2kg以内」は出品者名にしない（テストで「よう」になることを確認）
 
 ---
 
