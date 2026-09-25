@@ -91,6 +91,7 @@ from .support import (
     SALES_CHANNEL_OPTIONS,
     SHIPPING_METHOD_OPTIONS,
     _ConditionNoteAiGenerateThread,
+    checked_detail_description,
     _normalize_condition_note_newlines,
     _to_stored_newlines,
     _is_repricing_enabled_value,
@@ -358,7 +359,10 @@ class SinglePurchaseInputDialog(QDialog):
         layout.addRow("欠品・詳細（選択）:", missing_opts)
 
         self.call_condition_note_btn = QPushButton("コンディション説明呼び出し")
-        self.call_condition_note_btn.setToolTip("選択したコンディションに対応する説明をコンディション説明タブから読み込みます")
+        self.call_condition_note_btn.setToolTip(
+            "欠品・詳細にチェックがあるときは、詳細説明の文だけを入れます。\n"
+            "チェックが無いときは、良い・非常に良いなどのテンプレートを入れます。"
+        )
         self.call_condition_note_btn.clicked.connect(self._on_call_condition_note)
         layout.addRow("", self.call_condition_note_btn)
 
@@ -464,6 +468,30 @@ class SinglePurchaseInputDialog(QDialog):
             )
 
     def _on_call_condition_note(self):
+        try:
+            missing_data = self.condition_template_db.load_missing_keywords()
+            keywords = missing_data.get("keywords", {}) or {}
+        except Exception:
+            keywords = {}
+        detail = checked_detail_description(
+            keywords,
+            manual=bool(self.missing_manual_checkbox.isChecked()),
+            inner_box=bool(self.missing_inner_box_checkbox.isChecked()),
+            custom1=bool(self.missing_custom1_checkbox.isChecked()),
+            custom2=bool(self.missing_custom2_checkbox.isChecked()),
+            custom3=bool(self.missing_custom3_checkbox.isChecked()),
+        )
+        if detail is not None:
+            if not detail:
+                QMessageBox.information(
+                    self,
+                    "呼び出し",
+                    "チェックした項目の文が、詳細説明に登録されていません。",
+                )
+                return
+            self.condition_note_edit.setPlainText(_normalize_condition_note_newlines(detail))
+            return
+
         condition_text = self.condition_combo.currentText().strip()
         if not condition_text:
             QMessageBox.information(self, "呼び出し", "先に「コンディション」を選択してください。")
@@ -478,47 +506,7 @@ class SinglePurchaseInputDialog(QDialog):
                     f"コンディション「{condition_text}」に対応する説明が登録されていません。\nコンディション説明タブで登録してください。"
                 )
                 return
-            text = _normalize_condition_note_newlines(text)
-
-            # 欠品・詳細（カスタム）チェックに応じて「詳細説明」タブの文面を挿入
-            manual_checked = bool(self.missing_manual_checkbox.isChecked())
-            inner_box_checked = bool(self.missing_inner_box_checkbox.isChecked())
-            missing_key = ""
-            if manual_checked and inner_box_checked:
-                missing_key = "取説・内箱欠品"
-            elif manual_checked:
-                missing_key = "取説欠品"
-            elif inner_box_checked:
-                missing_key = "内箱欠品"
-
-            missing_data = self.condition_template_db.load_missing_keywords()
-            kw = missing_data.get("keywords", {}) or {}
-
-            if missing_key:
-                missing_text = str(kw.get(missing_key, "") or "").strip()
-                if missing_text:
-                    if "{欠品}" in text:
-                        text = text.replace("{欠品}", missing_text)
-                    elif "【付属品】" in text:
-                        text = text.replace("【付属品】", f"【付属品】{missing_text}")
-                    else:
-                        text = f"{text}\n【付属品】{missing_text}".strip()
-
-            extra_parts: List[str] = []
-            for ck, cb in (
-                ("custom1", self.missing_custom1_checkbox),
-                ("custom2", self.missing_custom2_checkbox),
-                ("custom3", self.missing_custom3_checkbox),
-            ):
-                if cb.isChecked():
-                    part = str(kw.get(ck, "") or "").strip()
-                    if part:
-                        extra_parts.append(part)
-            if extra_parts:
-                extra_block = "\n".join(extra_parts)
-                text = f"{text.rstrip()}\n{extra_block}".strip() if text.strip() else extra_block
-
-            self.condition_note_edit.setPlainText(text)
+            self.condition_note_edit.setPlainText(_normalize_condition_note_newlines(text))
         except Exception as e:
             QMessageBox.warning(self, "呼び出しエラー", f"コンディション説明の呼び出しに失敗しました。\n{str(e)}")
 

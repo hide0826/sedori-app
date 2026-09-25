@@ -152,3 +152,33 @@ class _ConditionNoteAiGenerateThread(QThread):
         except Exception as exc:
             self.finished_error.emit(str(exc))
 
+
+def checked_detail_description(
+    keywords: Dict[str, Any],
+    *,
+    manual: bool,
+    inner_box: bool,
+    custom1: bool = False,
+    custom2: bool = False,
+    custom3: bool = False,
+) -> Optional[str]:
+    """欠品・詳細がONなら、詳細説明タブの文だけを返す。未チェックなら None。
+
+    チェックはあるが文が空のときは空文字。
+    良い・非常に良い・可などのコンディションテンプレートは含めない。
+    """
+    if not (manual or inner_box or custom1 or custom2 or custom3):
+        return None
+    kw = keywords or {}
+    parts: List[str] = []
+    if manual and inner_box:
+        parts.append(str(kw.get("取説・内箱欠品", "") or "").strip())
+    elif manual:
+        parts.append(str(kw.get("取説欠品", "") or "").strip())
+    elif inner_box:
+        parts.append(str(kw.get("内箱欠品", "") or "").strip())
+    for key, on in (("custom1", custom1), ("custom2", custom2), ("custom3", custom3)):
+        if on:
+            parts.append(str(kw.get(key, "") or "").strip())
+    return "\n".join(part for part in parts if part)
+

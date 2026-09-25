@@ -95,6 +95,7 @@ from .support import (
     SALES_CHANNEL_OPTIONS,
     SHIPPING_METHOD_OPTIONS,
     _ConditionNoteAiGenerateThread,
+    checked_detail_description,
     _normalize_condition_note_newlines,
     _to_stored_newlines,
     _is_repricing_enabled_value,
@@ -260,8 +261,9 @@ class InventoryRowEditDialog(QDialog):
         btn_layout.setContentsMargins(0, 0, 0, 0)
         self.call_condition_note_btn = QPushButton("コンディション説明呼び出し")
         self.call_condition_note_btn.setToolTip(
-            "コンディション説明タブのテンプレートを挿入します。\n"
-            "「その他詳細」に入力がある場合は、欠品・詳細の選択と合わせて AI が説明文を生成します。"
+            "欠品・詳細にチェックがあるときは、詳細説明の文だけを入れます。\n"
+            "チェックが無いときは、良い・非常に良いなどのテンプレートを入れます。\n"
+            "「その他詳細」に入力がある場合は、AI が説明文を生成します。"
         )
         self.call_condition_note_btn.clicked.connect(self._on_call_condition_note)
         clear_condition_note_btn = QPushButton("クリア")
@@ -327,7 +329,37 @@ class InventoryRowEditDialog(QDialog):
         if note_w and isinstance(note_w, QPlainTextEdit):
             note_w.clear()
 
+    def _checked_detail_description(self) -> Optional[str]:
+        """欠品・詳細がONなら詳細説明の文だけ。未チェックなら None。"""
+        try:
+            missing_data = self.condition_template_db.load_missing_keywords()
+            keywords = missing_data.get("keywords", {}) or {}
+        except Exception:
+            keywords = {}
+        return checked_detail_description(
+            keywords,
+            manual=bool(self.missing_manual_checkbox.isChecked()),
+            inner_box=bool(self.missing_inner_box_checkbox.isChecked()),
+            custom1=bool(self.missing_custom1_checkbox.isChecked()),
+            custom2=bool(self.missing_custom2_checkbox.isChecked()),
+            custom3=bool(self.missing_custom3_checkbox.isChecked()),
+        )
+
     def _on_call_condition_note(self):
+        note_w = self._widgets.get("コンディション説明")
+        detail = self._checked_detail_description()
+        if detail is not None:
+            if not detail:
+                QMessageBox.information(
+                    self,
+                    "呼び出し",
+                    "チェックした項目の文が、詳細説明に登録されていません。",
+                )
+                return
+            if note_w and isinstance(note_w, QPlainTextEdit):
+                note_w.setPlainText(_normalize_condition_note_newlines(detail))
+            return
+
         other_details = ""
         if self.other_details_edit is not None:
             other_details = self.other_details_edit.text().strip()
@@ -336,7 +368,6 @@ class InventoryRowEditDialog(QDialog):
             return
 
         cond_w = self._widgets.get("コンディション")
-        note_w = self._widgets.get("コンディション説明")
         if not cond_w or not note_w:
             return
         condition_text = cond_w.text().strip() if isinstance(cond_w, QLineEdit) else cond_w.toPlainText().strip()
@@ -348,51 +379,7 @@ class InventoryRowEditDialog(QDialog):
         if not text:
             QMessageBox.information(self, "呼び出し", f"コンディション「{condition_text}」に対応する説明が登録されていません。\nコンディション説明タブで登録してください。")
             return
-        # テンプレートは改行を "\\n" で保存しているので、表示用に実際の改行に変換（1行表示で行区切りに\nが入った状態で編集欄に表示）
         text = _normalize_condition_note_newlines(text)
-
-        # 欠品・詳細（カスタム）チェックに応じて「詳細説明」タブの文面を挿入
-        try:
-            manual_checked = bool(self.missing_manual_checkbox.isChecked())
-            inner_box_checked = bool(self.missing_inner_box_checkbox.isChecked())
-            missing_key = ""
-            if manual_checked and inner_box_checked:
-                missing_key = "取説・内箱欠品"
-            elif manual_checked:
-                missing_key = "取説欠品"
-            elif inner_box_checked:
-                missing_key = "内箱欠品"
-
-            missing_data = self.condition_template_db.load_missing_keywords()
-            kw = missing_data.get("keywords", {}) or {}
-
-            if missing_key:
-                missing_text = str(kw.get(missing_key, "") or "").strip()
-                if missing_text:
-                    if "{欠品}" in text:
-                        text = text.replace("{欠品}", missing_text)
-                    elif "【付属品】" in text:
-                        text = text.replace("【付属品】", f"【付属品】{missing_text}")
-                    else:
-                        text = f"{text}\n【付属品】{missing_text}".strip()
-
-            extra_parts: List[str] = []
-            for ck, cb in (
-                ("custom1", self.missing_custom1_checkbox),
-                ("custom2", self.missing_custom2_checkbox),
-                ("custom3", self.missing_custom3_checkbox),
-            ):
-                if cb.isChecked():
-                    part = str(kw.get(ck, "") or "").strip()
-                    if part:
-                        extra_parts.append(part)
-            if extra_parts:
-                extra_block = "\n".join(extra_parts)
-                text = f"{text.rstrip()}\n{extra_block}".strip() if text.strip() else extra_block
-        except Exception:
-            # 詳細説明が取得できない場合は通常テンプレートのみを使用
-            pass
-
         note_w.setPlainText(text)
 
     def _collect_missing_selection_items(self) -> List[Dict[str, str]]:
