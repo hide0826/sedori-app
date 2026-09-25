@@ -662,7 +662,11 @@ class InventoryWorkflowMixin:
 
     def import_from_route_box(self):
         """ルート箱を1回選んで CSV／商品画像／レシート画像を既存タブへ振り分ける（Phase 3）。"""
-        from services.route_folder_import import choose_route_time_source, resolve_route_folder_layout
+        from services.route_folder_import import (
+            choose_route_time_source,
+            is_under_route_insurance,
+            resolve_route_folder_layout,
+        )
 
         base_dir = self._get_default_batch_root_dir()
         # 仕入帳を優先
@@ -701,7 +705,8 @@ class InventoryWorkflowMixin:
         self._update_workflow_status("ルート箱取込: CSV…", emphasize=True)
         QApplication.processEvents()
         self._import_csv_from_path(str(layout.csv_path))
-        lines.append(f"CSV: {layout.csv_path.name}")
+        csv_where = "ルート保険の " if is_under_route_insurance(layout.csv_path) else ""
+        lines.append(f"CSV: {csv_where}{layout.csv_path.name}")
 
         # 時刻は中身のある route.json を優先。無ければ Excel のルートテンプレ。
         time_source = choose_route_time_source(layout)
@@ -721,7 +726,10 @@ class InventoryWorkflowMixin:
             try:
                 loaded_path = self.route_summary_widget.load_template(str(layout.route_template))
                 if loaded_path:
-                    lines.append(f"ルートテンプレ: {layout.route_template.name}")
+                    tmpl_where = (
+                        "ルート保険の " if is_under_route_insurance(layout.route_template) else ""
+                    )
+                    lines.append(f"ルートテンプレ: {tmpl_where}{layout.route_template.name}")
                     loaded_route = True
                 else:
                     lines.append("ルートテンプレを開けませんでした")

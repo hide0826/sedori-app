@@ -18,6 +18,7 @@ from route_web import csv_inbox
 from route_web.product_images import append_product_file, next_product_filename, save_product_upload
 from route_web.schema import build_route_document
 from services.route_folder_import import find_stocklist_csv, resolve_route_folder_layout
+import services.route_folder_import as route_folder_import
 
 
 def test_csv_inbox_move_and_upload(tmp_path: Path, monkeypatch=None):
@@ -78,6 +79,37 @@ def test_product_upload_and_jan(tmp_path: Path):
     files = doc["stores"][0]["product_files"]
     assert files[0]["file"] == fn
     assert files[0]["jan"] == "4901234567890"
+
+
+def test_publish_route_insurance_copies_excel_only(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(route_folder_import, "ROUTE_INSURANCE_ROOT", tmp_path / "ルート保険")
+    box = tmp_path / "仕入帳" / "20260925テスト"
+    (box / "商品画像").mkdir(parents=True)
+    xlsx = box / "route_template_テスト_20260925.xlsx"
+    xlsx.write_bytes(b"excel")
+
+    dest, err = route_folder_import.publish_route_insurance(box, xlsx)
+
+    assert err == ""
+    assert dest is not None
+    assert (dest / "仕入CSV").is_dir()
+    assert (dest / xlsx.name).read_bytes() == b"excel"
+    assert not (dest / "商品画像").exists()
+
+    (dest / "仕入CSV" / "StockList_phone.csv").write_text("phone", encoding="utf-8")
+    layout = resolve_route_folder_layout(box)
+    assert layout.csv_path is not None
+    assert layout.csv_path.name == "StockList_phone.csv"
+    assert route_folder_import.is_under_route_insurance(layout.csv_path)
+
+    import os
+
+    edited = dest / xlsx.name
+    edited.write_bytes(b"edited")
+    os.utime(edited, None)
+    layout2 = resolve_route_folder_layout(box)
+    assert layout2.route_template is not None
+    assert layout2.route_template.read_bytes() == b"edited"
 
 
 def test_resolve_layout(tmp_path: Path):

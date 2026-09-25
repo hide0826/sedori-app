@@ -71,7 +71,7 @@ from .support import (
 
 
 class _RclonePushWorker(QThread):
-    """Webテンプレ作成後の Drive 送信を UI スレッド外で実行する。"""
+    """残置。2026-09-25 以降、Webテンプレ作成はこのスレッドを起動しない。"""
 
     finished_result = Signal(str, str)  # status, message
 
@@ -750,8 +750,8 @@ class RouteSummaryTemplateMixin:
     def generate_web_template(self):
         """Web用ルート箱＋route.json＋保険用 Excel を生成し、時刻入力WebのURLを案内する。
 
-        Excel「テンプレート生成」と同じ xlsx を同じ箱に置く。
-        ミニPCダウン時は Drive 同期された xlsx で従来どおり滞在時刻を入力できる。
+        Excel は仕入帳の箱にも置き、同じファイルと空の仕入CSVだけをルート保険へコピーする。
+        ミニPCダウン時は、ドライブが同期したルート保険の xlsx で滞在時刻を入力できる。
         """
         try:
             import json
@@ -846,7 +846,7 @@ class RouteSummaryTemplateMixin:
                 QMessageBox.warning(self, "警告", "テンプレートに出力する店舗がありません。")
                 return None
 
-            # 保険: 通常の Excel テンプレも同じ箱へ（ミニPCダウン時は Drive 同期の xlsx で滞在時刻入力）
+            # 保険: 通常の Excel テンプレも同じ箱へ。あとでルート保険へコピーする。
             excel_name = f"route_template_{safe_route_name}_{route_date_str}.xlsx"
             excel_path = route_folder / excel_name
             excel_ok = False
@@ -910,19 +910,27 @@ class RouteSummaryTemplateMixin:
                 route_date=route_date_iso,
             )
 
-            # Google Drive 送信はバックグラウンド（UI を止めない）
-            drive_line = "  - Google Drive: バックグラウンド送信中…（完了時に別ダイアログ）\n"
+            # 仕入帳は画像で大きいので同期しない。Excel と空の仕入CSVだけルート保険へ。
+            insurance_dir = None
+            insurance_err = ""
             try:
-                from services.rclone_route_drive import load_rclone_config
+                from services.route_folder_import import publish_route_insurance
 
-                cfg = load_rclone_config()
-                if not cfg.get("enabled"):
-                    drive_line = "  - Google Drive: スキップ（enabled=false）\n"
-                else:
-                    self._start_rclone_push_background(str(route_folder))
+                insurance_dir, insurance_err = publish_route_insurance(
+                    route_folder,
+                    excel_path if excel_ok else None,
+                )
             except Exception as exc:
-                drive_line = f"  - Google Drive: 起動失敗（{exc}）\n"
-                print(f"rclone worker start failed: {exc}")
+                insurance_err = str(exc)
+                print(f"ルート保険へのコピー失敗: {exc}")
+
+            if insurance_dir is not None:
+                drive_line = (
+                    f"  - ルート保険: {insurance_dir}\n"
+                    "    （ドライブが同期するのはこのフォルダだけ。出かける前に同期完了を確認）\n"
+                )
+            else:
+                drive_line = f"  - ルート保険: コピーできませんでした（{insurance_err}）\n"
 
             ok, srv_msg = ensure_route_web_running()
             fixed = home_url()
@@ -947,21 +955,23 @@ class RouteSummaryTemplateMixin:
                 f"{drive_line}"
                 f"  - 商品画像\\\n"
                 f"  - レシート画像\\\n"
-                f"  - 仕入CSV\\  … スマホは Drive 上の同じ箱へ直送（StockList_*.csv）\n\n"
+                f"  - 仕入CSV\\  … スマホはルート保険の同じ名前の箱へ（StockList_*.csv）\n\n"
                 f"【普段】スマホは固定URLをブックマーク\n{fixed}\n"
                 f"（クリップボードにコピー済み）\n\n"
                 f"一覧に「{route_date_iso} / {route_name}」→ 時刻・レシート・商品撮影。\n"
                 f"（個別URL: {this_route}）\n\n"
                 f"【保険】ミニPCが落ちたら Web は開けないので、\n"
-                f"Drive 上の Excel（{excel_name if excel_ok else 'route_template_*.xlsx'}）で\n"
-                f"従来どおり滞在時刻を入力してください。\n\n"
+                f"ドライブのルート保険にある Excel（{excel_name if excel_ok else 'route_template_*.xlsx'}）で\n"
+                f"滞在時刻を入力してください。仕入帳本体はドライブに上げません。\n\n"
                 f"他の開き方:\n" + "\n".join(alts) + "\n\n"
                 f"時刻Web: {srv_msg}"
             )
-            need_warn = (not ok) or (not excel_ok)
+            need_warn = (not ok) or (not excel_ok) or (insurance_dir is None)
             if need_warn:
                 if not excel_ok and excel_msg:
                     detail += f"\n\n※ Excel 保険: {excel_msg}"
+                if insurance_dir is None and insurance_err:
+                    detail += f"\n\n※ ルート保険: {insurance_err}"
                 if not ok:
                     detail += (
                         "\n\n※ Web が起動していない場合は\n"

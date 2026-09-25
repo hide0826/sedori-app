@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 CSV_DIR_NAME = "仕入CSV"
 PRODUCT_DIR_NAME = "商品画像"
 RECEIPT_DIR_NAME = "レシート画像"
+# 仕入帳（画像込みで大きい）は同期しない。ここだけ Google ドライブに載せる。
+ROUTE_INSURANCE_ROOT = Path(r"D:\せどり総合\店舗せどり仕入リスト入れ\ルート保険")
 
 
 @dataclass
@@ -22,6 +25,62 @@ class RouteFolderLayout:
     route_template: Optional[Path] = None
     route_json: Optional[Path] = None
     notes: List[str] = field(default_factory=list)
+
+
+def is_under_route_insurance(path: Path) -> bool:
+    """パスがルート保険の中か。"""
+    try:
+        Path(path).resolve().relative_to(ROUTE_INSURANCE_ROOT.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def matching_insurance_dir(route_folder: Path) -> Optional[Path]:
+    """仕入帳の箱と同じ名前のルート保険フォルダ。保険の中を選んでいるときは None。"""
+    root = Path(route_folder)
+    if is_under_route_insurance(root) or is_under_route_insurance(root.parent):
+        return None
+    candidate = ROUTE_INSURANCE_ROOT / root.name
+    if not candidate.is_dir():
+        return None
+    try:
+        if candidate.resolve() == root.resolve():
+            return None
+    except OSError:
+        return None
+    return candidate
+
+
+def publish_route_insurance(
+    route_folder: Path,
+    excel_path: Optional[Path] = None,
+) -> Tuple[Optional[Path], str]:
+    """Excel と空の仕入CSVだけをルート保険へ置く。画像はコピーしない。"""
+    dest = ROUTE_INSURANCE_ROOT / Path(route_folder).name
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / CSV_DIR_NAME).mkdir(exist_ok=True)
+        src = Path(excel_path) if excel_path else None
+        if src is not None and src.is_file():
+            shutil.copy2(src, dest / src.name)
+        return dest, ""
+    except OSError as exc:
+        return None, str(exc)
+
+
+def _newer_file(primary: Optional[Path], extra: Optional[Path]) -> Optional[Path]:
+    """更新が新しい方。同時刻なら primary（仕入帳側）を残す。"""
+    if extra is None:
+        return primary
+    if primary is None:
+        return extra
+    try:
+        if extra.stat().st_mtime > primary.stat().st_mtime:
+            return extra
+    except OSError:
+        return primary
+    return primary
 
 
 def find_stocklist_csv(route_folder: Path) -> Optional[Path]:
@@ -62,9 +121,15 @@ def resolve_route_folder_layout(route_folder: Path) -> RouteFolderLayout:
         layout.notes.append("フォルダが存在しません")
         return layout
 
-    layout.csv_path = find_stocklist_csv(root)
+    insurance = matching_insurance_dir(root)
+    layout.csv_path = _newer_file(
+        find_stocklist_csv(root),
+        find_stocklist_csv(insurance) if insurance is not None else None,
+    )
     if layout.csv_path is None:
         layout.notes.append("StockList CSV が見つかりません（仕入CSV/ または直下）")
+    elif is_under_route_insurance(layout.csv_path):
+        layout.notes.append("仕入CSVはルート保険から読みます")
 
     product = root / PRODUCT_DIR_NAME
     if product.is_dir():
@@ -78,7 +143,12 @@ def resolve_route_folder_layout(route_folder: Path) -> RouteFolderLayout:
     else:
         layout.notes.append("レシート画像/ がありません")
 
-    layout.route_template = find_route_template(root)
+    layout.route_template = _newer_file(
+        find_route_template(root),
+        find_route_template(insurance) if insurance is not None else None,
+    )
+    if layout.route_template is not None and is_under_route_insurance(layout.route_template):
+        layout.notes.append("時刻の Excel はルート保険の新しいファイルを使います")
     rj = root / "route.json"
     if rj.is_file():
         layout.route_json = rj

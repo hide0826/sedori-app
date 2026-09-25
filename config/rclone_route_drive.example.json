@@ -4,5 +4,5 @@
   "remote": "gdrive",
   "remote_root": "せどり総合/店舗せどり仕入リスト入れ/仕入帳",
   "timeout_sec": 180,
-  "_comment": "enabled を true に。GUI から見つからない場合は rclone_exe にフルパス（例: %LOCALAPPDATA%\\\\Microsoft\\\\WinGet\\\\Links\\\\rclone.exe）を書く。"
+  "_comment": "2026-09-25 以降、Webテンプレは rclone で送らない。ドライブが同期するのはルート保険だけ。enabled は false のまま。"
 }
