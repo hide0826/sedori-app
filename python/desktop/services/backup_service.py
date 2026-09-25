@@ -175,17 +175,54 @@ def begin_nightly_restart() -> bool:
     return True
 
 
+def relaunch_creationflags() -> int:
+    """
+    再起動待ちプロセスを、HIRIO のコンソールから切り離すフラグ。
+
+    同じコンソールのままだと、本体終了でコマンドプロンプトが閉じた瞬間に
+    待ちプロセスも一緒に死に、start_hirio.bat まで到達しない。
+    """
+    if sys.platform != "win32":
+        return 0
+    return subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+
+
+def _popen_detached(args: Sequence[str]) -> subprocess.Popen[Any]:
+    """コンソールを引き継がずにプロセスを起動する。"""
+    flags = relaunch_creationflags()
+    kwargs: Dict[str, Any] = {
+        "close_fds": True,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if flags:
+        kwargs["creationflags"] = flags
+        if sys.platform == "win32":
+            try:
+                return subprocess.Popen(
+                    list(args),
+                    creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB,
+                    close_fds=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                logger.info("job breakaway 不可のため、コンソール切り離しだけで起動します")
+    return subprocess.Popen(list(args), **kwargs)
+
+
 def schedule_relaunch_after_exit() -> bool:
     """このプロセスが終わったあと、start_hirio.bat を起動する。"""
     bat = _repo_root() / "start_hirio.bat"
     script = Path(__file__).resolve().parent.parent / "restart_hirio_after_exit.ps1"
+    log_path = Path(__file__).resolve().parent.parent / "logs" / "nightly_restart.log"
     if not bat.is_file() or not script.is_file():
         logger.warning("nightly restart skipped: bat=%s script=%s", bat, script)
         return False
-    flags = 0
-    if sys.platform == "win32":
-        flags = subprocess.CREATE_NO_WINDOW
-    subprocess.Popen(
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    _popen_detached(
         [
             "powershell",
             "-NoProfile",
@@ -197,9 +234,9 @@ def schedule_relaunch_after_exit() -> bool:
             str(os.getpid()),
             "-BatPath",
             str(bat),
-        ],
-        creationflags=flags,
-        close_fds=False,
+            "-LogPath",
+            str(log_path),
+        ]
     )
     return True
 

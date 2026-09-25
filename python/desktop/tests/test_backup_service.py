@@ -98,6 +98,21 @@ def test_prune_old_backups(tmp_path: Path) -> None:
     assert len(remaining) == 2
 
 
+def test_relaunch_creationflags_leave_parent_console() -> None:
+    import subprocess
+    import sys
+
+    from desktop.services.backup_service import relaunch_creationflags
+
+    flags = relaunch_creationflags()
+    if sys.platform != "win32":
+        assert flags == 0
+        return
+    assert flags & subprocess.DETACHED_PROCESS
+    assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+    assert not (flags & subprocess.CREATE_NO_WINDOW)
+
+
 def test_nightly_restart_due_only_inside_window() -> None:
     from datetime import datetime
 

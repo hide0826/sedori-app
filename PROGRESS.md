@@ -2,11 +2,13 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-09-23（情報撮影）
+更新日: 2026-09-25（夜の再起動が戻らない）
 
 ---
 
 ## いまの状態
+
+**2026-09-25（夜の再起動が戻らない）:** 9/25 3:00 の再起動は記録上実行済みだが、朝から本体が落ちたまま。`nightly_restart_done=2026-09-25`。待ちの PowerShell が HIRIO と同じコンソールに付いていて、終了で一緒に消えていた。`schedule_relaunch_after_exit` を `DETACHED_PROCESS` で切り離し、`python/desktop/logs/nightly_restart.log` に結果を残す。反映には、いま開いている HIRIO を一度閉じてもう一度開く。バックアップ先 `Z:\HIRIObackup` は現在見えていない（最終成功は 9/23 16:31）。
 
 **2026-09-23（情報撮影）:** ネット仕入の「情報撮影」は、いま開いているログイン済みChromeでメルカリを3枚撮る。拡張 `python/desktop/mercari_capture_extension`（表示名「HIRIO メルカリ撮影」1.0.2）を一度読み込む。撮影はゆっくり。サムネはダブルクリックで拡大。ユーザー名は「ゆうパケットプラスでお届け」などを飛ばす。行の編集で直したユーザー名・取引ID・出品URLは、OKを押しても空欄のときだけ画像の読み取りで埋める。反映には HIRIO 再起動。拡張の中身を変えたあとは chrome://extensions で再読み込み。ヤフオクは未対応。
 
