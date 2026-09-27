@@ -24,10 +24,18 @@ from route_web.product_images import (
     product_dir,
     save_product_upload,
     append_product_file,
+    append_route_product_file,
     confirm_product_group,
+    confirm_route_product_group,
+    confirmed_product_groups,
+    discard_product_group,
+    list_no_image_products,
+    mark_no_image,
+    clear_no_image,
+    route_file_code,
 )
 from route_web.prepare import load_prep_status, prepare_route_folder
-from route_web.route_purchases import list_route_purchases
+from route_web.route_purchases import list_route_purchases, lookup_photo_jan, nearby_route_products
 from route_web.scan_requests import enqueue_scan
 from route_web.receipts import (
     append_receipt_file,
@@ -46,6 +54,7 @@ from route_web.schema import stamp_updated
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PAGE_PATH = STATIC_DIR / "route.html"
 PHOTOS_PATH = STATIC_DIR / "route_photos.html"
+PHOTOS_DONE_PATH = STATIC_DIR / "route_photos_done.html"
 INDEX_PATH = STATIC_DIR / "index.html"
 ICON_PATH = STATIC_DIR / "icon.png"
 MANIFEST_PATH = STATIC_DIR / "manifest.webmanifest"
@@ -61,6 +70,7 @@ class InboxMoveBody(BaseModel):
 
 class ConfirmBody(BaseModel):
     jan: str = ""
+    asin: str = ""
 
 
 def _page_html(web_id: str) -> str:
@@ -131,6 +141,15 @@ def api_csv_inbox() -> JSONResponse:
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"inbox error: {exc}") from exc
     return JSONResponse({"inbox_path": path, "files": files})
+
+
+@app.get("/route/{web_id}/photos/done", response_class=HTMLResponse)
+def route_photos_done_page(web_id: str) -> HTMLResponse:
+    _require_doc(web_id)
+    if not PHOTOS_DONE_PATH.is_file():
+        raise HTTPException(status_code=500, detail="route_photos_done.html missing")
+    html = PHOTOS_DONE_PATH.read_text(encoding="utf-8")
+    return HTMLResponse(html.replace("__WEB_ID__", web_id))
 
 
 @app.get("/route/{web_id}/photos", response_class=HTMLResponse)
@@ -321,6 +340,164 @@ async def upload_product(
     )
 
 
+def _seed_saved_jan(folder: Path, filename: str, jan: str) -> bool:
+    """保存した写真のJANを画像DBへ書く。失敗しても写真自体は残す。"""
+    if not str(jan or "").strip():
+        return False
+    try:
+        from route_web.desktop_bridge import ensure_desktop_importable
+
+        ensure_desktop_importable()
+        from services.route_product_seed import seed_product_jan
+
+        return bool(seed_product_jan(product_dir(folder) / filename, jan))
+    except Exception:
+        return False
+
+
+@app.post("/api/route/{web_id}/products")
+async def upload_route_product(
+    web_id: str,
+    file: UploadFile = File(...),
+    jan: Optional[str] = Form(None),
+    asin: Optional[str] = Form(None),
+) -> JSONResponse:
+    """商品写真をルート単位で保存する。店舗は選ばない。"""
+    doc = _require_doc(web_id)
+    folder = _require_folder(web_id)
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="empty file")
+    code = route_file_code(doc)
+    try:
+        filename = save_product_upload(
+            folder,
+            str(doc.get("route_date") or ""),
+            code,
+            raw,
+            original_name=file.filename or "",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"save failed: {exc}") from exc
+    doc = append_route_product_file(doc, filename, jan=jan or "", asin=asin or "")
+    doc = stamp_updated(doc)
+    save_route_json(web_id, doc)
+    seeded = _seed_saved_jan(folder, filename, jan or "")
+    return JSONResponse(
+        {
+            "ok": True,
+            "filename": filename,
+            "jan": (jan or "").strip(),
+            "asin": (asin or "").strip(),
+            "image_db": seeded,
+            "route_code": str(doc.get("route_code") or ""),
+            "route_name": str(doc.get("route_name") or ""),
+            "product_files": doc.get("product_files") or [],
+        }
+    )
+
+
+@app.get("/api/route/{web_id}/products/done")
+def get_done_products(web_id: str) -> JSONResponse:
+    doc = _require_doc(web_id)
+    groups = confirmed_product_groups(doc)
+    by_jan: Dict[str, Dict[str, Any]] = {}
+    by_asin: Dict[str, Dict[str, Any]] = {}
+    try:
+        for row in list_route_purchases(doc):
+            jan = str(row.get("jan") or "")
+            asin = str(row.get("asin") or "")
+            if jan and jan not in by_jan:
+                by_jan[jan] = row
+            if asin and asin not in by_asin:
+                by_asin[asin] = row
+    except Exception:
+        by_jan = {}
+        by_asin = {}
+    done = []
+    seen = set()
+
+    def _append_done(jan: str, asin: str, files: list, no_image: bool) -> None:
+        key = ("jan:" + jan) if jan else (("asin:" + asin) if asin else "")
+        if not key or key in seen:
+            return
+        seen.add(key)
+        row = by_jan.get(jan) or by_asin.get(asin) or {}
+        done.append(
+            {
+                "jan": jan,
+                "asin": asin or row.get("asin") or "",
+                "files": files,
+                "no_image": no_image,
+                "product_name": row.get("product_name") or "",
+                "sku": row.get("sku") or "",
+                "route_name": str(doc.get("route_name") or ""),
+                "route_date": str(doc.get("route_date") or ""),
+            }
+        )
+
+    no_image_keys = set()
+    for item in list_no_image_products(doc):
+        jan = item.get("jan") or ""
+        asin = item.get("asin") or ""
+        key = ("jan:" + jan) if jan else ("asin:" + asin)
+        no_image_keys.add(key)
+    for group in groups:
+        jan = group.get("jan") or ""
+        asin = group.get("asin") or ""
+        key = ("jan:" + jan) if jan else (("asin:" + asin) if asin else "")
+        _append_done(jan, asin, group["files"], key in no_image_keys)
+    for item in list_no_image_products(doc):
+        _append_done(item.get("jan") or "", item.get("asin") or "", [], True)
+    return JSONResponse({"done": done})
+
+
+@app.post("/api/route/{web_id}/products/reopen")
+def reopen_route_products(web_id: str, body: ConfirmBody) -> JSONResponse:
+    doc = _require_doc(web_id)
+    folder = _require_folder(web_id)
+    discarded = False
+    try:
+        doc = discard_product_group(doc, folder, body.jan or "", body.asin or "")
+        discarded = True
+    except ValueError:
+        discarded = False
+    try:
+        doc, cleared = clear_no_image(doc, body.jan or "", body.asin or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not discarded and not cleared:
+        raise HTTPException(status_code=400, detail="reshoot target not found")
+    doc = stamp_updated(doc)
+    save_route_json(web_id, doc)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/route/{web_id}/products/no-image")
+def mark_route_product_no_image(web_id: str, body: ConfirmBody) -> JSONResponse:
+    """写真を撮らず、画像不要として撮影済みへ移す。"""
+    doc = _require_doc(web_id)
+    try:
+        doc = mark_no_image(doc, body.jan or "", body.asin or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    doc = stamp_updated(doc)
+    save_route_json(web_id, doc)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/route/{web_id}/products/confirm")
+def confirm_route_products(web_id: str, body: ConfirmBody) -> JSONResponse:
+    doc = _require_doc(web_id)
+    try:
+        doc = confirm_route_product_group(doc, body.jan or "", body.asin or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    doc = stamp_updated(doc)
+    save_route_json(web_id, doc)
+    return JSONResponse({"ok": True, "route": doc})
+
+
 @app.get("/api/route/{web_id}/products/{filename}")
 def get_product_file(web_id: str, filename: str):
     folder = _require_folder(web_id)
@@ -365,32 +542,44 @@ def get_prepare(web_id: str) -> JSONResponse:
 def get_route_purchases(web_id: str) -> JSONResponse:
     doc = _require_doc(web_id)
     rows = list_route_purchases(doc)
+    nearby = [] if rows else nearby_route_products(doc)
+    if rows:
+        message = ""
+    elif nearby:
+        message = "このルートの仕入はまだDBにありません。日付の近いルートの商品です"
+    else:
+        message = "先に仕入管理で箱を保存してください"
     return JSONResponse(
         {
             "purchases": rows,
-            "empty": not rows,
-            "message": "" if rows else "先に仕入管理で箱を保存してください",
+            "nearby_routes": nearby,
+            "empty": not rows and not nearby,
+            "message": message,
         }
     )
 
 
 @app.post("/api/route/{web_id}/barcode")
-async def read_route_barcode(web_id: str, file: UploadFile = File(...)) -> JSONResponse:
+async def read_route_barcode(
+    web_id: str,
+    file: UploadFile = File(...),
+    jan: Optional[str] = Form(None),
+) -> JSONResponse:
     doc = _require_doc(web_id)
     raw = await file.read()
     if not raw:
         raise HTTPException(status_code=400, detail="empty file")
     from route_web.barcode_read import decode_jan_bytes
 
-    jan = decode_jan_bytes(raw)
-    purchases = list_route_purchases(doc)
-    candidates = [row for row in purchases if jan and row.get("jan") == jan]
+    decoded = decode_jan_bytes(raw)
+    looked = lookup_photo_jan(doc, (jan or "").strip() or decoded)
     return JSONResponse(
         {
-            "jan": jan or "",
-            "candidates": candidates,
-            "purchases_empty": not purchases,
-            "message": "" if purchases else "先に仕入管理で箱を保存してください",
+            "jan": looked.get("jan") or "",
+            "level": looked.get("level") or "none",
+            "candidates": looked.get("candidates") or [],
+            "nearby_routes": looked.get("nearby_routes") or [],
+            "message": looked.get("message") or "",
         }
     )
 

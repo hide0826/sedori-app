@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>HIRIO 撮影済み</title>
+  <link rel="icon" href="/icon.png" type="image/png" />
+  <meta name="theme-color" content="#2a9fe0" />
+  <style>
+    :root { --bg:#0f1419; --card:#1a2332; --text:#e7ecf3; --muted:#8b9bb4; --accent:#3d8bfd; --border:#2a3548; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif; background:var(--bg); color:var(--text); padding:12px 12px 96px; }
+    a { color:#9ecbff; text-decoration:none; }
+    h1 { font-size:1.15rem; margin:0 0 4px; }
+    .sub { color:var(--muted); font-size:.85rem; margin-bottom:12px; }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:12px; }
+    button { display:block; width:100%; text-align:left; background:#243044; color:#fff; border:0; border-radius:8px; padding:10px 12px; font-size:1rem; }
+    .badge { display:inline-block; margin-right:8px; padding:2px 8px; border-radius:999px; background:#6b4f1d; color:#ffe08a; font-size:.8rem; vertical-align:middle; }
+    .hint { color:var(--muted); font-size:.85rem; }
+    #status.ok { color:#3fb950; }
+    #status.err { color:#ff7b72; }
+    li { margin:8px 0; list-style:none; }
+    ul { padding:0; margin:0; }
+  </style>
+</head>
+<body>
+  <p><a id="backLink" href="#">← 商品を選ぶ画面</a></p>
+  <h1 id="title">撮影済み</h1>
+  <div class="sub" id="subtitle"></div>
+  <div class="card">
+    <p class="hint">写真がある商品をタップすると「再撮影しますか？」と聞きます。画像不要の商品をタップすると、撮影リストに戻せます。</p>
+    <ul id="doneList"></ul>
+  </div>
+  <div id="status"></div>
+  <script>
+    const WEB_ID = "__WEB_ID__";
+    document.getElementById("backLink").href = "/route/" + encodeURIComponent(WEB_ID) + "/photos";
+
+    function setStatus(msg, kind) {
+      const el = document.getElementById("status");
+      el.textContent = msg || "";
+      el.className = kind || "";
+    }
+
+    function label(row) {
+      const code = row.jan ? ("JAN " + row.jan) : ("ASIN " + (row.asin || ""));
+      const photos = (row.files || []).length
+        ? (" / 写真 " + row.files.length + "枚")
+        : "";
+      return (row.product_name || row.sku || "名称なし") + " / " + code + photos;
+    }
+
+    function askReshoot(row) {
+      const noImageOnly = !!row.no_image && !(row.files || []).length;
+      const message = noImageOnly
+        ? "画像不要を取り消して、撮影リストに戻しますか？"
+        : "再撮影しますか？<br>撮影した画像は消えます。";
+      return new Promise((resolve) => {
+        const box = document.createElement("div");
+        box.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;";
+        box.innerHTML = '<div style="background:#1a2332;border:1px solid #2a3548;border-radius:10px;padding:16px;max-width:320px;width:100%"><p style="margin:0 0 12px">' + message + '</p><div style="display:flex;gap:8px"><button type="button" id="yesBtn" style="width:auto;flex:1;background:#3d8bfd">はい</button><button type="button" id="noBtn" style="width:auto;flex:1">いいえ</button></div></div>';
+        document.body.appendChild(box);
+        box.querySelector("#yesBtn").addEventListener("click", () => { box.remove(); resolve(true); });
+        box.querySelector("#noBtn").addEventListener("click", () => { box.remove(); resolve(false); });
+      });
+    }
+
+    async function reopen(row) {
+      const ok = await askReshoot(row);
+      if (!ok) return;
+      const res = await fetch(
+        "/api/route/" + encodeURIComponent(WEB_ID) + "/products/reopen",
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jan: row.jan || "", asin: row.asin || "" }) }
+      );
+      if (!res.ok) {
+        setStatus("写真を消せませんでした", "err");
+        return;
+      }
+      const back = row.jan
+        ? ("jan=" + encodeURIComponent(row.jan))
+        : ("asin=" + encodeURIComponent(row.asin || ""));
+      location.href = "/route/" + encodeURIComponent(WEB_ID) + "/photos?" + back;
+    }
+
+    async function loadAll() {
+      const routeRes = await fetch("/api/route/" + encodeURIComponent(WEB_ID));
+      const route = await routeRes.json();
+      document.getElementById("title").textContent = (route.route_name || "ルート") + " 撮影済み";
+      document.getElementById("subtitle").textContent = route.route_date || "";
+      const res = await fetch("/api/route/" + encodeURIComponent(WEB_ID) + "/products/done");
+      const data = await res.json();
+      const ul = document.getElementById("doneList");
+      ul.innerHTML = "";
+      const rows = data.done || [];
+      if (!rows.length) {
+        const li = document.createElement("li");
+        li.textContent = "撮影済みの商品はまだありません。";
+        ul.appendChild(li);
+        return;
+      }
+      rows.forEach((row) => {
+        const li = document.createElement("li");
+        const btn = document.createElement("button");
+        btn.type = "button";
+        if (row.no_image) {
+          const badge = document.createElement("span");
+          badge.className = "badge";
+          badge.textContent = "画像不要";
+          btn.appendChild(badge);
+        }
+        btn.appendChild(document.createTextNode(label(row)));
+        btn.addEventListener("click", () => reopen(row));
+        li.appendChild(btn);
+        ul.appendChild(li);
+      });
+    }
+
+    loadAll().catch((e) => setStatus("読み込み失敗: " + e.message, "err"));
+  </script>
+</body>
+</html>

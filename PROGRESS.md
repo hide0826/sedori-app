@@ -2,11 +2,17 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-09-26（Notion 追記をやめる）
+更新日: 2026-09-27（商品撮影）
 
 ---
 
 ## いまの状態
+
+**2026-09-27（商品撮影）:** 新品などで写真が不要な商品は、リストを長押しして「画像不要にしますか？」ではいを選ぶと、撮影済みへ「画像不要」バッジ付きで移る。このルートの商品が残らなければ、撮影は終わり。撮影済みの画像不要をタップすると、リストに戻せる。反映にはルートWebの再起動。
+
+**2026-09-26（商品撮影）:** JAN付きの写真は、撮影終了前でも保存と同時に画像DBへ書く。すでに撮った分も画像DBへ入れた。https は Tailscale Serve で有効。スマホは Tailscale をオンにして `https://houseserver.tail0a340c.ts.net/` を開くと、カメラを開いたまま続けて撮れる。縦持ちのまま、保存される写真は中央の横長（4:3）だけ。`http://houseserver:8792` は1枚ずつ。操作は Windows ユーザー hide に戻した。
+
+**2026-09-26（商品撮影・画面）:** 候補は仕入DBの最新スナップショット。撮影終了は商品を選ぶと押せる（写真が1枚あると緑）。押すと選択が外れ、その商品は「撮影済み」ページへ移り、選ぶ一覧からは消える。撮影済みをタップすると「再撮影しますか？」と聞き、はいなら写真を消して選び直す画面に戻る。選んだ商品のボタンは緑になる。JANが仕入DBに無い商品は ASIN で写真を紐付ける。反映にはルートWebの再起動。
 
 **2026-09-26（Notion）:** 仕様書ページへの追記はやめる。開くだけでトークン消費が大きい。方針と進捗は `C:\HIRIO\PROGRESS.md` とこのファイル、`docs/specs/` に書く。
 
@@ -54,6 +60,35 @@
 - ルート時刻Web: 番人 `python\route_web\watch.ps1`（`:8792`。落ちたら起動し直す）。手動は `start_route_web.bat`
 - Python: 3.13.15 / venv はこのマシンで作り直し済み
 - FastAPI: デスクトップ起動時に自動起動（失敗しても仕入画面は動く）
+
+---
+
+## 2026-09-27 商品撮影（ルート単位）
+
+仕入を保存したあとの `/route/{web_id}/photos` で撮る。店舗は選ばない。画面にはルート名と日付を出す。
+
+### 動き
+
+1. 候補は、そのルートの仕入DB。同じJANが無ければDB全体。それでも無ければ、日付が近いルート（21日以内を優先。無ければ近い順に3ルート）
+2. 写真は `{ルート箱}/商品画像/`。ファイル名は `{route_date}-{route_code}-item-{連番}.jpg`
+3. JAN付きの写真は、撮影終了を待たずに画像DBへ書く。ASINだけの写真は画像DBのJAN欄には入らない
+4. 撮影終了を押すと、その商品は「撮影済み」へ移る。タップすると再撮影を聞き、はいなら写真を消して一覧に戻す
+5. 新品など写真が不要な商品は、リストを長押しして「画像不要」。撮影済みへバッジ付きで移る。リストが空ならそのルートの撮影は終わり。撮影済みからタップすると一覧に戻せる
+6. スマホは Tailscale をオンにして `https://houseserver.tail0a340c.ts.net/` を開くと、カメラを開いたまま続けて撮れる。縦持ちのまま、保存は中央の横長（4:3）。`http://houseserver:8792` は1枚ずつ
+
+### 追加・変更
+
+| 何 | 場所 |
+|----|------|
+| 画面 | `python/route_web/static/route_photos.html` / `route_photos_done.html` |
+| API | `python/route_web/app.py`（`POST /api/route/{web_id}/products`、確定、画像不要、撮影済み） |
+| 保存と確定 | `python/route_web/product_images.py` |
+| 候補の探し方 | `python/route_web/route_purchases.py` |
+| 画像DBへの先書き | `python/desktop/services/route_product_seed.py` |
+| https | `python/route_web/enable_https.ps1`（Tailscale Serve。実行は Tailscale を掴んでいるユーザー） |
+| 仕様 | `docs/specs/field_route_web_spec.md` |
+
+反映にはルートWebの再起動。仕様書の Notion ページは更新しない（2026-09-26 の方針）。
 
 ---
 

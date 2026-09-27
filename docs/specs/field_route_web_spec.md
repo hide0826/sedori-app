@@ -290,13 +290,18 @@ Webテンプレ作成の最後に（停止前）:
 巡回中の各店舗カードには商品撮影を出さない。仕入を保存したあとの別画面で撮る。
 
 - 保存先: `{ルート箱}/商品画像/`
-- ファイル名: `{route_date}-{store_code}-item-{連番}.jpg`
-- `stores[].product_files`: `[{"file":"…jpg","jan":"…"}]`（jan は任意）
-- API: `POST /api/route/{web_id}/stores/{store_code}/products`（form: file + jan）
+- ファイル名: `{route_date}-{route_code}-item-{連番}.jpg`（店舗コードは使わない）
+- `product_files`: `[{"file":"…jpg","jan":"…","asin":"…"}]`（ルート直下。jan も asin も任意。JANが無い商品は ASIN で紐付ける）。以前の `stores[].product_files` も読み取れる
+- API: `POST /api/route/{web_id}/products`（form: file + jan + asin）。確定は `POST /api/route/{web_id}/products/confirm`
 - バーコード自動読取は、仕入保存後の商品撮影画面で行う（巡回中の画面には出さない）
 - 巡回画面: 時刻・仕入点数・レシート。ボタン「事前処理を実行」でレシートOCR（`prep_status.json` と証憑DB。リネームしない）
-- 商品撮影: `/route/{web_id}/photos`。JANあり／JANなし。「撮影終了」で `product_files[].confirmed`。仕入レコードの画像列はここでは書き換えない
-- 「スキャン実行」は `python/route_web/data/pending_scans.json` に依頼を書く。起動中の HIRIO が確定JANを画像DBへ先に書き、スキャンする
+- 商品撮影: `/route/{web_id}/photos`。店舗は選ばない。画面の店舗名の位置には、いま開いているルート名と日付を出す
+- JANを撮ったとき: まずそのルートの仕入DBから候補。そのルートに同じJANが無ければDB全体。それでも無ければ、指定ルートの日付に近いルートの商品一覧（21日以内を優先。無ければもっと近い順に3ルート）
+- 写真の保存はルート単位（`route.json` の `product_files`。ファイル名は `{route_date}-{route_code}-item-連番.jpg`）。「撮影終了」でそのJANまたはASINを確定。仕入レコードの画像列はここでは書き換えない
+- JANが付いた写真は、撮影終了を待たずに画像DB（`product_images`）へ書く。画像管理のスキャンはそのJANを使い、ファイル名にJANが無くてもグループできる。ASINだけの写真は画像DBのJAN欄には入らない
+- https で開いたとき（Tailscale Serve）は、ページ内のカメラで同じ商品を続けて撮る。http のときは、これまでどおり1枚ずつカメラが閉じる
+- 「スキャン実行」は `python/route_web/data/pending_scans.json` に依頼を書く。起動中の HIRIO が、JAN付きの写真を画像DBへ先に書き、スキャンする
+- 新品などで写真が不要な商品は、リストを長押しして「画像不要」にする。撮影済みへ「画像不要」バッジ付きで移り、選ぶリストからは消える。このルートの商品が残らなければ、そのルートの撮影は終わり
 - ルート箱取込は、仕入データタブのルート情報も開く。中身のある `route.json`（時刻・メモ・高速代・仕入点数）を Excel より優先。店名だけの JSON や空の JSON は Excel を開く
 
 ---
@@ -352,6 +357,8 @@ C:\HIRIO\repo\sedori-app.github\docs\specs\field_route_web_spec.md を読んで�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-09-26 | JAN付き写真は撮影終了前でも画像DBへ書く。https ならページ内カメラで連続撮影 |
+| 2026-09-26 | 商品撮影は店舗ではなくルート。JANはルート→DB全体→日付の近いルートの順 |
 | 2026-09-25 | rclone 送信を停止。ドライブへはルート保険だけ（Excel と仕入CSV）。仕入帳本体は同期しない |
 | 2026-09-23 | 巡回と商品撮影を分離。route.json 優先。レシート先読み。確定JANはスキャンで読み直さない |
 | 2026-09-22 | rclone 安定化: 裏送信＋copyのみ（mkdir省略）。GUI PATH／地図埋め込み失敗案内。常時Drive同期は不要 |

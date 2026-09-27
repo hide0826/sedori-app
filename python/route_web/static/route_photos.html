@@ -28,37 +28,61 @@
     input[type="file"] { display:none; }
     ul { padding-left:18px; }
     li { margin:6px 0; }
+    #candidates button, #productList button { display:block; width:100%; text-align:left; margin-top:6px; }
+    button.picked { background:#2ea043; box-shadow:inset 0 0 0 3px #b6f5c6; }
+    #finishBtn.ready { background:#243044; color:#fff; box-shadow:inset 0 0 0 2px #2ea043; opacity:1; }
+    #takePhotoBtn {
+      display:block; width:100%; text-align:center; font-size:1.45rem; font-weight:700;
+      padding:26px 16px; margin:0 0 10px;
+    }
+    #finishBtn { display:block; width:100%; background:#243044; font-size:.95rem; padding:12px; }
+    #routeDoneHint { display:none; color:#3fb950; font-size:1rem; font-weight:700; margin:8px 0 0; }
+    button, .btn { user-select:none; -webkit-touch-callout:none; }
+    #liveVideo {
+      display:block; width:100%; max-height:42vh; aspect-ratio:4 / 3;
+      background:#000; border-radius:8px; object-fit:cover;
+    }
+    #shutterBtn {
+      display:block; width:100%; text-align:center; font-size:1.45rem; font-weight:700;
+      padding:26px 16px; margin:10px 0;
+    }
   </style>
 </head>
 <body>
-  <p><a id="backLink" href="#">← 時刻・レシートの画面</a></p>
+  <p><a id="backLink" href="#">← 時刻・レシートの画面</a>　<a id="doneLink" href="#">撮影済み</a></p>
   <h1 id="title">商品撮影</h1>
   <div class="sub" id="subtitle">仕入DBが確定したあと</div>
   <div class="card">
-    <p class="hint">店を回っているあいだの画面ではありません。仕入を保存してから使います。</p>
+    <p class="hint">店を回っているあいだの画面ではありません。仕入を保存してから使います。店舗は選ばず、このルートで探します。</p>
     <div class="row">
       <button type="button" id="modeJan">JANあり</button>
       <button type="button" class="secondary" id="modeNoJan">JANなし</button>
     </div>
-    <label class="hint">店舗</label>
-    <select id="storeSelect" style="width:100%;padding:8px;margin:6px 0 10px"></select>
+    <label class="hint">ルート</label>
+    <p id="routeLabel" style="margin:6px 0 10px">読み込み中</p>
+    <p id="routeDoneHint">このルートの商品撮影は終わりました。</p>
+    <p class="hint">商品を長押しすると「画像不要にしますか？」と聞きます。はいを選ぶと、写真なしで撮影済みへ移ります。</p>
     <div id="janBox">
       <label class="btn">JANを撮る<input id="janShot" type="file" accept="image/*" capture="environment" /></label>
       <p class="hint" id="janRead">まだ読んでいません</p>
       <ul id="candidates"></ul>
     </div>
     <div id="noJanBox" style="display:none">
-      <p class="hint">このルートの商品から選んでください。</p>
+      <p class="hint" id="noJanHint">このルートの商品から選んでください。</p>
       <ul id="productList"></ul>
     </div>
   </div>
-  <div class="card">
+  <div class="card" id="photoCard">
     <h2 style="margin:0 0 8px;font-size:.95rem;color:var(--muted)">選んだ商品の写真</h2>
     <p class="hint" id="selectedLabel">商品が未選択です</p>
-    <div class="row">
-      <label class="btn">写真を撮る<input id="productShot" type="file" accept="image/*" capture="environment" /></label>
-      <button type="button" class="secondary" id="finishBtn" disabled>撮影終了</button>
+    <p class="hint" id="camHint"></p>
+    <div id="liveBox" style="display:none">
+      <video id="liveVideo" playsinline autoplay muted></video>
+      <button type="button" id="shutterBtn">写真を撮る</button>
+      <p class="hint">スマホは縦のままで大丈夫です。画面の横長の範囲が、横長の写真として保存されます。</p>
     </div>
+    <label class="btn" id="takePhotoBtn">写真を撮る<input id="productShot" type="file" accept="image/*" capture="environment" /></label>
+    <button type="button" id="finishBtn" disabled>撮影終了</button>
     <ul id="shotList"></ul>
   </div>
   <div class="card">
@@ -68,11 +92,54 @@
   <div id="status"></div>
   <script>
     const WEB_ID = "__WEB_ID__";
+    let camStream = null;
+    let shooting = false;
     let purchases = [];
+    let nearbyRoutes = [];
+    let candidateRows = [];
+    let candidateGroups = [];
+    let doneJans = {};
     let selected = null;
     let shotCount = 0;
 
     document.getElementById("backLink").href = "/route/" + encodeURIComponent(WEB_ID);
+    document.getElementById("doneLink").href = "/route/" + encodeURIComponent(WEB_ID) + "/photos/done";
+
+    function janKey(row) {
+      return String((row && row.jan) || "").replace(/\D/g, "");
+    }
+
+    function asinKey(row) {
+      return String((row && row.asin) || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+    }
+
+    function linkId(row) {
+      const jan = janKey(row);
+      if (jan) return "jan:" + jan;
+      const asin = asinKey(row);
+      if (asin) return "asin:" + asin;
+      return "";
+    }
+
+    function idText(row) {
+      const jan = janKey(row);
+      if (jan) return "JAN " + jan;
+      const asin = asinKey(row);
+      if (asin) return "ASIN " + asin;
+      return "コードなし";
+    }
+
+    function isDone(row) {
+      const key = linkId(row);
+      return !!key && !!doneJans[key];
+    }
+
+    function sameProduct(a, b) {
+      if (!a || !b) return false;
+      if (a.sku && b.sku) return a.sku === b.sku;
+      if (janKey(a) && janKey(a) === janKey(b)) return true;
+      return !!(asinKey(a) && asinKey(a) === asinKey(b));
+    }
 
     function setStatus(msg, kind) {
       const el = document.getElementById("status");
@@ -80,8 +147,10 @@
       el.className = kind || "";
     }
 
-    function storeCode() {
-      return document.getElementById("storeSelect").value || "";
+    function routeText(row) {
+      const name = (row && row.route_name) || "ルート";
+      const date = (row && (row.route_date || row.purchase_date)) || "";
+      return date ? (name + " " + date) : name;
     }
 
     function showSelected() {
@@ -92,58 +161,288 @@
         finish.disabled = true;
         return;
       }
-      label.textContent = (selected.product_name || selected.sku || "商品") + " / JAN " + (selected.jan || "なし");
-      finish.disabled = !selected.jan || shotCount < 1;
+      label.textContent = (selected.product_name || selected.sku || "商品")
+        + " / " + idText(selected)
+        + " / " + routeText(selected);
+      finish.disabled = !linkId(selected);
+      finish.className = shotCount >= 1 ? "ready" : "";
     }
 
-    function fillStores(stores) {
-      const sel = document.getElementById("storeSelect");
-      sel.innerHTML = "";
-      (stores || []).forEach((st) => {
-        const opt = document.createElement("option");
-        opt.value = st.store_code || "";
-        opt.textContent = (st.store_code || "") + " " + (st.store_name || "");
-        sel.appendChild(opt);
+    function chooseProduct(row) {
+      if (!linkId(row)) {
+        setStatus("この商品にはJANもASINもありません", "err");
+        return;
+      }
+      selected = row;
+      shotCount = 0;
+      document.getElementById("shotList").innerHTML = "";
+      showSelected();
+      renderProducts();
+      renderCandidates();
+      setStatus("商品を選びました", "ok");
+      const photoCard = document.getElementById("photoCard");
+      window.setTimeout(() => {
+        photoCard.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 50);
+      ensureLiveCamera();
+    }
+
+    async function ensureLiveCamera() {
+      const live = document.getElementById("liveBox");
+      const fallback = document.getElementById("takePhotoBtn");
+      if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        live.style.display = "none";
+        fallback.style.display = "";
+        return;
+      }
+      if (camStream) {
+        live.style.display = "";
+        fallback.style.display = "none";
+        return;
+      }
+      try {
+        camStream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 2560 } }
+        });
+        const video = document.getElementById("liveVideo");
+        video.srcObject = camStream;
+        await video.play();
+        live.style.display = "";
+        fallback.style.display = "none";
+      } catch (e) {
+        camStream = null;
+        live.style.display = "none";
+        fallback.style.display = "";
+        setStatus("カメラを開けませんでした。下のボタンで1枚ずつ撮ってください", "err");
+      }
+    }
+
+    function captureLandscape(video) {
+      const srcW = video.videoWidth;
+      const srcH = video.videoHeight;
+      const target = 4 / 3;
+      let sx = 0;
+      let sy = 0;
+      let sw = srcW;
+      let sh = srcH;
+      const srcAspect = srcW / srcH;
+      if (srcAspect > target) {
+        sw = Math.round(srcH * target);
+        sx = Math.round((srcW - sw) / 2);
+      } else if (srcAspect < target) {
+        sh = Math.round(srcW / target);
+        sy = Math.round((srcH - sh) / 2);
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = sw;
+      canvas.height = sh;
+      canvas.getContext("2d").drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+      return canvas;
+    }
+
+    async function shootLive() {
+      if (shooting) return;
+      if (!selected || !linkId(selected)) {
+        setStatus("先に商品を選んでください", "err");
+        return;
+      }
+      const video = document.getElementById("liveVideo");
+      if (!video.videoWidth) {
+        setStatus("カメラの準備ができていません", "err");
+        return;
+      }
+      shooting = true;
+      const btn = document.getElementById("shutterBtn");
+      btn.disabled = true;
+      try {
+        const canvas = captureLandscape(video);
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.85));
+        if (!blob) {
+          setStatus("写真を作れませんでした", "err");
+          return;
+        }
+        await uploadProduct(new File([blob], "product.jpg", { type: "image/jpeg" }));
+      } finally {
+        shooting = false;
+        btn.disabled = false;
+      }
+    }
+
+    function productButton(row, className) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      if (className) btn.className = className;
+      btn.textContent = (row.product_name || row.sku || "名称なし")
+        + " / " + idText(row)
+        + " / " + routeText(row);
+      if (sameProduct(selected, row)) btn.classList.add("picked");
+      let pressTimer = null;
+      let longPressed = false;
+      let startX = 0;
+      let startY = 0;
+      const cancelPress = () => {
+        if (pressTimer) window.clearTimeout(pressTimer);
+        pressTimer = null;
+      };
+      btn.addEventListener("pointerdown", (ev) => {
+        if (ev.pointerType === "mouse" && ev.button !== 0) return;
+        longPressed = false;
+        startX = ev.clientX;
+        startY = ev.clientY;
+        cancelPress();
+        pressTimer = window.setTimeout(() => {
+          longPressed = true;
+          pressTimer = null;
+          markNoImage(row);
+        }, 600);
+      });
+      btn.addEventListener("pointermove", (ev) => {
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) > 14) cancelPress();
+      });
+      btn.addEventListener("pointerup", cancelPress);
+      btn.addEventListener("pointercancel", cancelPress);
+      btn.addEventListener("contextmenu", (ev) => ev.preventDefault());
+      btn.addEventListener("click", () => {
+        if (longPressed) {
+          longPressed = false;
+          return;
+        }
+        chooseProduct(row);
+      });
+      return btn;
+    }
+
+    function askNoImage() {
+      return new Promise((resolve) => {
+        const box = document.createElement("div");
+        box.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;z-index:20;";
+        box.innerHTML = '<div style="background:#1a2332;border:1px solid #2a3548;border-radius:10px;padding:16px;max-width:320px;width:100%"><p style="margin:0 0 12px">画像不要にしますか？</p><div style="display:flex;gap:8px"><button type="button" id="yesBtn" style="width:auto;flex:1;background:#3d8bfd">はい</button><button type="button" id="noBtn" style="width:auto;flex:1;background:#243044">いいえ</button></div></div>';
+        document.body.appendChild(box);
+        box.querySelector("#yesBtn").addEventListener("click", () => { box.remove(); resolve(true); });
+        box.querySelector("#noBtn").addEventListener("click", () => { box.remove(); resolve(false); });
+      });
+    }
+
+    async function markNoImage(row) {
+      const yes = await askNoImage();
+      if (!yes) return;
+      const res = await fetch(
+        "/api/route/" + encodeURIComponent(WEB_ID) + "/products/no-image",
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jan: row.jan || "", asin: row.asin || "" }) }
+      );
+      if (!res.ok) {
+        setStatus("画像不要にできませんでした", "err");
+        return;
+      }
+      doneJans[linkId(row)] = true;
+      if (selected && sameProduct(selected, row)) {
+        selected = null;
+        shotCount = 0;
+        document.getElementById("shotList").innerHTML = "";
+        showSelected();
+      }
+      renderProducts();
+      renderCandidates();
+      if (purchases.length && openRows(purchases).length === 0) {
+        setStatus("このルートの商品撮影は終わりました", "ok");
+      } else {
+        setStatus("画像不要にして、撮影済みへ移しました", "ok");
+      }
+    }
+
+    function openRows(rows) {
+      return (rows || []).filter((row) => !isDone(row));
+    }
+
+    function appendChoices(ul, rows, groups) {
+      ul.innerHTML = "";
+      const visible = openRows(rows);
+      if (visible.length) {
+        visible.forEach((row) => {
+          const li = document.createElement("li");
+          li.appendChild(productButton(row, "secondary"));
+          ul.appendChild(li);
+        });
+        return;
+      }
+      (groups || []).forEach((group) => {
+        const left = openRows(group.purchases);
+        if (!left.length) return;
+        const head = document.createElement("li");
+        head.textContent = (group.route_name || "ルート") + " " + (group.route_date || "");
+        ul.appendChild(head);
+        left.forEach((row) => {
+          const li = document.createElement("li");
+          li.appendChild(productButton(row, "secondary"));
+          ul.appendChild(li);
+        });
       });
     }
 
     function renderProducts() {
-      const code = storeCode();
-      const list = document.getElementById("productList");
-      list.innerHTML = "";
-      purchases.filter((row) => !code || row.store_code === code).forEach((row) => {
-        const li = document.createElement("li");
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "secondary";
-        btn.textContent = (row.product_name || row.sku || "名称なし") + " / " + (row.jan || "JANなし");
-        btn.addEventListener("click", () => {
-          if (!row.jan) {
-            setStatus("この商品にはJANがありません", "err");
-            return;
-          }
-          selected = row;
-          shotCount = 0;
-          document.getElementById("shotList").innerHTML = "";
-          showSelected();
-          setStatus("商品を選びました", "ok");
+      const hint = document.getElementById("noJanHint");
+      const doneHint = document.getElementById("routeDoneHint");
+      const finished = purchases.length > 0 && openRows(purchases).length === 0;
+      doneHint.style.display = finished ? "" : "none";
+      if (finished) {
+        hint.textContent = "残っている商品はありません。";
+        document.getElementById("productList").innerHTML = "";
+        return;
+      }
+      if (purchases.length) {
+        hint.textContent = "このルートの商品から選んでください。長押しすると画像不要にできます。";
+      } else if (nearbyRoutes.length) {
+        hint.textContent = "このルートの仕入はまだDBにありません。日付の近いルートから選んでください。";
+      } else {
+        hint.textContent = "商品がDBにありません。先に仕入管理で箱を保存してください。";
+      }
+      appendChoices(document.getElementById("productList"), purchases, nearbyRoutes);
+    }
+
+    function renderCandidates() {
+      const ul = document.getElementById("candidates");
+      if (candidateRows.length) {
+        ul.innerHTML = "";
+        openRows(candidateRows).forEach((row) => {
+          const li = document.createElement("li");
+          li.appendChild(productButton(row, ""));
+          ul.appendChild(li);
         });
-        li.appendChild(btn);
-        list.appendChild(li);
-      });
+        return;
+      }
+      appendChoices(ul, [], candidateGroups);
     }
 
     async function loadAll() {
+      const doneRes = await fetch("/api/route/" + encodeURIComponent(WEB_ID) + "/products/done");
+      const doneData = await doneRes.json();
+      doneJans = {};
+      (doneData.done || []).forEach((row) => {
+        const key = linkId(row);
+        if (key) doneJans[key] = true;
+      });
       const routeRes = await fetch("/api/route/" + encodeURIComponent(WEB_ID));
       const route = await routeRes.json();
-      document.getElementById("title").textContent = (route.route_name || "ルート") + " 商品撮影";
+      const routeName = route.route_name || "ルート";
+      document.getElementById("title").textContent = routeName + " 商品撮影";
       document.getElementById("subtitle").textContent = (route.route_date || "") + " / 仕入保存後";
-      fillStores(route.stores || []);
+      document.getElementById("routeLabel").textContent = routeName + " " + (route.route_date || "");
       const buyRes = await fetch("/api/route/" + encodeURIComponent(WEB_ID) + "/purchases");
       const buy = await buyRes.json();
       purchases = buy.purchases || [];
-      if (buy.empty) setStatus(buy.message || "先に仕入管理で箱を保存してください", "err");
+      nearbyRoutes = buy.nearby_routes || [];
+      if (!purchases.length) setStatus(buy.message || "", buy.empty ? "err" : "ok");
       renderProducts();
+      const params = new URLSearchParams(location.search);
+      const wantJan = (params.get("jan") || "").replace(/\D/g, "");
+      const wantAsin = (params.get("asin") || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+      if (wantJan || wantAsin) {
+        const all = purchases.slice();
+        nearbyRoutes.forEach((group) => (group.purchases || []).forEach((row) => all.push(row)));
+        const row = all.find((item) => (wantJan && janKey(item) === wantJan) || (wantAsin && asinKey(item) === wantAsin));
+        if (row) chooseProduct(row);
+      }
     }
 
     async function readJanFile(file) {
@@ -158,50 +457,44 @@
       }
       const fd = new FormData();
       fd.append("file", file, file.name || "jan.jpg");
+      if (jan) fd.append("jan", jan);
       const res = await fetch("/api/route/" + encodeURIComponent(WEB_ID) + "/barcode", { method: "POST", body: fd });
       const data = await res.json();
       if (!jan) jan = data.jan || "";
       document.getElementById("janRead").textContent = jan ? ("読めたJAN: " + jan) : "JANを読めませんでした";
       const ul = document.getElementById("candidates");
       ul.innerHTML = "";
-      const hits = (data.candidates || []).filter((row) => !jan || row.jan === jan);
-      if (data.purchases_empty) {
-        setStatus(data.message || "先に仕入管理で箱を保存してください", "err");
+      const level = data.level || "";
+      const hits = openRows(data.candidates || []);
+      candidateRows = [];
+      candidateGroups = [];
+      if (jan && (level === "route" || level === "db") && hits.length) {
+        candidateRows = hits;
+        renderCandidates();
+        setStatus(data.message || "候補を出しました", "ok");
         return;
       }
-      if (!hits.length) {
-        setStatus("このルートの仕入に同じJANがありません", "err");
+      const groups = (data.nearby_routes && data.nearby_routes.length) ? data.nearby_routes : nearbyRoutes;
+      candidateGroups = groups;
+      appendChoices(ul, purchases, groups);
+      if (!jan) {
+        setStatus("JANを読めませんでした。下の商品一覧から選んでください", "err");
         return;
       }
-      hits.forEach((row) => {
-        const li = document.createElement("li");
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.textContent = (row.product_name || row.sku) + " を選ぶ";
-        btn.addEventListener("click", () => {
-          selected = row;
-          shotCount = 0;
-          document.getElementById("shotList").innerHTML = "";
-          if (row.store_code) document.getElementById("storeSelect").value = row.store_code;
-          showSelected();
-          setStatus("候補を選びました", "ok");
-        });
-        li.appendChild(btn);
-        ul.appendChild(li);
-      });
+      setStatus(data.message || "同じJANは無いので、商品一覧から選んでください", groups.length || purchases.length ? "ok" : "err");
     }
 
     async function uploadProduct(file) {
-      if (!selected || !selected.jan) {
+      if (!selected || !linkId(selected)) {
         setStatus("先に商品を選んでください", "err");
         return;
       }
-      const code = selected.store_code || storeCode();
       const fd = new FormData();
       fd.append("file", file, file.name || "product.jpg");
-      fd.append("jan", selected.jan);
+      if (selected.jan) fd.append("jan", selected.jan);
+      if (selected.asin) fd.append("asin", selected.asin);
       const res = await fetch(
-        "/api/route/" + encodeURIComponent(WEB_ID) + "/stores/" + encodeURIComponent(code) + "/products",
+        "/api/route/" + encodeURIComponent(WEB_ID) + "/products",
         { method: "POST", body: fd }
       );
       if (!res.ok) {
@@ -226,12 +519,12 @@
       document.getElementById("noJanBox").style.display = "";
       renderProducts();
     });
-    document.getElementById("storeSelect").addEventListener("change", () => renderProducts());
     document.getElementById("janShot").addEventListener("change", async (ev) => {
       const file = ev.target.files && ev.target.files[0];
       ev.target.value = "";
       if (file) await readJanFile(file);
     });
+    document.getElementById("shutterBtn").addEventListener("click", () => { shootLive(); });
     document.getElementById("productShot").addEventListener("change", async (ev) => {
       const file = ev.target.files && ev.target.files[0];
       ev.target.value = "";
@@ -239,21 +532,37 @@
     });
     document.getElementById("finishBtn").addEventListener("click", async () => {
       if (!selected) return;
-      const code = selected.store_code || storeCode();
+      if (shotCount < 1) {
+        setStatus("先に写真を1枚撮ってください", "err");
+        return;
+      }
       const res = await fetch(
-        "/api/route/" + encodeURIComponent(WEB_ID) + "/stores/" + encodeURIComponent(code) + "/products/confirm",
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jan: selected.jan }) }
+        "/api/route/" + encodeURIComponent(WEB_ID) + "/products/confirm",
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jan: selected.jan || "", asin: selected.asin || "" }) }
       );
       if (!res.ok) {
         setStatus("撮影終了を保存できませんでした", "err");
         return;
       }
-      setStatus("この商品の画像グループを確定しました", "ok");
+      doneJans[linkId(selected)] = true;
+      selected = null;
+      shotCount = 0;
+      document.getElementById("shotList").innerHTML = "";
+      showSelected();
+      renderProducts();
+      renderCandidates();
+      setStatus("撮影済みに移しました。選択を外しました", "ok");
     });
     document.getElementById("scanBtn").addEventListener("click", async () => {
       const res = await fetch("/api/route/" + encodeURIComponent(WEB_ID) + "/products/scan-request", { method: "POST" });
       setStatus(res.ok ? "HIRIOへスキャンを依頼しました" : "依頼に失敗しました", res.ok ? "ok" : "err");
     });
+    const camHint = document.getElementById("camHint");
+    if (window.isSecureContext) {
+      camHint.textContent = "商品を選ぶとカメラが開きます。スマホは縦のままで、保存される写真は横長です。";
+    } else {
+      camHint.textContent = "いまのアドレスは http なので、1枚撮るとカメラが閉じます。続けて撮るには https のアドレスで開いてください。";
+    }
     loadAll().catch((e) => setStatus("読み込み失敗: " + e.message, "err"));
   </script>
 </body>
