@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Google Takeout「お気に入りの場所.csv」から未登録店舗を取り込む。
+Google Takeout「お気に入りの場所.csv」／店舗名テキスト貼り付けから未登録店舗を取り込む。
 
 - ルートは原則未所属（affiliated_route_name / route_code は空）
 - ただし HA/HO/OF が 80m 以内の併設なら、既存店のルートを引き継ぐ
@@ -34,16 +34,19 @@ except ImportError:
 try:
     from services.hardoff_collocation_groups import (
         COLOCATION_RADIUS_M,
+        detect_hardoff_family_brand,
         find_collocated_hardoff_family_route,
     )
 except ImportError:
     try:
         from hardoff_collocation_groups import (  # type: ignore
             COLOCATION_RADIUS_M,
+            detect_hardoff_family_brand,
             find_collocated_hardoff_family_route,
         )
     except ImportError:
         COLOCATION_RADIUS_M = 80.0  # type: ignore
+        detect_hardoff_family_brand = None  # type: ignore
         find_collocated_hardoff_family_route = None  # type: ignore
 
 
@@ -181,6 +184,32 @@ def parse_takeout_favorites_csv(path: str | Path) -> List[TakeoutPlaceRow]:
     return rows
 
 
+
+def parse_store_names_text(text: str) -> List[TakeoutPlaceRow]:
+    """改行区切りの店舗名テキストを TakeoutPlaceRow 一覧にする。
+
+    空行と # で始まる行は無視する。カンマ区切りの1行は先頭だけを店名とみなす。
+    """
+    rows: List[TakeoutPlaceRow] = []
+    seen: Set[str] = set()
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # 誤って CSV 風に貼ったとき用（タイトルだけ使う）
+        if "," in line and ("タイトル" in line or line.lower().startswith("title")):
+            continue
+        title = line.split(",")[0].strip().strip('"').strip("'")
+        if not title:
+            continue
+        key = normalize_store_name(title)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        rows.append(TakeoutPlaceRow(title=title))
+    return rows
+
+
 class _DuplicateIndex:
     """既存店舗の重複判定インデックス。"""
 
@@ -220,20 +249,31 @@ class _DuplicateIndex:
 
         phone_key = normalize_phone(phone)
         if phone_key and len(phone_key) >= 9 and phone_key in self.by_phone:
-            return self.by_phone[phone_key], "電話番号が一致"
+            existing = self.by_phone[phone_key]
+            existing_name = str(existing.get("store_name") or "")
+            # HA/HO/OF 併設は電話が同じでも別店舗
+            if not _allow_hardoff_family_collocation(title, existing_name):
+                return existing, "電話番号が一致"
 
         addr_key = normalize_address(address)
         if addr_key and len(addr_key) >= 8 and addr_key in self.by_address:
-            return self.by_address[addr_key], "住所が一致"
+            existing = self.by_address[addr_key]
+            existing_name = str(existing.get("store_name") or "")
+            # HA/HO/OF 併設は住所が同じでも別店舗
+            if not _allow_hardoff_family_collocation(title, existing_name):
+                return existing, "住所が一致"
 
         if latitude is not None and longitude is not None:
             for store, lat, lng in self.coords:
                 if _haversine_m(latitude, longitude, lat, lng) <= SAME_LOCATION_RADIUS_M:
-                    # 同座標でもチェーンが明らかに違う併設店は別店舗として通す
-                    existing_name = normalize_store_name(str(store.get("store_name") or ""))
-                    if name_key and existing_name:
+                    existing_name = str(store.get("store_name") or "")
+                    # ハードオフ系の別ブランド併設は通す
+                    if _allow_hardoff_family_collocation(title, existing_name):
+                        continue
+                    existing_key = normalize_store_name(existing_name)
+                    if name_key and existing_key:
                         # 先頭のチェーンっぽい部分が大きく違う場合は併設の可能性
-                        if not _likely_same_brand(name_key, existing_name):
+                        if not _likely_same_brand(name_key, existing_key):
                             continue
                     return store, f"座標が近い（{SAME_LOCATION_RADIUS_M:.0f}m以内・同系統）"
         return None
@@ -254,6 +294,15 @@ class _DuplicateIndex:
         lng = _coerce_float(store.get("longitude"))
         if lat is not None and lng is not None:
             self.coords.append((store, lat, lng))
+
+
+def _allow_hardoff_family_collocation(title: str, existing_name: str) -> bool:
+    """ハードオフ／ホビーオフ／オフハウスの別ブランド併設なら True（重複扱いにしない）。"""
+    if detect_hardoff_family_brand is None:
+        return False
+    brand_a = detect_hardoff_family_brand({"store_name": title})
+    brand_b = detect_hardoff_family_brand({"store_name": existing_name})
+    return bool(brand_a and brand_b and brand_a != brand_b)
 
 
 def _likely_same_brand(a: str, b: str) -> bool:
@@ -279,9 +328,9 @@ def _resolve_store_code(db: Any, store_name: str) -> str:
     return ""
 
 
-def import_takeout_favorites(
+def import_takeout_places(
     db: Any,
-    csv_path: str | Path,
+    places: Sequence[TakeoutPlaceRow],
     *,
     fetch_info: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
     progress_callback: Optional[Callable[[int, int, str], bool]] = None,
@@ -289,24 +338,24 @@ def import_takeout_favorites(
     dry_run: bool = False,
 ) -> TakeoutImportResult:
     """
-    Takeout CSV から未登録店舗を取り込む。
+    店舗名リストから未登録店舗を取り込む（CSV / テキスト貼り付け共通）。
 
     原則は未所属。HA/HO/OF が 80m 以内にルート所属済みの併設店があれば同ルートへ。
     progress_callback(current, total, label) -> continue?
     """
     result = TakeoutImportResult()
-    places = parse_takeout_favorites_csv(csv_path)
-    result.parsed = len(places)
-    if not places:
+    place_list = [p for p in places if (p.title or "").strip()]
+    result.parsed = len(place_list)
+    if not place_list:
         return result
 
     fetcher = fetch_info or get_store_info_from_google
     index = _DuplicateIndex(db.list_stores())
-    # 同一CSV内の重複タイトルも抑止
+    # 同一リスト内の重複タイトルも抑止
     seen_titles: Set[str] = set()
 
-    total = len(places)
-    for i, place in enumerate(places):
+    total = len(place_list)
+    for i, place in enumerate(place_list):
         if progress_callback is not None:
             cont = progress_callback(i, total, place.title)
             if cont is False:
@@ -318,7 +367,7 @@ def import_takeout_favorites(
             continue
         if name_key in seen_titles:
             result.skipped.append(
-                ImportSkip(title=place.title, reason="CSV内で重複タイトル")
+                ImportSkip(title=place.title, reason="リスト内で重複タイトル")
             )
             continue
         seen_titles.add(name_key)
@@ -468,3 +517,24 @@ def import_takeout_favorites(
         progress_callback(total, total, "完了")
 
     return result
+
+
+def import_takeout_favorites(
+    db: Any,
+    csv_path: str | Path,
+    *,
+    fetch_info: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
+    progress_callback: Optional[Callable[[int, int, str], bool]] = None,
+    api_delay_sec: float = 0.25,
+    dry_run: bool = False,
+) -> TakeoutImportResult:
+    """Takeout CSV から未登録店舗を取り込む。"""
+    places = parse_takeout_favorites_csv(csv_path)
+    return import_takeout_places(
+        db,
+        places,
+        fetch_info=fetch_info,
+        progress_callback=progress_callback,
+        api_delay_sec=api_delay_sec,
+        dry_run=dry_run,
+    )

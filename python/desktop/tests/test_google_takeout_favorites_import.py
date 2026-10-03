@@ -11,9 +11,11 @@ from database.store_db import StoreDatabase
 from services.google_takeout_favorites_import import (
     _DuplicateIndex,
     import_takeout_favorites,
+    import_takeout_places,
     normalize_address,
     normalize_phone,
     normalize_store_name,
+    parse_store_names_text,
     parse_takeout_favorites_csv,
 )
 
@@ -184,3 +186,131 @@ def test_import_collocated_hardoff_inherits_route(temp_store_db: StoreDatabase, 
         assert any(
             key in row.collocated_with for key in ("ハードオフ", "ホビーオフ")
         )
+
+
+def test_parse_store_names_text_basic():
+    text = """
+BOOKOFF SUPER BAZAAR 多摩永山店
+BOOKOFF SUPER BAZAAR 立川駅北口店
+
+# コメント行
+ハードオフ 八王子大和田店
+ハードオフ 八王子大和田店
+BOOKOFF PLUS 町田旭町店
+"""
+    rows = parse_store_names_text(text)
+    assert [r.title for r in rows] == [
+        "BOOKOFF SUPER BAZAAR 多摩永山店",
+        "BOOKOFF SUPER BAZAAR 立川駅北口店",
+        "ハードオフ 八王子大和田店",
+        "BOOKOFF PLUS 町田旭町店",
+    ]
+
+
+def test_import_takeout_places_from_text(temp_store_db: StoreDatabase):
+    places = parse_store_names_text(
+        "既存テスト店XYZ\n新規テキスト店舗DEF\n"
+    )
+    temp_store_db.add_store(
+        {
+            "store_name": "既存テスト店XYZ",
+            "store_code": "ZZ-01",
+            "phone": "03-1111-2222",
+            "address": "東京都千代田区1-1",
+            "latitude": 35.68,
+            "longitude": 139.76,
+        }
+    )
+
+    def fake_fetch(name: str):
+        if "新規" in name:
+            return {
+                "address": "東京都新宿区9-9-9",
+                "phone": "03-7777-6666",
+                "latitude": 35.69,
+                "longitude": 139.70,
+            }
+        return {
+            "address": "東京都千代田区1-1",
+            "phone": "03-1111-2222",
+            "latitude": 35.68,
+            "longitude": 139.76,
+        }
+
+    result = import_takeout_places(
+        temp_store_db,
+        places,
+        fetch_info=fake_fetch,
+        api_delay_sec=0,
+    )
+    assert len(result.skipped) >= 1
+    assert len(result.added) == 1
+    assert result.added[0].title == "新規テキスト店舗DEF"
+
+
+def test_hardoff_hobby_same_address_not_duplicate():
+    """併設のホビーオフは住所・電話が同じでも別店舗として通す。"""
+    existing = [
+        {
+            "id": 1,
+            "store_name": "ハードオフ 埼玉東松山店",
+            "store_code": "HA-99",
+            "phone": "0493-27-1065",
+            "address": "〒355-0017 埼玉県東松山市桜山町４丁目３－１８",
+            "latitude": 36.04,
+            "longitude": 139.40,
+        }
+    ]
+    index = _DuplicateIndex(existing)
+    # 店名だけなら未登録
+    assert index.find_duplicate(title="ホビーオフ 埼玉東松山店") is None
+    # 住所・電話・座標が同じでも別ブランド併設は通す
+    dup = index.find_duplicate(
+        title="ホビーオフ 埼玉東松山店",
+        address="〒355-0017 埼玉県東松山市桜山町４丁目３－１８",
+        phone="0493-27-1065",
+        latitude=36.04,
+        longitude=139.40,
+    )
+    assert dup is None
+
+    # 同ブランドのゆれは重複
+    dup_same = index.find_duplicate(
+        title="ハードオフ埼玉東松山店",
+        address="〒355-0017 埼玉県東松山市桜山町４丁目３－１８",
+        phone="0493-27-1065",
+    )
+    assert dup_same is not None
+
+
+def test_import_hardoff_and_hobby_same_site(temp_store_db: StoreDatabase):
+    places = parse_store_names_text(
+        "ハードオフ 高麗川店\nホビーオフ 高麗川店\n"
+    )
+
+    def fake_fetch(name: str):
+        # 併設店は Google が同じ住所・電話・座標を返すことがある
+        return {
+            "address": "〒350-1231 埼玉県日高市鹿山３００－１",
+            "phone": "042-978-7979",
+            "latitude": 35.90,
+            "longitude": 139.34,
+        }
+
+    result = import_takeout_places(
+        temp_store_db,
+        places,
+        fetch_info=fake_fetch,
+        api_delay_sec=0,
+    )
+    assert len(result.added) == 2, (result.added, result.skipped, result.failed)
+    names = {row.title for row in result.added}
+    assert "ハードオフ 高麗川店" in names
+    assert "ホビーオフ 高麗川店" in names
+    hobby = next(r for r in result.added if "ホビー" in r.title)
+    hard = next(r for r in result.added if "ハード" in r.title)
+    # チェーンマッピングがあれば HA/HO。無くても追加自体は成功していればよい
+    if hard.store_code:
+        assert hard.store_code.upper().startswith("HA")
+    if hobby.store_code:
+        assert hobby.store_code.upper().startswith("HO")

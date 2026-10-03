@@ -139,6 +139,24 @@ class StoreListWidget(QWidget):
             }
         """)
         button_layout.addWidget(csv_import_btn)
+
+        text_import_btn = QPushButton("テキスト貼り付け")
+        text_import_btn.setToolTip(
+            "店舗名を1行ずつ貼り付けて取り込みます（CSVインポートと同じ処理）。\n"
+            "原則は未所属。ハードオフ／ホビーオフ／オフハウスが80m以内の併設なら\n"
+            "既存店と同じルートへ自動登録します。\n"
+            "住所・電話・緯度経度を取得し、店舗コードを自動付番します。"
+        )
+        text_import_btn.clicked.connect(self.import_store_names_text)
+        text_import_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+        """)
+        button_layout.addWidget(text_import_btn)
         
         # 店舗追加ボタン
         add_btn = QPushButton("店舗追加")
@@ -1429,26 +1447,49 @@ class StoreListWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"Excelインポートに失敗しました:\n{str(e)}")
 
-    def import_takeout_csv(self):
-        """Google Takeout お気に入り CSV から未登録店舗を未所属で取り込む。"""
+    def _load_takeout_import_funcs(self):
+        """CSV / テキスト貼り付け共通の取込モジュールを読み込む。"""
         try:
             from services.google_takeout_favorites_import import (
                 import_takeout_favorites,
+                import_takeout_places,
+                parse_store_names_text,
+                parse_takeout_favorites_csv,
+            )
+            return (
+                import_takeout_favorites,
+                import_takeout_places,
+                parse_store_names_text,
                 parse_takeout_favorites_csv,
             )
         except Exception:
             try:
                 from google_takeout_favorites_import import (  # type: ignore
                     import_takeout_favorites,
+                    import_takeout_places,
+                    parse_store_names_text,
+                    parse_takeout_favorites_csv,
+                )
+                return (
+                    import_takeout_favorites,
+                    import_takeout_places,
+                    parse_store_names_text,
                     parse_takeout_favorites_csv,
                 )
             except Exception as e:
                 QMessageBox.critical(
                     self,
                     "エラー",
-                    f"CSVインポートモジュールを読み込めませんでした:\n{e}",
+                    f"インポートモジュールを読み込めませんでした:\n{e}",
                 )
-                return
+                return None
+
+    def _confirm_and_run_place_import(self, preview_rows, *, source_label: str):
+        """店舗名リストを確認ダイアログのあと取り込み（CSV／テキスト共通）。"""
+        funcs = self._load_takeout_import_funcs()
+        if not funcs:
+            return
+        _fav, import_takeout_places, _parse_text, _parse_csv = funcs
 
         if get_store_info_from_google is None:
             QMessageBox.warning(
@@ -1459,30 +1500,17 @@ class StoreListWidget(QWidget):
             )
             return
 
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "お気に入りの場所.csv を選択",
-            "",
-            "CSVファイル (*.csv);;すべてのファイル (*)",
-        )
-        if not file_path:
-            return
-
-        try:
-            preview_rows = parse_takeout_favorites_csv(file_path)
-        except Exception as e:
-            QMessageBox.critical(self, "エラー", f"CSVの読み込みに失敗しました:\n{e}")
-            return
-
         if not preview_rows:
-            QMessageBox.information(self, "CSVインポート", "取り込める店舗名がありませんでした。")
+            QMessageBox.information(
+                self, f"{source_label}", "取り込める店舗名がありませんでした。"
+            )
             return
 
         reply = QMessageBox.question(
             self,
-            "CSVインポート確認",
-            f"「お気に入りの場所」形式の CSV を取り込みます。\n\n"
-            f"件数: {len(preview_rows)} 件（タイトルあり）\n"
+            f"{source_label}確認",
+            f"{source_label}で店舗を取り込みます。\n\n"
+            f"件数: {len(preview_rows)} 件\n"
             f"・DBに無い店舗だけ追加\n"
             f"・所属ルートは原則 未所属\n"
             f"・例外: ハードオフ／ホビーオフ／オフハウスが\n"
@@ -1498,9 +1526,9 @@ class StoreListWidget(QWidget):
             return
 
         progress = QProgressDialog(
-            "CSVインポート中...", "キャンセル", 0, len(preview_rows), self
+            f"{source_label}中...", "キャンセル", 0, len(preview_rows), self
         )
-        progress.setWindowTitle("CSVインポート")
+        progress.setWindowTitle(source_label)
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
         progress.show()
@@ -1515,9 +1543,9 @@ class StoreListWidget(QWidget):
             return not progress.wasCanceled()
 
         try:
-            result = import_takeout_favorites(
+            result = import_takeout_places(
                 self.db,
-                file_path,
+                preview_rows,
                 fetch_info=lambda name: get_store_info_from_google(
                     name, language_code="ja"
                 ),
@@ -1525,7 +1553,7 @@ class StoreListWidget(QWidget):
             )
         except Exception as e:
             progress.close()
-            QMessageBox.critical(self, "エラー", f"CSVインポートに失敗しました:\n{e}")
+            QMessageBox.critical(self, "エラー", f"{source_label}に失敗しました:\n{e}")
             return
 
         progress.close()
@@ -1568,11 +1596,83 @@ class StoreListWidget(QWidget):
             if len(result.failed) > 5:
                 lines.append(f"…他 {len(result.failed) - 5} 件")
 
-        QMessageBox.information(self, "CSVインポート完了", "\n".join(lines))
+        QMessageBox.information(self, f"{source_label}完了", "\n".join(lines))
         self.load_stores(self.search_edit.text())
         self.load_routes()
         self.routes_changed.emit()
-    
+
+    def import_takeout_csv(self):
+        """Google Takeout お気に入り CSV から未登録店舗を未所属で取り込む。"""
+        funcs = self._load_takeout_import_funcs()
+        if not funcs:
+            return
+        _fav, _places, _parse_text, parse_takeout_favorites_csv = funcs
+
+        if get_store_info_from_google is None:
+            QMessageBox.warning(
+                self,
+                "エラー",
+                "Google Mapsサービスが読み込めません。\n"
+                "設定タブの Maps API キーも確認してください。",
+            )
+            return
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "お気に入りの場所.csv を選択",
+            "",
+            "CSVファイル (*.csv);;すべてのファイル (*)",
+        )
+        if not file_path:
+            return
+
+        try:
+            preview_rows = parse_takeout_favorites_csv(file_path)
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"CSVの読み込みに失敗しました:\n{e}")
+            return
+
+        self._confirm_and_run_place_import(preview_rows, source_label="CSVインポート")
+
+    def import_store_names_text(self):
+        """店舗名テキスト貼り付けから未登録店舗を取り込む（CSVインポートと同じ処理）。"""
+        funcs = self._load_takeout_import_funcs()
+        if not funcs:
+            return
+        _fav, _places, parse_store_names_text, _parse_csv = funcs
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("店舗名テキスト貼り付け")
+        dialog.resize(560, 420)
+        layout = QVBoxLayout(dialog)
+        hint = QLabel(
+            "店舗名を1行ずつ貼り付けてください。\n"
+            "空行と「#」で始まる行は無視します。"
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        text_edit = QTextEdit()
+        text_edit.setPlaceholderText(
+            "BOOKOFF SUPER BAZAAR 多摩永山店\n"
+            "BOOKOFF SUPER BAZAAR 立川駅北口店\n"
+            "BOOKOFF PLUS 町田旭町店\n"
+            "ハードオフ 八王子大和田店"
+        )
+        layout.addWidget(text_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("取り込み開始")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        preview_rows = parse_store_names_text(text_edit.toPlainText())
+        self._confirm_and_run_place_import(
+            preview_rows, source_label="テキスト貼り付けインポート"
+        )
+
     def add_store(self):
         """店舗追加"""
         dialog = StoreEditDialog(self, custom_fields_def=self.custom_fields_def, initial_route_name=self.current_selected_route)
