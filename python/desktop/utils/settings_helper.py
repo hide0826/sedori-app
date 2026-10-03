@@ -107,6 +107,8 @@ def set_recording_mode_enabled_flag(enabled: bool) -> None:
 
 
 PURCHASE_EVIDENCE_LOCAL_ROOT_KEY = "purchase_evidence/local_root"
+ONLINE_PURCHASE_ROOT_KEY = "online_purchase/root_dir"
+ONLINE_PURCHASE_LAST_BOX_KEY = "online_purchase/last_box"
 
 
 def get_purchase_evidence_local_root() -> str:
@@ -117,3 +119,23 @@ def get_purchase_evidence_local_root() -> str:
 
 def set_purchase_evidence_local_root(path: str) -> None:
     _settings().setValue(PURCHASE_EVIDENCE_LOCAL_ROOT_KEY, str(path or "").strip())
+
+
+def get_online_purchase_root() -> str:
+    """ネット仕入の親フォルダ（例: D:\\せどり総合\\ネット仕入れリスト）。"""
+    v = _settings().value(ONLINE_PURCHASE_ROOT_KEY, "") or ""
+    return str(v).strip()
+
+
+def set_online_purchase_root(path: str) -> None:
+    _settings().setValue(ONLINE_PURCHASE_ROOT_KEY, str(path or "").strip())
+
+
+def get_online_purchase_last_box() -> str:
+    """最後に作った／開いたネット仕入箱。"""
+    v = _settings().value(ONLINE_PURCHASE_LAST_BOX_KEY, "") or ""
+    return str(v).strip()
+
+
+def set_online_purchase_last_box(path: str) -> None:
+    _settings().setValue(ONLINE_PURCHASE_LAST_BOX_KEY, str(path or "").strip())

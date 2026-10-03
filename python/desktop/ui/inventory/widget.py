@@ -288,6 +288,10 @@ class InventoryWidget(
         if csv_only is not None:
             csv_only.setVisible(True)
             csv_only.setEnabled(True)
+        create_box = getattr(self, "create_online_box_btn", None)
+        if create_box is not None:
+            create_box.setVisible(True)
+            create_box.setEnabled(True)
         combo = getattr(self, "view_mode_combo", None)
         if combo is not None:
             idx = combo.findText("ルートテンプレートビュー")
@@ -332,7 +336,9 @@ class InventoryWidget(
 
         self.route_box_csv_btn = QPushButton("ルート箱からCSV取込")
         self.route_box_csv_btn.setToolTip(
-            "ルート箱の仕入CSVだけを読み込みます。ルート情報・画像・レシートは開きません。"
+            "箱の「仕入CSV/」または直下にあるCSVを読み込みます。"
+            "StockList_ 以外のアマサーチCSVでもOKです（いちばん新しいファイル）。"
+            "ルート情報・画像・レシートは開きません。"
         )
         self.route_box_csv_btn.clicked.connect(
             lambda: self._run_action_with_status(
@@ -342,6 +348,21 @@ class InventoryWidget(
         self.route_box_csv_btn.setStyleSheet(green_button_style)
         self.route_box_csv_btn.setVisible(self.is_online_mode)
         workflow_layout.addWidget(self.route_box_csv_btn)
+
+        self.create_online_box_btn = QPushButton("今日の箱を作る")
+        self.create_online_box_btn.setToolTip(
+            "ネット仕入れリストに フリマYYYYMMDD を作り、"
+            "仕入CSV・商品画像・証憑スクショを揃えます。"
+            "情報撮影の保存先も証憑スクショに合わせます。"
+        )
+        self.create_online_box_btn.clicked.connect(
+            lambda: self._run_action_with_status(
+                "今日の箱を作る", self.create_today_online_box
+            )
+        )
+        self.create_online_box_btn.setStyleSheet(green_button_style)
+        self.create_online_box_btn.setVisible(self.is_online_mode)
+        workflow_layout.addWidget(self.create_online_box_btn)
 
         self.info_capture_btn = QPushButton("情報撮影")
         self.info_capture_btn.setToolTip(
@@ -392,6 +413,11 @@ class InventoryWidget(
         workflow_layout.addWidget(self.generate_sku_btn)
 
         self.db_save_btn = QPushButton("DB保存")
+        if self.is_online_mode:
+            self.db_save_btn.setToolTip(
+                "仕入をDBに保存します。"
+                "ネット仕入では、保存後にスマホ商品撮影の候補書き出しも自動で行います。"
+            )
         self.db_save_btn.clicked.connect(
             lambda: self._run_action_with_status("DB保存", self._confirm_condition_edit_then_save_to_databases)
         )

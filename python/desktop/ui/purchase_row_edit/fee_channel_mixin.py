@@ -175,31 +175,34 @@ class PurchaseFeeChannelMixin:
         return short if short else main
 
     def _on_sku_date_text_changed(self, text: str) -> None:
-        """SKU日付欄は数字8桁のみ。"""
-        if self._sku_date_edit is None:
-            return
-        digits = "".join(c for c in text if c.isdigit())[:8]
-        if digits != text:
-            self._sku_date_edit.blockSignals(True)
-            self._sku_date_edit.setText(digits)
-            self._sku_date_edit.blockSignals(False)
+        """互換用（SKU全文編集では数字制限しない）。"""
+        return
 
-    def _apply_sku_date_change(self) -> bool:
+    def _apply_sku_change(self) -> bool:
         """
-        日付編集ありの場合に record と DB の SKU を更新する。
+        SKU編集ありの場合に record・仕入DB・古物台帳・商品DB を更新する。
         失敗時は False（メッセージ表示済み想定）。
         """
-        if self._sku_date_edit is None:
+        edit = getattr(self, "_sku_edit", None) or self._sku_date_edit
+        if edit is None:
             return True
-        raw = self._sku_date_edit.text().strip()
-        raw = "".join(c for c in raw if c.isdigit())
-        if len(raw) != 8:
-            QMessageBox.warning(self, "SKU", "日付は YYYYMMDD の8桁で入力してください。")
+        new_sku = edit.text().strip()
+        if not new_sku:
+            QMessageBox.warning(self, "SKU", "SKUを空にはできません。")
             return False
-        if not _is_valid_yyyymmdd(raw):
-            QMessageBox.warning(self, "SKU", "日付が有効な暦日ではありません（YYYYMMDD を確認してください）。")
+        unsafe = '\\/:*?"<>|'
+        if any(ch in new_sku for ch in unsafe):
+            QMessageBox.warning(
+                self,
+                "SKU",
+                f"SKUに使えない文字があります: {unsafe}",
+            )
             return False
-        new_sku = raw + self._sku_suffix_rest
+        # 空白はアンダースコアに寄せる（誤入力防止）
+        if any(ch.isspace() for ch in new_sku):
+            new_sku = "_".join(new_sku.split())
+            edit.setText(new_sku)
+
         old_sku = self._last_committed_sku
         if new_sku == old_sku:
             self.record["SKU"] = new_sku
@@ -208,14 +211,14 @@ class PurchaseFeeChannelMixin:
 
         pw = self._product_widget
         pdb = getattr(pw, "purchase_history_db", None) if pw else None
-        if pdb:
+        if pdb and old_sku:
             row_new = pdb.get_by_sku(new_sku)
-            row_old = pdb.get_by_sku(old_sku) if old_sku else None
+            row_old = pdb.get_by_sku(old_sku)
             if row_new is not None and (row_old is None or row_new.get("id") != row_old.get("id")):
                 QMessageBox.warning(
                     self,
                     "SKU",
-                    f"SKU「{new_sku}」は既に別の仕入データで使用されています。別の日付を指定してください。",
+                    f"SKU「{new_sku}」は既に別の仕入データで使用されています。",
                 )
                 return False
             if row_old is not None:
@@ -225,6 +228,10 @@ class PurchaseFeeChannelMixin:
                     QMessageBox.warning(self, "SKU", str(e))
                     return False
 
+        # 商品DB（products）の SKU も追従
+        if old_sku and new_sku and old_sku != new_sku:
+            self._sync_product_sku_rename(old_sku, new_sku)
+
         # 古物台帳（ledger_entries / purchase_rows）の SKU も同時に更新
         if old_sku and new_sku and old_sku != new_sku:
             self._sync_ledger_sku_rename(old_sku, new_sku)
@@ -233,6 +240,31 @@ class PurchaseFeeChannelMixin:
         self.record["sku"] = new_sku
         self._last_committed_sku = new_sku
         return True
+
+    def _apply_sku_date_change(self) -> bool:
+        """互換エイリアス。"""
+        return self._apply_sku_change()
+
+    def _sync_product_sku_rename(self, old_sku: str, new_sku: str) -> None:
+        """products テーブルの SKU を追従更新する。"""
+        pw = self._product_widget
+        product_db = getattr(pw, "product_db", None) if pw else None
+        if product_db is None:
+            return
+        try:
+            existing_new = None
+            if hasattr(product_db, "get_by_sku"):
+                existing_new = product_db.get_by_sku(new_sku)
+            if existing_new:
+                return
+            cur = product_db.conn.cursor()
+            cur.execute(
+                "UPDATE products SET sku = ?, updated_at = CURRENT_TIMESTAMP WHERE sku = ?",
+                (new_sku, old_sku),
+            )
+            product_db.conn.commit()
+        except Exception:
+            pass
 
     def _sync_ledger_sku_rename(self, old_sku: str, new_sku: str) -> None:
         """仕入SKU変更に合わせて古物台帳DBのSKUを更新し、表示中なら再読込する。"""
@@ -248,14 +280,24 @@ class PurchaseFeeChannelMixin:
         except Exception:
             # 台帳同期失敗でも仕入DB側の変更は維持する
             return
-        # 古物台帳タブが既に読み込み済みなら表示を追従
+        # 古物台帳タブが開いていれば表示を即追従
+        antique = None
         try:
             pw = self._product_widget
             inv = getattr(pw, "inventory_widget", None) if pw is not None else None
             antique = getattr(inv, "antique_widget", None) if inv is not None else None
-            if antique is not None and getattr(antique, "_ledger_loaded", False):
-                if hasattr(antique, "reload_ledger_rows"):
-                    antique.reload_ledger_rows()
+            if antique is None and pw is not None:
+                win = pw.window() if hasattr(pw, "window") else None
+                antique = getattr(win, "antique_widget", None) if win is not None else None
+        except Exception:
+            antique = None
+        if antique is None:
+            return
+        try:
+            if hasattr(antique, "reload_ledger_rows"):
+                antique.reload_ledger_rows()
+            elif hasattr(antique, "load_ledger"):
+                antique.load_ledger()
         except Exception:
             pass
 

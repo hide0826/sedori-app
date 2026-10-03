@@ -456,6 +456,15 @@ class InventoryPersistenceMixin:
                 traceback.print_exc()
         else:
             messages.append("ルート情報: ルートテンプレートが未ロードです")
+
+        # ネット仕入: DB保存できたらスマホ商品撮影の準備も自動で行う
+        if getattr(self, "purchase_mode", "store") == "online" and purchase_saved:
+            try:
+                prep_lines = self.prepare_online_phone_photos_after_db_save()
+                if prep_lines:
+                    messages.extend(prep_lines)
+            except Exception as exc:
+                messages.append(f"スマホ撮影準備エラー: {exc}")
         
         # 結果メッセージを表示
         if purchase_saved or route_saved:

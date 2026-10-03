@@ -65,6 +65,53 @@ def _doc_route(doc: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
+def _is_online_box(doc: Dict[str, Any]) -> bool:
+    kind = str(doc.get("box_kind") or "").strip().lower()
+    if kind == "online":
+        return True
+    return str(doc.get("route_code") or "").strip().upper() == "NET"
+
+
+def _list_online_photo_candidates(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """ネット箱は店舗コードではなく photo_candidates から候補を返す。"""
+    ensure_desktop_importable()
+    try:
+        from services.online_box import load_photo_candidates
+    except ImportError:
+        from desktop.services.online_box import load_photo_candidates  # type: ignore
+
+    route_meta = _doc_route(doc)
+    rows = load_photo_candidates(doc=doc)
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        sku = str(item.get("sku") or "").strip()
+        jan = _jan_key(item.get("jan"))
+        asin = _asin_key(item.get("asin"))
+        name = str(item.get("product_name") or "").strip()
+        key = (sku, jan, asin, name)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            {
+                "sku": sku,
+                "jan": jan,
+                "asin": asin,
+                "product_name": name,
+                "store_code": str(item.get("store_code") or "NET").strip() or "NET",
+                "store_name": str(item.get("store_name") or "ネット仕入").strip(),
+                "purchase_date": _date_key(item.get("purchase_date")) or route_meta["route_date"],
+                "route_name": route_meta["route_name"] or str(item.get("route_name") or ""),
+                "route_code": route_meta["route_code"] or "NET",
+                "route_date": route_meta["route_date"],
+            }
+        )
+    return out
+
+
 def _jan_key(value: Any) -> str:
     return re.sub(r"\D", "", str(value or ""))
 
@@ -155,6 +202,9 @@ def _store_codes(doc: Dict[str, Any]) -> Set[str]:
 
 
 def list_route_purchases(doc: Dict[str, Any], *, db_path: str | None = None) -> List[Dict[str, Any]]:
+    if _is_online_box(doc):
+        return _list_online_photo_candidates(doc)
+
     ensure_desktop_importable()
     from database.product_db import ProductDatabase
     from database.purchase_db import PurchaseDatabase

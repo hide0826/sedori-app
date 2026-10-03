@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 import threading
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from route_web import ROUTE_WEB_PORT
@@ -130,7 +130,21 @@ def index_page() -> HTMLResponse:
 
 @app.get("/api/routes")
 def api_routes() -> JSONResponse:
-    return JSONResponse({"routes": list_route_summaries()})
+    # ネット仕入れリスト上の箱を自動登録（スマホ一覧に出す）
+    try:
+        from route_web.online_sync import sync_online_boxes_into_registry
+
+        sync_online_boxes_into_registry()
+    except Exception as exc:
+        # 一覧取得自体は落とさない
+        print(f"[route_web] online sync skipped: {exc}")
+    try:
+        return JSONResponse({"routes": list_route_summaries()})
+    except Exception as exc:
+        return JSONResponse(
+            {"routes": [], "error": str(exc)},
+            status_code=500,
+        )
 
 
 @app.get("/api/csv-inbox")
@@ -162,8 +176,12 @@ def route_photos_page(web_id: str) -> HTMLResponse:
 
 
 @app.get("/route/{web_id}", response_class=HTMLResponse)
-def route_page(web_id: str) -> HTMLResponse:
-    _require_doc(web_id)
+def route_page(web_id: str):
+    doc = _require_doc(web_id)
+    kind = str(doc.get("box_kind") or "").strip().lower()
+    code = str(doc.get("route_code") or "").strip().upper()
+    if kind == "online" or code == "NET":
+        return RedirectResponse(url=f"/route/{web_id}/photos", status_code=302)
     return HTMLResponse(_page_html(web_id))
 
 
@@ -542,9 +560,13 @@ def get_prepare(web_id: str) -> JSONResponse:
 def get_route_purchases(web_id: str) -> JSONResponse:
     doc = _require_doc(web_id)
     rows = list_route_purchases(doc)
-    nearby = [] if rows else nearby_route_products(doc)
+    kind = str(doc.get("box_kind") or "").strip().lower()
+    is_online = kind == "online" or str(doc.get("route_code") or "").strip().upper() == "NET"
+    nearby = [] if rows or is_online else nearby_route_products(doc)
     if rows:
         message = ""
+    elif is_online:
+        message = "先にネット仕入タブで「スマホ商品撮影」を押し、候補を書き出してください"
     elif nearby:
         message = "このルートの仕入はまだDBにありません。日付の近いルートの商品です"
     else:

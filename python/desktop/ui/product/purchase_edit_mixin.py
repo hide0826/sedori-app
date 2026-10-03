@@ -772,12 +772,55 @@ class PurchaseEditMixin:
                     _merge_into(rec)
 
     def refresh_purchase_display_after_row_edit(
-        self, edited_record: Optional[Dict[str, Any]] = None
+        self,
+        edited_record: Optional[Dict[str, Any]] = None,
+        *,
+        old_sku: Optional[str] = None,
     ) -> None:
-        """仕入行編集反映後: 月別・改定価格列を即時更新し、フィルタ状態を維持する。"""
+        """仕入行編集反映後: 一覧を即時更新し、フィルタ状態を維持する。"""
+        new_sku = ""
         if edited_record:
+            new_sku = str(
+                edited_record.get("SKU") or edited_record.get("sku") or ""
+            ).strip()
+        prev_sku = str(old_sku or "").strip()
+        sku_changed = bool(prev_sku and new_sku and prev_sku != new_sku)
+
+        if sku_changed:
+            # 高速表示パスだとセル文字列が古いまま残るため、SKU変更時は必ず再描画する
+            self._invalidate_purchase_table_full_master()
+            if hasattr(self, "_purchase_incremental_reset"):
+                try:
+                    self._purchase_incremental_reset()
+                except Exception:
+                    pass
+
+        if edited_record and not sku_changed:
             self._refresh_purchase_repricing_table_cells_for_record(edited_record)
-        self.filter_purchase_records()
+
+        if sku_changed:
+            master = self._purchase_master_records() if hasattr(self, "_purchase_master_records") else []
+            filters_active = (
+                self._purchase_search_filters_active()
+                if hasattr(self, "_purchase_search_filters_active")
+                else False
+            )
+            if filters_active and hasattr(self, "_compute_filtered_purchase_records"):
+                display = self._compute_filtered_purchase_records()
+            else:
+                display = list(master) if master else []
+            self.purchase_records = display
+            self.populate_purchase_table(display, force_full=True)
+            self._purchase_table_full_master_built = bool(display) and not filters_active
+            if hasattr(self, "update_purchase_count_label"):
+                self.update_purchase_count_label()
+            try:
+                self.purchase_table.viewport().repaint()
+                QApplication.processEvents()
+            except Exception:
+                pass
+        else:
+            self.filter_purchase_records()
 
     def _delete_record_by_row_signature(self, row: int) -> None:
         """

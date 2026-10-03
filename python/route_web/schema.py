@@ -29,6 +29,7 @@ def build_route_document(
     food: str = "",
     other_expense: str = "",
     notes: str = "",
+    box_kind: str = "",
 ) -> Dict[str, Any]:
     store_rows: List[Dict[str, Any]] = []
     for idx, store in enumerate(stores, start=1):
@@ -66,7 +67,7 @@ def build_route_document(
     store_rows.sort(key=lambda r: (r["order"], r["store_code"]))
 
     now = datetime.now(JST).isoformat(timespec="seconds")
-    return {
+    doc: Dict[str, Any] = {
         "schema_version": 1,
         "web_id": web_id,
         "folder_path": folder_path,
@@ -84,6 +85,9 @@ def build_route_document(
         "updated_at": now,
         "stores": store_rows,
     }
+    if box_kind:
+        doc["box_kind"] = str(box_kind).strip()
+    return doc
 
 
 def stamp_updated(doc: Dict[str, Any]) -> Dict[str, Any]:

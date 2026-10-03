@@ -19,6 +19,7 @@
       --accent: #3d8bfd;
       --border: #2a3548;
       --ok: #2ea043;
+      --net: #c9842f;
     }
     * { box-sizing: border-box; }
     body {
@@ -31,6 +32,11 @@
       padding-bottom: 40px;
     }
     h1 { font-size: 1.2rem; margin: 0 0 6px; }
+    h2 {
+      font-size: 1rem;
+      margin: 18px 0 8px;
+      color: var(--text);
+    }
     .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 14px; }
     .hint {
       background: #132033;
@@ -45,7 +51,7 @@
       color: #9ecbff;
       word-break: break-all;
     }
-    .toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
     button {
       border: none;
       border-radius: 8px;
@@ -66,6 +72,9 @@
       padding: 14px;
       margin-bottom: 10px;
     }
+    a.card.net {
+      border-color: #6b4a1e;
+    }
     a.card:active { opacity: 0.9; }
     a.card.disabled { opacity: 0.45; pointer-events: none; }
     .date { font-size: 1.05rem; font-weight: 700; }
@@ -81,22 +90,30 @@
       color: var(--muted);
     }
     .badge.ok { background: #1f3d2a; color: #3fb950; }
+    .badge.net { background: #3d2a12; color: #f0b35a; }
     #status { margin-top: 10px; color: var(--muted); font-size: 0.85rem; min-height: 1.2em; }
     #status.err { color: #ff7b72; }
   </style>
 </head>
 <body>
-  <h1>ルート時刻一覧</h1>
+  <h1>HIRIO 撮影・巡回</h1>
   <div class="sub">このページをスマホのホーム／ブックマークに固定してください</div>
   <div class="hint">
-    固定URL（この画面）:<br />
-    <code id="fixedUrl"></code><br /><br />
-    HIRIO で「Webテンプレート作成」したルートがここに並びます。日付とルート名をタップして時刻入力へ。
+    連続撮影は <code>https://houseserver.tail0a340c.ts.net/</code>（Tailscale ON）で開いてください。<br /><br />
+    <b>ネット仕入の撮影準備は PC の「DB保存」で自動です。</b><br />
+    PC → 仕入管理 → <b>ネット仕入</b> → CSV取込 → DB保存<br />
+    その後、下の「ネット仕入」の箱をタップして撮ります。
   </div>
   <div class="toolbar">
     <button type="button" id="reloadBtn">再読込</button>
   </div>
-  <div id="list"></div>
+
+  <h2>ネット仕入（商品撮影）</h2>
+  <div id="netList"></div>
+
+  <h2>ルート（時刻・レシート）</h2>
+  <div id="routeList"></div>
+
   <div id="status"></div>
 
   <script>
@@ -114,6 +131,36 @@
         .replace(/"/g, "&quot;");
     }
 
+    function isOnline(r) {
+      return String(r.box_kind || "").toLowerCase() === "online"
+        || String(r.route_code || "").toUpperCase() === "NET";
+    }
+
+    function makeCard(r, online) {
+      const a = document.createElement("a");
+      a.className = "card" + (online ? " net" : "") + (r.available ? "" : " disabled");
+      if (r.available) {
+        a.href = online
+          ? "/route/" + encodeURIComponent(r.web_id) + "/photos"
+          : "/route/" + encodeURIComponent(r.web_id);
+      } else {
+        a.href = "#";
+      }
+      const badgeText = !r.available
+        ? "ファイルなし"
+        : (online ? "商品撮影へ" : "時刻入力へ");
+      const badgeClass = !r.available ? "badge" : (online ? "badge net" : "badge ok");
+      a.innerHTML =
+        '<div class="date">' + escapeHtml(r.route_date || "(日付なし)") + "</div>" +
+        '<div class="name">' + escapeHtml(r.route_name || r.web_id) + "</div>" +
+        '<div class="meta">' +
+        escapeHtml(online ? "ネット仕入" : (r.route_code || "")) +
+        (r.updated_at ? " · 更新 " + escapeHtml(r.updated_at) : "") +
+        "</div>" +
+        '<span class="' + badgeClass + '">' + badgeText + "</span>";
+      return a;
+    }
+
     async function loadList() {
       setStatus("読み込み中…");
       const res = await fetch("/api/routes");
@@ -123,34 +170,32 @@
       }
       const data = await res.json();
       const routes = data.routes || [];
-      const wrap = document.getElementById("list");
-      wrap.innerHTML = "";
-      if (!routes.length) {
-        wrap.innerHTML =
-          '<div class="hint">まだルートがありません。PCのHIRIOで「Webテンプレート作成」を押してください。</div>';
-        setStatus("0件");
-        return;
+      const netWrap = document.getElementById("netList");
+      const routeWrap = document.getElementById("routeList");
+      netWrap.innerHTML = "";
+      routeWrap.innerHTML = "";
+
+      const net = routes.filter(isOnline);
+      const store = routes.filter((r) => !isOnline(r));
+
+      if (!net.length) {
+        netWrap.innerHTML =
+          '<div class="hint">まだネット箱がありません。<br>' +
+          "PCのHIRIOで「仕入管理 → ネット仕入 → CSV取込 → DB保存」すると、ここに出ます。</div>";
+      } else {
+        net.forEach((r) => netWrap.appendChild(makeCard(r, true)));
       }
-      routes.forEach((r) => {
-        const a = document.createElement("a");
-        a.className = "card" + (r.available ? "" : " disabled");
-        a.href = r.available ? "/route/" + encodeURIComponent(r.web_id) : "#";
-        a.innerHTML =
-          '<div class="date">' + escapeHtml(r.route_date || "(日付なし)") + "</div>" +
-          '<div class="name">' + escapeHtml(r.route_name || r.web_id) + "</div>" +
-          '<div class="meta">' +
-          escapeHtml(r.route_code || "") +
-          (r.updated_at ? " · 更新 " + escapeHtml(r.updated_at) : "") +
-          "</div>" +
-          '<span class="badge ' + (r.available ? "ok" : "") + '">' +
-          (r.available ? "時刻入力へ" : "ファイルなし") +
-          "</span>";
-        wrap.appendChild(a);
-      });
-      setStatus(routes.length + " 件");
+
+      if (!store.length) {
+        routeWrap.innerHTML =
+          '<div class="hint">ルートがありません。PCで「Webテンプレート作成」を押してください。</div>';
+      } else {
+        store.forEach((r) => routeWrap.appendChild(makeCard(r, false)));
+      }
+
+      setStatus("ネット " + net.length + " 件 / ルート " + store.length + " 件");
     }
 
-    document.getElementById("fixedUrl").textContent = location.origin + "/";
     document.getElementById("reloadBtn").addEventListener("click", () => loadList());
     loadList();
   </script>

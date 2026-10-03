@@ -9,11 +9,15 @@ import sys
 import time
 from typing import Optional, Tuple
 from urllib.error import URLError
+from urllib.parse import quote
 from urllib.request import urlopen
 
 from route_web import ROUTE_WEB_PORT
 
 HEALTH_URL = f"http://127.0.0.1:{ROUTE_WEB_PORT}/health"
+
+# Tailscale Serve（連続カメラ撮影は https 必須）。PROGRESS / enable_https.ps1 と揃える。
+DEFAULT_HTTPS_BASE = "https://houseserver.tail0a340c.ts.net"
 
 
 def is_route_web_up(timeout: float = 1.0) -> bool:
@@ -66,20 +70,31 @@ def ensure_route_web_running(wait_seconds: float = 8.0) -> Tuple[bool, str]:
 
 
 def public_base_urls() -> list[str]:
-    """スマホ向けに案内するベース URL 候補。"""
+    """スマホ向けに案内するベース URL 候補。https（Tailscale）を先頭にする。"""
     return [
+        DEFAULT_HTTPS_BASE,
         f"http://houseserver:{ROUTE_WEB_PORT}",
         f"http://192.168.0.200:{ROUTE_WEB_PORT}",
         f"http://127.0.0.1:{ROUTE_WEB_PORT}",
     ]
 
 
+def preferred_public_base() -> str:
+    """案内・ブラウザ起動に使う第一候補（https）。"""
+    return public_base_urls()[0]
+
+
 def home_url(base: Optional[str] = None) -> str:
     """固定のルート一覧URL（スマホはこれをブックマーク）。"""
-    root = (base or public_base_urls()[0]).rstrip("/")
+    root = (base or preferred_public_base()).rstrip("/")
     return f"{root}/"
 
 
 def route_page_url(web_id: str, base: Optional[str] = None) -> str:
-    root = (base or public_base_urls()[0]).rstrip("/")
-    return f"{root}/route/{web_id}"
+    root = (base or preferred_public_base()).rstrip("/")
+    return f"{root}/route/{quote(str(web_id or ''), safe='')}"
+
+
+def route_photos_url(web_id: str, base: Optional[str] = None) -> str:
+    root = (base or preferred_public_base()).rstrip("/")
+    return f"{root}/route/{quote(str(web_id or ''), safe='')}/photos"

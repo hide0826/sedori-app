@@ -84,15 +84,29 @@ def _newer_file(primary: Optional[Path], extra: Optional[Path]) -> Optional[Path
 
 
 def find_stocklist_csv(route_folder: Path) -> Optional[Path]:
-    """仕入CSV/ 優先、無ければ直下の StockList_*.csv。"""
+    """仕入CSVを探す。
+
+    優先順:
+    1. 仕入CSV/ の StockList_*.csv
+    2. 仕入CSV/ の任意 *.csv（アマサーチ等の別名）
+    3. 直下の StockList_*.csv
+    4. 直下の任意 *.csv
+    同じグループ内では更新時刻が新しいファイル。
+    """
     sub = route_folder / CSV_DIR_NAME
     candidates: List[Path] = []
     if sub.is_dir():
-        candidates.extend(sorted(sub.glob("StockList_*.csv")))
+        candidates.extend(sorted(p for p in sub.glob("StockList_*.csv") if p.is_file()))
         if not candidates:
             candidates.extend(sorted(p for p in sub.glob("*.csv") if p.is_file()))
     if not candidates:
-        candidates.extend(sorted(route_folder.glob("StockList_*.csv")))
+        candidates.extend(
+            sorted(p for p in route_folder.glob("StockList_*.csv") if p.is_file())
+        )
+    if not candidates:
+        candidates.extend(
+            sorted(p for p in route_folder.glob("*.csv") if p.is_file())
+        )
     if not candidates:
         return None
     try:
@@ -127,7 +141,7 @@ def resolve_route_folder_layout(route_folder: Path) -> RouteFolderLayout:
         find_stocklist_csv(insurance) if insurance is not None else None,
     )
     if layout.csv_path is None:
-        layout.notes.append("StockList CSV が見つかりません（仕入CSV/ または直下）")
+        layout.notes.append("CSV が見つかりません（仕入CSV/ または直下の *.csv）")
     elif is_under_route_insurance(layout.csv_path):
         layout.notes.append("仕入CSVはルート保険から読みます")
 

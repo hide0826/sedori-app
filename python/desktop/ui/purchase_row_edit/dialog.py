@@ -163,7 +163,8 @@ class PurchaseRowEditDialog(
         super().__init__(None)
         self.record = record
         self._last_committed_sku = str(record.get("SKU") or record.get("sku") or "").strip()
-        self._sku_date_edit: Optional[QLineEdit] = None
+        self._sku_edit: Optional[QLineEdit] = None
+        self._sku_date_edit: Optional[QLineEdit] = None  # 互換（全文編集欄を指す）
         self._sku_suffix_rest: str = ""
         self._product_widget = product_widget if product_widget is not None else parent
         self._csv_inventory_snapshot = csv_inventory_snapshot or {}
@@ -228,42 +229,24 @@ class PurchaseRowEditDialog(
         info_layout.addRow("商品名:", self._title_label)
         info_layout.addRow("ASIN:", QLabel(self._record_str("ASIN") or "-"))
         sku_full = self._record_str("SKU") or self._record_str("sku") or ""
-        date_prefix, rest_suffix = _split_sku_leading_date(sku_full)
         locked = _sku_date_edit_locked(self.record)
-        if locked or date_prefix is None:
+        if locked:
             sku_lbl = QLabel(sku_full or "-")
-            if locked:
-                sku_lbl.setToolTip(
-                    "販売済み・一部販売済みの商品は、SKU先頭の日付（8桁）を変更できません。"
-                )
-            elif not sku_full:
-                sku_lbl.setToolTip("")
-            else:
-                sku_lbl.setToolTip(
-                    "SKUが先頭8桁の日付（YYYYMMDD）形式ではないため、日付のみの変更はできません。"
-                )
+            sku_lbl.setToolTip(
+                "販売済み・一部販売済みの商品は、SKUを変更できません。"
+            )
             info_layout.addRow("SKU:", sku_lbl)
         else:
-            self._sku_suffix_rest = rest_suffix
-            sku_row = QHBoxLayout()
-            self._sku_date_edit = QLineEdit()
-            self._sku_date_edit.setMaxLength(8)
-            self._sku_date_edit.setFixedWidth(92)
-            self._sku_date_edit.setText(date_prefix)
-            self._sku_date_edit.setPlaceholderText("YYYYMMDD")
-            self._sku_date_edit.setToolTip(
-                "先頭8桁（仕入日など）のみ変更できます。出品日と見なされる場合の調整・自社寝かせ在庫向けです。"
+            self._sku_edit = QLineEdit()
+            self._sku_edit.setText(sku_full)
+            self._sku_edit.setPlaceholderText("例: 20261003-TR-12-4400-6P-016")
+            self._sku_edit.setToolTip(
+                "SKU全体を編集できます（店舗コードの入れ忘れ修正など）。\n"
+                "反映すると仕入DB・古物台帳のSKUも同時に更新されます。"
             )
-            self._sku_date_edit.textChanged.connect(self._on_sku_date_text_changed)
-            suf_lbl = QLabel(rest_suffix if rest_suffix else "")
-            suf_lbl.setStyleSheet("color: #b0b0b0;")
-            suf_lbl.setWordWrap(False)
-            suf_lbl.setToolTip("SKUのこの部分は変更できません（日付8桁のみ編集可）。")
-            sku_row.addWidget(self._sku_date_edit, 0)
-            sku_row.addWidget(suf_lbl, 1)
-            sku_wrap = QWidget()
-            sku_wrap.setLayout(sku_row)
-            info_layout.addRow("SKU:", sku_wrap)
+            # 旧ロジック互換: 日付専用欄として参照される場合がある
+            self._sku_date_edit = self._sku_edit
+            info_layout.addRow("SKU:", self._sku_edit)
         self._condition_combo = QComboBox()
         self._condition_combo.addItems(_CONDITION_OPTIONS)
         condition_text = self._record_condition_label_text()
@@ -900,7 +883,7 @@ class PurchaseRowEditDialog(
     def _apply(self) -> None:
         """仕入DBに反映する（ダイアログは閉じない＝ブラウザを見たまま続けられる）"""
         old_sku = self._last_committed_sku
-        if not self._apply_sku_date_change():
+        if not self._apply_sku_change():
             return
         if self._sale_price_spin is not None:
             sale_int = int(self._sale_price_spin.value())
@@ -1001,7 +984,9 @@ class PurchaseRowEditDialog(
                     pass
             if hasattr(pw, "refresh_purchase_display_after_row_edit"):
                 try:
-                    pw.refresh_purchase_display_after_row_edit(self.record)
+                    pw.refresh_purchase_display_after_row_edit(
+                        self.record, old_sku=old_sku
+                    )
                 except Exception:
                     pass
         self._update_window_title()

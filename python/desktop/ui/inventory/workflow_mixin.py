@@ -622,17 +622,40 @@ class InventoryWorkflowMixin:
                 combo.setCurrentIndex(idx)
 
     def import_csv_only_from_route_box(self):
-        """ネット仕入向け。ルート箱の仕入CSVだけを読み込む。"""
+        """ネット仕入向け。ルート箱／ネット箱の仕入CSVだけを読み込む。"""
         from services.route_folder_import import resolve_route_folder_layout
 
         base_dir = self._get_default_batch_root_dir()
-        ledger = Path(r"D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳")
-        if ledger.is_dir():
-            base_dir = str(ledger)
+        try:
+            from utils.settings_helper import (
+                get_online_purchase_last_box,
+                get_online_purchase_root,
+            )
+        except ImportError:
+            from desktop.utils.settings_helper import (  # type: ignore
+                get_online_purchase_last_box,
+                get_online_purchase_root,
+            )
+        from services.online_box import resolve_default_online_root
+
+        last_box = get_online_purchase_last_box()
+        online_root = get_online_purchase_root()
+        if last_box and Path(last_box).is_dir():
+            base_dir = last_box
+        elif online_root and Path(online_root).is_dir():
+            base_dir = online_root
+        else:
+            default_online = resolve_default_online_root()
+            if default_online is not None:
+                base_dir = str(default_online)
+            else:
+                ledger = Path(r"D:\せどり総合\店舗せどり仕入リスト入れ\仕入帳")
+                if ledger.is_dir():
+                    base_dir = str(ledger)
 
         selected_dir = QFileDialog.getExistingDirectory(
             self,
-            "ルート箱を選択（仕入CSV だけ読み込みます）",
+            "箱を選択（仕入CSV だけ読み込みます）",
             base_dir,
         )
         if not selected_dir:
@@ -650,15 +673,19 @@ class InventoryWorkflowMixin:
             QMessageBox.warning(
                 self,
                 "CSV未検出",
-                "仕入CSV/ または直下に StockList_*.csv がありません。\n"
+                "仕入CSV/ または箱の直下に CSV ファイルがありません。\n"
+                "アマサーチのCSVでも、名前は問いません（いちばん新しいCSVを読みます）。\n"
                 + "\n".join(layout.notes),
             )
             return
 
-        self._update_workflow_status("ルート箱CSV: 取込中…", emphasize=True)
+        self._update_workflow_status(
+            f"ルート箱CSV: {layout.csv_path.name} を取込中…",
+            emphasize=True,
+        )
         QApplication.processEvents()
         self._import_csv_from_path(str(layout.csv_path))
-        self._update_workflow_status("ルート箱CSV: 完了")
+        self._update_workflow_status(f"ルート箱CSV: 完了（{layout.csv_path.name}）")
 
     def import_from_route_box(self):
         """ルート箱を1回選んで CSV／商品画像／レシート画像を既存タブへ振り分ける（Phase 3）。"""
@@ -787,3 +814,232 @@ class InventoryWorkflowMixin:
             + "\n\n続けて「照合処理実行」など既存の工程を実行してください。",
         )
 
+    def _resolve_online_purchase_root(self) -> str:
+        """ネット仕入の親フォルダ。設定 → 既定候補 → ダイアログ。"""
+        try:
+            from utils.settings_helper import (
+                get_online_purchase_root,
+                set_online_purchase_root,
+            )
+        except ImportError:
+            from desktop.utils.settings_helper import (  # type: ignore
+                get_online_purchase_root,
+                set_online_purchase_root,
+            )
+        from services.online_box import resolve_default_online_root
+
+        saved = get_online_purchase_root()
+        if saved and Path(saved).is_dir():
+            return saved
+
+        default = resolve_default_online_root()
+        start = str(default) if default is not None else str(Path.home())
+        picked = QFileDialog.getExistingDirectory(
+            self,
+            "ネット仕入の親フォルダを選択（例: ネット仕入れリスト）",
+            start,
+        )
+        if not picked:
+            return ""
+        set_online_purchase_root(picked)
+        return picked
+
+    def create_today_online_box(self):
+        """ワンクリックで フリマYYYYMMDD + 仕入CSV/商品画像/証憑スクショ を作る。"""
+        try:
+            from utils.settings_helper import (
+                set_online_purchase_last_box,
+                set_online_purchase_root,
+                set_purchase_evidence_local_root,
+            )
+        except ImportError:
+            from desktop.utils.settings_helper import (  # type: ignore
+                set_online_purchase_last_box,
+                set_online_purchase_root,
+                set_purchase_evidence_local_root,
+            )
+        from services.online_box import create_online_purchase_box
+
+        base_dir = self._resolve_online_purchase_root()
+        if not base_dir:
+            QMessageBox.warning(
+                self,
+                "今日の箱を作る",
+                "親フォルダが選ばれていないため、箱を作れませんでした。",
+            )
+            return
+
+        try:
+            result = create_online_purchase_box(base_dir, label="フリマ")
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "今日の箱を作る",
+                f"フォルダの作成に失敗しました:\n{exc}",
+            )
+            return
+        except ValueError as exc:
+            QMessageBox.warning(self, "今日の箱を作る", str(exc))
+            return
+
+        set_online_purchase_root(base_dir)
+        set_online_purchase_last_box(str(result.box_dir))
+        set_purchase_evidence_local_root(str(result.evidence_dir))
+
+        try:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(result.box_dir)))
+        except Exception:
+            pass
+
+        if result.created_box:
+            status = f"ネット箱作成: {result.box_dir.name}"
+            title_note = "新規作成しました。"
+        elif result.created_subdirs:
+            status = f"ネット箱更新: {result.box_dir.name}"
+            title_note = (
+                "箱は既にありました。足りないサブフォルダを追加しました。\n"
+                + "・"
+                + "\n・".join(result.created_subdirs)
+            )
+        else:
+            status = f"ネット箱確認: {result.box_dir.name}"
+            title_note = "箱とサブフォルダは既に揃っています。"
+
+        self._update_workflow_status(status, emphasize=True)
+        web_line = ""
+        if result.web_id:
+            web_line = f"\n\nスマホ一覧用ID:\n{result.web_id}"
+        QMessageBox.information(
+            self,
+            "今日の箱を作る",
+            f"{title_note}\n\n"
+            f"箱:\n{result.box_dir}\n\n"
+            f"情報撮影の証憑保存先を次に設定しました:\n{result.evidence_dir}"
+            f"{web_line}",
+        )
+
+    def _inventory_records_for_photos(self) -> List[Dict[str, Any]]:
+        data = getattr(self, "filtered_data", None)
+        if data is None or len(data) == 0:
+            data = getattr(self, "inventory_data", None)
+        if data is None or len(data) == 0:
+            return []
+        records: List[Dict[str, Any]] = []
+        try:
+            for _, row in data.iterrows():
+                records.append(row.to_dict())
+        except Exception:
+            try:
+                records = data.to_dict(orient="records")
+            except Exception:
+                return []
+        return records
+
+    def _resolve_online_purchase_root_quiet(self) -> str:
+        """ダイアログなしで親フォルダを決める。無ければ空文字。"""
+        try:
+            from utils.settings_helper import get_online_purchase_root
+        except ImportError:
+            from desktop.utils.settings_helper import get_online_purchase_root  # type: ignore
+        from services.online_box import resolve_default_online_root
+
+        saved = get_online_purchase_root()
+        if saved and Path(saved).is_dir():
+            return saved
+        default = resolve_default_online_root()
+        return str(default) if default is not None else ""
+
+    def prepare_online_phone_photos_after_db_save(self) -> List[str]:
+        """
+        ネット仕入の DB保存後に呼ぶ。
+        箱登録・撮影候補書き出し・Web起動確認まで行い、メッセージ行を返す。
+        """
+        try:
+            from utils.settings_helper import (
+                get_online_purchase_last_box,
+                set_online_purchase_last_box,
+                set_online_purchase_root,
+                set_purchase_evidence_local_root,
+            )
+        except ImportError:
+            from desktop.utils.settings_helper import (  # type: ignore
+                get_online_purchase_last_box,
+                set_online_purchase_last_box,
+                set_online_purchase_root,
+                set_purchase_evidence_local_root,
+            )
+        from services.online_box import (
+            create_online_purchase_box,
+            ensure_online_route_registration,
+            write_photo_candidates,
+        )
+
+        lines: List[str] = []
+        records = self._inventory_records_for_photos()
+        if not records:
+            lines.append("スマホ撮影準備: 一覧が空のため候補を書き出せませんでした")
+            return lines
+
+        base_dir = self._resolve_online_purchase_root_quiet()
+        if not base_dir:
+            # 対話で親を選ばせる（初回のみ）
+            base_dir = self._resolve_online_purchase_root()
+        if not base_dir:
+            lines.append("スマホ撮影準備: ネット仕入れリストの親フォルダが未設定です")
+            return lines
+
+        last_box = get_online_purchase_last_box()
+        box_dir = Path(last_box) if last_box and Path(last_box).is_dir() else None
+        try:
+            if box_dir is None:
+                created = create_online_purchase_box(base_dir, label="フリマ")
+                box_dir = created.box_dir
+                set_purchase_evidence_local_root(str(created.evidence_dir))
+            web_id, _ = ensure_online_route_registration(box_dir, route_name=box_dir.name)
+            set_online_purchase_root(base_dir)
+            set_online_purchase_last_box(str(box_dir))
+            _path, rows = write_photo_candidates(
+                box_dir,
+                records,
+                route_name=box_dir.name,
+            )
+        except Exception as exc:
+            lines.append(f"スマホ撮影準備エラー: {exc}")
+            return lines
+
+        if not rows:
+            lines.append("スマホ撮影準備: 候補を作れませんでした（商品名・JAN・ASIN・SKUが空）")
+            return lines
+
+        try:
+            from route_web.server_helper import (
+                ensure_route_web_running,
+                home_url,
+                route_photos_url,
+            )
+        except ImportError:
+            python_dir = Path(__file__).resolve().parents[3]
+            if str(python_dir) not in sys.path:
+                sys.path.insert(0, str(python_dir))
+            from route_web.server_helper import (
+                ensure_route_web_running,
+                home_url,
+                route_photos_url,
+            )
+
+        web_ok, web_message = ensure_route_web_running()
+        photos_url = route_photos_url(web_id)
+        home = home_url()
+        lines.append(f"スマホ撮影準備: 候補 {len(rows)} 件 → {box_dir.name}")
+        lines.append(f"撮影URL: {photos_url}")
+        lines.append(f"一覧: {home}")
+        if not web_ok:
+            lines.append(f"Web起動注意: {web_message}")
+        try:
+            self._update_workflow_status(
+                f"スマホ撮影準備: 候補{len(rows)}件 → {box_dir.name}",
+                emphasize=True,
+            )
+        except Exception:
+            pass
+        return lines

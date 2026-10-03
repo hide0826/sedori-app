@@ -2,11 +2,15 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-09-27（商品撮影）
+更新日: 2026-10-03（ネット仕入箱・SKU全文編集・一覧即反映）
 
 ---
 
 ## いまの状態
+
+**2026-10-03（ネット仕入箱）:** 店舗の仕入帳ルートとは別に、ネット仕入用の日付箱を作る（`仕入CSV`／`商品画像`／`証憑スクショ`）。`box_kind=online`・`route_code=NET` の `route.json` を書き、route_web に登録する。ネット仕入の **DB保存** 後に撮影候補（`photo_candidates.json`）を箱へ書き、スマホは既存 https（`https://houseserver.tail0a340c.ts.net/`）の商品撮影画面で撮る（ホームページにネット箱セクション）。証憑専用ボタンは付けない。CSV取込は `仕入CSV/` 内の **任意 `*.csv`**（`StockList_*.csv` 以外のアマサーチ出力も可）。
+
+**2026-10-03（SKU全文編集・即反映）:** 仕入行の編集で SKU 全体を直せる（販売済みはロック）。反映時に仕入DB・商品DB・古物台帳の SKU を同時更新。SKUが変わったときは仕入一覧を `force_full` で再描画し、古物台帳タブも開いていれば再読込（再起動不要）。反映には **一度 HIRIO（と必要ならルートWeb）を再起動**してこのコードを載せる。
 
 **2026-09-27（商品撮影）:** 新品などで写真が不要な商品は、リストを長押しして「画像不要にしますか？」ではいを選ぶと、撮影済みへ「画像不要」バッジ付きで移る。このルートの商品が残らなければ、撮影は終わり。撮影済みの画像不要をタップすると、リストに戻せる。反映にはルートWebの再起動。
 
@@ -60,6 +64,48 @@
 - ルート時刻Web: 番人 `python\route_web\watch.ps1`（`:8792`。落ちたら起動し直す）。手動は `start_route_web.bat`
 - Python: 3.13.15 / venv はこのマシンで作り直し済み
 - FastAPI: デスクトップ起動時に自動起動（失敗しても仕入画面は動く）
+
+---
+
+## 2026-10-03 ネット仕入箱・SKU全文編集
+
+店舗ルート（仕入帳）とは別系統。親フォルダ例: `D:\せどり総合\ネット仕入れリスト`（設定キー `online_purchase/root_dir`、無ければ既定候補）。
+
+### 動き
+
+1. ネット仕入タブで日付箱を1クリック作成 → `YYYY-MM-DD-フリマ` 等＋ `仕入CSV`／`商品画像`／`証憑スクショ`
+2. `route.json` に `box_kind=online`・`route_code=NET`。`ensure_online_route_registration` で route_web 登録
+3. **DB保存** 後に `write_photo_candidates` → 箱内 `photo_candidates.json`。専用の「スマホ用ボタン」はサイト側に置かない
+4. スマホは https でトップ → ネット箱 → `/route/{web_id}/photos`（既存商品撮影UI）
+5. CSV取込: `find_stocklist_csv` が `StockList_*.csv` のあと任意 `*.csv` も探す
+6. 仕入行の編集: SKU全文編集 → purchases／products／ledger の rename。一覧は SKU変更時フル再描画
+
+### 追加・変更
+
+| 何 | 場所 |
+|----|------|
+| 箱作成・候補書込 | `python/desktop/services/online_box.py` |
+| サーバ側 online 同期 | `python/route_web/online_sync.py` |
+| DB保存後の準備 | `python/desktop/ui/inventory/workflow_mixin.py` |
+| 設定 | `python/desktop/utils/settings_helper.py`（`online_purchase/*`） |
+| CSV任意名 | `python/desktop/services/route_folder_import.py` |
+| SKU全文＋台帳同期 | `purchase_row_edit/dialog.py` / `fee_channel_mixin.py` |
+| 一覧即反映 | `python/desktop/ui/product/purchase_edit_mixin.py` |
+| route_web UI/API | `app.py` / `registry.py` / `route_purchases.py` / `schema.py` / `server_helper.py` / `static/index.html` / `route_photos.html` |
+| テスト | `python/desktop/tests/test_online_box.py`（＋ `test_route_web_phase235.py` 追記） |
+
+### 確認コマンド
+
+```text
+cd C:\HIRIO\repo\sedori-app.github
+.venv\Scripts\python.exe -m pytest python/desktop/tests/test_online_box.py -q
+```
+
+### 次の一手（実機）
+
+1. HIRIO とルートWebを一度再起動
+2. ネット仕入で箱作成 → CSV投入 → DB保存 → https で候補が出るか
+3. 仕入行の編集で SKU を直し「反映」→ 一覧と古物台帳がすぐ変わるか
 
 ---
 

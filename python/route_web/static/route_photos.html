@@ -105,6 +105,11 @@
     document.getElementById("backLink").href = "/route/" + encodeURIComponent(WEB_ID);
     document.getElementById("doneLink").href = "/route/" + encodeURIComponent(WEB_ID) + "/photos/done";
 
+    function isOnlineRoute(route) {
+      return String((route && route.box_kind) || "").toLowerCase() === "online"
+        || String((route && route.route_code) || "").toUpperCase() === "NET";
+    }
+
     function janKey(row) {
       return String((row && row.jan) || "").replace(/\D/g, "");
     }
@@ -425,9 +430,16 @@
       const routeRes = await fetch("/api/route/" + encodeURIComponent(WEB_ID));
       const route = await routeRes.json();
       const routeName = route.route_name || "ルート";
+      const online = isOnlineRoute(route);
       document.getElementById("title").textContent = routeName + " 商品撮影";
-      document.getElementById("subtitle").textContent = (route.route_date || "") + " / 仕入保存後";
+      document.getElementById("subtitle").textContent = online
+        ? ((route.route_date || "") + " / ネット仕入")
+        : ((route.route_date || "") + " / 仕入保存後");
       document.getElementById("routeLabel").textContent = routeName + " " + (route.route_date || "");
+      if (online) {
+        document.getElementById("backLink").textContent = "← ルート一覧";
+        document.getElementById("backLink").href = "/";
+      }
       const buyRes = await fetch("/api/route/" + encodeURIComponent(WEB_ID) + "/purchases");
       const buy = await buyRes.json();
       purchases = buy.purchases || [];

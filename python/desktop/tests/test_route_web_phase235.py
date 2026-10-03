@@ -56,6 +56,29 @@ def test_find_stocklist_prefers_subdir(tmp_path: Path):
     assert found.name == "StockList_new.csv"
 
 
+def test_find_any_csv_in_root_for_amasearch(tmp_path: Path):
+    """アマサーチ等、StockList_ 以外のCSVでも直下から拾う。"""
+    root = tmp_path / "フリマ20261001"
+    root.mkdir()
+    csv_path = root / "仕入れ済み商品一覧_20261001_1816_standard.csv"
+    csv_path.write_text("a,b\n1,2\n", encoding="utf-8")
+    found = find_stocklist_csv(root)
+    assert found is not None
+    assert found.name == csv_path.name
+
+
+def test_find_any_csv_in_subdir_without_stocklist(tmp_path: Path):
+    root = tmp_path / "box"
+    root.mkdir()
+    sub = root / "仕入CSV"
+    sub.mkdir()
+    csv_path = sub / "923.csv"
+    csv_path.write_text("x\n", encoding="utf-8")
+    found = find_stocklist_csv(root)
+    assert found is not None
+    assert found.name == "923.csv"
+
+
 def test_product_upload_and_jan(tmp_path: Path):
     folder = tmp_path / "route"
     folder.mkdir(parents=True)

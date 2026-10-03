@@ -66,27 +66,33 @@ def list_route_summaries() -> List[Dict[str, Any]]:
         route_date = str(entry.get("route_date") or "")
         route_name = str(entry.get("route_name") or "")
         route_code = ""
+        box_kind = ""
         updated_at = ""
         available = False
-        if folder.is_dir():
-            path = route_json_path(folder)
-            if path.is_file():
-                try:
-                    doc = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    doc = None
-                if isinstance(doc, dict):
-                    available = True
-                    route_date = str(doc.get("route_date") or route_date)
-                    route_name = str(doc.get("route_name") or route_name)
-                    route_code = str(doc.get("route_code") or "")
-                    updated_at = str(doc.get("updated_at") or "")
+        try:
+            if folder.is_dir():
+                path = route_json_path(folder)
+                if path.is_file():
+                    try:
+                        doc = json.loads(path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError, PermissionError):
+                        doc = None
+                    if isinstance(doc, dict):
+                        available = True
+                        route_date = str(doc.get("route_date") or route_date)
+                        route_name = str(doc.get("route_name") or route_name)
+                        route_code = str(doc.get("route_code") or "")
+                        box_kind = str(doc.get("box_kind") or "")
+                        updated_at = str(doc.get("updated_at") or "")
+        except (OSError, PermissionError):
+            available = False
         rows.append(
             {
                 "web_id": web_id,
                 "route_date": route_date,
                 "route_name": route_name,
                 "route_code": route_code,
+                "box_kind": box_kind,
                 "updated_at": updated_at,
                 "available": available,
                 "folder_path": str(folder),
