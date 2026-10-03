@@ -48,7 +48,7 @@
       flex-wrap: wrap;
     }
     label { min-width: 5.5rem; font-size: 0.9rem; }
-    input[type="time"], input[type="text"], input[type="number"] {
+    input[type="time"], input[type="text"], input[type="number"], textarea {
       flex: 1;
       min-width: 6rem;
       padding: 10px 12px;
@@ -58,6 +58,14 @@
       color: var(--text);
       font-size: 1rem;
     }
+    textarea {
+      min-height: 3.2rem;
+      resize: vertical;
+      font-family: inherit;
+      line-height: 1.4;
+    }
+    .row.notes-row { align-items: flex-start; }
+    .row.notes-row label { padding-top: 10px; }
     button, label.btn {
       border: none;
       border-radius: 8px;
@@ -311,6 +319,10 @@
           'data-store="' + i + '" data-field="purchase_item_count" value="' +
           (st.purchase_item_count != null && st.purchase_item_count !== "" ? String(st.purchase_item_count) : "") +
           '" /></div>' +
+          '<div class="row notes-row"><label>備考</label>' +
+          '<textarea data-store="' + i + '" data-field="notes" rows="2" placeholder="店舗マスタの備考（追記可）">' +
+          escapeHtml(st.notes || "") +
+          '</textarea></div>' +
           '<div class="receipt-block">' +
           '<div class="sub" style="margin:0 0 6px">レシート</div>' +
           '<div class="row" style="margin-bottom:4px">' +
@@ -341,6 +353,9 @@
         const countEl = document.querySelector(
           'input[data-store="' + i + '"][data-field="purchase_item_count"]'
         );
+        const notesEl = document.querySelector(
+          'textarea[data-store="' + i + '"][data-field="notes"]'
+        );
         copy.in_time = inEl ? inEl.value || "" : "";
         copy.out_time = outEl ? outEl.value || "" : "";
         if (countEl && String(countEl.value).trim() !== "") {
@@ -349,6 +364,7 @@
         } else {
           copy.purchase_item_count = null;
         }
+        copy.notes = notesEl ? String(notesEl.value || "").trim() : (st.notes || "");
         copy.receipt_files = st.receipt_files || [];
         copy.product_files = st.product_files || [];
         return copy;
@@ -487,21 +503,57 @@
       setStatus("読み込み完了", "ok");
     }
 
-    async function saveRoute() {
-      const body = collectForm();
-      setStatus("保存中…");
-      const res = await fetch("/api/route/" + encodeURIComponent(WEB_ID), {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const t = await res.text();
-        setStatus("保存失敗: " + res.status + " " + t, "err");
+    let autosaveTimer = null;
+    let saveInFlight = false;
+    let saveQueued = false;
+
+    async function saveRoute(opts) {
+      const options = opts || {};
+      const keepForm = !!options.keepForm;
+      const silent = !!options.silent;
+      if (saveInFlight) {
+        saveQueued = true;
         return;
       }
-      fillForm(await res.json());
-      setStatus("保存しました " + new Date().toLocaleTimeString(), "ok");
+      saveInFlight = true;
+      const body = collectForm();
+      if (!silent) setStatus("保存中…");
+      try {
+        const res = await fetch("/api/route/" + encodeURIComponent(WEB_ID), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const t = await res.text();
+          setStatus("保存失敗: " + res.status + " " + t, "err");
+          return;
+        }
+        const data = await res.json();
+        if (keepForm) {
+          doc = data;
+        } else {
+          fillForm(data);
+        }
+        setStatus((silent ? "自動保存 " : "保存しました ") + new Date().toLocaleTimeString(), "ok");
+      } catch (e) {
+        setStatus("保存失敗: " + e.message, "err");
+      } finally {
+        saveInFlight = false;
+        if (saveQueued) {
+          saveQueued = false;
+          scheduleAutosave(0);
+        }
+      }
+    }
+
+    function scheduleAutosave(delayMs) {
+      const ms = delayMs == null ? 700 : delayMs;
+      if (autosaveTimer) clearTimeout(autosaveTimer);
+      autosaveTimer = setTimeout(() => {
+        autosaveTimer = null;
+        saveRoute({ keepForm: true, silent: true });
+      }, ms);
     }
 
     document.body.addEventListener("click", async (ev) => {
@@ -509,14 +561,20 @@
       if (!btn) return;
       if (btn.dataset.now) {
         const el = document.getElementById(btn.dataset.now);
-        if (el) el.value = nowHHmm();
+        if (el) {
+          el.value = nowHHmm();
+          scheduleAutosave(200);
+        }
         return;
       }
       if (btn.dataset.nowStore != null) {
         const sel =
           'input[data-store="' + btn.dataset.nowStore + '"][data-field="' + btn.dataset.field + '"]';
         const el = document.querySelector(sel);
-        if (el) el.value = nowHHmm();
+        if (el) {
+          el.value = nowHHmm();
+          scheduleAutosave(200);
+        }
         return;
       }
       if (btn.dataset.inboxMove) {
@@ -564,6 +622,24 @@
       } catch (e) {
         setStatus("アップロード失敗: " + e.message, "err");
       }
+    });
+
+    function isAutosaveField(el) {
+      if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) return false;
+      if (el.type === "file") return false;
+      if (el.id === "departure_time" || el.id === "return_time") return true;
+      if (el.id === "toll_outbound" || el.id === "toll_return" || el.id === "notes") return true;
+      return el.dataset && el.dataset.store != null && !!el.dataset.field;
+    }
+
+    document.body.addEventListener("input", (ev) => {
+      if (isAutosaveField(ev.target)) scheduleAutosave();
+    });
+    document.body.addEventListener("change", (ev) => {
+      const el = ev.target;
+      if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) return;
+      if (el.type === "file") return;
+      if (isAutosaveField(el)) scheduleAutosave(200);
     });
 
     document.getElementById("saveBtn").addEventListener("click", () => saveRoute());

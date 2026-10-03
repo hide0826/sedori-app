@@ -50,6 +50,10 @@ from route_web.registry import (
     save_route_json,
 )
 from route_web.schema import stamp_updated
+from route_web.store_notes_sync import (
+    enrich_store_notes_from_master,
+    sync_changed_store_notes_to_master,
+)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PAGE_PATH = STATIC_DIR / "route.html"
@@ -187,7 +191,8 @@ def route_page(web_id: str):
 
 @app.get("/api/route/{web_id}")
 def get_route(web_id: str) -> JSONResponse:
-    return JSONResponse(_require_doc(web_id))
+    doc = enrich_store_notes_from_master(_require_doc(web_id))
+    return JSONResponse(doc)
 
 
 @app.put("/api/route/{web_id}")
@@ -198,6 +203,10 @@ def put_route(web_id: str, body: Dict[str, Any]) -> JSONResponse:
     body["folder_path"] = existing.get("folder_path") or body.get("folder_path")
     body["schema_version"] = existing.get("schema_version") or 1
     body = stamp_updated(body)
+    try:
+        sync_changed_store_notes_to_master(existing, body)
+    except Exception as exc:
+        print(f"店舗マスタ備考同期エラー: {exc}")
     save_route_json(web_id, body)
     return JSONResponse(body)
 
