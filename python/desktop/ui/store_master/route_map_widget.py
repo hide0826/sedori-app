@@ -9,6 +9,7 @@ import os
 from typing import Any, Dict, List, Optional, Set
 
 from PySide6.QtCore import Qt, QUrl, Signal, QSettings, QTimer, QEvent
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -117,7 +118,26 @@ ROUTE_LINE_COLORS = [
 ]
 
 DEFAULT_PIN_COLOR = "#1976d2"
+SKIPPED_PIN_COLOR = "#9e9e9e"
 UNASSIGNED_KEY = "__unassigned__"
+
+
+def _template_include_from_value(value: Any) -> bool:
+    """stores.template_include / will_visit 相当。未設定は訪問する扱い。"""
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    try:
+        return int(value) != 0
+    except (TypeError, ValueError):
+        return bool(value)
+
+
+def _will_visit_from_store(store: Dict[str, Any]) -> bool:
+    if "will_visit" in store:
+        return bool(store.get("will_visit"))
+    return _template_include_from_value(store.get("template_include"))
 
 SETTINGS_ORG = "HIRIO"
 SETTINGS_APP = "desktop"
@@ -224,6 +244,7 @@ def _store_map_dict(store: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "tag_names": tag_names,
         "tag_ids": [int(t["id"]) for t in tags if t.get("id") is not None],
         "member_names": [],
+        "will_visit": _will_visit_from_store(store),
     }
 
 
@@ -263,6 +284,14 @@ def _markers_from_stores(stores_raw: List[Dict[str, Any]]) -> List[Dict[str, Any
                 break
         if not mapped:
             continue
+        # 併設ピンの訪問フラグは代表店を優先
+        mapped["will_visit"] = _will_visit_from_store(group.representative)
+        member_codes = []
+        for m in members:
+            mc = str(m.get("store_code") or m.get("supplier_code") or "").strip()
+            if mc and mc not in member_codes:
+                member_codes.append(mc)
+        mapped["member_codes"] = member_codes
         if detect_hardoff_family_brand is not None and detect_hardoff_family_brand(
             group.representative
         ):
@@ -278,6 +307,33 @@ def _markers_from_stores(stores_raw: List[Dict[str, Any]]) -> List[Dict[str, Any
                 mapped["lat"], mapped["lng"] = mean
         markers.append(mapped)
     return markers
+
+
+def _mark_route_endpoints(stores: List[Dict[str, Any]]) -> None:
+    """訪問する店の先頭をスタート、末尾をゴールにする（1店なら both）。"""
+    visit_idxs = [
+        i for i, s in enumerate(stores) if s.get("will_visit", True) is not False
+    ]
+    if not visit_idxs:
+        return
+    first_i = visit_idxs[0]
+    last_i = visit_idxs[-1]
+    if first_i == last_i:
+        stores[first_i]["endpoint"] = "both"
+    else:
+        stores[first_i]["endpoint"] = "start"
+        stores[last_i]["endpoint"] = "goal"
+
+
+def _store_matches_code(store: Dict[str, Any], store_code: str) -> bool:
+    code = (store_code or "").strip()
+    if not code:
+        return False
+    sc = str(store.get("store_code") or "").strip()
+    if sc == code:
+        return True
+    members = store.get("member_codes") or []
+    return code in {str(m).strip() for m in members}
 
 
 def _json_for_js(obj: Any) -> str:
@@ -331,6 +387,11 @@ def build_leaflet_html(payload: Dict[str, Any]) -> str:
     width: 34px;
     height: 44px;
     text-align: center;
+    position: relative;
+  }}
+  .hirio-pin.selected {{
+    width: 44px;
+    height: 56px;
   }}
   .hirio-pin-badge {{
     width: 30px;
@@ -343,10 +404,19 @@ def build_leaflet_html(payload: Dict[str, Any]) -> str:
     align-items: center;
     justify-content: center;
   }}
+  .hirio-pin.selected .hirio-pin-badge {{
+    width: 38px;
+    height: 38px;
+    border: 3px solid #ffeb3b;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.55);
+  }}
   .hirio-pin-text {{
     color: #fff;
     font: 700 11px/1 "Segoe UI","Meiryo UI","Yu Gothic UI",sans-serif;
     letter-spacing: 0;
+  }}
+  .hirio-pin.selected .hirio-pin-text {{
+    font-size: 13px;
   }}
   .hirio-pin-pointer {{
     width: 0;
@@ -356,6 +426,54 @@ def build_leaflet_html(payload: Dict[str, Any]) -> str:
     border-right: 6px solid transparent;
     border-top-width: 10px;
     border-top-style: solid;
+  }}
+  .hirio-pin.selected .hirio-pin-pointer {{
+    border-left-width: 8px;
+    border-right-width: 8px;
+    border-top-width: 12px;
+  }}
+  .hirio-endpoint {{
+    position: absolute;
+    left: 50%;
+    top: -14px;
+    transform: translateX(-50%);
+    padding: 1px 5px;
+    border-radius: 8px;
+    font: 700 10px/1.2 "Segoe UI","Meiryo UI",sans-serif;
+    color: #fff;
+    white-space: nowrap;
+    border: 1px solid #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.45);
+    z-index: 2;
+  }}
+  .hirio-endpoint.start {{ background: #2e7d32; }}
+  .hirio-endpoint.goal {{ background: #c62828; }}
+  .hirio-endpoint.both {{ background: #6a1b9a; }}
+  .hirio-pin.selected .hirio-endpoint {{
+    top: -16px;
+    font-size: 11px;
+  }}
+  .hirio-pick-num {{
+    position: absolute;
+    right: -6px;
+    top: -6px;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 4px;
+    border-radius: 9px;
+    background: #e65100;
+    color: #fff;
+    border: 1px solid #fff;
+    font: 700 11px/18px "Segoe UI","Meiryo UI",sans-serif;
+    text-align: center;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.45);
+    z-index: 3;
+  }}
+  body.hirio-pick-mode {{
+    cursor: crosshair;
+  }}
+  body.hirio-pick-mode .hirio-pin {{
+    cursor: pointer;
   }}
   .legend-icon {{
     display: inline-flex;
@@ -369,6 +487,16 @@ def build_leaflet_html(payload: Dict[str, Any]) -> str:
     justify-content: center;
     font: 700 10px/1 "Segoe UI","Meiryo UI",sans-serif;
     color: #fff;
+  }}
+  .legend-endpoint {{
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 8px;
+    margin-right: 6px;
+    font: 700 10px/1.2 sans-serif;
+    color: #fff;
+    border: 1px solid #fff;
+    vertical-align: middle;
   }}
   {tile_filter_css}
 </style>
@@ -416,6 +544,16 @@ function hirioSetGrayscale(on) {{
   if (mapEl) mapEl.style.background = on ? '#e8e8e8' : '#cfd8dc';
 }}
 
+function notifyStorePick(store) {{
+  if (!window.__HIRIO_PICK_MODE) return;
+  try {{
+    document.title = 'HIRIO_PICK:' + JSON.stringify({{
+      store_code: store.store_code || '',
+      member_codes: store.member_codes || []
+    }});
+  }} catch (e) {{}}
+}}
+
 function bindStorePopup(marker, store, routeName) {{
   const tags = (store.tag_names || []).join(' / ') || '（タグなし）';
   const code = store.store_code ? '[' + store.store_code + '] ' : '';
@@ -430,28 +568,79 @@ function bindStorePopup(marker, store, routeName) {{
     '<div>ルート: ' + (routeName || '未所属') + '</div>' +
     '<div class="popup-tags">タグ: ' + tags + '</div>'
   );
+  marker.on('click', function(e) {{
+    if (!window.__HIRIO_PICK_MODE) return;
+    try {{ L.DomEvent.stop(e); }} catch (err) {{}}
+    try {{ marker.closePopup(); }} catch (err2) {{}}
+    notifyStorePick(store);
+  }});
+}}
+
+function pickIndexHtml(store) {{
+  const n = store.pick_index;
+  if (!n) return '';
+  return '<div class="hirio-pick-num">' + n + '</div>';
+}}
+
+function endpointLabel(endpoint) {{
+  if (endpoint === 'start') return 'スタート';
+  if (endpoint === 'goal') return 'ゴール';
+  if (endpoint === 'both') return '始/終';
+  return '';
+}}
+
+function endpointHtml(endpoint) {{
+  const label = endpointLabel(endpoint);
+  if (!label) return '';
+  return '<div class="hirio-endpoint ' + endpoint + '">' + label + '</div>';
 }}
 
 function addCircle(store, routeName) {{
+  const skipped = store.will_visit === false;
+  const selected = !!store.selected;
+  const endpoint = store.endpoint || '';
+  const radius = selected ? 12 : (endpoint ? 10 : 8);
   const marker = L.circleMarker([store.lat, store.lng], {{
-    radius: 8,
-    color: '#ffffff',
-    weight: 1.5,
-    fillColor: store.pin_color || DEFAULT_PIN,
-    fillOpacity: 0.95
+    radius: radius,
+    color: selected ? '#ffeb3b' : '#ffffff',
+    weight: selected ? 3 : 1.5,
+    fillColor: skipped ? '{SKIPPED_PIN_COLOR}' : (store.pin_color || DEFAULT_PIN),
+    fillOpacity: skipped ? 0.75 : 0.95
   }});
   bindStorePopup(marker, store, routeName);
   marker.addTo(layerGroup);
+  if (endpoint) {{
+    const tip = L.marker([store.lat, store.lng], {{
+      icon: L.divIcon({{
+        className: 'hirio-pin-wrap',
+        html: '<div style="position:relative;width:1px;height:1px;">' +
+              endpointHtml(endpoint) + '</div>',
+        iconSize: [1, 1],
+        iconAnchor: [0, 28]
+      }}),
+      interactive: false,
+      keyboard: false
+    }});
+    tip.addTo(layerGroup);
+  }}
 }}
 
 function addIconMarker(store, routeName, icons) {{
   const key = store.icon_key || 'other';
   const spec = (icons && icons[key]) || (icons && icons.other) || {{ bg: DEFAULT_PIN, text: '他', fg: '#ffffff' }};
-  const bg = spec.bg || DEFAULT_PIN;
-  const fg = spec.fg || '#ffffff';
+  const skipped = store.will_visit === false;
+  const selected = !!store.selected;
+  const endpoint = store.endpoint || '';
+  const bg = skipped ? '{SKIPPED_PIN_COLOR}' : (spec.bg || DEFAULT_PIN);
+  const fg = skipped ? '#ffffff' : (spec.fg || '#ffffff');
   const text = spec.text || '他';
+  const pinClass = 'hirio-pin' + (selected ? ' selected' : '');
+  const size = selected ? [44, 56] : [34, 44];
+  const anchor = selected ? [22, 54] : [17, 42];
   const html =
-    '<div class="hirio-pin">' +
+    '<div class="' + pinClass + '">' +
+      endpointHtml(endpoint) +
+      pickIndexHtml(store) +
       '<div class="hirio-pin-badge" style="background:' + bg + '">' +
         '<span class="hirio-pin-text" style="color:' + fg + '">' + text + '</span>' +
       '</div>' +
@@ -461,23 +650,31 @@ function addIconMarker(store, routeName, icons) {{
     icon: L.divIcon({{
       className: 'hirio-pin-wrap',
       html: html,
-      iconSize: [34, 44],
-      iconAnchor: [17, 42],
-      popupAnchor: [0, -36]
+      iconSize: size,
+      iconAnchor: anchor,
+      popupAnchor: [0, selected ? -48 : -36]
     }}),
-    keyboard: false
+    keyboard: false,
+    opacity: skipped ? 0.85 : 1,
+    zIndexOffset: selected ? 600 : (store.pick_index ? 500 : (endpoint ? 400 : 0))
   }});
   bindStorePopup(marker, store, routeName);
   marker.addTo(layerGroup);
 }}
 
-function addRouteLine(pts, color, weight, opacity) {{
-  L.polyline(pts, {{
-    color: '#ffffff', weight: weight + 2, opacity: 0.7
-  }}).addTo(layerGroup);
-  L.polyline(pts, {{
+function addRouteLine(pts, color, weight, opacity, dashed) {{
+  const optsHalo = {{
+    color: '#ffffff', weight: weight + 2, opacity: dashed ? 0.35 : 0.7
+  }};
+  const optsMain = {{
     color: color, weight: weight, opacity: opacity
-  }}).addTo(layerGroup);
+  }};
+  if (dashed) {{
+    optsHalo.dashArray = '4 8';
+    optsMain.dashArray = '4 8';
+  }}
+  L.polyline(pts, optsHalo).addTo(layerGroup);
+  L.polyline(pts, optsMain).addTo(layerGroup);
 }}
 
 function hirioUpdateLegend(data) {{
@@ -511,6 +708,10 @@ function hirioUpdateLegend(data) {{
                 (t.name||'') + '</div>';
       }});
     }}
+    if (data.show_endpoints) {{
+      html += '<div style="margin-top:6px;"><span class="legend-endpoint" style="background:#2e7d32;">スタート</span>開始店舗</div>';
+      html += '<div><span class="legend-endpoint" style="background:#c62828;">ゴール</span>終了店舗</div>';
+    }}
     div.innerHTML = html;
     return div;
   }};
@@ -519,7 +720,12 @@ function hirioUpdateLegend(data) {{
   modeBadgeControl = L.control({{ position: 'topright' }});
   modeBadgeControl.onAdd = function() {{
     const div = L.DomUtil.create('div', 'mode-badge');
-    div.textContent = data.grayscale ? '白黒地図' : 'カラー地図';
+    if (data.pick_mode) {{
+      div.textContent = '訪問順クリック選択中';
+      div.style.background = 'rgba(230,81,0,0.92)';
+    }} else {{
+      div.textContent = data.grayscale ? '白黒地図' : 'カラー地図';
+    }}
     return div;
   }};
   modeBadgeControl.addTo(map);
@@ -529,6 +735,10 @@ function hirioUpdateLegend(data) {{
 window.__HIRIO_UPDATE = function(data, opts) {{
   opts = opts || {{}};
   window.__HIRIO_DATA = data || {{}};
+  window.__HIRIO_PICK_MODE = !!data.pick_mode;
+  try {{
+    document.body.classList.toggle('hirio-pick-mode', !!data.pick_mode);
+  }} catch (e) {{}}
   const useIcons = !!data.use_icons;
   const icons = data.map_icons || {{}};
   const grayscale = !!data.grayscale;
@@ -539,20 +749,54 @@ window.__HIRIO_UPDATE = function(data, opts) {{
 
   hirioSetGrayscale(grayscale);
   layerGroup.clearLayers();
+  const selectedCode = (data.selected_store_code || '').trim();
 
   (data.routes || []).forEach(function(route) {{
     const color = route.line_color || '#1e88e5';
-    const pts = [];
+    const visitPts = [];
+    const skipStores = [];
+    const pickPts = [];
     (route.stores || []).forEach(function(s) {{
+      const codes = [s.store_code || ''].concat(s.member_codes || []);
+      s.selected = !!(selectedCode && codes.indexOf(selectedCode) >= 0);
       if (useIcons) addIconMarker(s, route.route_name, icons);
       else addCircle(s, route.route_name);
-      pts.push([s.lat, s.lng]);
       bounds.push([s.lat, s.lng]);
+      if (s.pick_index) {{
+        pickPts.push({{ idx: s.pick_index, lat: s.lat, lng: s.lng }});
+      }}
+      if (s.will_visit === false) {{
+        skipStores.push(s);
+      }} else {{
+        visitPts.push([s.lat, s.lng]);
+      }}
     }});
-    if ((route.road_polyline || []).length >= 2) {{
-      addRouteLine(route.road_polyline, color, lineWeight, lineOpacity);
-    }} else if (pts.length >= 2) {{
-      addRouteLine(pts, color, dashWeight, lineOpacity);
+    // クリック選択中は、選んだ順の線だけ伸ばす（未選択時は線なし）
+    if (data.pick_mode) {{
+      if (pickPts.length) {{
+        pickPts.sort(function(a, b) {{ return a.idx - b.idx; }});
+        const pts = pickPts.map(function(p) {{ return [p.lat, p.lng]; }});
+        if (pts.length >= 2) {{
+          addRouteLine(pts, color, dashWeight, lineOpacity, false);
+        }}
+      }}
+    }} else if ((route.road_polyline || []).length >= 2) {{
+      addRouteLine(route.road_polyline, color, lineWeight, lineOpacity, false);
+    }} else if (visitPts.length >= 2) {{
+      addRouteLine(visitPts, color, dashWeight, lineOpacity, false);
+    }}
+    // 行かない店: 最後に訪問する店から薄い点線（選択モード中は非表示）
+    if (!data.pick_mode && visitPts.length >= 1 && skipStores.length) {{
+      const last = visitPts[visitPts.length - 1];
+      skipStores.forEach(function(s) {{
+        addRouteLine(
+          [last, [s.lat, s.lng]],
+          color,
+          2,
+          0.45,
+          true
+        );
+      }});
     }}
   }});
 
@@ -620,6 +864,12 @@ class RouteMapWidget(QWidget):
         self._tag_checks: Dict[int, QCheckBox] = {}
         self._editing_route_code: str = ""
         self._editing_route_name: str = ""
+        self._selected_store_code: str = ""
+        self._pick_mode: bool = False
+        self._pick_order: List[str] = []
+        self._pick_baseline_rows: List[Dict[str, Any]] = []
+        self._pick_history: List[List[str]] = [[]]
+        self._pick_history_index: int = 0
         self._visit_reorder_busy = False
         self._brand_tags_synced = False
         self._splitter_sizes_restored = False
@@ -719,8 +969,21 @@ class RouteMapWidget(QWidget):
         self.select_all_btn.clicked.connect(self.select_all_routes)
         route_btns.addWidget(self.select_all_btn)
         self.clear_btn = QPushButton("全解除")
+        self.clear_btn.setToolTip("ルートの表示チェックをすべて外します")
         self.clear_btn.clicked.connect(self.clear_route_selection)
         route_btns.addWidget(self.clear_btn)
+        self.clear_edit_route_btn = QPushButton("ルート選択解除")
+        self.clear_edit_route_btn.setToolTip(
+            "編集中ルートの選択を解除し、全体マップ表示に戻します"
+        )
+        self.clear_edit_route_btn.setStyleSheet(
+            "QPushButton { background: #546e7a; color: #ffffff; border: none;"
+            " padding: 5px 10px; border-radius: 4px; }"
+            "QPushButton:hover:!disabled { background: #607d8b; }"
+            "QPushButton:disabled { background: #424242; color: #9e9e9e; }"
+        )
+        self.clear_edit_route_btn.clicked.connect(self.clear_editing_route_focus)
+        route_btns.addWidget(self.clear_edit_route_btn)
         route_btns.addStretch()
         self.route_section.body_layout.addLayout(route_btns)
 
@@ -746,6 +1009,8 @@ class RouteMapWidget(QWidget):
         self.visit_section.toggled.connect(self._on_visit_section_toggled)
         self.visit_hint = QLabel(
             "ルート名をダブルクリック → 店舗一覧。\n"
+            "チェックOFF＝行かない（地図でグレー＋最後尾から点線）。\n"
+            "「訪問順序反転」で周回順を逆にできます。\n"
             "ドラッグで周回順変更（マスタ表示順＋最新ルート登録へ保存）。\n"
             "区切り線をドラッグで各パネルの高さを変更できます。"
         )
@@ -754,13 +1019,42 @@ class RouteMapWidget(QWidget):
         self.visit_section.body_layout.addWidget(self.visit_hint)
 
         visit_btns = QHBoxLayout()
+        self.reverse_visit_order_btn = QPushButton("訪問順序反転")
+        self.reverse_visit_order_btn.setToolTip(
+            "店舗の周回順を逆にします（スタート⇔ゴール）。\n"
+            "反転後は自動で保存されます。"
+        )
+        self.reverse_visit_order_btn.setStyleSheet(
+            "QPushButton { background: #1565c0; color: #ffffff; border: none;"
+            " padding: 5px 10px; border-radius: 4px; }"
+            "QPushButton:disabled { background: #424242; color: #9e9e9e; }"
+            "QPushButton:hover:!disabled { background: #1e88e5; }"
+        )
+        self.reverse_visit_order_btn.clicked.connect(self.reverse_editing_visit_order)
+        self.reverse_visit_order_btn.setEnabled(False)
+        visit_btns.addWidget(self.reverse_visit_order_btn)
         self.save_visit_order_btn = QPushButton("訪問順序保存")
         self.save_visit_order_btn.setToolTip(
-            "いまの並びを店舗マスタ表示順＋最新ルート登録の訪問順へ保存"
+            "いまの並びと訪問チェックを店舗マスタ表示順・"
+            "テンプレート出力フラグ＋最新ルート登録の訪問順へ保存"
         )
         self.save_visit_order_btn.clicked.connect(self.save_editing_visit_order)
         self.save_visit_order_btn.setEnabled(False)
         visit_btns.addWidget(self.save_visit_order_btn)
+        self.web_template_btn = QPushButton("WEBテンプレート作成")
+        self.web_template_btn.setToolTip(
+            "いまの訪問順（チェックONの店）で Webテンプレートを作成します。\n"
+            "日付選択ダイアログが開き、GoogleマップURLも生成できます。"
+        )
+        self.web_template_btn.setStyleSheet(
+            "QPushButton { background: #0d6efd; color: #ffffff; border: none;"
+            " padding: 5px 10px; border-radius: 4px; }"
+            "QPushButton:disabled { background: #424242; color: #9e9e9e; }"
+            "QPushButton:hover:!disabled { background: #0b5ed7; }"
+        )
+        self.web_template_btn.clicked.connect(self.open_web_template_dialog)
+        self.web_template_btn.setEnabled(False)
+        visit_btns.addWidget(self.web_template_btn)
         visit_btns.addStretch()
         self.visit_section.body_layout.addLayout(visit_btns)
 
@@ -776,9 +1070,22 @@ class RouteMapWidget(QWidget):
                 border: 1px solid #444444; alternate-background-color: #2c2c2c;
             }
             QListWidget::item:selected { background: #1565c0; color: #ffffff; }
+            QListWidget::indicator {
+                width: 16px; height: 16px;
+                border: 2px solid #cfd8dc; border-radius: 3px;
+                background: #2b2b2b;
+            }
+            QListWidget::indicator:checked {
+                background: #4caf50; border: 2px solid #81c784;
+            }
+            QListWidget::indicator:unchecked {
+                background: #2b2b2b; border: 2px solid #cfd8dc;
+            }
             """
         )
         self.visit_list.model().rowsMoved.connect(self._on_visit_rows_moved)
+        self.visit_list.itemChanged.connect(self._on_visit_item_changed)
+        self.visit_list.currentItemChanged.connect(self._on_visit_current_changed)
         self.visit_section.body_layout.addWidget(self.visit_list, 1)
         self.left_splitter.addWidget(self.visit_section)
 
@@ -838,13 +1145,104 @@ class RouteMapWidget(QWidget):
 
         right = QGroupBox("地図")
         right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(6, 6, 6, 6)
+        right_layout.setSpacing(4)
+
+        # 1行だけの細いツールバー（余白で地図を潰さない）
+        map_toolbar_host = QWidget()
+        map_toolbar_host.setObjectName("routeMapPickToolbar")
+        map_toolbar_host.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        map_toolbar_host.setFixedHeight(30)
+        map_toolbar_host.setStyleSheet(
+            "QWidget#routeMapPickToolbar { background: transparent; }"
+        )
+        map_toolbar = QHBoxLayout(map_toolbar_host)
+        map_toolbar.setContentsMargins(0, 0, 0, 0)
+        map_toolbar.setSpacing(4)
+        _pick_btn_css = (
+            "QPushButton {"
+            " background: #455a64; color: #ffffff; border: none;"
+            " padding: 2px 8px; border-radius: 4px; font-size: 12px;"
+            "}"
+            "QPushButton:hover:!disabled { background: #546e7a; }"
+            "QPushButton:disabled { background: #37474f; color: #78909c; }"
+        )
+        self.pick_order_btn = QPushButton("地図上で訪問順序選択")
+        self.pick_order_btn.setCheckable(True)
+        self.pick_order_btn.setFixedHeight(26)
+        self.pick_order_btn.setToolTip(
+            "ONにすると、地図上の店舗を1件ずつクリックして周回順を決められます。\n"
+            "同じ店をもう一度クリックすると選択解除できます。\n"
+            "先にルート名をダブルクリックして編集対象を選んでください。\n"
+            "もう一度押すと選択モードを終了します。"
+        )
+        self.pick_order_btn.setStyleSheet(
+            """
+            QPushButton {
+                background: #6a1b9a; color: #ffffff; border: none;
+                padding: 2px 10px; border-radius: 4px; font-weight: bold;
+            }
+            QPushButton:hover:!disabled { background: #8e24aa; }
+            QPushButton:checked {
+                background: #e65100; color: #ffffff;
+            }
+            QPushButton:checked:hover { background: #ef6c00; }
+            QPushButton:disabled { background: #424242; color: #9e9e9e; }
+            """
+        )
+        self.pick_order_btn.toggled.connect(self._on_pick_order_toggled)
+        map_toolbar.addWidget(self.pick_order_btn, 0)
+
+        self.pick_undo_btn = QPushButton("戻る")
+        self.pick_undo_btn.setFixedHeight(26)
+        self.pick_undo_btn.setToolTip("ひとつ前の選択状態に戻します")
+        self.pick_undo_btn.setStyleSheet(_pick_btn_css)
+        self.pick_undo_btn.setEnabled(False)
+        self.pick_undo_btn.clicked.connect(self._pick_undo)
+        map_toolbar.addWidget(self.pick_undo_btn, 0)
+
+        self.pick_redo_btn = QPushButton("進む")
+        self.pick_redo_btn.setFixedHeight(26)
+        self.pick_redo_btn.setToolTip("戻る前の選択状態に進みます")
+        self.pick_redo_btn.setStyleSheet(_pick_btn_css)
+        self.pick_redo_btn.setEnabled(False)
+        self.pick_redo_btn.clicked.connect(self._pick_redo)
+        map_toolbar.addWidget(self.pick_redo_btn, 0)
+
+        self.pick_save_btn = QPushButton("訪問順序保存")
+        self.pick_save_btn.setFixedHeight(26)
+        self.pick_save_btn.setToolTip("いまの訪問順を保存します")
+        self.pick_save_btn.setStyleSheet(
+            "QPushButton {"
+            " background: #2e7d32; color: #ffffff; border: none;"
+            " padding: 2px 8px; border-radius: 4px; font-size: 12px;"
+            "}"
+            "QPushButton:hover:!disabled { background: #388e3c; }"
+            "QPushButton:disabled { background: #37474f; color: #78909c; }"
+        )
+        self.pick_save_btn.setEnabled(False)
+        self.pick_save_btn.clicked.connect(self._pick_save_order)
+        map_toolbar.addWidget(self.pick_save_btn, 0)
+
+        self.pick_status_label = QLabel("")
+        self.pick_status_label.setWordWrap(False)
+        self.pick_status_label.setFixedHeight(26)
+        self.pick_status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.pick_status_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.pick_status_label.setStyleSheet(
+            "color: #ffcc80; font-size: 12px; background: transparent;"
+        )
+        map_toolbar.addWidget(self.pick_status_label, 1)
+        right_layout.addWidget(map_toolbar_host, 0)
+
         if WEBENGINE_AVAILABLE and QWebEngineView is not None:
             self.map_view = QWebEngineView()
             self.map_view.setMinimumHeight(420)
             self.map_view.setMinimumWidth(360)
+            self.map_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self.map_view.loadFinished.connect(self._on_map_load_finished)
             self.map_view.titleChanged.connect(self._on_map_title_changed)
-            right_layout.addWidget(self.map_view)
+            right_layout.addWidget(self.map_view, 1)
         else:
             self.map_view = None
             fallback = QLabel(
@@ -853,7 +1251,7 @@ class RouteMapWidget(QWidget):
             )
             fallback.setAlignment(Qt.AlignCenter)
             fallback.setWordWrap(True)
-            right_layout.addWidget(fallback)
+            right_layout.addWidget(fallback, 1)
         self.main_splitter.addWidget(right)
         self.main_splitter.setStretchFactor(0, 1)
         self.main_splitter.setStretchFactor(1, 4)
@@ -1054,19 +1452,19 @@ class RouteMapWidget(QWidget):
 
     def _focus_route_on_map(self, route_code: str) -> None:
         """指定ルートを編集対象にし、店舗リスト表示＋地図拡大。"""
+        if self._pick_mode:
+            # ルート切替前に選択モードを終了（現ルートの並びを保存）
+            self.pick_order_btn.setChecked(False)
+        self._selected_store_code = ""
         self._set_editing_route(route_code)
         cb = self._route_checks.get(route_code)
-        need_refresh = False
         if cb is not None and not cb.isChecked():
             cb.blockSignals(True)
             cb.setChecked(True)
             cb.blockSignals(False)
-            need_refresh = True
-        if need_refresh:
-            self._refresh_map()
-            QTimer.singleShot(350, lambda c=route_code: self._fit_map_to_route(c))
-        else:
-            self._fit_map_to_route(route_code)
+        # スタート／ゴール表示を反映してから拡大
+        self._refresh_map()
+        QTimer.singleShot(350, lambda c=route_code: self._fit_map_to_route(c))
 
     def _fit_map_to_route(self, route_code: str) -> None:
         if not self.map_view or not self._payload_cache:
@@ -1330,8 +1728,16 @@ class RouteMapWidget(QWidget):
         self._map_ready = bool(ok)
 
     def _on_map_title_changed(self, title: str) -> None:
-        """拡大・移動のたびに document.title 経由で位置を受け取る。"""
+        """document.title 経由で地図操作・店舗クリックを受け取る。"""
         text = str(title or "")
+        if text.startswith("HIRIO_PICK:"):
+            try:
+                raw = json.loads(text[len("HIRIO_PICK:") :])
+            except Exception:
+                return
+            if isinstance(raw, dict):
+                self._on_map_store_picked(raw)
+            return
         if not text.startswith("HIRIO_MAP:"):
             return
         try:
@@ -1343,6 +1749,327 @@ class RouteMapWidget(QWidget):
             return
         self._saved_map_view = view
         self._persist_map_view(view)
+
+    def _set_pick_status(self, text: str) -> None:
+        """地図上ツールバーは1行固定。全文はツールチップへ。"""
+        msg = str(text or "")
+        self.pick_status_label.setText(msg)
+        self.pick_status_label.setToolTip(msg)
+
+    def _update_pick_nav_buttons(self) -> None:
+        on = bool(self._pick_mode)
+        self.pick_undo_btn.setEnabled(on and self._pick_history_index > 0)
+        self.pick_redo_btn.setEnabled(
+            on and self._pick_history_index < len(self._pick_history) - 1
+        )
+        self.pick_save_btn.setEnabled(on and bool(self._editing_route_code))
+
+    def _refresh_pick_status_text(self) -> None:
+        if not self._pick_mode:
+            self._set_pick_status("")
+            return
+        total = len(self._pick_baseline_rows) or self.visit_list.count()
+        picked = len(self._pick_order)
+        if picked <= 0:
+            self._set_pick_status("1件目からクリック（再クリックで解除）")
+            self.status_label.setText("訪問順クリック選択中…")
+        elif picked >= total:
+            self._set_pick_status(f"全{total}店選択済み。保存 or もう一度ボタンで終了")
+            self.status_label.setText("訪問順クリック選択: 完了")
+        else:
+            self._set_pick_status(
+                f"{picked}/{total} 選択 → 次は{picked + 1}件目（再クリックで解除）"
+            )
+            self.status_label.setText(f"訪問順クリック選択中: {picked}/{total}")
+
+    def _push_pick_history(self) -> None:
+        self._pick_history = self._pick_history[: self._pick_history_index + 1]
+        self._pick_history.append(list(self._pick_order))
+        self._pick_history_index = len(self._pick_history) - 1
+        self._update_pick_nav_buttons()
+
+    def _apply_pick_order_to_ui(self, *, save: bool = True) -> None:
+        """pick_order に合わせて店舗リスト・地図を更新。"""
+        baseline = self._pick_baseline_rows or self._snapshot_visit_items()
+        if not baseline:
+            self._refresh_map()
+            self._refresh_pick_status_text()
+            self._update_pick_nav_buttons()
+            return
+        by_code = {r["store_code"]: dict(r) for r in baseline}
+        # いまのチェック状態を優先
+        for row in self._snapshot_visit_items():
+            code = row["store_code"]
+            if code in by_code:
+                by_code[code]["checked"] = row["checked"]
+        remaining = [
+            by_code[r["store_code"]]
+            for r in baseline
+            if r["store_code"] not in set(self._pick_order)
+        ]
+        new_rows = [
+            by_code[c] for c in self._pick_order if c in by_code
+        ] + remaining
+        self._rebuild_visit_list_from_rows(new_rows)
+        if self._pick_order:
+            self._selected_store_code = self._pick_order[-1]
+        if save and self._editing_route_code:
+            self.save_editing_visit_order(silent=True)
+        else:
+            self._refresh_map()
+        self._refresh_pick_status_text()
+        self._update_pick_nav_buttons()
+
+    def _on_pick_order_toggled(self, checked: bool) -> None:
+        if checked:
+            if not self._editing_route_code:
+                self.pick_order_btn.blockSignals(True)
+                self.pick_order_btn.setChecked(False)
+                self.pick_order_btn.blockSignals(False)
+                QMessageBox.information(
+                    self,
+                    "地図上で訪問順序選択",
+                    "先にルート名をダブルクリックして編集対象を選んでください。",
+                )
+                return
+            if self.visit_list.count() < 1:
+                self.pick_order_btn.blockSignals(True)
+                self.pick_order_btn.setChecked(False)
+                self.pick_order_btn.blockSignals(False)
+                QMessageBox.information(
+                    self, "地図上で訪問順序選択", "このルートに店舗がありません。"
+                )
+                return
+            self._pick_mode = True
+            self._pick_baseline_rows = self._snapshot_visit_items()
+            self._pick_order = []
+            self._pick_history = [[]]
+            self._pick_history_index = 0
+            self._refresh_pick_status_text()
+            self._update_pick_nav_buttons()
+            self._refresh_map()
+            return
+
+        # OFF: 選択モード終了（いまの並びを保存）
+        was_picking = self._pick_mode
+        self._pick_mode = False
+        self._pick_order = []
+        self._pick_baseline_rows = []
+        self._pick_history = [[]]
+        self._pick_history_index = 0
+        self._set_pick_status("")
+        self._update_pick_nav_buttons()
+        if was_picking and self._editing_route_code and self.visit_list.count() > 0:
+            self.save_editing_visit_order(silent=True)
+            self.status_label.setText(
+                f"訪問順クリック選択を終了: {self._editing_route_name or self._editing_route_code}"
+            )
+        else:
+            self._refresh_map()
+
+    def _pick_undo(self) -> None:
+        if not self._pick_mode or self._pick_history_index <= 0:
+            return
+        self._pick_history_index -= 1
+        self._pick_order = list(self._pick_history[self._pick_history_index])
+        self._apply_pick_order_to_ui(save=True)
+
+    def _pick_redo(self) -> None:
+        if not self._pick_mode:
+            return
+        if self._pick_history_index >= len(self._pick_history) - 1:
+            return
+        self._pick_history_index += 1
+        self._pick_order = list(self._pick_history[self._pick_history_index])
+        self._apply_pick_order_to_ui(save=True)
+
+    def _pick_save_order(self) -> None:
+        if not self._editing_route_code:
+            QMessageBox.information(
+                self, "訪問順序保存", "先にルートを選んでください。"
+            )
+            return
+        self.save_editing_visit_order(silent=False)
+
+    def _snapshot_visit_items(self) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for i in range(self.visit_list.count()):
+            item = self.visit_list.item(i)
+            code = str(item.data(Qt.UserRole) or "").strip()
+            if not code:
+                continue
+            rows.append(
+                {
+                    "store_code": code,
+                    "store_name": str(item.data(Qt.UserRole + 1) or "").strip(),
+                    "notes": str(item.data(Qt.UserRole + 2) or "").strip(),
+                    "checked": item.checkState() == Qt.Checked,
+                }
+            )
+        return rows
+
+    def _rebuild_visit_list_from_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self._visit_reorder_busy = True
+        self.visit_list.clear()
+        for idx, row in enumerate(rows, start=1):
+            store_code = str(row.get("store_code") or "").strip()
+            store_name = str(row.get("store_name") or "").strip()
+            notes = str(row.get("notes") or "").strip()
+            label = self._format_visit_item_label(idx, store_name, store_code, notes)
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, store_code)
+            item.setData(Qt.UserRole + 1, store_name)
+            item.setData(Qt.UserRole + 2, notes)
+            tip = f"{store_name}"
+            if store_code:
+                tip += f" [{store_code}]"
+            if notes:
+                tip += f"\n備考: {notes}"
+            item.setToolTip(tip)
+            item.setFlags(
+                item.flags()
+                | Qt.ItemIsEnabled
+                | Qt.ItemIsSelectable
+                | Qt.ItemIsDragEnabled
+                | Qt.ItemIsUserCheckable
+            )
+            item.setCheckState(Qt.Checked if row.get("checked", True) else Qt.Unchecked)
+            self._apply_visit_item_style(item)
+            self.visit_list.addItem(item)
+        self._visit_reorder_busy = False
+
+    def _codes_for_map_pick(
+        self, store_code: str, member_codes: Optional[List[Any]] = None
+    ) -> List[str]:
+        """クリックしたピンに対応する店舗コード（併設はリスト上の相対順でまとめて）。"""
+        code = (store_code or "").strip()
+        members = [
+            str(c).strip()
+            for c in (member_codes or [])
+            if str(c).strip()
+        ]
+        candidates = []
+        for c in [code] + members:
+            if c and c not in candidates:
+                candidates.append(c)
+        if not candidates:
+            return []
+        # 基準順（選択開始時）を優先
+        baseline_codes = [
+            str(r.get("store_code") or "").strip()
+            for r in self._pick_baseline_rows
+            if str(r.get("store_code") or "").strip()
+        ]
+        source = baseline_codes or self._ordered_store_codes_from_list()
+        in_list = [c for c in source if c in set(candidates)]
+        if in_list:
+            return in_list
+        return candidates[:1]
+
+    def _on_map_store_picked(self, payload: Dict[str, Any]) -> None:
+        if not self._pick_mode or not self._editing_route_code:
+            return
+        codes = self._codes_for_map_pick(
+            str(payload.get("store_code") or ""),
+            payload.get("member_codes") if isinstance(payload.get("member_codes"), list) else None,
+        )
+        if not codes:
+            return
+        picked_set = set(self._pick_order)
+        # すべて選択済みなら再クリックで解除
+        if codes and all(c in picked_set for c in codes):
+            remove = set(codes)
+            self._pick_order = [c for c in self._pick_order if c not in remove]
+            self._push_pick_history()
+            self._apply_pick_order_to_ui(save=True)
+            return
+
+        added = False
+        for code in codes:
+            if code not in picked_set:
+                self._pick_order.append(code)
+                picked_set.add(code)
+                added = True
+        if not added:
+            return
+        self._push_pick_history()
+        self._apply_pick_order_to_ui(save=True)
+
+    def clear_editing_route_focus(self) -> None:
+        """編集中ルートを解除して全体マップ表示に戻す。"""
+        if self._pick_mode:
+            self.pick_order_btn.blockSignals(True)
+            self.pick_order_btn.setChecked(False)
+            self.pick_order_btn.blockSignals(False)
+            self._pick_mode = False
+            self._pick_order = []
+            self._pick_baseline_rows = []
+            self._pick_history = [[]]
+            self._pick_history_index = 0
+            self._set_pick_status("")
+            self._update_pick_nav_buttons()
+
+        self._editing_route_code = ""
+        self._editing_route_name = ""
+        self._selected_store_code = ""
+        self._visit_reorder_busy = True
+        self.visit_list.clear()
+        self._visit_reorder_busy = False
+        self.visit_section.set_title("店舗（ルートをダブルクリック）")
+        self.save_visit_order_btn.setEnabled(False)
+        self.reverse_visit_order_btn.setEnabled(False)
+        self.web_template_btn.setEnabled(False)
+        self._restyle_route_checks()
+        self._refresh_map()
+        QTimer.singleShot(200, self._fit_map_to_all_visible)
+        self.status_label.setText("ルート選択を解除しました（全体マップ）")
+
+    def _fit_map_to_all_visible(self) -> None:
+        """表示中ルート全体が収まるように地図を拡大。"""
+        if not self.map_view or not self._payload_cache:
+            return
+        selected = self._selected_route_codes()
+        points: List[List[float]] = []
+        for route in self._payload_cache.get("routes") or []:
+            code = str(route.get("route_code") or "")
+            if code not in selected:
+                continue
+            stores_raw = [
+                s for s in (route.get("stores") or []) if self._store_passes_tag_filter(s)
+            ]
+            for marker in _markers_from_stores(stores_raw):
+                try:
+                    points.append([float(marker["lat"]), float(marker["lng"])])
+                except (TypeError, ValueError, KeyError):
+                    continue
+        if self.show_unassigned_check.isChecked():
+            for marker in _markers_from_stores(
+                [
+                    s
+                    for s in (self._payload_cache.get("unassigned") or [])
+                    if self._store_passes_tag_filter(s)
+                ]
+            ):
+                try:
+                    points.append([float(marker["lat"]), float(marker["lng"])])
+                except (TypeError, ValueError, KeyError):
+                    continue
+        if not points:
+            self.status_label.setText("表示できる座標がありません")
+            return
+        payload = json.dumps(points, ensure_ascii=False)
+        js = (
+            "(function(){"
+            "try {"
+            "if (typeof window.__HIRIO_FIT_BOUNDS !== 'function') return false;"
+            f"return window.__HIRIO_FIT_BOUNDS({payload});"
+            "} catch (e) { return false; }"
+            "})();"
+        )
+        try:
+            self.map_view.page().runJavaScript(js)
+        except Exception as e:
+            print(f"全体マップ拡大失敗: {e}")
 
     def _apply_leaflet_payload(self, leaflet_payload: Dict[str, Any]) -> None:
         """地図へ反映。既に表示中ならピンだけ差し替え（拡大位置は維持）。"""
@@ -1399,6 +2126,8 @@ class RouteMapWidget(QWidget):
         self.visit_section.set_title(title)
         self.visit_section.set_expanded(True)
         self.save_visit_order_btn.setEnabled(bool(code))
+        self.reverse_visit_order_btn.setEnabled(bool(code))
+        self.web_template_btn.setEnabled(bool(code))
         QTimer.singleShot(0, self._redistribute_left_splitter)
         self._load_visit_list_for_route(code)
         # ルート一覧の見た目を更新（編集中ハイライト）
@@ -1415,6 +2144,24 @@ class RouteMapWidget(QWidget):
                     else ""
                 )
             )
+
+    def _visit_notes_from_store(self, store: Dict[str, Any]) -> str:
+        """店舗一覧と同じ備考（stores.notes）。"""
+        return str(store.get("notes") or "").strip()
+
+    def _format_visit_item_label(
+        self, index: int, store_name: str, store_code: str, notes: str
+    ) -> str:
+        label = f"{index}. {store_name}"
+        if store_code:
+            label += f"  [{store_code}]"
+        if notes:
+            # 1行表示用。長い備考は省略し、全文はツールチップへ
+            short = notes.replace("\n", " ").strip()
+            if len(short) > 40:
+                short = short[:40] + "…"
+            label += f"  ｜ {short}"
+        return label
 
     def _load_visit_list_for_route(self, route_code: str) -> None:
         self._visit_reorder_busy = True
@@ -1440,19 +2187,37 @@ class RouteMapWidget(QWidget):
                 store.get("store_code") or store.get("supplier_code") or ""
             ).strip()
             store_name = str(store.get("store_name") or "").strip()
-            label = f"{idx}. {store_name}" + (f"  [{store_code}]" if store_code else "")
+            notes = self._visit_notes_from_store(store)
+            label = self._format_visit_item_label(idx, store_name, store_code, notes)
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, store_code)
             item.setData(Qt.UserRole + 1, store_name)
+            item.setData(Qt.UserRole + 2, notes)
+            tip = f"{store_name}"
+            if store_code:
+                tip += f" [{store_code}]"
+            if notes:
+                tip += f"\n備考: {notes}"
+            item.setToolTip(tip)
             item.setFlags(
                 item.flags()
                 | Qt.ItemIsEnabled
                 | Qt.ItemIsSelectable
                 | Qt.ItemIsDragEnabled
+                | Qt.ItemIsUserCheckable
             )
+            will_visit = _will_visit_from_store(store)
+            item.setCheckState(Qt.Checked if will_visit else Qt.Unchecked)
+            self._apply_visit_item_style(item)
             self.visit_list.addItem(item)
         self._editing_route_name = route_name
         self._visit_reorder_busy = False
+
+    def _apply_visit_item_style(self, item: QListWidgetItem) -> None:
+        if item.checkState() == Qt.Checked:
+            item.setForeground(QBrush(QColor("#f0f0f0")))
+        else:
+            item.setForeground(QBrush(QColor("#9e9e9e")))
 
     def _ordered_store_codes_from_list(self) -> list:
         codes = []
@@ -1463,17 +2228,191 @@ class RouteMapWidget(QWidget):
                 codes.append(code)
         return codes
 
+    def _visit_includes_from_list(self) -> Dict[str, bool]:
+        includes: Dict[str, bool] = {}
+        for i in range(self.visit_list.count()):
+            item = self.visit_list.item(i)
+            code = str(item.data(Qt.UserRole) or "").strip()
+            if code:
+                includes[code] = item.checkState() == Qt.Checked
+        return includes
+
+    def _sync_visit_includes_to_payload(self) -> None:
+        """編集中ルートの template_include をリストのチェック状態に合わせる。"""
+        route_code = self._editing_route_code
+        if not route_code or not self._payload_cache:
+            return
+        includes = self._visit_includes_from_list()
+        for route in self._payload_cache.get("routes") or []:
+            if str(route.get("route_code") or "") != route_code:
+                continue
+            for store in route.get("stores") or []:
+                code = str(
+                    store.get("store_code") or store.get("supplier_code") or ""
+                ).strip()
+                if code in includes:
+                    store["template_include"] = 1 if includes[code] else 0
+                    store["will_visit"] = includes[code]
+            break
+
     def _renumber_visit_list_labels(self) -> None:
         self._visit_reorder_busy = True
         for i in range(self.visit_list.count()):
             item = self.visit_list.item(i)
             store_code = str(item.data(Qt.UserRole) or "").strip()
             store_name = str(item.data(Qt.UserRole + 1) or "").strip()
-            label = f"{i + 1}. {store_name}" + (
-                f"  [{store_code}]" if store_code else ""
+            notes = str(item.data(Qt.UserRole + 2) or "").strip()
+            item.setText(
+                self._format_visit_item_label(i + 1, store_name, store_code, notes)
             )
-            item.setText(label)
+            tip = f"{store_name}"
+            if store_code:
+                tip += f" [{store_code}]"
+            if notes:
+                tip += f"\n備考: {notes}"
+            item.setToolTip(tip)
+            self._apply_visit_item_style(item)
         self._visit_reorder_busy = False
+
+    def _stores_for_web_template(self) -> List[Dict[str, Any]]:
+        """訪問リストのチェックON店舗を、訪問順のフル店舗データで返す。"""
+        if not self._editing_route_code or not self._payload_cache:
+            return []
+        includes = self._visit_includes_from_list()
+        ordered = self._ordered_store_codes_from_list()
+        by_code: Dict[str, Dict[str, Any]] = {}
+        for route in self._payload_cache.get("routes") or []:
+            if str(route.get("route_code") or "") != self._editing_route_code:
+                continue
+            for s in route.get("stores") or []:
+                c = str(s.get("store_code") or s.get("supplier_code") or "").strip()
+                if c:
+                    by_code[c] = dict(s)
+            break
+        # payload に無い場合は DB から補完
+        missing = [c for c in ordered if c not in by_code]
+        if missing and self._editing_route_name:
+            try:
+                for s in self.db.get_stores_for_route_ordered(self._editing_route_name):
+                    c = str(s.get("store_code") or s.get("supplier_code") or "").strip()
+                    if c and c not in by_code:
+                        by_code[c] = dict(s)
+            except Exception:
+                pass
+
+        stores: List[Dict[str, Any]] = []
+        visit_i = 0
+        for code in ordered:
+            if not includes.get(code, True):
+                continue
+            s = by_code.get(code)
+            if not s:
+                continue
+            row = dict(s)
+            visit_i += 1
+            row["visit_order"] = visit_i
+            row["template_include"] = 1
+            # 備考はリスト側を優先
+            for j in range(self.visit_list.count()):
+                item = self.visit_list.item(j)
+                if str(item.data(Qt.UserRole) or "").strip() == code:
+                    notes = str(item.data(Qt.UserRole + 2) or "").strip()
+                    if notes:
+                        row["notes"] = notes
+                    break
+            stores.append(row)
+        return stores
+
+    def open_web_template_dialog(self) -> None:
+        """店舗エリアから Webテンプレート作成ダイアログを開く。"""
+        if not self._editing_route_code:
+            QMessageBox.information(
+                self,
+                "WEBテンプレート作成",
+                "先にルート名をダブルクリックして編集対象を選んでください。",
+            )
+            return
+        # 最新のチェック状態を保存してから作成
+        self.save_editing_visit_order(silent=True)
+        stores = self._stores_for_web_template()
+        if not stores:
+            QMessageBox.warning(
+                self,
+                "WEBテンプレート作成",
+                "出力する店舗がありません。\n"
+                "訪問チェックがONの店舗があるか確認してください。",
+            )
+            return
+        try:
+            from .web_template_dialog import WebTemplateFromMapDialog
+        except Exception:
+            try:
+                from web_template_dialog import WebTemplateFromMapDialog  # type: ignore
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "エラー", f"ダイアログを開けませんでした:\n{e}"
+                )
+                return
+        dlg = WebTemplateFromMapDialog(
+            self,
+            route_code=self._editing_route_code,
+            route_name=self._editing_route_name or self._editing_route_code,
+            stores=stores,
+        )
+        dlg.exec()
+
+    def reverse_editing_visit_order(self) -> None:
+        """訪問順を反転して保存（スタート⇔ゴール）。"""
+        if not self._editing_route_code:
+            QMessageBox.information(
+                self,
+                "訪問順序反転",
+                "先にルート名をダブルクリックして編集対象を選んでください。",
+            )
+            return
+        count = self.visit_list.count()
+        if count < 2:
+            QMessageBox.information(
+                self, "訪問順序反転", "反転する店舗が足りません（2店以上必要）。"
+            )
+            return
+        self._visit_reorder_busy = True
+        items = [self.visit_list.takeItem(0) for _ in range(count)]
+        for item in reversed(items):
+            self.visit_list.addItem(item)
+        self._visit_reorder_busy = False
+        self._renumber_visit_list_labels()
+        self.save_editing_visit_order(silent=True)
+        self.status_label.setText(
+            f"訪問順を反転しました: {self._editing_route_name or self._editing_route_code}"
+        )
+
+    def _on_visit_item_changed(self, item: QListWidgetItem) -> None:
+        if self._visit_reorder_busy:
+            return
+        # setForeground でも itemChanged が再発火することがあるためガード
+        self._visit_reorder_busy = True
+        try:
+            self._apply_visit_item_style(item)
+        finally:
+            self._visit_reorder_busy = False
+        self._sync_visit_includes_to_payload()
+        # 保存処理内で地図も再描画する
+        self.save_editing_visit_order(silent=True)
+
+    def _on_visit_current_changed(
+        self, current: Optional[QListWidgetItem], _previous: Optional[QListWidgetItem]
+    ) -> None:
+        """店舗リストで選んだ店の地図アイコンを少し大きくする。"""
+        if self._visit_reorder_busy:
+            return
+        code = ""
+        if current is not None:
+            code = str(current.data(Qt.UserRole) or "").strip()
+        if code == self._selected_store_code:
+            return
+        self._selected_store_code = code
+        self._refresh_map()
 
     def _on_visit_rows_moved(self, *_args) -> None:
         if self._visit_reorder_busy:
@@ -1492,12 +2431,13 @@ class RouteMapWidget(QWidget):
                 )
             return
         ordered = self._ordered_store_codes_from_list()
+        includes = self._visit_includes_from_list()
         if not ordered:
             if not silent:
                 QMessageBox.warning(self, "訪問順序", "保存する店舗がありません。")
             return
 
-        # 1) 店舗マスタ表示順
+        # 1) 店舗マスタ表示順 ＋ テンプレート出力（訪問する／しない）
         master_ok = False
         try:
             from services.store_route_membership_service import reorder_route_stores
@@ -1507,11 +2447,17 @@ class RouteMapWidget(QWidget):
             except Exception:
                 reorder_route_stores = None  # type: ignore
         if reorder_route_stores is not None:
-            master_ok = bool(reorder_route_stores(self.db, route_name, ordered))
+            master_ok = bool(
+                reorder_route_stores(
+                    self.db, route_name, ordered, store_template_includes=includes
+                )
+            )
         else:
             master_ok = bool(
                 self.db.update_store_display_order(
-                    route_name, {c: i + 1 for i, c in enumerate(ordered)}
+                    route_name,
+                    {c: i + 1 for i, c in enumerate(ordered)},
+                    includes,
                 )
             )
 
@@ -1537,7 +2483,7 @@ class RouteMapWidget(QWidget):
             except Exception as e:
                 print(f"ルート登録訪問順の同期エラー: {e}")
 
-        # メモリ上の payload も並べ替え（地図線をすぐ反映）
+        # メモリ上の payload も並べ替え＋訪問フラグ反映（地図線をすぐ反映）
         if self._payload_cache:
             for route in self._payload_cache.get("routes") or []:
                 if str(route.get("route_code") or "") != route_code:
@@ -1554,6 +2500,9 @@ class RouteMapWidget(QWidget):
                         continue
                     s = dict(s)
                     s["display_order"] = i
+                    if c in includes:
+                        s["template_include"] = 1 if includes[c] else 0
+                        s["will_visit"] = includes[c]
                     new_stores.append(s)
                 # リストに無い店は末尾維持
                 for c, s in by_code.items():
@@ -1568,13 +2517,17 @@ class RouteMapWidget(QWidget):
         except Exception:
             pass
 
+        skip_count = sum(1 for v in includes.values() if not v)
         msg = (
             f"「{route_name}」の周回順を保存しました。\n"
             f"・店舗マスタ表示順: {'OK' if master_ok else '失敗'}\n"
+            f"・訪問チェック（テンプレート出力）: "
+            f"{len(includes) - skip_count}件行く / {skip_count}件スキップ\n"
             f"・最新ルート登録の訪問順: {visit_updated}件更新"
         )
         self.status_label.setText(
-            f"訪問順保存: {route_name}（マスタ{'OK' if master_ok else 'NG'} / 登録{visit_updated}件）"
+            f"訪問順保存: {route_name}（マスタ{'OK' if master_ok else 'NG'} / "
+            f"スキップ{skip_count} / 登録{visit_updated}件）"
         )
         if not silent:
             QMessageBox.information(self, "訪問順序保存", msg)
@@ -1587,15 +2540,71 @@ class RouteMapWidget(QWidget):
         selected = self._selected_route_codes()
         colors = self._route_color_map()
 
+        # 編集中ルートはリストのチェック状態を優先
+        editing_includes: Optional[Dict[str, bool]] = None
+        if self._editing_route_code and self.visit_list.count() > 0:
+            editing_includes = self._visit_includes_from_list()
+
         map_routes: List[Dict[str, Any]] = []
         for route in self._payload_cache.get("routes") or []:
             code = str(route.get("route_code") or "")
             if code not in selected:
                 continue
-            stores_raw = [
-                s for s in (route.get("stores") or []) if self._store_passes_tag_filter(s)
-            ]
+            stores_raw = []
+            for s in route.get("stores") or []:
+                if not self._store_passes_tag_filter(s):
+                    continue
+                s2 = dict(s)
+                sc = str(
+                    s2.get("store_code") or s2.get("supplier_code") or ""
+                ).strip()
+                if (
+                    editing_includes is not None
+                    and code == self._editing_route_code
+                    and sc in editing_includes
+                ):
+                    s2["template_include"] = 1 if editing_includes[sc] else 0
+                    s2["will_visit"] = editing_includes[sc]
+                else:
+                    s2["will_visit"] = _will_visit_from_store(s2)
+                stores_raw.append(s2)
             stores = _markers_from_stores(stores_raw)
+            # 編集中ルート: クリック選択中は番号、通常はスタート／ゴール
+            if code and code == self._editing_route_code:
+                if self._pick_mode and self._pick_order:
+                    pick_rank = {
+                        c: i + 1 for i, c in enumerate(self._pick_order) if c
+                    }
+                    for m in stores:
+                        rank = None
+                        codes = [str(m.get("store_code") or "").strip()] + [
+                            str(x).strip() for x in (m.get("member_codes") or [])
+                        ]
+                        for c in codes:
+                            if c in pick_rank:
+                                r = pick_rank[c]
+                                if rank is None or r < rank:
+                                    rank = r
+                        if rank is not None:
+                            m["pick_index"] = rank
+                    picked = sorted(
+                        [m for m in stores if m.get("pick_index")],
+                        key=lambda x: int(x.get("pick_index") or 0),
+                    )
+                    for m in stores:
+                        m.pop("endpoint", None)
+                    if len(picked) == 1:
+                        picked[0]["endpoint"] = "both"
+                    elif len(picked) >= 2:
+                        picked[0]["endpoint"] = "start"
+                        picked[-1]["endpoint"] = "goal"
+                else:
+                    _mark_route_endpoints(stores)
+            # リスト選択中の店舗を強調
+            if self._selected_store_code:
+                for m in stores:
+                    if _store_matches_code(m, self._selected_store_code):
+                        m["selected"] = True
 
             map_routes.append(
                 {
@@ -1615,6 +2624,10 @@ class RouteMapWidget(QWidget):
                 if self._store_passes_tag_filter(s)
             ]
             unassigned = _markers_from_stores(unassigned_raw)
+            if self._selected_store_code:
+                for m in unassigned:
+                    if _store_matches_code(m, self._selected_store_code):
+                        m["selected"] = True
 
         tag_legend = []
         for tag in self._payload_cache.get("tags") or []:
@@ -1643,6 +2656,13 @@ class RouteMapWidget(QWidget):
                     }
                 )
 
+        show_endpoints = bool(self._editing_route_code) and any(
+            s.get("endpoint")
+            for r in map_routes
+            if str(r.get("route_code") or "") == self._editing_route_code
+            for s in (r.get("stores") or [])
+        )
+
         leaflet_payload: Dict[str, Any] = {
             "routes": map_routes,
             "unassigned": unassigned,
@@ -1651,6 +2671,9 @@ class RouteMapWidget(QWidget):
             "map_icons": MAP_ICON_DEFS,
             "use_icons": bool(self.icon_check.isChecked()),
             "grayscale": bool(self.grayscale_check.isChecked()),
+            "selected_store_code": self._selected_store_code,
+            "show_endpoints": show_endpoints,
+            "pick_mode": bool(self._pick_mode),
         }
 
         self._apply_leaflet_payload(leaflet_payload)

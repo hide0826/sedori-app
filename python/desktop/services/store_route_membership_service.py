@@ -9,7 +9,7 @@ RouteManagementDialog と RouteKanbanWidget の双方から利用し、
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 UNASSIGNED_COLUMN_KEY = "__unassigned__"
 
@@ -138,8 +138,9 @@ def reorder_route_stores(
     db,
     route_name: str,
     ordered_store_codes: Sequence[str],
+    store_template_includes: Optional[Mapping[str, bool]] = None,
 ) -> bool:
-    """ルート内の display_order を訪問順に更新する。"""
+    """ルート内の display_order（と任意で template_include）を訪問順に更新する。"""
     route_name = (route_name or "").strip()
     if not route_name:
         return False
@@ -150,7 +151,14 @@ def reorder_route_stores(
     }
     if not store_orders:
         return False
-    return db.update_store_display_order(route_name, store_orders)
+    includes = None
+    if store_template_includes is not None:
+        includes = {
+            str(code).strip(): bool(flag)
+            for code, flag in store_template_includes.items()
+            if str(code).strip()
+        }
+    return db.update_store_display_order(route_name, store_orders, includes)
 
 
 def apply_store_to_route_membership(
