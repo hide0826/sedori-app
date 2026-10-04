@@ -541,6 +541,62 @@ class RouteDatabase:
             return self._row_to_dict(row)
         return None
     
+    
+    def get_latest_route_summary_for_code(self, route_code: str) -> Optional[Dict[str, Any]]:
+        """ルートコードの最新サマリー（日付降順）を1件返す。"""
+        code = (route_code or "").strip()
+        if not code:
+            return None
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM route_summaries
+            WHERE route_code = ?
+            ORDER BY route_date DESC, id DESC
+            LIMIT 1
+            """,
+            (code,),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def update_visit_orders_for_summary(
+        self,
+        route_summary_id: int,
+        store_code_to_order: Dict[str, int],
+    ) -> int:
+        """store_visit_details の visit_order を店舗コード単位で更新する。
+
+        Returns:
+            更新した行数
+        """
+        if not store_code_to_order:
+            return 0
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        updated = 0
+        try:
+            for code, order in store_code_to_order.items():
+                code = (code or "").strip()
+                if not code:
+                    continue
+                cursor.execute(
+                    """
+                    UPDATE store_visit_details
+                    SET visit_order = ?
+                    WHERE route_summary_id = ? AND store_code = ?
+                    """,
+                    (int(order), int(route_summary_id), code),
+                )
+                updated += int(cursor.rowcount or 0)
+            conn.commit()
+        except Exception as e:
+            print(f"訪問順更新エラー: {e}")
+            conn.rollback()
+            return 0
+        return updated
+
     def get_store_visits_by_route(self, route_summary_id: int) -> List[Dict[str, Any]]:
         """ルートサマリーIDに紐づく店舗訪問詳細一覧を取得"""
         conn = self._get_connection()

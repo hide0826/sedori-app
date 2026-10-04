@@ -93,6 +93,7 @@ class StoreMasterWidget(QWidget):
             self._on_kanban_stores_data_changed
         )
         self.store_list_widget.routes_changed.connect(self._on_store_list_routes_changed)
+        self.route_map_widget.routes_changed.connect(self._on_map_routes_changed)
         self.tab_widget.currentChanged.connect(self._on_master_tab_changed)
 
     def _on_kanban_routes_changed(self) -> None:
@@ -116,6 +117,12 @@ class StoreMasterWidget(QWidget):
 
     def _on_store_list_routes_changed(self) -> None:
         """店舗一覧のルート編集後にカンバンを同期"""
+        self.route_kanban_widget.reload_board()
+
+    def _on_map_routes_changed(self) -> None:
+        """ルート地図で訪問順を変えたあと、店舗一覧・カンバンを同期"""
+        self.store_list_widget.load_routes()
+        self._store_list_dirty = True
         self.route_kanban_widget.reload_board()
 
     def _on_master_tab_changed(self, index: int) -> None:

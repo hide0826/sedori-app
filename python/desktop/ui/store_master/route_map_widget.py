@@ -8,7 +8,7 @@ import sys
 import os
 from typing import Any, Dict, List, Optional, Set
 
-from PySide6.QtCore import Qt, QUrl, Signal, QSettings, QTimer
+from PySide6.QtCore import Qt, QUrl, Signal, QSettings, QTimer, QEvent
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -19,9 +19,14 @@ from PySide6.QtWidgets import (
     QSplitter,
     QGroupBox,
     QMessageBox,
-    QTextEdit,
     QScrollArea,
     QFrame,
+    QStyle,
+    QStyleOptionButton,
+    QListWidget,
+    QListWidgetItem,
+    QAbstractItemView,
+    QSizePolicy,
 )
 
 _desktop_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -39,17 +44,8 @@ except Exception:
     QWebEngineView = None  # type: ignore
     WEBENGINE_AVAILABLE = False
 
-try:
-    from services.google_maps_directions_service import fetch_driving_route
-except Exception:
-    try:
-        from google_maps_directions_service import (  # type: ignore
-            fetch_driving_route,
-        )
-    except Exception:
-        fetch_driving_route = None  # type: ignore
-
 from .store_tags_dialog import StoreTagsDialog
+from .collapsible_section import CollapsibleSection
 
 try:
     from services.store_brand_tag_service import (
@@ -128,6 +124,9 @@ SETTINGS_APP = "desktop"
 SETTINGS_MAIN_SPLITTER = "store_master/route_map/main_splitter"
 SETTINGS_LEFT_SPLITTER = "store_master/route_map/left_splitter"
 SETTINGS_MAP_VIEW = "store_master/route_map/map_view"
+SETTINGS_COLLAPSE_ROUTES = "store_master/route_map/collapse_routes"
+SETTINGS_COLLAPSE_VISITS = "store_master/route_map/collapse_visits"
+SETTINGS_COLLAPSE_TAGS = "store_master/route_map/collapse_tags"
 
 # ダークテーマでもチェック枠が見えるようにする共通スタイル
 CHECKBOX_BASE_STYLE = """
@@ -152,59 +151,39 @@ QCheckBox::indicator:unchecked {
 }
 """
 
-# 白背景パネル用（タグ絞り込み）
-CHECKBOX_LIGHT_BASE_STYLE = """
-QCheckBox {
-    spacing: 8px;
-    padding: 3px 2px;
-    background: transparent;
-}
-QCheckBox::indicator {
-    width: 16px;
-    height: 16px;
-    border: 2px solid #757575;
-    border-radius: 3px;
-    background: #ffffff;
-}
-QCheckBox::indicator:checked {
-    background: #4caf50;
-    border: 2px solid #2e7d32;
-}
-QCheckBox::indicator:unchecked {
-    background: #ffffff;
-    border: 2px solid #757575;
-}
-"""
-
-TAG_FILTER_GROUP_STYLE = """
-QGroupBox {
-    background-color: #ffffff;
-    color: #212121;
-    border: 1px solid #bdbdbd;
-    border-radius: 6px;
-    margin-top: 12px;
-    font-weight: bold;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 10px;
-    padding: 0 6px;
-    color: #212121;
-    background-color: #ffffff;
-}
-"""
-
-
 def _checkbox_style(text_color: str) -> str:
+    """ダークパネル上の色付き文字用チェックボックス。"""
     return CHECKBOX_BASE_STYLE + f"\nQCheckBox {{ color: {text_color}; font-weight: bold; }}"
 
 
-def _checkbox_style_light(text_color: str) -> str:
-    """白背景上でも色付き文字が読みやすいチェックボックス。"""
-    return (
-        CHECKBOX_LIGHT_BASE_STYLE
-        + f"\nQCheckBox {{ color: {text_color}; font-weight: bold; }}"
-    )
+class RouteNameCheckBox(QCheckBox):
+    """ルート一覧用。トグルはチェック枠クリックのみ。店名側はダブルクリック拡大。"""
+
+    def _indicator_rect(self):
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        return self.style().subElementRect(QStyle.SE_CheckBoxIndicator, opt, self)
+
+    def _pos(self, event):
+        if hasattr(event, "position"):
+            return event.position().toPoint()
+        return event.pos()
+
+    def _on_indicator(self, event) -> bool:
+        return self._indicator_rect().contains(self._pos(event))
+
+    def mousePressEvent(self, event) -> None:
+        if self._on_indicator(event):
+            super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._on_indicator(event):
+            super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        # 枠上のダブルクリックは通常のチェック動作、店名側は eventFilter で拡大
+        if self._on_indicator(event):
+            super().mouseDoubleClickEvent(event)
 
 
 def _pin_color_for_store(store: Dict[str, Any]) -> str:
@@ -605,6 +584,20 @@ window.__HIRIO_UPDATE = function(data, opts) {{
   return true;
 }};
 
+window.__HIRIO_FIT_BOUNDS = function(points) {{
+  if (!points || !points.length) return false;
+  const bounds = [];
+  points.forEach(function(p) {{
+    if (p && Number.isFinite(p[0]) && Number.isFinite(p[1])) {{
+      bounds.push([p[0], p[1]]);
+    }}
+  }});
+  if (!bounds.length) return false;
+  map.fitBounds(bounds, {{ padding: [48, 48], maxZoom: 14 }});
+  hirioRememberView();
+  return true;
+}};
+
 window.__HIRIO_UPDATE(window.__HIRIO_DATA, {{ fit: true }});
 </script>
 </body>
@@ -621,10 +614,13 @@ class RouteMapWidget(QWidget):
         super().__init__(parent)
         self.db = StoreDatabase()
         self._payload_cache: Optional[Dict[str, Any]] = None
-        self._road_cache: Dict[str, Dict[str, Any]] = {}
         self._route_checks: Dict[str, QCheckBox] = {}
         self._route_colors: Dict[str, str] = {}
+        self._route_names: Dict[str, str] = {}
         self._tag_checks: Dict[int, QCheckBox] = {}
+        self._editing_route_code: str = ""
+        self._editing_route_name: str = ""
+        self._visit_reorder_busy = False
         self._brand_tags_synced = False
         self._splitter_sizes_restored = False
         self._saved_map_view: Optional[Dict[str, float]] = None
@@ -645,16 +641,6 @@ class RouteMapWidget(QWidget):
         self.tags_btn = QPushButton("タグ管理")
         self.tags_btn.clicked.connect(self.open_tags_dialog)
         toolbar.addWidget(self.tags_btn)
-
-        self.road_check = QCheckBox("道路沿いルート＋所要時間")
-        self.road_check.setStyleSheet(_checkbox_style("#e0e0e0"))
-        self.road_check.setToolTip(
-            "ON: Google Directions API で道路沿いの線と所要時間を取得します。\n"
-            "API キー（設定タブ）と Directions API の有効化が必要です。\n"
-            "失敗時は直線ルートにフォールバックします。"
-        )
-        self.road_check.toggled.connect(self._on_options_changed)
-        toolbar.addWidget(self.road_check)
 
         self.show_unassigned_check = QCheckBox("未所属も表示")
         self.show_unassigned_check.setStyleSheet(_checkbox_style("#e0e0e0"))
@@ -689,15 +675,45 @@ class RouteMapWidget(QWidget):
         self.main_splitter.setChildrenCollapsible(False)
 
         left = QWidget()
+        left.setObjectName("routeMapLeftPanel")
+        left.setStyleSheet(
+            """
+            QWidget#routeMapLeftPanel { background: #1e1e1e; }
+            QPushButton {
+                background: #2e7d32; color: #ffffff; border: none;
+                padding: 5px 10px; border-radius: 4px;
+            }
+            QPushButton:disabled { background: #424242; color: #9e9e9e; }
+            QPushButton:hover:!disabled { background: #388e3c; }
+            QLabel { color: #cfd8dc; }
+            """
+        )
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(6)
+        left_layout.setSpacing(4)
+
+        settings = self._settings()
+        routes_expanded = self._settings_bool(settings.value(SETTINGS_COLLAPSE_ROUTES, True), True)
+        visits_expanded = self._settings_bool(settings.value(SETTINGS_COLLAPSE_VISITS, True), True)
+        tags_expanded = self._settings_bool(settings.value(SETTINGS_COLLAPSE_TAGS, True), True)
 
         self.left_splitter = QSplitter(Qt.Vertical)
         self.left_splitter.setChildrenCollapsible(False)
+        self.left_splitter.setHandleWidth(6)
+        self.left_splitter.setStyleSheet(
+            """
+            QSplitter::handle:vertical {
+                background: #3a3a3a;
+                margin: 1px 0;
+            }
+            QSplitter::handle:vertical:hover { background: #5a5a5a; }
+            """
+        )
 
-        route_group = QGroupBox("ルート（チェックで表示）")
-        route_layout = QVBoxLayout(route_group)
+        self.route_section = CollapsibleSection(
+            "ルート（チェックで表示）", expanded=bool(routes_expanded)
+        )
+        self.route_section.toggled.connect(self._on_route_section_toggled)
         route_btns = QHBoxLayout()
         self.select_all_btn = QPushButton("全選択")
         self.select_all_btn.clicked.connect(self.select_all_routes)
@@ -706,23 +722,70 @@ class RouteMapWidget(QWidget):
         self.clear_btn.clicked.connect(self.clear_route_selection)
         route_btns.addWidget(self.clear_btn)
         route_btns.addStretch()
-        route_layout.addLayout(route_btns)
+        self.route_section.body_layout.addLayout(route_btns)
 
         self.route_scroll = QScrollArea()
         self.route_scroll.setWidgetResizable(True)
         self.route_scroll.setFrameShape(QFrame.NoFrame)
+        self.route_scroll.setStyleSheet(
+            "QScrollArea { background: #1e1e1e; border: none; }"
+        )
         self.route_list_host = QWidget()
+        self.route_list_host.setStyleSheet("background: #1e1e1e;")
         self.route_list_box = QVBoxLayout(self.route_list_host)
         self.route_list_box.setContentsMargins(4, 4, 4, 4)
         self.route_list_box.setSpacing(2)
         self.route_list_box.addStretch()
         self.route_scroll.setWidget(self.route_list_host)
-        route_layout.addWidget(self.route_scroll)
-        self.left_splitter.addWidget(route_group)
+        self.route_section.body_layout.addWidget(self.route_scroll, 1)
+        self.left_splitter.addWidget(self.route_section)
 
-        tag_group = QGroupBox("タグで絞り込み（評価・メモ）")
-        tag_group.setStyleSheet(TAG_FILTER_GROUP_STYLE)
-        tag_layout = QVBoxLayout(tag_group)
+        self.visit_section = CollapsibleSection(
+            "店舗（ルートをダブルクリック）", expanded=bool(visits_expanded)
+        )
+        self.visit_section.toggled.connect(self._on_visit_section_toggled)
+        self.visit_hint = QLabel(
+            "ルート名をダブルクリック → 店舗一覧。\n"
+            "ドラッグで周回順変更（マスタ表示順＋最新ルート登録へ保存）。\n"
+            "区切り線をドラッグで各パネルの高さを変更できます。"
+        )
+        self.visit_hint.setWordWrap(True)
+        self.visit_hint.setStyleSheet("color: #9e9e9e; font-size: 11px;")
+        self.visit_section.body_layout.addWidget(self.visit_hint)
+
+        visit_btns = QHBoxLayout()
+        self.save_visit_order_btn = QPushButton("訪問順序保存")
+        self.save_visit_order_btn.setToolTip(
+            "いまの並びを店舗マスタ表示順＋最新ルート登録の訪問順へ保存"
+        )
+        self.save_visit_order_btn.clicked.connect(self.save_editing_visit_order)
+        self.save_visit_order_btn.setEnabled(False)
+        visit_btns.addWidget(self.save_visit_order_btn)
+        visit_btns.addStretch()
+        self.visit_section.body_layout.addLayout(visit_btns)
+
+        self.visit_list = QListWidget()
+        self.visit_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.visit_list.setDefaultDropAction(Qt.MoveAction)
+        self.visit_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.visit_list.setAlternatingRowColors(True)
+        self.visit_list.setStyleSheet(
+            """
+            QListWidget {
+                background: #252525; color: #f0f0f0;
+                border: 1px solid #444444; alternate-background-color: #2c2c2c;
+            }
+            QListWidget::item:selected { background: #1565c0; color: #ffffff; }
+            """
+        )
+        self.visit_list.model().rowsMoved.connect(self._on_visit_rows_moved)
+        self.visit_section.body_layout.addWidget(self.visit_list, 1)
+        self.left_splitter.addWidget(self.visit_section)
+
+        self.tag_section = CollapsibleSection(
+            "タグで絞り込み（評価・メモ）", expanded=bool(tags_expanded)
+        )
+        self.tag_section.toggled.connect(self._on_tag_section_toggled)
         tag_btns = QHBoxLayout()
         self.tag_select_all_btn = QPushButton("全選択")
         self.tag_select_all_btn.setToolTip("評価・メモタグをすべて選択します")
@@ -733,50 +796,42 @@ class RouteMapWidget(QWidget):
         self.tag_clear_btn.clicked.connect(self.clear_tag_selection)
         tag_btns.addWidget(self.tag_clear_btn)
         tag_btns.addStretch()
-        tag_layout.addLayout(tag_btns)
+        self.tag_section.body_layout.addLayout(tag_btns)
 
-        # 店舗種別は店舗ラベル（BO/SS/TR/H1〜）で見るため、ここでは評価・メモのみ
         self.quality_tag_scroll = QScrollArea()
         self.quality_tag_scroll.setWidgetResizable(True)
         self.quality_tag_scroll.setFrameShape(QFrame.NoFrame)
         self.quality_tag_scroll.setStyleSheet(
-            "QScrollArea { background: #ffffff; border: none; }"
+            "QScrollArea { background: #1e1e1e; border: none; }"
         )
         self.quality_tag_host = QWidget()
-        self.quality_tag_host.setStyleSheet("background: #ffffff;")
+        self.quality_tag_host.setStyleSheet("background: #1e1e1e;")
         self.quality_tag_box = QVBoxLayout(self.quality_tag_host)
         self.quality_tag_box.setContentsMargins(4, 4, 4, 4)
         self.quality_tag_box.setSpacing(2)
         self.quality_tag_scroll.setWidget(self.quality_tag_host)
-        tag_layout.addWidget(self.quality_tag_scroll, 1)
+        self.tag_section.body_layout.addWidget(self.quality_tag_scroll, 1)
 
-        # 互換: 旧コード参照用
         self.tag_filter_box = self.quality_tag_box
         self.tag_tabs = None
         self.brand_tag_box = self.quality_tag_box
 
         self.include_untagged_check = QCheckBox("評価タグなし店舗も表示")
         self.include_untagged_check.setChecked(True)
-        self.include_untagged_check.setStyleSheet(_checkbox_style_light("#212121"))
+        self.include_untagged_check.setStyleSheet(_checkbox_style("#e0e0e0"))
         self.include_untagged_check.setToolTip(
             "評価・メモタグが付いていない店舗も地図に出します"
         )
         self.include_untagged_check.toggled.connect(self._on_options_changed)
-        tag_layout.addWidget(self.include_untagged_check)
-        self.left_splitter.addWidget(tag_group)
+        self.tag_section.body_layout.addWidget(self.include_untagged_check)
+        self.left_splitter.addWidget(self.tag_section)
 
-        summary_group = QGroupBox("所要時間・距離")
-        summary_layout = QVBoxLayout(summary_group)
-        self.summary_text = QTextEdit()
-        self.summary_text.setReadOnly(True)
-        self.summary_text.setMinimumHeight(80)
-        summary_layout.addWidget(self.summary_text)
-        self.left_splitter.addWidget(summary_group)
+        self.left_splitter.setStretchFactor(0, 2)
+        self.left_splitter.setStretchFactor(1, 3)
+        self.left_splitter.setStretchFactor(2, 2)
+        self.left_splitter.splitterMoved.connect(self._save_splitter_sizes)
+        left_layout.addWidget(self.left_splitter, 1)
 
-        self.left_splitter.setStretchFactor(0, 3)
-        self.left_splitter.setStretchFactor(1, 2)
-        self.left_splitter.setStretchFactor(2, 1)
-        left_layout.addWidget(self.left_splitter)
         left.setMinimumWidth(220)
 
         self.main_splitter.addWidget(left)
@@ -804,10 +859,7 @@ class RouteMapWidget(QWidget):
         self.main_splitter.setStretchFactor(1, 4)
         # 初回デフォルト: 地図を広めに
         self.main_splitter.setSizes([280, 920])
-        self.left_splitter.setSizes([260, 200, 120])
-
         self.main_splitter.splitterMoved.connect(self._save_splitter_sizes)
-        self.left_splitter.splitterMoved.connect(self._save_splitter_sizes)
 
         layout.addWidget(self.main_splitter, 1)
 
@@ -832,33 +884,117 @@ class RouteMapWidget(QWidget):
     def _restore_splitter_sizes(self) -> None:
         settings = self._settings()
         main_sizes = settings.value(SETTINGS_MAIN_SPLITTER)
-        left_sizes = settings.value(SETTINGS_LEFT_SPLITTER)
         try:
             if isinstance(main_sizes, list) and len(main_sizes) >= 2:
                 self.main_splitter.setSizes([int(x) for x in main_sizes[:2]])
             elif main_sizes is not None:
-                # QSettings が QVariantList / 文字列になる場合
                 parsed = [int(x) for x in list(main_sizes)]
                 if len(parsed) >= 2:
                     self.main_splitter.setSizes(parsed[:2])
         except Exception:
             pass
         try:
-            if isinstance(left_sizes, list) and len(left_sizes) >= 3:
-                self.left_splitter.setSizes([int(x) for x in left_sizes[:3]])
-            elif left_sizes is not None:
-                parsed = [int(x) for x in list(left_sizes)]
-                if len(parsed) >= 3:
-                    self.left_splitter.setSizes(parsed[:3])
+            self._redistribute_left_splitter()
         except Exception:
             pass
         self._splitter_sizes_restored = True
+
+    @staticmethod
+    def _settings_bool(value, default: bool = True) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+    def _on_route_section_toggled(self, on: bool) -> None:
+        # 畳む前に現在の高さを保存（開き直したときの比率用）
+        if not on:
+            self._save_splitter_sizes()
+        self._settings().setValue(SETTINGS_COLLAPSE_ROUTES, bool(on))
+        QTimer.singleShot(0, self._redistribute_and_save_left)
+
+    def _on_visit_section_toggled(self, on: bool) -> None:
+        if not on:
+            self._save_splitter_sizes()
+        self._settings().setValue(SETTINGS_COLLAPSE_VISITS, bool(on))
+        QTimer.singleShot(0, self._redistribute_and_save_left)
+
+    def _on_tag_section_toggled(self, on: bool) -> None:
+        if not on:
+            self._save_splitter_sizes()
+        self._settings().setValue(SETTINGS_COLLAPSE_TAGS, bool(on))
+        QTimer.singleShot(0, self._redistribute_and_save_left)
+
+    def _redistribute_and_save_left(self) -> None:
+        self._redistribute_left_splitter()
+        self._save_splitter_sizes()
+
+    def _left_sections(self):
+        return [self.route_section, self.visit_section, self.tag_section]
+
+    def _redistribute_left_splitter(self) -> None:
+        """畳んだパネルはヘッダー高さだけにし、残りを開いているパネルへ配分する。"""
+        if self.left_splitter is None:
+            return
+        sections = self._left_sections()
+        total = max(120, int(self.left_splitter.size().height() or 0))
+        if total < 120:
+            total = 400
+        header_sizes = []
+        expanded_idx = []
+        for i, sec in enumerate(sections):
+            if sec.is_expanded():
+                header_sizes.append(0)
+                expanded_idx.append(i)
+            else:
+                header_sizes.append(sec.header_height())
+        fixed = sum(header_sizes)
+        remain = max(0, total - fixed)
+        sizes = list(header_sizes)
+        if expanded_idx:
+            saved = self._settings().value(SETTINGS_LEFT_SPLITTER)
+            try:
+                saved_list = [int(x) for x in list(saved)] if saved is not None else []
+            except Exception:
+                saved_list = []
+            weights = []
+            for i in expanded_idx:
+                w = saved_list[i] if i < len(saved_list) and saved_list[i] > 40 else 100
+                weights.append(max(40, w))
+            wsum = sum(weights) or 1
+            for i, idx in enumerate(expanded_idx):
+                sizes[idx] = max(60, int(remain * weights[i] / wsum))
+            diff = remain - sum(sizes[i] for i in expanded_idx)
+            if expanded_idx and diff:
+                sizes[expanded_idx[-1]] = max(60, sizes[expanded_idx[-1]] + diff)
+        self.left_splitter.setSizes(sizes)
 
     def _save_splitter_sizes(self, *_args) -> None:
         try:
             settings = self._settings()
             settings.setValue(SETTINGS_MAIN_SPLITTER, self.main_splitter.sizes())
-            settings.setValue(SETTINGS_LEFT_SPLITTER, self.left_splitter.sizes())
+            if self.left_splitter is not None:
+                current = [int(x) for x in self.left_splitter.sizes()]
+                prev_raw = settings.value(SETTINGS_LEFT_SPLITTER)
+                try:
+                    prev = [int(x) for x in list(prev_raw)] if prev_raw is not None else []
+                except Exception:
+                    prev = []
+                merged = []
+                for i, sec in enumerate(self._left_sections()):
+                    cur = current[i] if i < len(current) else 100
+                    if sec.is_expanded():
+                        merged.append(max(60, cur))
+                    else:
+                        # 畳んだパネルは「好みの高さ」を残す（開き直したとき用）
+                        if i < len(prev) and prev[i] > 40:
+                            merged.append(prev[i])
+                        else:
+                            merged.append(120)
+                settings.setValue(SETTINGS_LEFT_SPLITTER, merged)
         except Exception:
             pass
 
@@ -906,6 +1042,71 @@ class RouteMapWidget(QWidget):
 
     def _on_options_changed(self, *_args) -> None:
         self._refresh_map()
+
+    def eventFilter(self, obj, event) -> bool:
+        """ルート名（チェック枠以外）のダブルクリックで地図を拡大する。"""
+        if event.type() == QEvent.MouseButtonDblClick and isinstance(obj, RouteNameCheckBox):
+            code = obj.property("route_code")
+            if code is not None and str(code) and not obj._on_indicator(event):
+                self._focus_route_on_map(str(code))
+                return True
+        return super().eventFilter(obj, event)
+
+    def _focus_route_on_map(self, route_code: str) -> None:
+        """指定ルートを編集対象にし、店舗リスト表示＋地図拡大。"""
+        self._set_editing_route(route_code)
+        cb = self._route_checks.get(route_code)
+        need_refresh = False
+        if cb is not None and not cb.isChecked():
+            cb.blockSignals(True)
+            cb.setChecked(True)
+            cb.blockSignals(False)
+            need_refresh = True
+        if need_refresh:
+            self._refresh_map()
+            QTimer.singleShot(350, lambda c=route_code: self._fit_map_to_route(c))
+        else:
+            self._fit_map_to_route(route_code)
+
+    def _fit_map_to_route(self, route_code: str) -> None:
+        if not self.map_view or not self._payload_cache:
+            return
+        points: List[List[float]] = []
+        for route in self._payload_cache.get("routes") or []:
+            if str(route.get("route_code") or "") != route_code:
+                continue
+            stores_raw = [
+                s for s in (route.get("stores") or []) if self._store_passes_tag_filter(s)
+            ]
+            for marker in _markers_from_stores(stores_raw):
+                try:
+                    points.append([float(marker["lat"]), float(marker["lng"])])
+                except (TypeError, ValueError, KeyError):
+                    continue
+            break
+        if not points:
+            self.status_label.setText("このルートに表示できる座標がありません")
+            return
+        payload = json.dumps(points, ensure_ascii=False)
+        js = (
+            "(function(){"
+            "try {"
+            "if (typeof window.__HIRIO_FIT_BOUNDS !== 'function') return false;"
+            f"return window.__HIRIO_FIT_BOUNDS({payload});"
+            "} catch (e) { return false; }"
+            "})();"
+        )
+        try:
+            self.map_view.page().runJavaScript(js)
+            name = ""
+            for route in self._payload_cache.get("routes") or []:
+                if str(route.get("route_code") or "") == route_code:
+                    name = str(route.get("route_name") or route_code)
+                    break
+            self.status_label.setText(f"拡大表示: {name or route_code}")
+        except Exception as e:
+            print(f"ルート拡大失敗: {e}")
+
 
     def reload(self) -> None:
         self._ensure_brand_tags_on_load()
@@ -975,6 +1176,7 @@ class RouteMapWidget(QWidget):
         self._clear_layout_widgets(self.route_list_box, keep_stretch=False)
         self._route_checks.clear()
         self._route_colors.clear()
+        self._route_names.clear()
 
         routes = (self._payload_cache or {}).get("routes") or []
         for idx, route in enumerate(routes):
@@ -982,15 +1184,31 @@ class RouteMapWidget(QWidget):
             name = str(route.get("route_name") or "")
             count = int(route.get("store_count") or 0)
             color = ROUTE_LINE_COLORS[idx % len(ROUTE_LINE_COLORS)]
-            cb = QCheckBox(f"{name}（{count}）")
-            cb.setStyleSheet(_checkbox_style(color))
+            cb = RouteNameCheckBox(f"{name}（{count}）")
+            # 一覧は黒字。編集中ルートは青背景で区別
+            editing = bool(code) and code == self._editing_route_code
+            cb.setStyleSheet(
+                _checkbox_style("#90caf9" if editing else "#e0e0e0")
+                + ("\nQCheckBox { background: #0d47a1; border-radius: 4px; padding: 2px; }"
+                   if editing else "")
+            )
+            cb.setToolTip(
+                "チェック枠: 表示オン／オフ\n"
+                "ルート名をダブルクリック: 店舗リスト表示＋地図拡大"
+            )
+            cb.setProperty("route_code", code)
             checked = first_load or code in previously
             cb.setChecked(checked)
             cb.toggled.connect(self._on_options_changed)
+            cb.installEventFilter(self)
             self.route_list_box.addWidget(cb)
             self._route_checks[code] = cb
             self._route_colors[code] = color
+            self._route_names[code] = name
         self.route_list_box.addStretch()
+        # 編集中ルートの店舗リストを同期
+        if self._editing_route_code:
+            self._load_visit_list_for_route(self._editing_route_code)
 
     def _rebuild_tag_filters(self) -> None:
         previously: Set[int] = {
@@ -1016,7 +1234,7 @@ class RouteMapWidget(QWidget):
             tid = int(tag["id"])
             color = str(tag.get("color") or DEFAULT_PIN_COLOR)
             cb = QCheckBox(str(tag.get("name") or ""))
-            cb.setStyleSheet(_checkbox_style_light(color))
+            cb.setStyleSheet(_checkbox_style(color))
             cb.setChecked(True if first_load else tid in previously)
             cb.toggled.connect(self._on_options_changed)
             self.quality_tag_box.addWidget(cb)
@@ -1164,13 +1382,210 @@ class RouteMapWidget(QWidget):
         html_doc = build_leaflet_html(leaflet_payload)
         self.map_view.setHtml(html_doc, QUrl("https://local.hirio/"))
 
+
+    def _set_editing_route(self, route_code: str) -> None:
+        """編集中ルートを切り替え、店舗リストを読み込む。"""
+        code = (route_code or "").strip()
+        self._editing_route_code = code
+        self._editing_route_name = self._route_names.get(code, "")
+        if not self._editing_route_name and self._payload_cache:
+            for route in self._payload_cache.get("routes") or []:
+                if str(route.get("route_code") or "") == code:
+                    self._editing_route_name = str(route.get("route_name") or "")
+                    break
+        title = "店舗（ルートをダブルクリック）"
+        if self._editing_route_name:
+            title = f"店舗（編集中: {self._editing_route_name}）"
+        self.visit_section.set_title(title)
+        self.visit_section.set_expanded(True)
+        self.save_visit_order_btn.setEnabled(bool(code))
+        QTimer.singleShot(0, self._redistribute_left_splitter)
+        self._load_visit_list_for_route(code)
+        # ルート一覧の見た目を更新（編集中ハイライト）
+        self._restyle_route_checks()
+
+    def _restyle_route_checks(self) -> None:
+        for code, cb in self._route_checks.items():
+            editing = bool(code) and code == self._editing_route_code
+            cb.setStyleSheet(
+                _checkbox_style("#90caf9" if editing else "#e0e0e0")
+                + (
+                    "\nQCheckBox { background: #0d47a1; border-radius: 4px; padding: 2px; }"
+                    if editing
+                    else ""
+                )
+            )
+
+    def _load_visit_list_for_route(self, route_code: str) -> None:
+        self._visit_reorder_busy = True
+        self.visit_list.clear()
+        code = (route_code or "").strip()
+        if not code or not self._payload_cache:
+            self._visit_reorder_busy = False
+            return
+        route_name = self._editing_route_name or self._route_names.get(code, "")
+        stores = []
+        for route in self._payload_cache.get("routes") or []:
+            if str(route.get("route_code") or "") == code:
+                stores = list(route.get("stores") or [])
+                route_name = str(route.get("route_name") or route_name)
+                break
+        if not stores and route_name:
+            try:
+                stores = self.db.get_stores_for_route_ordered(route_name)
+            except Exception:
+                stores = []
+        for idx, store in enumerate(stores, start=1):
+            store_code = str(
+                store.get("store_code") or store.get("supplier_code") or ""
+            ).strip()
+            store_name = str(store.get("store_name") or "").strip()
+            label = f"{idx}. {store_name}" + (f"  [{store_code}]" if store_code else "")
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, store_code)
+            item.setData(Qt.UserRole + 1, store_name)
+            item.setFlags(
+                item.flags()
+                | Qt.ItemIsEnabled
+                | Qt.ItemIsSelectable
+                | Qt.ItemIsDragEnabled
+            )
+            self.visit_list.addItem(item)
+        self._editing_route_name = route_name
+        self._visit_reorder_busy = False
+
+    def _ordered_store_codes_from_list(self) -> list:
+        codes = []
+        for i in range(self.visit_list.count()):
+            item = self.visit_list.item(i)
+            code = str(item.data(Qt.UserRole) or "").strip()
+            if code:
+                codes.append(code)
+        return codes
+
+    def _renumber_visit_list_labels(self) -> None:
+        self._visit_reorder_busy = True
+        for i in range(self.visit_list.count()):
+            item = self.visit_list.item(i)
+            store_code = str(item.data(Qt.UserRole) or "").strip()
+            store_name = str(item.data(Qt.UserRole + 1) or "").strip()
+            label = f"{i + 1}. {store_name}" + (
+                f"  [{store_code}]" if store_code else ""
+            )
+            item.setText(label)
+        self._visit_reorder_busy = False
+
+    def _on_visit_rows_moved(self, *_args) -> None:
+        if self._visit_reorder_busy:
+            return
+        self._renumber_visit_list_labels()
+        self.save_editing_visit_order(silent=True)
+
+    def save_editing_visit_order(self, silent: bool = False) -> None:
+        """店舗マスタ display_order ＋ 最新ルート登録の visit_order を保存。"""
+        route_code = self._editing_route_code
+        route_name = self._editing_route_name
+        if not route_code or not route_name:
+            if not silent:
+                QMessageBox.information(
+                    self, "訪問順序", "先にルート名をダブルクリックして編集対象を選んでください。"
+                )
+            return
+        ordered = self._ordered_store_codes_from_list()
+        if not ordered:
+            if not silent:
+                QMessageBox.warning(self, "訪問順序", "保存する店舗がありません。")
+            return
+
+        # 1) 店舗マスタ表示順
+        master_ok = False
+        try:
+            from services.store_route_membership_service import reorder_route_stores
+        except Exception:
+            try:
+                from store_route_membership_service import reorder_route_stores  # type: ignore
+            except Exception:
+                reorder_route_stores = None  # type: ignore
+        if reorder_route_stores is not None:
+            master_ok = bool(reorder_route_stores(self.db, route_name, ordered))
+        else:
+            master_ok = bool(
+                self.db.update_store_display_order(
+                    route_name, {c: i + 1 for i, c in enumerate(ordered)}
+                )
+            )
+
+        # 2) 最新ルート登録（route_summaries / store_visit_details）の訪問順
+        visit_updated = 0
+        try:
+            from database.route_db import RouteDatabase
+        except Exception:
+            try:
+                from desktop.database.route_db import RouteDatabase  # type: ignore
+            except Exception:
+                RouteDatabase = None  # type: ignore
+        if RouteDatabase is not None:
+            try:
+                rdb = RouteDatabase()
+                summary = rdb.get_latest_route_summary_for_code(route_code)
+                if summary and summary.get("id") is not None:
+                    visit_updated = rdb.update_visit_orders_for_summary(
+                        int(summary["id"]),
+                        {c: i + 1 for i, c in enumerate(ordered)},
+                    )
+                rdb.close()
+            except Exception as e:
+                print(f"ルート登録訪問順の同期エラー: {e}")
+
+        # メモリ上の payload も並べ替え（地図線をすぐ反映）
+        if self._payload_cache:
+            for route in self._payload_cache.get("routes") or []:
+                if str(route.get("route_code") or "") != route_code:
+                    continue
+                by_code = {}
+                for s in route.get("stores") or []:
+                    c = str(s.get("store_code") or s.get("supplier_code") or "").strip()
+                    if c:
+                        by_code[c] = s
+                new_stores = []
+                for i, c in enumerate(ordered, start=1):
+                    s = by_code.get(c)
+                    if not s:
+                        continue
+                    s = dict(s)
+                    s["display_order"] = i
+                    new_stores.append(s)
+                # リストに無い店は末尾維持
+                for c, s in by_code.items():
+                    if c not in set(ordered):
+                        new_stores.append(s)
+                route["stores"] = new_stores
+                break
+
+        self._refresh_map()
+        try:
+            self.routes_changed.emit()
+        except Exception:
+            pass
+
+        msg = (
+            f"「{route_name}」の周回順を保存しました。\n"
+            f"・店舗マスタ表示順: {'OK' if master_ok else '失敗'}\n"
+            f"・最新ルート登録の訪問順: {visit_updated}件更新"
+        )
+        self.status_label.setText(
+            f"訪問順保存: {route_name}（マスタ{'OK' if master_ok else 'NG'} / 登録{visit_updated}件）"
+        )
+        if not silent:
+            QMessageBox.information(self, "訪問順序保存", msg)
+        elif not master_ok:
+            QMessageBox.warning(self, "訪問順序", "店舗マスタ表示順の保存に失敗しました。")
+
     def _refresh_map(self) -> None:
         if not self._payload_cache:
             return
         selected = self._selected_route_codes()
         colors = self._route_color_map()
-        use_road = self.road_check.isChecked()
-        summary_lines: List[str] = []
 
         map_routes: List[Dict[str, Any]] = []
         for route in self._payload_cache.get("routes") or []:
@@ -1182,50 +1597,15 @@ class RouteMapWidget(QWidget):
             ]
             stores = _markers_from_stores(stores_raw)
 
-            entry: Dict[str, Any] = {
-                "route_name": route.get("route_name") or "",
-                "route_code": code,
-                "line_color": colors.get(code, ROUTE_LINE_COLORS[0]),
-                "stores": stores,
-                "road_polyline": [],
-            }
-
-            if use_road and len(stores_raw) >= 2 and fetch_driving_route:
-                cache_key = code + "|" + ",".join(
-                    str(s.get("id")) for s in stores_raw if s.get("id") is not None
-                )
-                road = self._road_cache.get(cache_key)
-                if road is None:
-                    result = fetch_driving_route(stores_raw)
-                    if result.ok:
-                        road = {
-                            "polyline": result.polyline,
-                            "distance_km": result.distance_km,
-                            "duration_text": result.duration_text,
-                            "error": "",
-                        }
-                    else:
-                        road = {
-                            "polyline": [],
-                            "distance_km": 0,
-                            "duration_text": "",
-                            "error": result.error,
-                        }
-                    self._road_cache[cache_key] = road
-                entry["road_polyline"] = road.get("polyline") or []
-                name = route.get("route_name") or code
-                if road.get("duration_text"):
-                    summary_lines.append(
-                        f"・{name}: {road['duration_text']} / {road['distance_km']} km"
-                    )
-                elif road.get("error"):
-                    summary_lines.append(f"・{name}: 直線表示（{road['error']}）")
-            elif use_road and len(stores) >= 2:
-                summary_lines.append(
-                    f"・{route.get('route_name') or code}: 直線表示（座標不足）"
-                )
-
-            map_routes.append(entry)
+            map_routes.append(
+                {
+                    "route_name": route.get("route_name") or "",
+                    "route_code": code,
+                    "line_color": colors.get(code, ROUTE_LINE_COLORS[0]),
+                    "stores": stores,
+                    "road_polyline": [],
+                }
+            )
 
         unassigned: List[Dict[str, Any]] = []
         if self.show_unassigned_check.isChecked():
@@ -1272,17 +1652,5 @@ class RouteMapWidget(QWidget):
             "use_icons": bool(self.icon_check.isChecked()),
             "grayscale": bool(self.grayscale_check.isChecked()),
         }
-
-        if not summary_lines:
-            if use_road:
-                self.summary_text.setPlainText(
-                    "道路ルート情報はありません。ルートを選択するか API キーを確認してください。"
-                )
-            else:
-                self.summary_text.setPlainText(
-                    "直線ルート表示中。道路沿い・所要時間が必要なときは左上のチェックをONにしてください。"
-                )
-        else:
-            self.summary_text.setPlainText("\n".join(summary_lines))
 
         self._apply_leaflet_payload(leaflet_payload)
