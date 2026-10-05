@@ -10,6 +10,7 @@ from services.google_maps_service import (
 )
 from ui.store_master.route_map_widget import (
     _markers_from_stores,
+    _merge_cross_route_hardoff_markers,
     _missing_hardoff_brands,
     _store_map_dict,
     _suggest_collocated_store_name,
@@ -93,3 +94,96 @@ def test_brand_matches_and_distance_helpers():
     assert _normalize_name_key("ハードオフ 東所沢店") == _normalize_name_key(
         "ハードオフ東所沢店"
     )
+
+
+def test_merge_cross_route_hardoff_markers_same_coords():
+    """別ルートでも同一座標の HA/HO は1ピン（H3相当）にまとまる。"""
+    ha11 = _store_map_dict(
+        {
+            "id": 51,
+            "store_code": "HA-11",
+            "store_name": "ハードオフ船橋習志野台",
+            "latitude": 35.720909,
+            "longitude": 140.0522627,
+            "tags": [],
+        }
+    )
+    ho02 = _store_map_dict(
+        {
+            "id": 50,
+            "store_code": "HO-02",
+            "store_name": "ホビーオフ船橋習志野台",
+            "latitude": 35.720909,
+            "longitude": 140.0522627,
+            "tags": [],
+        }
+    )
+    ha60 = _store_map_dict(
+        {
+            "id": 274,
+            "store_code": "HA-60",
+            "store_name": "ハードオフ 船橋習志野台店",
+            "latitude": 35.720909,
+            "longitude": 140.0522627,
+            "tags": [],
+        }
+    )
+    assert ha11 and ho02 and ha60
+    # ルートA: HA+HO 併設、ルートB: HA 単独（実データと同じ分裂）
+    route_a_markers = _markers_from_stores(
+        [
+            {
+                "id": 51,
+                "store_code": "HA-11",
+                "store_name": "ハードオフ船橋習志野台",
+                "latitude": 35.720909,
+                "longitude": 140.0522627,
+                "tags": [],
+            },
+            {
+                "id": 50,
+                "store_code": "HO-02",
+                "store_name": "ホビーオフ船橋習志野台",
+                "latitude": 35.720909,
+                "longitude": 140.0522627,
+                "tags": [],
+            },
+        ]
+    )
+    route_b_markers = _markers_from_stores(
+        [
+            {
+                "id": 274,
+                "store_code": "HA-60",
+                "store_name": "ハードオフ 船橋習志野台店",
+                "latitude": 35.720909,
+                "longitude": 140.0522627,
+                "tags": [],
+            }
+        ]
+    )
+    map_routes = [
+        {"route_code": "A", "stores": route_a_markers},
+        {"route_code": "B", "stores": route_b_markers},
+    ]
+    unassigned: list = []
+    _merge_cross_route_hardoff_markers(map_routes, unassigned)
+
+    visible_pins = [
+        s
+        for r in map_routes
+        for s in (r.get("stores") or [])
+        if not s.get("suppress_pin")
+    ]
+    stubs = [
+        s
+        for r in map_routes
+        for s in (r.get("stores") or [])
+        if s.get("suppress_pin")
+    ]
+    assert len(visible_pins) == 1
+    assert len(stubs) == 1
+    pin = visible_pins[0]
+    assert pin["is_hardoff_family"] is True
+    assert set(pin.get("member_codes") or []) >= {"HA-11", "HO-02", "HA-60"}
+    assert pin.get("icon_key") == "hardoff3"

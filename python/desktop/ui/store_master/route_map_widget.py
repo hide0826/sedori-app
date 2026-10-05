@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 import os
@@ -93,16 +94,19 @@ except Exception:
 
 try:
     from services.hardoff_collocation_groups import (
+        COLOCATION_RADIUS_M,
         detect_hardoff_family_brand,
         group_hardoff_family_stores,
     )
 except Exception:
     try:
         from hardoff_collocation_groups import (  # type: ignore
+            COLOCATION_RADIUS_M,
             detect_hardoff_family_brand,
             group_hardoff_family_stores,
         )
     except Exception:
+        COLOCATION_RADIUS_M = 80.0  # type: ignore
         detect_hardoff_family_brand = None  # type: ignore
         group_hardoff_family_stores = None  # type: ignore
 
@@ -414,6 +418,175 @@ def _mark_route_endpoints(stores: List[Dict[str, Any]]) -> None:
     else:
         stores[first_i]["endpoint"] = "start"
         stores[last_i]["endpoint"] = "goal"
+
+
+def _marker_lat_lng(marker: Dict[str, Any]) -> Optional[Tuple[float, float]]:
+    try:
+        return (float(marker.get("lat")), float(marker.get("lng")))
+    except (TypeError, ValueError):
+        return None
+
+
+def _approx_distance_m(
+    a: Tuple[float, float], b: Tuple[float, float]
+) -> float:
+    lat1, lng1 = a
+    lat2, lng2 = b
+    dy = (lat1 - lat2) * 111_000.0
+    dx = (lng1 - lng2) * 111_000.0 * max(
+        0.2, abs(math.cos(math.radians(lat1)))
+    )
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def _merge_marker_members(base: Dict[str, Any], other: Dict[str, Any]) -> None:
+    """other の併設メンバー情報を base に合流させる。"""
+    codes = list(base.get("member_codes") or [])
+    ids = list(base.get("member_ids") or [])
+    names = list(base.get("member_names") or [])
+    brands = list(base.get("member_brands") or [])
+
+    for code in [other.get("store_code"), *(other.get("member_codes") or [])]:
+        cs = str(code or "").strip()
+        if cs and cs not in codes:
+            codes.append(cs)
+    for mid in [other.get("id"), *(other.get("member_ids") or [])]:
+        try:
+            mid_i = int(mid)
+        except (TypeError, ValueError):
+            continue
+        if mid_i and mid_i not in ids:
+            ids.append(mid_i)
+    for name in [other.get("store_name"), *(other.get("member_names") or [])]:
+        ns = str(name or "").strip()
+        if ns and ns not in names:
+            names.append(ns)
+    for brand in other.get("member_brands") or []:
+        bs = str(brand or "").strip().upper()
+        if bs and bs not in brands:
+            brands.append(bs)
+
+    base["member_codes"] = codes
+    base["member_ids"] = ids
+    base["member_names"] = names
+    base["member_brands"] = [b for b in _HARDOFF_BRAND_ORDER if b in brands]
+    base["is_hardoff_family"] = True
+    base["collocation_checked"] = bool(base.get("collocation_checked")) or bool(
+        other.get("collocation_checked")
+    )
+    # ピン表示用アイコンはメンバー店舗数（H1/H2/H3）
+    member_count = max(len(ids), len(codes), 1)
+    base["icon_key"] = hardoff_collocation_icon_key(member_count)
+
+
+def _line_only_marker(marker: Dict[str, Any]) -> Dict[str, Any]:
+    """ルート線用に座標だけ残し、ピン描画は抑止する。"""
+    return {
+        "id": marker.get("id"),
+        "store_code": marker.get("store_code") or "",
+        "store_name": marker.get("store_name") or "",
+        "lat": marker.get("lat"),
+        "lng": marker.get("lng"),
+        "will_visit": marker.get("will_visit", True),
+        "endpoint": marker.get("endpoint"),
+        "pick_index": marker.get("pick_index"),
+        "template_include": marker.get("template_include"),
+        "suppress_pin": True,
+        "is_hardoff_family": False,
+        "member_codes": [],
+        "member_ids": [],
+        "member_names": [],
+        "member_brands": [],
+    }
+
+
+def _merge_cross_route_hardoff_markers(
+    map_routes: List[Dict[str, Any]],
+    unassigned: List[Dict[str, Any]],
+    *,
+    radius_m: Optional[float] = None,
+) -> None:
+    """
+    ルート／未所属をまたいで近接する HA/HO/OF ピンを1つにまとめる。
+
+    線引き用の座標は各ルートに残し、余分なピンだけ suppress_pin にする。
+    """
+    limit = float(radius_m if radius_m is not None else COLOCATION_RADIUS_M)
+    slots: List[Tuple[str, int, Dict[str, Any]]] = []
+    for ri, route in enumerate(map_routes or []):
+        for marker in route.get("stores") or []:
+            if marker.get("is_hardoff_family") and not marker.get("suppress_pin"):
+                slots.append(("route", ri, marker))
+    for marker in unassigned or []:
+        if marker.get("is_hardoff_family") and not marker.get("suppress_pin"):
+            slots.append(("unassigned", -1, marker))
+
+    n = len(slots)
+    if n < 2:
+        return
+
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[rj] = ri
+
+    coords: List[Optional[Tuple[float, float]]] = []
+    for _, _, marker in slots:
+        coords.append(_marker_lat_lng(marker))
+
+    for i in range(n):
+        if coords[i] is None:
+            continue
+        for j in range(i + 1, n):
+            if coords[j] is None:
+                continue
+            if _approx_distance_m(coords[i], coords[j]) <= limit:  # type: ignore[arg-type]
+                union(i, j)
+
+    buckets: Dict[int, List[int]] = {}
+    for i in range(n):
+        buckets.setdefault(find(i), []).append(i)
+
+    for idxs in buckets.values():
+        if len(idxs) < 2:
+            continue
+        # メンバーが多いピンを代表に残す
+        def _score(i: int) -> Tuple[int, int]:
+            m = slots[i][2]
+            return (
+                len(m.get("member_ids") or m.get("member_codes") or []),
+                1 if m.get("endpoint") else 0,
+            )
+
+        keep_i = max(idxs, key=_score)
+        keep_marker = slots[keep_i][2]
+        for i in idxs:
+            if i == keep_i:
+                continue
+            other = slots[i][2]
+            _merge_marker_members(keep_marker, other)
+            # 線用スタブへ差し替え
+            stub = _line_only_marker(other)
+            kind, ri, _ = slots[i]
+            if kind == "route":
+                stores = map_routes[ri].get("stores") or []
+                for si, s in enumerate(stores):
+                    if s is other:
+                        stores[si] = stub
+                        break
+            else:
+                for ui, s in enumerate(unassigned):
+                    if s is other:
+                        unassigned[ui] = stub
+                        break
 
 
 def _store_matches_code(store: Dict[str, Any], store_code: str) -> bool:
@@ -1434,26 +1607,32 @@ window.__HIRIO_UPDATE = function(data, opts) {{
   (data.routes || []).forEach(function(route) {{
     (route.stores || []).forEach(function(s) {{
       if (!Number.isFinite(s.lat) || !Number.isFinite(s.lng)) return;
+      bounds.push([s.lat, s.lng]);
+      if (s.suppress_pin) return;  // ルート線用のみ（クロスルート併設でピン統合済み）
       const codes = [s.store_code || ''].concat(s.member_codes || []);
       s.selected = !!(selectedCode && codes.indexOf(selectedCode) >= 0);
       s.route_code = route.route_code || '';
       s.route_name = route.route_name || '';
       pinEntries.push({{ store: s, lat: s.lat, lng: s.lng, routeName: route.route_name }});
-      bounds.push([s.lat, s.lng]);
     }});
   }});
   (data.unassigned || []).forEach(function(s) {{
     if (!Number.isFinite(s.lat) || !Number.isFinite(s.lng)) return;
+    bounds.push([s.lat, s.lng]);
+    if (s.suppress_pin) return;
     s.route_code = '';
     s.route_name = '';
     pinEntries.push({{ store: s, lat: s.lat, lng: s.lng, routeName: '未所属' }});
-    bounds.push([s.lat, s.lng]);
   }});
   applyOverlapOffsets(pinEntries);
 
   // 2) ルート線（本物の lat/lng）
+  // 訪問順クリック選択中: 編集中ルートの既存線だけ消し、クリック順の線だけ伸ばす。
+  // 他ルートの線はそのまま残して見やすくする。
+  const editingCode = (data.editing_route_code || '').trim();
   (data.routes || []).forEach(function(route) {{
     const color = route.line_color || '#1e88e5';
+    const routeCode = (route.route_code || '').trim();
     const visitPts = [];
     const skipStores = [];
     const pickPts = [];
@@ -1468,22 +1647,22 @@ window.__HIRIO_UPDATE = function(data, opts) {{
         visitPts.push([s.lat, s.lng]);
       }}
     }});
-    // クリック選択中は、選んだ順の線だけ伸ばす（未選択時は線なし）
-    if (data.pick_mode) {{
-      if (pickPts.length) {{
+    const isEditingRoute =
+      !!data.pick_mode && !!editingCode && routeCode === editingCode;
+    if (isEditingRoute) {{
+      // 編集中ルート: 既存の周回線は出さない。クリックした分だけ線を伸ばす
+      if (pickPts.length >= 2) {{
         pickPts.sort(function(a, b) {{ return a.idx - b.idx; }});
         const pts = pickPts.map(function(p) {{ return [p.lat, p.lng]; }});
-        if (pts.length >= 2) {{
-          addRouteLine(pts, color, dashWeight, lineOpacity, false);
-        }}
+        addRouteLine(pts, color, dashWeight, lineOpacity, false);
       }}
     }} else if ((route.road_polyline || []).length >= 2) {{
       addRouteLine(route.road_polyline, color, lineWeight, lineOpacity, false);
     }} else if (visitPts.length >= 2) {{
       addRouteLine(visitPts, color, dashWeight, lineOpacity, false);
     }}
-    // 行かない店: 最後に訪問する店から薄い点線（選択モード中は非表示）
-    if (!data.pick_mode && visitPts.length >= 1 && skipStores.length) {{
+    // 行かない店: 最後に訪問する店から薄い点線（編集中ルートの選択モード中は非表示）
+    if (!isEditingRoute && visitPts.length >= 1 && skipStores.length) {{
       const last = visitPts[visitPts.length - 1];
       skipStores.forEach(function(s) {{
         addRouteLine(
@@ -1892,6 +2071,8 @@ class RouteMapWidget(QWidget):
         self.pick_order_btn.setFixedHeight(26)
         self.pick_order_btn.setToolTip(
             "ONにすると、地図上の店舗を1件ずつクリックして周回順を決められます。\n"
+            "編集中ルートの既存ラインは消し、クリックした順だけ線が伸びます。\n"
+            "他のルートの線はそのまま表示されます。\n"
             "同じ店をもう一度クリックすると選択解除できます。\n"
             "先にルート名をダブルクリックして編集対象を選んでください。\n"
             "もう一度押すと選択モードを終了します。"
@@ -3956,6 +4137,9 @@ class RouteMapWidget(QWidget):
                     if _store_matches_code(m, self._selected_store_code):
                         m["selected"] = True
 
+        # 別ルートでも近接 HA/HO/OF は1ピンにまとめる（座標0mでもルート違いで分裂しない）
+        _merge_cross_route_hardoff_markers(map_routes, unassigned)
+
         tag_legend = []
         for tag in self._payload_cache.get("tags") or []:
             tid = int(tag["id"])
@@ -4026,6 +4210,7 @@ class RouteMapWidget(QWidget):
             "show_endpoints": show_endpoints,
             "show_collocation_checked": show_collocation_checked,
             "pick_mode": bool(self._pick_mode),
+            "editing_route_code": self._editing_route_code or "",
         }
 
         self._apply_leaflet_payload(leaflet_payload)
