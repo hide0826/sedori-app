@@ -1423,6 +1423,36 @@ function applyOverlapOffsets(entries) {{
   }});
 }}
 
+function bindRouteFocusOnDblClick(layer, routeCode) {{
+  if (!layer || !routeCode) return;
+  layer.on('dblclick', function(e) {{
+    try {{ L.DomEvent.stop(e); }} catch (err) {{}}
+    if (window.__HIRIO_PICK_MODE) return;
+    const code = String(routeCode || '').trim();
+    if (!code) return;
+    notifyRouteAction({{ action: 'focus', route_code: code }});
+  }});
+}}
+
+function bindStoreFocusOnDblClick(marker, store) {{
+  if (!marker || !store) return;
+  marker.on('dblclick', function(e) {{
+    try {{ L.DomEvent.stop(e); }} catch (err) {{}}
+    if (window.__HIRIO_PICK_MODE) return;
+    const code = String(store.route_code || '').trim();
+    if (!code) {{
+      // 未所属はルート選択できない
+      return;
+    }}
+    notifyRouteAction({{
+      action: 'focus',
+      route_code: code,
+      store_code: store.store_code || '',
+      store_id: store.id || null
+    }});
+  }});
+}}
+
 function addCircle(store, routeName) {{
   const skipped = store.will_visit === false;
   const selected = !!store.selected;
@@ -1441,6 +1471,7 @@ function addCircle(store, routeName) {{
     fillOpacity: skipped ? 0.75 : 0.95
   }});
   bindStorePopup(marker, store, routeName);
+  bindStoreFocusOnDblClick(marker, store);
   marker.addTo(layerGroup);
   if (endpoint || (store.is_hardoff_family && store.collocation_checked)) {{
     const tip = L.marker(disp, {{
@@ -1499,15 +1530,22 @@ function addIconMarker(store, routeName, icons) {{
     zIndexOffset: selected ? 600 : (store.pick_index ? 500 : (endpoint ? 400 : (store.hasOffset ? 200 : 0)))
   }});
   bindStorePopup(marker, store, routeName);
+  bindStoreFocusOnDblClick(marker, store);
   marker.addTo(layerGroup);
 }}
 
-function addRouteLine(pts, color, weight, opacity, dashed) {{
+function addRouteLine(pts, color, weight, opacity, dashed, routeCode) {{
   const optsHalo = {{
-    color: '#ffffff', weight: weight + 2, opacity: dashed ? 0.35 : 0.7
+    color: '#ffffff',
+    weight: weight + 2,
+    opacity: dashed ? 0.35 : 0.7,
+    interactive: false
   }};
   const optsMain = {{
-    color: color, weight: weight, opacity: opacity
+    color: color,
+    weight: weight,
+    opacity: opacity,
+    interactive: false
   }};
   if (dashed) {{
     optsHalo.dashArray = '4 8';
@@ -1515,6 +1553,24 @@ function addRouteLine(pts, color, weight, opacity, dashed) {{
   }}
   L.polyline(pts, optsHalo).addTo(layerGroup);
   L.polyline(pts, optsMain).addTo(layerGroup);
+  // ダブルクリック用の透明な太いヒット領域
+  const code = String(routeCode || '').trim();
+  if (code) {{
+    const hit = L.polyline(pts, {{
+      color: color,
+      weight: Math.max(weight + 12, 16),
+      opacity: 0.0,
+      interactive: true,
+      bubblingMouseEvents: false
+    }});
+    hit.addTo(layerGroup);
+    hit.bindTooltip('ダブルクリックでこのルートを選択', {{
+      sticky: true,
+      opacity: 0.85,
+      direction: 'top'
+    }});
+    bindRouteFocusOnDblClick(hit, code);
+  }}
 }}
 
 function hirioUpdateLegend(data) {{
@@ -1654,12 +1710,12 @@ window.__HIRIO_UPDATE = function(data, opts) {{
       if (pickPts.length >= 2) {{
         pickPts.sort(function(a, b) {{ return a.idx - b.idx; }});
         const pts = pickPts.map(function(p) {{ return [p.lat, p.lng]; }});
-        addRouteLine(pts, color, dashWeight, lineOpacity, false);
+        addRouteLine(pts, color, dashWeight, lineOpacity, false, routeCode);
       }}
     }} else if ((route.road_polyline || []).length >= 2) {{
-      addRouteLine(route.road_polyline, color, lineWeight, lineOpacity, false);
+      addRouteLine(route.road_polyline, color, lineWeight, lineOpacity, false, routeCode);
     }} else if (visitPts.length >= 2) {{
-      addRouteLine(visitPts, color, dashWeight, lineOpacity, false);
+      addRouteLine(visitPts, color, dashWeight, lineOpacity, false, routeCode);
     }}
     // 行かない店: 最後に訪問する店から薄い点線（編集中ルートの選択モード中は非表示）
     if (!isEditingRoute && visitPts.length >= 1 && skipStores.length) {{
@@ -1670,7 +1726,8 @@ window.__HIRIO_UPDATE = function(data, opts) {{
           color,
           2,
           0.45,
-          true
+          true,
+          routeCode
         );
       }});
     }}
@@ -1873,7 +1930,7 @@ class RouteMapWidget(QWidget):
         route_btns.addWidget(self.clear_btn)
         self.clear_edit_route_btn = QPushButton("ルート選択解除")
         self.clear_edit_route_btn.setToolTip(
-            "編集中ルートの選択を解除し、全体マップ表示に戻します"
+            "編集中ルートの選択だけ解除します（地図の拡大／位置はそのまま）"
         )
         self.clear_edit_route_btn.setStyleSheet(
             "QPushButton { background: #546e7a; color: #ffffff; border: none;"
@@ -1881,7 +1938,9 @@ class RouteMapWidget(QWidget):
             "QPushButton:hover:!disabled { background: #607d8b; }"
             "QPushButton:disabled { background: #424242; color: #9e9e9e; }"
         )
-        self.clear_edit_route_btn.clicked.connect(self.clear_editing_route_focus)
+        self.clear_edit_route_btn.clicked.connect(
+            lambda: self.clear_editing_route_focus(fit_all=False)
+        )
         route_btns.addWidget(self.clear_edit_route_btn)
         route_btns.addStretch()
         self.route_section.body_layout.addLayout(route_btns)
@@ -1908,6 +1967,7 @@ class RouteMapWidget(QWidget):
         self.visit_section.toggled.connect(self._on_visit_section_toggled)
         self.visit_hint = QLabel(
             "ルート名をダブルクリック → 店舗一覧。\n"
+            "地図の店舗ピン／ルート線をダブルクリックでも選択できます。\n"
             "チェックOFF＝行かない（地図でグレー＋最後尾から点線）。\n"
             "「訪問順序反転」で周回順を逆にできます。\n"
             "ドラッグで周回順変更（マスタ表示順＋最新ルート登録へ保存）。\n"
@@ -2172,8 +2232,8 @@ class RouteMapWidget(QWidget):
             QTimer.singleShot(0, self._restore_splitter_sizes)
         if self._payload_cache is None:
             self.reload()
-        # 開いたときは「ルート選択解除」と同じ全体マップ状態にする（白画面回避）
-        QTimer.singleShot(250, self.clear_editing_route_focus)
+        # 開いたときは「ルート選択解除」と同じ編集解除＋全体マップ状態にする（白画面回避）
+        QTimer.singleShot(250, lambda: self.clear_editing_route_focus(fit_all=True))
 
     def hideEvent(self, event) -> None:
         self._save_splitter_sizes()
@@ -2495,7 +2555,8 @@ class RouteMapWidget(QWidget):
             )
             cb.setToolTip(
                 "チェック枠: 表示オン／オフ\n"
-                "ルート名をダブルクリック: 店舗リスト表示＋地図拡大"
+                "ルート名をダブルクリック: 店舗リスト表示＋地図拡大\n"
+                "地図上の店舗ピン／ルート線をダブルクリックでも選択できます"
             )
             cb.setProperty("route_code", code)
             checked = first_load or code in previously
@@ -2708,8 +2769,24 @@ class RouteMapWidget(QWidget):
         return ids
 
     def _on_map_route_action(self, payload: Dict[str, Any]) -> None:
-        """地図ポップアップからのルート解除／登録。"""
+        """地図ポップアップ／ラインからのルート操作。"""
         action = str(payload.get("action") or "").strip()
+
+        # 地図上ダブルクリックでルート選択（店舗ピン・ルート線）
+        if action == "focus":
+            to_code = str(payload.get("route_code") or "").strip()
+            if not to_code:
+                QMessageBox.information(
+                    self,
+                    "ルート選択",
+                    "この店舗はルート未所属のため選択できません。",
+                )
+                return
+            self._focus_route_on_map(to_code)
+            name = self._route_names.get(to_code) or to_code
+            self.status_label.setText(f"地図からルート選択: {name}")
+            return
+
         store_ids = self._resolve_store_ids_for_map_action(payload)
         if not store_ids:
             QMessageBox.warning(self, "ルート操作", "対象店舗を特定できませんでした。")
@@ -3503,8 +3580,12 @@ class RouteMapWidget(QWidget):
         self._push_pick_history()
         self._apply_pick_order_to_ui(save=True)
 
-    def clear_editing_route_focus(self) -> None:
-        """編集中ルートを解除して全体マップ表示に戻す。"""
+    def clear_editing_route_focus(self, *, fit_all: bool = False) -> None:
+        """編集中ルートを解除する。
+
+        fit_all=True のときだけ全体が収まるようズームする（初回表示用）。
+        ボタンからの解除では現在の地図位置・ズームを維持する。
+        """
         if self._pick_mode:
             self.pick_order_btn.blockSignals(True)
             self.pick_order_btn.setChecked(False)
@@ -3529,8 +3610,11 @@ class RouteMapWidget(QWidget):
         self.web_template_btn.setEnabled(False)
         self._restyle_route_checks()
         self._refresh_map()
-        QTimer.singleShot(200, self._fit_map_to_all_visible)
-        self.status_label.setText("ルート選択を解除しました（全体マップ）")
+        if fit_all:
+            QTimer.singleShot(200, self._fit_map_to_all_visible)
+            self.status_label.setText("ルート選択を解除しました（全体マップ）")
+        else:
+            self.status_label.setText("ルート選択を解除しました")
 
     def _fit_map_to_all_visible(self) -> None:
         """表示中ルート全体が収まるように地図を拡大。"""
