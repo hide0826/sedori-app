@@ -2,11 +2,13 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-10-04（ルート地図・訪問スキップ／WEBテンプレ）
+更新日: 2026-10-05（TWSバッテリー検品 /tws マウント＋履歴API）
 
 ---
 
 ## いまの状態
+
+**2026-10-05（TWSバッテリー検品）:** ルートWeb（`:8792`）に `C:\HIRIO\tws-battery-check` を `/tws` で静的配信。履歴APIは `/api/tws-battery/*`（SQLite は `tws-battery-check/data/inspections.db`）。撮影・巡回トップにリンク追加。スマホは `https://houseserver.tail0a340c.ts.net/tws/`。詳細は [`tws-battery-check/PROGRESS.md`](../../tws-battery-check/PROGRESS.md)。反映はルートWeb再起動（実施済み）。
 
 **2026-10-04（ルート地図・周回編集／WEBテンプレ）:** 訪問チェックOFF＝行かない（地図iconグレー＋最後尾から薄い点線）。状態は `stores.template_include`（ルート登録の出力チェックと同義）。店舗選択でicon拡大、編集中ルートにスタート／ゴール。訪問順序反転。地図上で訪問順序選択（クリックで順に接続、再クリック解除、戻る／進む／保存）。ルート選択解除で全体マップ。店舗エリアから **WEBテンプレート作成**（最大化可・左右分割・開いた時点でGoogleマップ表示・画面内で訪問順反転可・設定の Maps APIキーで Embed）。反映には **HIRIO 再起動**。
 

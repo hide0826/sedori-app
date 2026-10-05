@@ -9,6 +9,7 @@ import threading
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from route_web import ROUTE_WEB_PORT
@@ -62,6 +63,9 @@ PHOTOS_DONE_PATH = STATIC_DIR / "route_photos_done.html"
 INDEX_PATH = STATIC_DIR / "index.html"
 ICON_PATH = STATIC_DIR / "icon.png"
 MANIFEST_PATH = STATIC_DIR / "manifest.webmanifest"
+# C:\HIRIO\repo\sedori-app.github\python\route_web → 4つ上が C:\HIRIO
+_HIRIO_ROOT = Path(__file__).resolve().parents[4]
+TWS_BATTERY_DIR = _HIRIO_ROOT / "tws-battery-check"
 
 app = FastAPI(title="HIRIO Route Web", version="0.3.0")
 _prepare_guard = threading.Lock()
@@ -634,6 +638,30 @@ def request_product_scan(web_id: str) -> JSONResponse:
     folder = _require_folder(web_id)
     item = enqueue_scan(web_id, folder)
     return JSONResponse({"ok": True, "request": item})
+
+
+# TWSバッテリー検品 API（SQLite: C:\HIRIO\tws-battery-check\data\inspections.db）
+if TWS_BATTERY_DIR.is_dir():
+    import sys
+
+    tws_path = str(TWS_BATTERY_DIR)
+    if tws_path not in sys.path:
+        sys.path.insert(0, tws_path)
+    try:
+        from tws_api import router as tws_battery_router  # type: ignore
+
+        app.include_router(tws_battery_router)
+    except Exception as exc:
+        print(f"[route_web] tws-battery API not loaded: {exc}")
+
+
+# TWSバッテリー検品 PWA（既存 Tailscale https の /tws/ で配信）
+if TWS_BATTERY_DIR.is_dir():
+    app.mount(
+        "/tws",
+        StaticFiles(directory=str(TWS_BATTERY_DIR), html=True),
+        name="tws_battery_check",
+    )
 
 
 def create_app() -> FastAPI:
