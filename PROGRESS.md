@@ -2,11 +2,13 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-10-05（TWSバッテリー検品 /tws マウント＋履歴API）
+更新日: 2026-10-05（ルート地図・ハードオフ併設自動確認＋確認済み）
 
 ---
 
 ## いまの状態
+
+**2026-10-05（ルート地図・ハードオフ併設確認）:** 店舗マスタ「ルート地図」のハードオフ系ピンに、(1) Google Places で未登録の併設（HA/HO/OF）を自動検索、(2) 候補からそのまま併設店舗登録、(3) 「併設確認済み」チェック（`stores.collocation_checked`）、(4) ピン上の緑✓と凡例表示を追加。未確認かつ不足ブランドがあるピンを開くと自動検索（セッションキャッシュあり）。手動「併設を自動確認」でも再検索可。反映には **HIRIO 再起動**。
 
 **2026-10-05（TWSバッテリー検品）:** ルートWeb（`:8792`）に `C:\HIRIO\tws-battery-check` を `/tws` で静的配信。履歴APIは `/api/tws-battery/*`（SQLite は `tws-battery-check/data/inspections.db`）。撮影・巡回トップにリンク追加。スマホは `https://houseserver.tail0a340c.ts.net/tws/`。詳細は [`tws-battery-check/PROGRESS.md`](../../tws-battery-check/PROGRESS.md)。反映はルートWeb再起動（実施済み）。
 
@@ -78,6 +80,40 @@
 ---
 
 ---
+
+---
+
+## 2026-10-05 ルート地図・ハードオフ併設自動確認と確認済み
+
+ハードオフ系ピンで、近くの未登録併設を Google で探し、確認済みを地図上一目で分かるようにする。
+
+### 動き
+
+1. ハードオフ系ピンを開く → 「併設確認済み」チェックと「併設を自動確認」ボタン
+2. 未確認かつ HA/HO/OF が不足しているとき、ピンオープンで Places 近傍検索（150m）を1回実行（セッションキャッシュ）
+3. 候補の「登録」→ 既存の併設店舗登録ダイアログへ店名・住所・電話・座標をプリフィルして DB 保存
+4. 確認済みON → `stores.collocation_checked=1`（併設メンバーまとめて更新）→ ピンに緑✓、凡例に表示
+
+### 追加・変更
+
+| 何 | 場所 |
+|----|------|
+| DBフラグ・CRUD | `python/desktop/database/store_db.py`（`collocation_checked`） |
+| Places 近傍検索 | `python/desktop/services/google_maps_service.py`（`search_nearby_hardoff_collocations`） |
+| ポップアップ・✓・ハンドラ | `python/desktop/ui/store_master/route_map_widget.py` |
+| テスト | `python/desktop/tests/test_route_map_collocation_register.py` |
+
+### 確認（実機）
+
+1. HIRIO を再起動（設定タブに Google Maps APIキーがあること）
+2. データベース管理 → 店舗マスタ → ルート地図
+3. H1 ピンを開き、自動検索または「併設を自動確認」で候補が出るか
+4. 候補「登録」で DB 追加 → ピンが H2/H3 になるか
+5. 「併設確認済み」にチェック → ピンに ✓ が付くか
+
+### 次の一手
+
+1. 上記の実機確認
 
 ---
 

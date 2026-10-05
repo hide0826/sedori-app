@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import os
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from PySide6.QtCore import Qt, QUrl, Signal, QSettings, QTimer, QEvent
 from PySide6.QtGui import QBrush, QColor
@@ -28,6 +29,8 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QAbstractItemView,
     QSizePolicy,
+    QDialog,
+    QInputDialog,
 )
 
 _desktop_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -47,6 +50,7 @@ except Exception:
 
 from .store_tags_dialog import StoreTagsDialog
 from .collapsible_section import CollapsibleSection
+from .store_dialogs import StoreEditDialog
 
 try:
     from services.store_brand_tag_service import (
@@ -118,6 +122,14 @@ ROUTE_LINE_COLORS = [
 ]
 
 DEFAULT_PIN_COLOR = "#1976d2"
+
+# ハードオフ系併設で選べるブランド（優先順）
+_HARDOFF_BRAND_ORDER: Tuple[str, ...] = ("HA", "HO", "OF")
+_HARDOFF_BRAND_LABELS = {
+    "HA": "ハードオフ",
+    "HO": "ホビーオフ",
+    "OF": "オフハウス",
+}
 SKIPPED_PIN_COLOR = "#9e9e9e"
 UNASSIGNED_KEY = "__unassigned__"
 
@@ -225,6 +237,54 @@ def _icon_key_for_store(store: Dict[str, Any]) -> str:
     return resolve_map_icon_key(str(store.get("store_name") or ""), tag_names)
 
 
+def _brand_of_store(store: Dict[str, Any]) -> Optional[str]:
+    if detect_hardoff_family_brand is None:
+        return None
+    try:
+        return detect_hardoff_family_brand(store)
+    except Exception:
+        return None
+
+
+def _ordered_member_brands(members: List[Dict[str, Any]]) -> List[str]:
+    found: List[str] = []
+    for m in members:
+        brand = _brand_of_store(m)
+        if brand and brand not in found:
+            found.append(brand)
+    return [b for b in _HARDOFF_BRAND_ORDER if b in found]
+
+
+def _missing_hardoff_brands(member_brands: List[str]) -> List[str]:
+    present = {str(b or "").strip().upper() for b in (member_brands or [])}
+    return [b for b in _HARDOFF_BRAND_ORDER if b not in present]
+
+
+def _suggest_collocated_store_name(source_name: str, brand: str) -> str:
+    """併設登録用の店舗名候補（例: オフハウス 東所沢店 → ハードオフ 東所沢店）。"""
+    label = _HARDOFF_BRAND_LABELS.get(brand, brand)
+    location = ""
+    try:
+        from services.combined_store_split_service import extract_location_suffix
+
+        location = extract_location_suffix(source_name)
+    except Exception:
+        try:
+            from combined_store_split_service import (  # type: ignore
+                extract_location_suffix,
+            )
+
+            location = extract_location_suffix(source_name)
+        except Exception:
+            location = ""
+    if not location:
+        return label
+    use_space = bool(re.search(r"(ハウス|オフ)\s+\S", source_name or ""))
+    if use_space:
+        return f"{label} {location}".strip()
+    return f"{label}{location}".strip()
+
+
 def _store_map_dict(store: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     try:
         lat = float(store.get("latitude"))
@@ -233,6 +293,11 @@ def _store_map_dict(store: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
     tags = store.get("tags") or []
     tag_names = [t.get("name") for t in tags if t.get("name")]
+    brand = _brand_of_store(store)
+    try:
+        checked = bool(int(store.get("collocation_checked") or 0))
+    except (TypeError, ValueError):
+        checked = bool(store.get("collocation_checked"))
     return {
         "id": store.get("id"),
         "store_code": store.get("store_code") or store.get("supplier_code") or "",
@@ -244,6 +309,9 @@ def _store_map_dict(store: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "tag_names": tag_names,
         "tag_ids": [int(t["id"]) for t in tags if t.get("id") is not None],
         "member_names": [],
+        "member_brands": [brand] if brand else [],
+        "is_hardoff_family": brand is not None,
+        "collocation_checked": checked,
         "will_visit": _will_visit_from_store(store),
     }
 
@@ -287,14 +355,37 @@ def _markers_from_stores(stores_raw: List[Dict[str, Any]]) -> List[Dict[str, Any
         # 併設ピンの訪問フラグは代表店を優先
         mapped["will_visit"] = _will_visit_from_store(group.representative)
         member_codes = []
+        member_ids: List[int] = []
         for m in members:
             mc = str(m.get("store_code") or m.get("supplier_code") or "").strip()
             if mc and mc not in member_codes:
                 member_codes.append(mc)
+            mid = m.get("id")
+            if mid is not None:
+                try:
+                    mid_i = int(mid)
+                except (TypeError, ValueError):
+                    mid_i = None
+                if mid_i is not None and mid_i not in member_ids:
+                    member_ids.append(mid_i)
         mapped["member_codes"] = member_codes
-        if detect_hardoff_family_brand is not None and detect_hardoff_family_brand(
-            group.representative
-        ):
+        mapped["member_ids"] = member_ids
+        member_brands = _ordered_member_brands(members)
+        mapped["member_brands"] = member_brands
+        # 併設ピンはメンバーのいずれかが確認済みならピン全体を確認済み
+        any_checked = False
+        for m in members:
+            try:
+                if bool(int(m.get("collocation_checked") or 0)):
+                    any_checked = True
+                    break
+            except (TypeError, ValueError):
+                if m.get("collocation_checked"):
+                    any_checked = True
+                    break
+        mapped["collocation_checked"] = any_checked
+        if member_brands:
+            mapped["is_hardoff_family"] = True
             mapped["icon_key"] = hardoff_collocation_icon_key(len(members))
             names = []
             for m in members:
@@ -374,7 +465,66 @@ def build_leaflet_html(payload: Dict[str, Any]) -> str:
     margin-right:6px; border:1px solid #fff; vertical-align:middle;
   }}
   .popup-title {{ font-weight:bold; margin-bottom:4px; }}
-  .popup-tags {{ color:#90caf9; }}
+  .popup-tags {{ color:#1565c0; font-size:12px; }}
+  .popup-actions {{
+    margin-top: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }}
+  .popup-actions button {{
+    border: 1px solid #90a4ae;
+    background: #eceff1;
+    color: #263238;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font: 12px/1.2 "Segoe UI","Meiryo UI",sans-serif;
+    cursor: pointer;
+  }}
+  .popup-actions button.danger {{
+    background: #ffebee;
+    border-color: #ef9a9a;
+    color: #b71c1c;
+  }}
+  .popup-actions button.primary {{
+    background: #e3f2fd;
+    border-color: #64b5f6;
+    color: #0d47a1;
+  }}
+  .popup-actions button.colloc {{
+    background: #e8f5e9;
+    border-color: #81c784;
+    color: #1b5e20;
+  }}
+  .popup-actions button:hover {{ filter: brightness(0.97); }}
+  .popup-candidates {{
+    margin-top: 8px;
+    max-height: 160px;
+    overflow-y: auto;
+    border-top: 1px solid #cfd8dc;
+    padding-top: 6px;
+  }}
+  .popup-candidates .cand-title {{
+    font: 700 11px/1.3 sans-serif;
+    color: #455a64;
+    margin-bottom: 4px;
+  }}
+  .popup-candidates a {{
+    display: block;
+    padding: 4px 6px;
+    margin: 2px 0;
+    border-radius: 4px;
+    text-decoration: none;
+    color: #0d47a1;
+    background: #f5f9fc;
+    font: 12px/1.3 "Segoe UI","Meiryo UI",sans-serif;
+  }}
+  .popup-candidates a:hover {{ background: #e3f2fd; }}
+  .popup-candidates .cand-dist {{
+    color: #607d8b;
+    font-size: 11px;
+    margin-left: 4px;
+  }}
   .mode-badge {{
     background: rgba(30,30,30,0.85); color:#eee; padding:4px 8px;
     border-radius:4px; font: 11px/1.3 sans-serif;
@@ -469,6 +619,87 @@ def build_leaflet_html(payload: Dict[str, Any]) -> str:
     box-shadow: 0 1px 3px rgba(0,0,0,0.45);
     z-index: 3;
   }}
+  .hirio-checked {{
+    position: absolute;
+    left: -4px;
+    top: -4px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #2e7d32;
+    color: #fff;
+    border: 1px solid #fff;
+    font: 700 11px/16px "Segoe UI","Meiryo UI",sans-serif;
+    text-align: center;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.45);
+    z-index: 3;
+  }}
+  .hirio-pin.selected .hirio-checked {{
+    width: 18px;
+    height: 18px;
+    font-size: 12px;
+    line-height: 18px;
+  }}
+  .popup-check-row {{
+    margin-top: 6px;
+    font-size: 12px;
+    color: #1b5e20;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }}
+  .popup-check-row input {{ margin: 0; }}
+  .popup-colloc-status {{
+    margin-top: 6px;
+    font-size: 12px;
+    color: #546e7a;
+  }}
+  .popup-colloc-cand {{
+    margin-top: 6px;
+    border-top: 1px solid #cfd8dc;
+    padding-top: 6px;
+    max-height: 180px;
+    overflow-y: auto;
+  }}
+  .popup-colloc-cand .cand-title {{
+    font-weight: bold;
+    font-size: 12px;
+    margin-bottom: 4px;
+  }}
+  .popup-colloc-cand .cand-row {{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 4px 0;
+    border-bottom: 1px solid #eceff1;
+    font-size: 12px;
+  }}
+  .popup-colloc-cand .cand-meta {{ color: #607d8b; font-size: 11px; }}
+  .popup-colloc-cand button {{
+    border: 1px solid #81c784;
+    background: #e8f5e9;
+    color: #1b5e20;
+    border-radius: 4px;
+    padding: 3px 8px;
+    font: 12px/1.2 "Segoe UI","Meiryo UI",sans-serif;
+    cursor: pointer;
+    white-space: nowrap;
+  }}
+  .legend-checked {{
+    display: inline-flex;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #2e7d32;
+    color: #fff;
+    border: 1px solid #fff;
+    margin-right: 6px;
+    vertical-align: middle;
+    align-items: center;
+    justify-content: center;
+    font: 700 11px/1 "Segoe UI",sans-serif;
+  }}
   body.hirio-pick-mode {{
     cursor: crosshair;
   }}
@@ -554,6 +785,62 @@ function notifyStorePick(store) {{
   }} catch (e) {{}}
 }}
 
+function notifyRouteAction(payload) {{
+  try {{
+    const body = payload || {{}};
+    body._ts = Date.now();
+    document.title = 'HIRIO_ROUTE:' + JSON.stringify(body);
+  }} catch (e) {{}}
+}}
+
+function approxKm(lat1, lng1, lat2, lng2) {{
+  const dy = (lat1 - lat2) * 111.0;
+  const dx = (lng1 - lng2) * 111.0 * Math.cos((lat1 * Math.PI) / 180);
+  return Math.sqrt(dx * dx + dy * dy);
+}}
+
+function storeActionPayload(store, extra) {{
+  const base = {{
+    store_id: store.id || null,
+    store_code: store.store_code || '',
+    store_name: store.store_name || '',
+    member_codes: store.member_codes || [],
+    member_ids: store.member_ids || [],
+    member_names: store.member_names || [],
+    member_brands: store.member_brands || [],
+    from_route_code: store.route_code || '',
+    from_route_name: store.route_name || '',
+    lat: store.lat,
+    lng: store.lng
+  }};
+  if (extra) {{
+    Object.keys(extra).forEach(function(k) {{ base[k] = extra[k]; }});
+  }}
+  return base;
+}}
+
+function nearestRouteCandidates(store, limit) {{
+  const centers = (window.__HIRIO_DATA && window.__HIRIO_DATA.route_centers) || [];
+  const current = (store.route_code || '').trim();
+  const lat = store.lat;
+  const lng = store.lng;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return [];
+  const rows = [];
+  centers.forEach(function(c) {{
+    if (!c || !Number.isFinite(c.lat) || !Number.isFinite(c.lng)) return;
+    const code = (c.route_code || '').trim();
+    if (!code) return;
+    if (current && code === current) return;
+    rows.push({{
+      route_code: code,
+      route_name: c.route_name || code,
+      km: approxKm(lat, lng, c.lat, c.lng)
+    }});
+  }});
+  rows.sort(function(a, b) {{ return a.km - b.km; }});
+  return rows.slice(0, limit || 12);
+}}
+
 function bindStorePopup(marker, store, routeName) {{
   const tags = (store.tag_names || []).join(' / ') || '（タグなし）';
   const code = store.store_code ? '[' + store.store_code + '] ' : '';
@@ -562,12 +849,185 @@ function bindStorePopup(marker, store, routeName) {{
   if (members.length > 1) {{
     extra = '<div>併設: ' + members.join(' / ') + '</div>';
   }}
+  const assigned = !!(store.route_code || '').trim();
+  const routeLabel = routeName || store.route_name || (assigned ? store.route_code : '未所属');
+  const memberBrands = store.member_brands || [];
+  const missingBrands = ['HA', 'HO', 'OF'].filter(function(b) {{
+    return memberBrands.indexOf(b) < 0;
+  }});
+  const isHardoff = !!store.is_hardoff_family;
+  const showColloc = isHardoff && missingBrands.length > 0;
+  const checked = !!store.collocation_checked;
+  let hardoffExtra = '';
+  if (isHardoff && !window.__HIRIO_PICK_MODE) {{
+    hardoffExtra =
+      '<label class="popup-check-row">' +
+        '<input type="checkbox" class="hirio-chk-colloc"' +
+        (checked ? ' checked' : '') + '>' +
+        '併設確認済み' +
+      '</label>' +
+      '<div class="popup-colloc-status"></div>' +
+      '<div class="popup-colloc-cand" style="display:none;"></div>';
+  }}
+  let actions = '';
+  if (!window.__HIRIO_PICK_MODE) {{
+    actions =
+      '<div class="popup-actions">' +
+        (assigned
+          ? '<button type="button" class="danger hirio-btn-unassign">ルート解除</button>'
+          : '') +
+        '<button type="button" class="primary hirio-btn-register">ルート登録</button>' +
+        (isHardoff
+          ? '<button type="button" class="colloc hirio-btn-auto-colloc">併設を自動確認</button>'
+          : '') +
+        (showColloc
+          ? '<button type="button" class="colloc hirio-btn-colloc">併設店舗登録</button>'
+          : '') +
+        '<button type="button" class="danger hirio-btn-delete">DBから削除</button>' +
+      '</div>' +
+      '<div class="popup-candidates" style="display:none;"></div>';
+  }}
   marker.bindPopup(
     '<div class="popup-title">' + code + (store.store_name || '') + '</div>' +
     extra +
-    '<div>ルート: ' + (routeName || '未所属') + '</div>' +
-    '<div class="popup-tags">タグ: ' + tags + '</div>'
+    '<div>ルート: ' + routeLabel + '</div>' +
+    '<div class="popup-tags">タグ: ' + tags + '</div>' +
+    hardoffExtra +
+    actions,
+    {{ maxWidth: 340 }}
   );
+  marker.on('popupopen', function() {{
+    if (window.__HIRIO_PICK_MODE) return;
+    const root = marker.getPopup() && marker.getPopup().getElement();
+    if (!root) return;
+    const unBtn = root.querySelector('.hirio-btn-unassign');
+    const regBtn = root.querySelector('.hirio-btn-register');
+    const collocBtn = root.querySelector('.hirio-btn-colloc');
+    const autoBtn = root.querySelector('.hirio-btn-auto-colloc');
+    const delBtn = root.querySelector('.hirio-btn-delete');
+    const chk = root.querySelector('.hirio-chk-colloc');
+    const status = root.querySelector('.popup-colloc-status');
+    const candBox = root.querySelector('.popup-candidates');
+    const cacheKey = storeCacheKey(store);
+    if (chk) {{
+      chk.onchange = function() {{
+        notifyRouteAction(
+          storeActionPayload(store, {{
+            action: 'set_collocation_checked',
+            checked: !!chk.checked,
+            member_brands: memberBrands
+          }})
+        );
+      }};
+    }}
+    function requestAutoCheck(force) {{
+      if (status) status.textContent = force ? 'Googleで再検索中…' : 'Googleで確認中…';
+      notifyRouteAction(
+        storeActionPayload(store, {{
+          action: 'auto_check_collocation',
+          member_brands: memberBrands,
+          force: !!force,
+          cache_key: cacheKey,
+          lat: store.lat,
+          lng: store.lng
+        }})
+      );
+    }}
+    if (autoBtn) {{
+      autoBtn.onclick = function(ev) {{
+        try {{ L.DomEvent.stop(ev); }} catch (errA) {{}}
+        requestAutoCheck(true);
+      }};
+    }}
+    // キャッシュ済み結果を再表示
+    const cached = window.__HIRIO_COLLOC_CACHE[cacheKey];
+    if (cached && typeof window.__HIRIO_SHOW_COLLOC_CANDIDATES === 'function') {{
+      window.__HIRIO_SHOW_COLLOC_CANDIDATES(cached);
+    }} else if (
+      isHardoff &&
+      !checked &&
+      missingBrands.length > 0 &&
+      !store._autoCheckedOnce
+    ) {{
+      store._autoCheckedOnce = true;
+      requestAutoCheck(false);
+    }} else if (status && isHardoff && missingBrands.length <= 0) {{
+      status.textContent = 'HA/HO/OF はDB上そろっています';
+    }}
+    if (unBtn) {{
+      unBtn.onclick = function(ev) {{
+        try {{ L.DomEvent.stop(ev); }} catch (err) {{}}
+        notifyRouteAction(storeActionPayload(store, {{ action: 'unassign' }}));
+        try {{ marker.closePopup(); }} catch (err2) {{}}
+      }};
+    }}
+    if (delBtn) {{
+      delBtn.onclick = function(ev) {{
+        try {{ L.DomEvent.stop(ev); }} catch (errDel) {{}}
+        notifyRouteAction(storeActionPayload(store, {{ action: 'delete' }}));
+        try {{ marker.closePopup(); }} catch (errDel2) {{}}
+      }};
+    }}
+    if (collocBtn) {{
+      collocBtn.onclick = function(ev) {{
+        try {{ L.DomEvent.stop(ev); }} catch (errCol) {{}}
+        notifyRouteAction(
+          storeActionPayload(store, {{
+            action: 'register_collocation',
+            member_brands: memberBrands
+          }})
+        );
+        try {{ marker.closePopup(); }} catch (errCol2) {{}}
+      }};
+    }}
+    if (regBtn && candBox) {{
+      regBtn.onclick = function(ev) {{
+        try {{ L.DomEvent.stop(ev); }} catch (err) {{}}
+        const cands = nearestRouteCandidates(store, 12);
+        if (!cands.length) {{
+          candBox.style.display = 'block';
+          candBox.innerHTML =
+            '<div class="cand-title">候補ルートがありません</div>';
+          return;
+        }}
+        let html = '<div class="cand-title">近いルートから選択</div>';
+        cands.forEach(function(c) {{
+          const dist =
+            c.km < 1
+              ? Math.round(c.km * 1000) + 'm'
+              : c.km.toFixed(1) + 'km';
+          html +=
+            '<a href="#" class="hirio-cand-route" data-code="' +
+            encodeURIComponent(c.route_code) +
+            '" data-name="' +
+            encodeURIComponent(c.route_name) +
+            '">' +
+            (c.route_name || c.route_code) +
+            '<span class="cand-dist">' +
+            dist +
+            '</span></a>';
+        }});
+        candBox.innerHTML = html;
+        candBox.style.display = 'block';
+        candBox.querySelectorAll('.hirio-cand-route').forEach(function(a) {{
+          a.onclick = function(ev2) {{
+            try {{ L.DomEvent.stop(ev2); }} catch (err3) {{}}
+            try {{ ev2.preventDefault(); }} catch (err4) {{}}
+            const rc = decodeURIComponent(a.getAttribute('data-code') || '');
+            const rn = decodeURIComponent(a.getAttribute('data-name') || '');
+            notifyRouteAction(
+              storeActionPayload(store, {{
+                action: 'register',
+                route_code: rc,
+                route_name: rn
+              }})
+            );
+            try {{ marker.closePopup(); }} catch (err5) {{}}
+          }};
+        }});
+      }};
+    }}
+  }});
   marker.on('click', function(e) {{
     if (!window.__HIRIO_PICK_MODE) return;
     try {{ L.DomEvent.stop(e); }} catch (err) {{}}
@@ -582,6 +1042,87 @@ function pickIndexHtml(store) {{
   return '<div class="hirio-pick-num">' + n + '</div>';
 }}
 
+function checkedBadgeHtml(store) {{
+  if (!store.is_hardoff_family || !store.collocation_checked) return '';
+  return '<div class="hirio-checked" title="併設確認済み">✓</div>';
+}}
+
+function storeCacheKey(store) {{
+  const id = store.id || store.store_code || '';
+  const lat = Number(store.lat || 0).toFixed(5);
+  const lng = Number(store.lng || 0).toFixed(5);
+  return String(id) + '@' + lat + ',' + lng;
+}}
+
+window.__HIRIO_COLLOC_CACHE = window.__HIRIO_COLLOC_CACHE || {{}};
+
+window.__HIRIO_SHOW_COLLOC_CANDIDATES = function(payload) {{
+  const data = payload || {{}};
+  const key = data.cache_key || '';
+  if (key) {{
+    window.__HIRIO_COLLOC_CACHE[key] = data;
+  }}
+  const root = document.querySelector('.leaflet-popup-content');
+  if (!root) return;
+  const box = root.querySelector('.popup-colloc-cand');
+  const status = root.querySelector('.popup-colloc-status');
+  if (!box) return;
+  if (data.error) {{
+    if (status) status.textContent = data.error;
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }}
+  const cands = data.candidates || [];
+  if (status) {{
+    status.textContent = cands.length
+      ? ('Google検索: ' + cands.length + '件の併設候補')
+      : (data.message || '近くに未登録の併設は見つかりませんでした');
+  }}
+  if (!cands.length) {{
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }}
+  let html = '<div class="cand-title">未登録の併設候補</div>';
+  cands.forEach(function(c, idx) {{
+    const dist = (c.distance_m != null)
+      ? (c.distance_m < 1000
+          ? Math.round(c.distance_m) + 'm'
+          : (c.distance_m / 1000).toFixed(1) + 'km')
+      : '';
+    html +=
+      '<div class="cand-row">' +
+        '<div>' +
+          '<div>' + (c.store_name || c.brand_label || '') + '</div>' +
+          '<div class="cand-meta">' + (c.brand_label || '') +
+            (dist ? (' · ' + dist) : '') + '</div>' +
+        '</div>' +
+        '<button type="button" class="hirio-btn-cand-reg" data-idx="' + idx + '">登録</button>' +
+      '</div>';
+  }});
+  box.innerHTML = html;
+  box.style.display = 'block';
+  box.querySelectorAll('.hirio-btn-cand-reg').forEach(function(btn) {{
+    btn.onclick = function(ev) {{
+      try {{ L.DomEvent.stop(ev); }} catch (err) {{}}
+      const i = parseInt(btn.getAttribute('data-idx') || '-1', 10);
+      const cand = cands[i];
+      if (!cand) return;
+      notifyRouteAction({{
+        action: 'register_collocation_candidate',
+        store_id: data.store_id || null,
+        store_code: data.store_code || '',
+        store_name: data.store_name || '',
+        member_codes: data.member_codes || [],
+        member_ids: data.member_ids || [],
+        member_brands: data.member_brands || [],
+        candidate: cand
+      }});
+    }};
+  }});
+}};
+
 function endpointLabel(endpoint) {{
   if (endpoint === 'start') return 'スタート';
   if (endpoint === 'goal') return 'ゴール';
@@ -595,26 +1136,147 @@ function endpointHtml(endpoint) {{
   return '<div class="hirio-endpoint ' + endpoint + '">' + label + '</div>';
 }}
 
+// 画面上で近接するピンをずらし、本物座標へ脚を伸ばす
+const OVERLAP_PX = 28;
+const OFFSET_PX = 22;
+
+function storeDisplayLatLng(store) {{
+  const lat = Number.isFinite(store.displayLat) ? store.displayLat : store.lat;
+  const lng = Number.isFinite(store.displayLng) ? store.displayLng : store.lng;
+  return [lat, lng];
+}}
+
+function addOffsetStem(trueLat, trueLng, dispLat, dispLng, color) {{
+  L.polyline(
+    [[trueLat, trueLng], [dispLat, dispLng]],
+    {{
+      color: color || DEFAULT_PIN,
+      weight: 2.5,
+      opacity: 0.9,
+      interactive: false
+    }}
+  ).addTo(layerGroup);
+  L.circleMarker([trueLat, trueLng], {{
+    radius: 3.5,
+    color: '#ffffff',
+    weight: 1.5,
+    fillColor: color || DEFAULT_PIN,
+    fillOpacity: 1,
+    interactive: false
+  }}).addTo(layerGroup);
+}}
+
+function applyOverlapOffsets(entries) {{
+  // entries: {{ store, lat, lng }} — 画面ピクセル距離で近接グループ化し displayLat/Lng を付与
+  entries.forEach(function(e) {{
+    e.store.displayLat = e.lat;
+    e.store.displayLng = e.lng;
+    e.store.hasOffset = false;
+  }});
+  const n = entries.length;
+  if (n < 2) return;
+  try {{
+    const sz = map.getSize();
+    if (!sz || sz.x < 40 || sz.y < 40) {{
+      try {{ map.invalidateSize(false); }} catch (e0) {{}}
+      return; // サイズ未確定のときはずらさず本物座標のまま
+    }}
+  }} catch (e1) {{
+    return;
+  }}
+
+  const points = [];
+  for (let i = 0; i < n; i++) {{
+    const pt = map.latLngToLayerPoint(L.latLng(entries[i].lat, entries[i].lng));
+    points.push({{ x: pt.x, y: pt.y }});
+  }}
+
+  const parent = [];
+  for (let i = 0; i < n; i++) parent[i] = i;
+  function find(a) {{
+    while (parent[a] !== a) {{
+      parent[a] = parent[parent[a]];
+      a = parent[a];
+    }}
+    return a;
+  }}
+  function union(a, b) {{
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[ra] = rb;
+  }}
+
+  const thresh2 = OVERLAP_PX * OVERLAP_PX;
+  for (let i = 0; i < n; i++) {{
+    for (let j = i + 1; j < n; j++) {{
+      const dx = points[i].x - points[j].x;
+      const dy = points[i].y - points[j].y;
+      if (dx * dx + dy * dy <= thresh2) union(i, j);
+    }}
+  }}
+
+  const groups = {{}};
+  for (let i = 0; i < n; i++) {{
+    const r = find(i);
+    if (!groups[r]) groups[r] = [];
+    groups[r].push(i);
+  }}
+
+  Object.keys(groups).forEach(function(key) {{
+    const idxs = groups[key];
+    if (idxs.length < 2) return;
+    const count = idxs.length;
+    idxs.forEach(function(i, k) {{
+      let ox = 0;
+      let oy = 0;
+      if (count === 2) {{
+        ox = (k === 0) ? -OFFSET_PX : OFFSET_PX;
+        oy = -10;
+      }} else {{
+        const start = -Math.PI * 0.85;
+        const end = -Math.PI * 0.15;
+        const t = k / (count - 1);
+        const angle = start + (end - start) * t;
+        const radius = OFFSET_PX + Math.min(count - 2, 5) * 5;
+        ox = Math.cos(angle) * radius;
+        oy = Math.sin(angle) * radius;
+      }}
+      const base = map.latLngToLayerPoint(L.latLng(entries[i].lat, entries[i].lng));
+      const dispLl = map.layerPointToLatLng(L.point(base.x + ox, base.y + oy));
+      entries[i].store.displayLat = dispLl.lat;
+      entries[i].store.displayLng = dispLl.lng;
+      entries[i].store.hasOffset = true;
+    }});
+  }});
+}}
+
 function addCircle(store, routeName) {{
   const skipped = store.will_visit === false;
   const selected = !!store.selected;
   const endpoint = store.endpoint || '';
   const radius = selected ? 12 : (endpoint ? 10 : 8);
-  const marker = L.circleMarker([store.lat, store.lng], {{
+  const fill = skipped ? '{SKIPPED_PIN_COLOR}' : (store.pin_color || DEFAULT_PIN);
+  const disp = storeDisplayLatLng(store);
+  if (store.hasOffset) {{
+    addOffsetStem(store.lat, store.lng, disp[0], disp[1], fill);
+  }}
+  const marker = L.circleMarker(disp, {{
     radius: radius,
     color: selected ? '#ffeb3b' : '#ffffff',
     weight: selected ? 3 : 1.5,
-    fillColor: skipped ? '{SKIPPED_PIN_COLOR}' : (store.pin_color || DEFAULT_PIN),
+    fillColor: fill,
     fillOpacity: skipped ? 0.75 : 0.95
   }});
   bindStorePopup(marker, store, routeName);
   marker.addTo(layerGroup);
-  if (endpoint) {{
-    const tip = L.marker([store.lat, store.lng], {{
+  if (endpoint || (store.is_hardoff_family && store.collocation_checked)) {{
+    const tip = L.marker(disp, {{
       icon: L.divIcon({{
         className: 'hirio-pin-wrap',
         html: '<div style="position:relative;width:1px;height:1px;">' +
-              endpointHtml(endpoint) + '</div>',
+              endpointHtml(endpoint) +
+              checkedBadgeHtml(store) +
+              '</div>',
         iconSize: [1, 1],
         iconAnchor: [0, 28]
       }}),
@@ -637,16 +1299,21 @@ function addIconMarker(store, routeName, icons) {{
   const pinClass = 'hirio-pin' + (selected ? ' selected' : '');
   const size = selected ? [44, 56] : [34, 44];
   const anchor = selected ? [22, 54] : [17, 42];
+  const disp = storeDisplayLatLng(store);
+  if (store.hasOffset) {{
+    addOffsetStem(store.lat, store.lng, disp[0], disp[1], bg);
+  }}
   const html =
     '<div class="' + pinClass + '">' +
       endpointHtml(endpoint) +
       pickIndexHtml(store) +
+      checkedBadgeHtml(store) +
       '<div class="hirio-pin-badge" style="background:' + bg + '">' +
         '<span class="hirio-pin-text" style="color:' + fg + '">' + text + '</span>' +
       '</div>' +
       '<div class="hirio-pin-pointer" style="border-top-color:' + bg + '"></div>' +
     '</div>';
-  const marker = L.marker([store.lat, store.lng], {{
+  const marker = L.marker(disp, {{
     icon: L.divIcon({{
       className: 'hirio-pin-wrap',
       html: html,
@@ -656,7 +1323,7 @@ function addIconMarker(store, routeName, icons) {{
     }}),
     keyboard: false,
     opacity: skipped ? 0.85 : 1,
-    zIndexOffset: selected ? 600 : (store.pick_index ? 500 : (endpoint ? 400 : 0))
+    zIndexOffset: selected ? 600 : (store.pick_index ? 500 : (endpoint ? 400 : (store.hasOffset ? 200 : 0)))
   }});
   bindStorePopup(marker, store, routeName);
   marker.addTo(layerGroup);
@@ -712,6 +1379,9 @@ function hirioUpdateLegend(data) {{
       html += '<div style="margin-top:6px;"><span class="legend-endpoint" style="background:#2e7d32;">スタート</span>開始店舗</div>';
       html += '<div><span class="legend-endpoint" style="background:#c62828;">ゴール</span>終了店舗</div>';
     }}
+    if (data.show_collocation_checked) {{
+      html += '<div style="margin-top:6px;"><span class="legend-checked">✓</span>併設確認済み</div>';
+    }}
     div.innerHTML = html;
     return div;
   }};
@@ -731,9 +1401,17 @@ function hirioUpdateLegend(data) {{
   modeBadgeControl.addTo(map);
 }}
 
+let hirioUpdating = false;
+let hirioZoomRedrawTimer = null;
+let hirioFromZoomRedraw = false;
+
 // ピン・線だけ描き直す。fit=false なら拡大位置は絶対に変えない
 window.__HIRIO_UPDATE = function(data, opts) {{
   opts = opts || {{}};
+  if (hirioUpdating) return false;
+  hirioUpdating = true;
+  try {{
+  try {{ map.invalidateSize(false); }} catch (eInv) {{}}
   window.__HIRIO_DATA = data || {{}};
   window.__HIRIO_PICK_MODE = !!data.pick_mode;
   try {{
@@ -751,17 +1429,36 @@ window.__HIRIO_UPDATE = function(data, opts) {{
   layerGroup.clearLayers();
   const selectedCode = (data.selected_store_code || '').trim();
 
+  // 1) 全ピンを集め、近接なら画面上でずらす（ルート線は本物座標のまま）
+  const pinEntries = [];
+  (data.routes || []).forEach(function(route) {{
+    (route.stores || []).forEach(function(s) {{
+      if (!Number.isFinite(s.lat) || !Number.isFinite(s.lng)) return;
+      const codes = [s.store_code || ''].concat(s.member_codes || []);
+      s.selected = !!(selectedCode && codes.indexOf(selectedCode) >= 0);
+      s.route_code = route.route_code || '';
+      s.route_name = route.route_name || '';
+      pinEntries.push({{ store: s, lat: s.lat, lng: s.lng, routeName: route.route_name }});
+      bounds.push([s.lat, s.lng]);
+    }});
+  }});
+  (data.unassigned || []).forEach(function(s) {{
+    if (!Number.isFinite(s.lat) || !Number.isFinite(s.lng)) return;
+    s.route_code = '';
+    s.route_name = '';
+    pinEntries.push({{ store: s, lat: s.lat, lng: s.lng, routeName: '未所属' }});
+    bounds.push([s.lat, s.lng]);
+  }});
+  applyOverlapOffsets(pinEntries);
+
+  // 2) ルート線（本物の lat/lng）
   (data.routes || []).forEach(function(route) {{
     const color = route.line_color || '#1e88e5';
     const visitPts = [];
     const skipStores = [];
     const pickPts = [];
     (route.stores || []).forEach(function(s) {{
-      const codes = [s.store_code || ''].concat(s.member_codes || []);
-      s.selected = !!(selectedCode && codes.indexOf(selectedCode) >= 0);
-      if (useIcons) addIconMarker(s, route.route_name, icons);
-      else addCircle(s, route.route_name);
-      bounds.push([s.lat, s.lng]);
+      if (!Number.isFinite(s.lat) || !Number.isFinite(s.lng)) return;
       if (s.pick_index) {{
         pickPts.push({{ idx: s.pick_index, lat: s.lat, lng: s.lng }});
       }}
@@ -800,10 +1497,10 @@ window.__HIRIO_UPDATE = function(data, opts) {{
     }}
   }});
 
-  (data.unassigned || []).forEach(function(s) {{
-    if (useIcons) addIconMarker(s, '未所属', icons);
-    else addCircle(s, '未所属');
-    bounds.push([s.lat, s.lng]);
+  // 3) ピン（ずらした表示座標。脚は本物へ）
+  pinEntries.forEach(function(e) {{
+    if (useIcons) addIconMarker(e.store, e.routeName, icons);
+    else addCircle(e.store, e.routeName);
   }});
 
   hirioUpdateLegend(data);
@@ -826,10 +1523,31 @@ window.__HIRIO_UPDATE = function(data, opts) {{
   hirioRememberView();
   window.__HIRIO_READY = true;
   return true;
+  }} finally {{
+    hirioUpdating = false;
+  }}
 }};
+
+// ズームが変わると画面上の近接関係が変わるので、ずらしをやり直す
+// fitBounds 中の zoomend は UPDATE 完了後に回す（ずらし量を最終ズームで再計算）
+map.on('zoomend', function() {{
+  if (!window.__HIRIO_DATA || hirioFromZoomRedraw) return;
+  if (hirioZoomRedrawTimer) clearTimeout(hirioZoomRedrawTimer);
+  hirioZoomRedrawTimer = setTimeout(function() {{
+    hirioZoomRedrawTimer = null;
+    if (!window.__HIRIO_DATA || hirioFromZoomRedraw || hirioUpdating) return;
+    hirioFromZoomRedraw = true;
+    try {{
+      window.__HIRIO_UPDATE(window.__HIRIO_DATA, {{ fit: false }});
+    }} finally {{
+      hirioFromZoomRedraw = false;
+    }}
+  }}, 80);
+}});
 
 window.__HIRIO_FIT_BOUNDS = function(points) {{
   if (!points || !points.length) return false;
+  try {{ map.invalidateSize(false); }} catch (eInv2) {{}}
   const bounds = [];
   points.forEach(function(p) {{
     if (p && Number.isFinite(p[0]) && Number.isFinite(p[1])) {{
@@ -875,6 +1593,8 @@ class RouteMapWidget(QWidget):
         self._splitter_sizes_restored = False
         self._saved_map_view: Optional[Dict[str, float]] = None
         self._map_ready = False
+        # 併設自動確認のセッションキャッシュ（API連打防止）
+        self._colloc_search_cache: Dict[str, Dict[str, Any]] = {}
         self.setup_ui()
         self._saved_map_view = self._load_map_view_settings()
 
@@ -1271,6 +1991,8 @@ class RouteMapWidget(QWidget):
             QTimer.singleShot(0, self._restore_splitter_sizes)
         if self._payload_cache is None:
             self.reload()
+        # 開いたときは「ルート選択解除」と同じ全体マップ状態にする（白画面回避）
+        QTimer.singleShot(250, self.clear_editing_route_focus)
 
     def hideEvent(self, event) -> None:
         self._save_splitter_sizes()
@@ -1726,6 +2448,9 @@ class RouteMapWidget(QWidget):
 
     def _on_map_load_finished(self, ok: bool) -> None:
         self._map_ready = bool(ok)
+        if ok:
+            # HTML 初回読込直後はサイズ未確定で白くなりやすいので全体表示を当てる
+            QTimer.singleShot(120, self._fit_map_to_all_visible)
 
     def _on_map_title_changed(self, title: str) -> None:
         """document.title 経由で地図操作・店舗クリックを受け取る。"""
@@ -1738,6 +2463,14 @@ class RouteMapWidget(QWidget):
             if isinstance(raw, dict):
                 self._on_map_store_picked(raw)
             return
+        if text.startswith("HIRIO_ROUTE:"):
+            try:
+                raw = json.loads(text[len("HIRIO_ROUTE:") :])
+            except Exception:
+                return
+            if isinstance(raw, dict):
+                self._on_map_route_action(raw)
+            return
         if not text.startswith("HIRIO_MAP:"):
             return
         try:
@@ -1749,6 +2482,600 @@ class RouteMapWidget(QWidget):
             return
         self._saved_map_view = view
         self._persist_map_view(view)
+
+    def _resolve_store_ids_for_map_action(self, payload: Dict[str, Any]) -> List[int]:
+        """ポップアップ操作対象の店舗ID（併設はまとめて）。"""
+        ids: List[int] = []
+        for raw in payload.get("member_ids") or []:
+            try:
+                sid = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if sid not in ids:
+                ids.append(sid)
+        if ids:
+            return ids
+        try:
+            sid = int(payload.get("store_id"))
+        except (TypeError, ValueError):
+            sid = None
+        if sid is not None:
+            return [sid]
+
+        codes = []
+        sc = str(payload.get("store_code") or "").strip()
+        if sc:
+            codes.append(sc)
+        for c in payload.get("member_codes") or []:
+            cs = str(c or "").strip()
+            if cs and cs not in codes:
+                codes.append(cs)
+        for code in codes:
+            store = None
+            try:
+                store = self.db.get_store_by_code(code)
+            except Exception:
+                store = None
+            if not store:
+                continue
+            try:
+                sid = int(store.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if sid not in ids:
+                ids.append(sid)
+        return ids
+
+    def _on_map_route_action(self, payload: Dict[str, Any]) -> None:
+        """地図ポップアップからのルート解除／登録。"""
+        action = str(payload.get("action") or "").strip()
+        store_ids = self._resolve_store_ids_for_map_action(payload)
+        if not store_ids:
+            QMessageBox.warning(self, "ルート操作", "対象店舗を特定できませんでした。")
+            return
+
+        try:
+            from services.store_route_membership_service import (
+                move_store_to_route,
+                remove_store_from_route,
+                store_in_route,
+                unassign_store_completely,
+            )
+        except Exception:
+            try:
+                from store_route_membership_service import (  # type: ignore
+                    move_store_to_route,
+                    remove_store_from_route,
+                    store_in_route,
+                    unassign_store_completely,
+                )
+            except Exception as e:
+                QMessageBox.critical(self, "ルート操作", f"処理を読み込めませんでした:\n{e}")
+                return
+
+        label = (
+            str(payload.get("store_name") or payload.get("store_code") or "").strip()
+            or f"{len(store_ids)}店"
+        )
+
+        if action == "unassign":
+            from_code = str(payload.get("from_route_code") or "").strip()
+            from_name = str(payload.get("from_route_name") or "").strip()
+            if not from_code and not from_name:
+                QMessageBox.information(self, "ルート解除", "この店舗は未所属です。")
+                return
+            ok_count = 0
+            for sid in store_ids:
+                store = self.db.get_store(sid)
+                if not store:
+                    continue
+                if from_code or from_name:
+                    if remove_store_from_route(self.db, sid, from_name, from_code):
+                        ok_count += 1
+                    elif unassign_store_completely(self.db, sid):
+                        ok_count += 1
+                elif unassign_store_completely(self.db, sid):
+                    ok_count += 1
+            if ok_count <= 0:
+                QMessageBox.warning(self, "ルート解除", "解除に失敗しました。")
+                return
+            editing = self._editing_route_code
+            self.reload()
+            if editing:
+                self._set_editing_route(editing)
+            self.routes_changed.emit()
+            self.status_label.setText(
+                f"ルート解除: {label}（{from_name or from_code or '所属'}）"
+            )
+            return
+
+        if action == "register":
+            to_code = str(payload.get("route_code") or "").strip()
+            to_name = str(payload.get("route_name") or "").strip() or to_code
+            if not to_code:
+                QMessageBox.warning(self, "ルート登録", "登録先ルートがありません。")
+                return
+            already = 0
+            moved = 0
+            for sid in store_ids:
+                store = self.db.get_store(sid)
+                if not store:
+                    continue
+                if store_in_route(store, to_name, to_code):
+                    already += 1
+                    continue
+                if move_store_to_route(self.db, sid, to_name, to_code):
+                    moved += 1
+            if moved <= 0:
+                if already:
+                    QMessageBox.information(
+                        self,
+                        "ルート登録",
+                        f"「{label}」はすでに「{to_name}」に所属しています。",
+                    )
+                else:
+                    QMessageBox.warning(self, "ルート登録", "登録に失敗しました。")
+                return
+            editing = self._editing_route_code
+            self.reload()
+            # 登録先を編集対象にして店舗リストも更新
+            self._set_editing_route(to_code)
+            cb = self._route_checks.get(to_code)
+            if cb is not None and not cb.isChecked():
+                cb.blockSignals(True)
+                cb.setChecked(True)
+                cb.blockSignals(False)
+            self._refresh_map()
+            self.routes_changed.emit()
+            self.status_label.setText(f"ルート登録: {label} → {to_name}")
+            return
+
+        if action == "delete":
+            member_note = ""
+            if len(store_ids) > 1:
+                member_note = (
+                    f"\n\n併設としてまとまっている {len(store_ids)} 店を"
+                    "まとめて削除します。"
+                )
+            reply = QMessageBox.question(
+                self,
+                "削除確認",
+                f"店舗「{label}」をDBから削除しますか？\n"
+                "（元に戻せません）"
+                f"{member_note}",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            ok_count = 0
+            errors: List[str] = []
+            for sid in store_ids:
+                try:
+                    if self.db.delete_store(sid):
+                        ok_count += 1
+                except Exception as e:
+                    errors.append(str(e))
+            if ok_count <= 0:
+                detail = "\n".join(errors[:3]) if errors else ""
+                QMessageBox.warning(
+                    self,
+                    "DBから削除",
+                    "削除に失敗しました。" + (f"\n{detail}" if detail else ""),
+                )
+                return
+            if self._selected_store_code:
+                codes = {
+                    str(c).strip()
+                    for c in (
+                        [payload.get("store_code")]
+                        + list(payload.get("member_codes") or [])
+                    )
+                    if str(c or "").strip()
+                }
+                if self._selected_store_code in codes:
+                    self._selected_store_code = ""
+            editing = self._editing_route_code
+            self.reload()
+            if editing and editing in self._route_checks:
+                self._set_editing_route(editing)
+            else:
+                QTimer.singleShot(200, self._fit_map_to_all_visible)
+            self.routes_changed.emit()
+            self.status_label.setText(f"DBから削除: {label}（{ok_count}店）")
+            return
+
+        if action == "register_collocation":
+            self._register_collocated_store_from_map(payload)
+            return
+
+        if action == "register_collocation_candidate":
+            self._register_collocated_store_from_map(payload)
+            return
+
+        if action == "set_collocation_checked":
+            self._set_collocation_checked_from_map(payload)
+            return
+
+        if action == "auto_check_collocation":
+            self._auto_check_collocation_from_map(payload)
+            return
+
+        QMessageBox.warning(self, "ルート操作", f"不明な操作です: {action}")
+
+    def _merge_auto_brand_tag_ids(self, store_name: str, tag_ids: list) -> list:
+        try:
+            from services.store_brand_tag_service import merge_brand_tag_ids
+        except Exception:
+            try:
+                from store_brand_tag_service import merge_brand_tag_ids  # type: ignore
+            except Exception:
+                return list(tag_ids or [])
+        return merge_brand_tag_ids(self.db, store_name, tag_ids or [])
+
+    def _pick_collocation_brand(
+        self, member_brands: List[str], source_label: str
+    ) -> Optional[str]:
+        """未登録の HA/HO/OF から併設登録するブランドを選ぶ。"""
+        missing = _missing_hardoff_brands(member_brands)
+        if not missing:
+            QMessageBox.information(
+                self,
+                "併設店舗登録",
+                "ハードオフ／ホビーオフ／オフハウスは\n"
+                "すでにすべて登録されています。",
+            )
+            return None
+        if len(missing) == 1:
+            return missing[0]
+
+        labels = [
+            f"{code}: {_HARDOFF_BRAND_LABELS.get(code, code)}" for code in missing
+        ]
+        choice, ok = QInputDialog.getItem(
+            self,
+            "併設店舗登録",
+            f"基準店: {source_label}\n\n"
+            "まだDBにない併設ブランドを選んでください:",
+            labels,
+            0,
+            False,
+        )
+        if not ok or not choice:
+            return None
+        code = str(choice).split(":", 1)[0].strip().upper()
+        return code if code in missing else None
+
+    def _resolve_source_store_for_collocation(
+        self, payload: Dict[str, Any]
+    ) -> Tuple[Optional[Dict[str, Any]], List[int], List[str]]:
+        store_ids = self._resolve_store_ids_for_map_action(payload)
+        source = None
+        if store_ids:
+            source = self.db.get_store(store_ids[0])
+        if not source:
+            code = str(payload.get("store_code") or "").strip()
+            if code:
+                try:
+                    source = self.db.get_store_by_code(code)
+                except Exception:
+                    source = None
+        member_brands = [
+            str(b or "").strip().upper()
+            for b in (payload.get("member_brands") or [])
+            if str(b or "").strip()
+        ]
+        if not member_brands:
+            brands: List[str] = []
+            for sid in store_ids or []:
+                st = self.db.get_store(sid)
+                if not st:
+                    continue
+                b = _brand_of_store(st)
+                if b and b not in brands:
+                    brands.append(b)
+            if not brands and source:
+                b = _brand_of_store(source)
+                if b:
+                    brands.append(b)
+            member_brands = brands
+        return source, store_ids, member_brands
+
+    def _push_colloc_candidates_to_map(self, payload_for_js: Dict[str, Any]) -> None:
+        """ポップアップへ候補一覧を返す。"""
+        if not WEBENGINE_AVAILABLE or not getattr(self, "map_view", None):
+            return
+        try:
+            body = _json_for_js(payload_for_js)
+            js = f"window.__HIRIO_SHOW_COLLOC_CANDIDATES && window.__HIRIO_SHOW_COLLOC_CANDIDATES({body});"
+            self.map_view.page().runJavaScript(js)
+        except Exception as e:
+            print(f"併設候補の地図反映エラー: {e}")
+
+    def _set_collocation_checked_from_map(self, payload: Dict[str, Any]) -> None:
+        """ポップアップの併設確認済みチェックをDBへ保存。"""
+        store_ids = self._resolve_store_ids_for_map_action(payload)
+        if not store_ids:
+            QMessageBox.warning(self, "併設確認済み", "対象店舗を特定できませんでした。")
+            return
+        checked = bool(payload.get("checked"))
+        try:
+            updated = self.db.set_collocation_checked(store_ids, checked)
+        except Exception as e:
+            QMessageBox.critical(self, "併設確認済み", f"保存に失敗しました:\n{e}")
+            return
+        if updated <= 0:
+            QMessageBox.warning(self, "併設確認済み", "更新対象がありませんでした。")
+            return
+        editing = self._editing_route_code
+        self.reload()
+        if editing:
+            self._set_editing_route(editing)
+        self.routes_changed.emit()
+        label = str(payload.get("store_name") or payload.get("store_code") or "").strip()
+        state = "確認済み" if checked else "未確認"
+        self.status_label.setText(f"併設{state}: {label or f'{len(store_ids)}店'}")
+
+    def _auto_check_collocation_from_map(self, payload: Dict[str, Any]) -> None:
+        """Google Places で未登録の併設候補を検索し、ポップアップへ返す。"""
+        source, store_ids, member_brands = self._resolve_source_store_for_collocation(
+            payload
+        )
+        cache_key = str(payload.get("cache_key") or "").strip()
+        force = bool(payload.get("force"))
+        base_js = {
+            "cache_key": cache_key,
+            "store_id": payload.get("store_id"),
+            "store_code": payload.get("store_code") or "",
+            "store_name": payload.get("store_name") or "",
+            "member_codes": payload.get("member_codes") or [],
+            "member_ids": store_ids or payload.get("member_ids") or [],
+            "member_brands": member_brands,
+        }
+        if not force and cache_key and cache_key in self._colloc_search_cache:
+            cached = dict(self._colloc_search_cache[cache_key])
+            cached.update(base_js)
+            self._push_colloc_candidates_to_map(cached)
+            return
+
+        if not source:
+            out = {
+                **base_js,
+                "candidates": [],
+                "error": "基準店舗を特定できませんでした",
+            }
+            if cache_key:
+                self._colloc_search_cache[cache_key] = out
+            self._push_colloc_candidates_to_map(out)
+            return
+
+        missing = _missing_hardoff_brands(member_brands)
+        if not missing:
+            out = {
+                **base_js,
+                "candidates": [],
+                "message": "HA/HO/OF はDB上そろっています",
+            }
+            if cache_key:
+                self._colloc_search_cache[cache_key] = out
+            self._push_colloc_candidates_to_map(out)
+            return
+
+        try:
+            lat = float(payload.get("lat") if payload.get("lat") is not None else source.get("latitude"))
+            lng = float(payload.get("lng") if payload.get("lng") is not None else source.get("longitude"))
+        except (TypeError, ValueError):
+            out = {
+                **base_js,
+                "candidates": [],
+                "error": "座標が無いためGoogle検索できません",
+            }
+            if cache_key:
+                self._colloc_search_cache[cache_key] = out
+            self._push_colloc_candidates_to_map(out)
+            return
+
+        existing_names = [
+            str(n).strip()
+            for n in (payload.get("member_names") or [])
+            if str(n or "").strip()
+        ]
+        if not existing_names:
+            for sid in store_ids or []:
+                st = self.db.get_store(sid)
+                if not st:
+                    continue
+                name = str(st.get("store_name") or "").strip()
+                if name and name not in existing_names:
+                    existing_names.append(name)
+
+        try:
+            from services.google_maps_service import search_nearby_hardoff_collocations
+        except Exception:
+            try:
+                from google_maps_service import (  # type: ignore
+                    search_nearby_hardoff_collocations,
+                )
+            except Exception as e:
+                out = {
+                    **base_js,
+                    "candidates": [],
+                    "error": f"Google検索を読み込めません: {e}",
+                }
+                self._push_colloc_candidates_to_map(out)
+                return
+
+        try:
+            candidates = search_nearby_hardoff_collocations(
+                latitude=lat,
+                longitude=lng,
+                source_store_name=str(source.get("store_name") or ""),
+                missing_brands=missing,
+                existing_member_names=existing_names,
+            )
+        except Exception as e:
+            out = {
+                **base_js,
+                "candidates": [],
+                "error": f"Google検索に失敗しました: {e}",
+            }
+            if cache_key:
+                self._colloc_search_cache[cache_key] = out
+            self._push_colloc_candidates_to_map(out)
+            return
+
+        out = {
+            **base_js,
+            "candidates": candidates,
+            "message": (
+                f"{len(candidates)}件の併設候補"
+                if candidates
+                else "近くに未登録の併設は見つかりませんでした"
+            ),
+        }
+        if cache_key:
+            self._colloc_search_cache[cache_key] = out
+        self._push_colloc_candidates_to_map(out)
+        self.status_label.setText(
+            f"併設自動確認: {out['message']}（{source.get('store_name') or ''}）"
+        )
+
+    def _register_collocated_store_from_map(self, payload: Dict[str, Any]) -> None:
+        """地図ポップアップからハードオフ系の併設店をDB登録する。"""
+        source, store_ids, member_brands = self._resolve_source_store_for_collocation(
+            payload
+        )
+        if not source:
+            QMessageBox.warning(
+                self, "併設店舗登録", "基準となる店舗を特定できませんでした。"
+            )
+            return
+
+        candidate = payload.get("candidate") if isinstance(payload.get("candidate"), dict) else None
+        source_label = (
+            str(source.get("store_name") or source.get("store_code") or "").strip()
+            or "選択店舗"
+        )
+
+        if candidate:
+            brand = str(candidate.get("brand") or "").strip().upper()
+            if brand not in _HARDOFF_BRAND_LABELS:
+                QMessageBox.warning(self, "併設店舗登録", "候補のブランドが不正です。")
+                return
+            suggested_name = str(candidate.get("store_name") or "").strip() or (
+                _suggest_collocated_store_name(str(source.get("store_name") or ""), brand)
+            )
+            prefill_address = str(candidate.get("address") or source.get("address") or "")
+            prefill_phone = str(candidate.get("phone") or source.get("phone") or "")
+            prefill_lat = StoreEditDialog._coerce_coordinate(
+                candidate.get("latitude")
+            )
+            prefill_lng = StoreEditDialog._coerce_coordinate(
+                candidate.get("longitude")
+            )
+            if prefill_lat is None:
+                prefill_lat = StoreEditDialog._coerce_coordinate(source.get("latitude"))
+            if prefill_lng is None:
+                prefill_lng = StoreEditDialog._coerce_coordinate(source.get("longitude"))
+        else:
+            brand = self._pick_collocation_brand(member_brands, source_label)
+            if not brand:
+                return
+            suggested_name = _suggest_collocated_store_name(
+                str(source.get("store_name") or ""), brand
+            )
+            prefill_address = str(source.get("address") or "")
+            prefill_phone = str(source.get("phone") or "")
+            prefill_lat = StoreEditDialog._coerce_coordinate(source.get("latitude"))
+            prefill_lng = StoreEditDialog._coerce_coordinate(source.get("longitude"))
+
+        initial_route = str(source.get("affiliated_route_name") or "").strip()
+        custom_fields_def = []
+        try:
+            custom_fields_def = self.db.list_custom_fields(active_only=True)
+        except Exception:
+            custom_fields_def = []
+
+        dialog = StoreEditDialog(
+            self,
+            custom_fields_def=custom_fields_def,
+            initial_route_name=initial_route if initial_route else "",
+        )
+        dialog.setWindowTitle(
+            f"併設店舗登録（{_HARDOFF_BRAND_LABELS.get(brand, brand)}）"
+        )
+        dialog.store_name_edit.setText(suggested_name)
+        dialog.address_edit.setText(prefill_address)
+        dialog.phone_edit.setText(prefill_phone)
+        dialog._latitude = prefill_lat
+        dialog._longitude = prefill_lng
+        dialog._refresh_store_code_suggestions(suggested_name, auto_pick_first=True)
+        if not dialog._get_store_code_text():
+            try:
+                next_code = self.db.get_next_store_code_for_prefix(brand)
+                if next_code:
+                    dialog._set_store_code_text(next_code)
+            except Exception:
+                pass
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        is_valid, error_msg = dialog.validate()
+        if not is_valid:
+            QMessageBox.warning(self, "エラー", error_msg)
+            return
+
+        try:
+            data = dialog.get_data()
+            if not data.get("store_code"):
+                store_name = data.get("store_name", "")
+                if store_name:
+                    generated = self.db.get_next_store_code_from_store_name(store_name)
+                    if generated:
+                        data["store_code"] = generated
+                if not data.get("store_code"):
+                    next_code = self.db.get_next_store_code_for_prefix(brand)
+                    if next_code:
+                        data["store_code"] = next_code
+            if data.get("latitude") is None or data.get("longitude") is None:
+                if prefill_lat is not None and prefill_lng is not None:
+                    data["latitude"] = prefill_lat
+                    data["longitude"] = prefill_lng
+            aff = (data.get("affiliated_route_name") or "").strip()
+            if not aff:
+                data["affiliated_route_name"] = None
+                data["route_code"] = None
+            tag_ids = data.pop("tag_ids", None) or []
+            tag_ids = self._merge_auto_brand_tag_ids(
+                str(data.get("store_name") or ""), tag_ids
+            )
+            new_id = self.db.add_store(data)
+            if new_id:
+                self.db.set_store_tag_ids(int(new_id), tag_ids)
+            # 登録後は検索キャッシュを捨てて再確認できるようにする
+            self._colloc_search_cache.clear()
+            new_code = str(data.get("store_code") or "").strip()
+            new_name = str(data.get("store_name") or "").strip()
+            msg = f"併設店舗を登録しました。\n{new_name}"
+            if new_code:
+                msg += f"\n店舗コード: {new_code}"
+            if aff:
+                msg += f"\nルート: {aff}"
+            else:
+                msg += "\n（未所属。あとからルート登録できます）"
+            QMessageBox.information(self, "完了", msg)
+
+            editing = self._editing_route_code
+            self.reload()
+            if editing:
+                self._set_editing_route(editing)
+            if new_code:
+                self._selected_store_code = new_code
+            self.routes_changed.emit()
+            self.status_label.setText(f"併設店舗登録: {new_name or new_code}")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"登録に失敗しました:\n{e}")
 
     def _set_pick_status(self, text: str) -> None:
         """地図上ツールバーは1行固定。全文はツールチップへ。"""
@@ -2663,9 +3990,33 @@ class RouteMapWidget(QWidget):
             for s in (r.get("stores") or [])
         )
 
+        # 全ルートの中心（近い順の登録候補用。表示ON/OFFに関わらず）
+        route_centers: List[Dict[str, Any]] = []
+        for route in self._payload_cache.get("routes") or []:
+            code = str(route.get("route_code") or "").strip()
+            if not code:
+                continue
+            mean = _mean_lat_lng(list(route.get("stores") or []))
+            if not mean:
+                continue
+            route_centers.append(
+                {
+                    "route_code": code,
+                    "route_name": str(route.get("route_name") or code),
+                    "lat": mean[0],
+                    "lng": mean[1],
+                }
+            )
+
+        show_collocation_checked = any(
+            bool(s.get("collocation_checked")) and bool(s.get("is_hardoff_family"))
+            for s in visible_stores
+        )
+
         leaflet_payload: Dict[str, Any] = {
             "routes": map_routes,
             "unassigned": unassigned,
+            "route_centers": route_centers,
             "tag_legend": tag_legend,
             "icon_legend": icon_legend,
             "map_icons": MAP_ICON_DEFS,
@@ -2673,6 +4024,7 @@ class RouteMapWidget(QWidget):
             "grayscale": bool(self.grayscale_check.isChecked()),
             "selected_store_code": self._selected_store_code,
             "show_endpoints": show_endpoints,
+            "show_collocation_checked": show_collocation_checked,
             "pick_mode": bool(self._pick_mode),
         }
 

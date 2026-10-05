@@ -15,11 +15,20 @@ Google Maps APIを使用した店舗情報取得サービス
 
 from __future__ import annotations
 
+import math
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from PySide6.QtCore import QSettings
+
+# ハードオフ系併設の近傍検索（Places座標ずれを踏まえ 150m）
+HARDOFF_COLLOCATION_SEARCH_RADIUS_M = 150.0
+_HARDOFF_BRAND_LABELS = {
+    "HA": "ハードオフ",
+    "HO": "ホビーオフ",
+    "OF": "オフハウス",
+}
 
 try:
     import requests
@@ -505,6 +514,232 @@ def get_store_info_from_google(
     except Exception as e:
         print(f"店舗情報の取得エラー ({store_name}): {e}")
         return None
+
+
+def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    r = 6371000.0
+    dlat = math.radians(lat2 - lat1)
+    dlng = math.radians(lng2 - lng1)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(dlng / 2) ** 2
+    )
+    return 2.0 * r * math.asin(math.sqrt(a))
+
+
+def _normalize_name_key(name: str) -> str:
+    s = re.sub(r"[\s\u3000]+", "", (name or "").strip().lower())
+    return s
+
+
+def _brand_matches_place_name(brand: str, place_name: str) -> bool:
+    label = _HARDOFF_BRAND_LABELS.get(brand, "")
+    name = place_name or ""
+    name_u = name.upper()
+    if brand == "HA":
+        return (
+            "ハードオフ" in name
+            or "HARD OFF" in name_u
+            or "HARDOFF" in name_u.replace(" ", "")
+        )
+    if brand == "HO":
+        return (
+            "ホビーオフ" in name
+            or "HOBBY OFF" in name_u
+            or "HOBBYOFF" in name_u.replace(" ", "")
+        )
+    if brand == "OF":
+        return (
+            "オフハウス" in name
+            or "OFF HOUSE" in name_u
+            or "OFFHOUSE" in name_u.replace(" ", "")
+        )
+    return bool(label and label in name)
+
+
+def _search_text_place_near(
+    *,
+    text_query: str,
+    latitude: float,
+    longitude: float,
+    radius_m: float,
+    api_key: str,
+    language_code: str = "ja",
+) -> Optional[Dict[str, Any]]:
+    """Places searchText + locationBias で1件取得し、距離付きで返す。"""
+    if requests is None:
+        return None
+    search_url = "https://places.googleapis.com/v1/places:searchText"
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": (
+            "places.id,places.displayName,places.formattedAddress,"
+            "places.location,places.nationalPhoneNumber,"
+            "places.internationalPhoneNumber"
+        ),
+    }
+    payload = {
+        "textQuery": text_query,
+        "maxResultCount": 3,
+        "languageCode": language_code,
+        "regionCode": "JP",
+        "locationBias": {
+            "circle": {
+                "center": {"latitude": latitude, "longitude": longitude},
+                "radius": float(radius_m),
+            }
+        },
+    }
+    try:
+        resp = requests.post(search_url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"近傍検索エラー ({text_query}): {e}")
+        return None
+
+    places = data.get("places") or []
+    best: Optional[Dict[str, Any]] = None
+    best_dist = None
+    for place in places:
+        display = place.get("displayName") or {}
+        name = str(display.get("text") or "").strip()
+        plat, plng = _parse_location(place.get("location"))
+        if plat is None or plng is None:
+            continue
+        dist = _haversine_m(latitude, longitude, plat, plng)
+        if dist > radius_m:
+            continue
+        address = place.get("formattedAddress") or ""
+        if address:
+            address = normalize_japanese_address(formatted=address) or address
+        phone = (
+            place.get("nationalPhoneNumber")
+            or place.get("internationalPhoneNumber")
+            or ""
+        )
+        cand = {
+            "store_name": name,
+            "address": address,
+            "phone": phone,
+            "latitude": plat,
+            "longitude": plng,
+            "distance_m": round(dist, 1),
+            "place_id": place.get("id") or "",
+        }
+        if best is None or dist < best_dist:  # type: ignore[operator]
+            best = cand
+            best_dist = dist
+    return best
+
+
+def search_nearby_hardoff_collocations(
+    *,
+    latitude: float,
+    longitude: float,
+    source_store_name: str = "",
+    location_label: str = "",
+    missing_brands: Sequence[str],
+    existing_member_names: Optional[Sequence[str]] = None,
+    radius_m: float = HARDOFF_COLLOCATION_SEARCH_RADIUS_M,
+    api_key: Optional[str] = None,
+    language_code: str = "ja",
+) -> List[Dict[str, Any]]:
+    """
+    基準座標の近くで、まだDBにない HA/HO/OF 併設候補を Places で探す。
+
+    戻り値の各要素:
+      {
+        "brand": "HA"|"HO"|"OF",
+        "brand_label": "ハードオフ",
+        "store_name": "...",
+        "address": "...",
+        "phone": "...",
+        "latitude": float,
+        "longitude": float,
+        "distance_m": float,
+      }
+    """
+    key = _resolve_api_key(api_key)
+    if not key:
+        print("警告: Google Maps APIキーが設定されていません。")
+        return []
+
+    try:
+        lat = float(latitude)
+        lng = float(longitude)
+    except (TypeError, ValueError):
+        return []
+
+    loc = (location_label or "").strip()
+    if not loc:
+        try:
+            from services.combined_store_split_service import extract_location_suffix
+
+            loc = extract_location_suffix(source_store_name)
+        except Exception:
+            try:
+                from combined_store_split_service import (  # type: ignore
+                    extract_location_suffix,
+                )
+
+                loc = extract_location_suffix(source_store_name)
+            except Exception:
+                loc = ""
+
+    existing_keys = {
+        _normalize_name_key(n)
+        for n in (existing_member_names or [])
+        if str(n or "").strip()
+    }
+    # 基準店自身も除外
+    if source_store_name:
+        existing_keys.add(_normalize_name_key(source_store_name))
+
+    results: List[Dict[str, Any]] = []
+    for raw_brand in missing_brands or []:
+        brand = str(raw_brand or "").strip().upper()
+        label = _HARDOFF_BRAND_LABELS.get(brand)
+        if not label:
+            continue
+        query = f"{label} {loc}".strip() if loc else label
+        found = _search_text_place_near(
+            text_query=query,
+            latitude=lat,
+            longitude=lng,
+            radius_m=radius_m,
+            api_key=key,
+            language_code=language_code,
+        )
+        if not found:
+            continue
+        name = str(found.get("store_name") or "").strip()
+        if not name:
+            continue
+        if not _brand_matches_place_name(brand, name):
+            continue
+        if _normalize_name_key(name) in existing_keys:
+            continue
+        results.append(
+            {
+                "brand": brand,
+                "brand_label": label,
+                "store_name": name,
+                "address": found.get("address") or "",
+                "phone": found.get("phone") or "",
+                "latitude": found.get("latitude"),
+                "longitude": found.get("longitude"),
+                "distance_m": found.get("distance_m"),
+                "place_id": found.get("place_id") or "",
+            }
+        )
+        existing_keys.add(_normalize_name_key(name))
+
+    results.sort(key=lambda r: float(r.get("distance_m") or 9999))
+    return results
 
 
 def _stores_needing_address_recovery(store_db) -> List[Dict[str, Any]]:

@@ -75,6 +75,14 @@ class StoreDatabase:
             cursor.execute("ALTER TABLE stores ADD COLUMN template_include INTEGER DEFAULT 1")
         except sqlite3.OperationalError:
             pass
+
+        # collocation_checked: ハードオフ系の併設有無を確認済みか（1=確認済み）
+        try:
+            cursor.execute(
+                "ALTER TABLE stores ADD COLUMN collocation_checked INTEGER DEFAULT 0"
+            )
+        except sqlite3.OperationalError:
+            pass
         
         # google_map_urlカラムが存在しない場合は追加（マイグレーション）
         try:
@@ -548,6 +556,10 @@ class StoreDatabase:
         if 'display_order' in store_data:
             update_fields.append('display_order = ?')
             update_values.append(store_data.get('display_order'))
+
+        if 'collocation_checked' in store_data:
+            update_fields.append('collocation_checked = ?')
+            update_values.append(1 if store_data.get('collocation_checked') else 0)
         
         if not update_fields:
             return False  # 更新するフィールドがない
@@ -564,6 +576,35 @@ class StoreDatabase:
         
         conn.commit()
         return cursor.rowcount > 0
+
+    def set_collocation_checked(
+        self, store_ids: List[int], checked: bool
+    ) -> int:
+        """ハードオフ系併設の確認済みフラグをまとめて更新。更新件数を返す。"""
+        ids: List[int] = []
+        for raw in store_ids or []:
+            try:
+                sid = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if sid and sid not in ids:
+                ids.append(sid)
+        if not ids:
+            return 0
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        flag = 1 if checked else 0
+        placeholders = ",".join("?" for _ in ids)
+        cursor.execute(
+            f"""
+            UPDATE stores
+            SET collocation_checked = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id IN ({placeholders})
+            """,
+            [flag, *ids],
+        )
+        conn.commit()
+        return int(cursor.rowcount or 0)
     
     def update_store_notes(self, store_id: int, notes: str) -> bool:
         """店舗の備考のみを更新"""
@@ -1050,6 +1091,13 @@ class StoreDatabase:
 
         if "tags" not in store_dict:
             store_dict["tags"] = []
+
+        try:
+            store_dict["collocation_checked"] = bool(
+                int(store_dict.get("collocation_checked") or 0)
+            )
+        except (TypeError, ValueError):
+            store_dict["collocation_checked"] = False
         
         return store_dict
 
