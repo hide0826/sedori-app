@@ -2589,8 +2589,29 @@ class RouteMapWidget(QWidget):
         )
         self.new_route_btn.clicked.connect(self.start_new_route_build)
         route_btns.addWidget(self.new_route_btn)
+        self.rename_route_btn = QPushButton("ルート名変更")
+        self.rename_route_btn.setToolTip(
+            "編集中のルート（青く選択されたルート）の名前を変更します。\n"
+            "先にルート名をダブルクリックして選んでください。"
+        )
+        self.rename_route_btn.setStyleSheet(
+            "QPushButton { background: #1565c0; color: #ffffff; border: none;"
+            " padding: 5px 10px; border-radius: 4px; }"
+            "QPushButton:hover:!disabled { background: #1976d2; }"
+            "QPushButton:disabled { background: #424242; color: #9e9e9e; }"
+        )
+        self.rename_route_btn.setEnabled(False)
+        self.rename_route_btn.clicked.connect(self.rename_editing_route)
+        route_btns.addWidget(self.rename_route_btn)
         route_btns.addStretch()
         self.route_section.body_layout.addLayout(route_btns)
+
+        self.route_stats_label = QLabel("ルート — ／ 所属 —店 ／ 未所属 —店")
+        self.route_stats_label.setStyleSheet(
+            "color: #b0bec5; font-size: 11px; padding: 2px 4px;"
+        )
+        self.route_stats_label.setWordWrap(True)
+        self.route_section.body_layout.addWidget(self.route_stats_label)
 
         self.route_scroll = QScrollArea()
         self.route_scroll.setWidgetResizable(True)
@@ -3226,9 +3247,12 @@ class RouteMapWidget(QWidget):
         self._rebuild_route_list()
         self._rebuild_tag_filters()
         self._refresh_map()
+        self._update_route_stats_label()
+        stats = self._route_stats_counts()
         self.status_label.setText(
-            f"ルート {len(self._payload_cache.get('routes') or [])} ／ "
-            f"タグ {len(self._payload_cache.get('tags') or [])}"
+            f"ルート {stats['route_count']} ／ "
+            f"所属 {stats['assigned_count']}店 ／ "
+            f"未所属 {stats['unassigned_count']}店"
         )
 
     def _ensure_brand_tags_on_load(self) -> None:
@@ -3318,6 +3342,108 @@ class RouteMapWidget(QWidget):
         # 編集中ルートの店舗リストを同期
         if self._editing_route_code:
             self._load_visit_list_for_route(self._editing_route_code)
+        self._update_route_stats_label()
+
+    def _route_stats_counts(self) -> Dict[str, int]:
+        """ルート数・所属店舗数・未所属店舗数。"""
+        routes = (self._payload_cache or {}).get("routes") or []
+        unassigned = (self._payload_cache or {}).get("unassigned") or []
+        assigned = 0
+        for route in routes:
+            try:
+                assigned += int(route.get("store_count") or 0)
+            except (TypeError, ValueError):
+                assigned += len(route.get("stores") or [])
+        return {
+            "route_count": len(routes),
+            "assigned_count": assigned,
+            "unassigned_count": len(unassigned),
+        }
+
+    def _update_route_stats_label(self) -> None:
+        if not hasattr(self, "route_stats_label"):
+            return
+        stats = self._route_stats_counts()
+        text = (
+            f"ルート {stats['route_count']} ／ "
+            f"所属 {stats['assigned_count']}店 ／ "
+            f"未所属 {stats['unassigned_count']}店"
+        )
+        self.route_stats_label.setText(text)
+        self.route_stats_label.setToolTip(
+            "ルート数: 登録されているルートの数\n"
+            "所属: いずれかのルートに入っている店舗数\n"
+            "未所属: ルートに入っていない店舗数"
+        )
+
+    def rename_editing_route(self) -> None:
+        """編集中ルートの名前だけ変更する（ルートコードは変えない）。"""
+        route_code = (self._editing_route_code or "").strip()
+        if not route_code:
+            QMessageBox.information(
+                self,
+                "ルート名変更",
+                "先にルート名をダブルクリックして、変更したいルートを選んでください。",
+            )
+            return
+        old_name = (
+            self._editing_route_name
+            or self._route_names.get(route_code)
+            or route_code
+        )
+        new_name, ok = QInputDialog.getText(
+            self,
+            "ルート名変更",
+            f"新しいルート名を入力してください:\n（ルートコード: {route_code}）",
+            text=str(old_name),
+        )
+        if not ok:
+            return
+        new_name = str(new_name or "").strip()
+        if not new_name:
+            QMessageBox.warning(self, "ルート名変更", "ルート名を入力してください。")
+            return
+        if new_name == str(old_name).strip():
+            return
+        try:
+            conflict = self.db.get_route_code_by_name(new_name)
+        except Exception:
+            conflict = None
+        if conflict and conflict != route_code:
+            QMessageBox.warning(
+                self,
+                "ルート名変更",
+                f"同じルート名が既にあります（{conflict}）。\n別名にしてください。",
+            )
+            return
+        try:
+            ok_rename = self.db.rename_route_by_code(route_code, new_name)
+        except Exception as e:
+            QMessageBox.critical(
+                self, "ルート名変更", f"変更に失敗しました:\n{e}"
+            )
+            return
+        if not ok_rename:
+            QMessageBox.warning(
+                self,
+                "ルート名変更",
+                "ルート名の変更に失敗しました。\n同名ルートがないか確認してください。",
+            )
+            return
+        self.reload()
+        if route_code in self._route_checks:
+            self._set_editing_route(route_code)
+            try:
+                self.route_scroll.ensureWidgetVisible(
+                    self._route_checks[route_code], 8, 8
+                )
+            except Exception:
+                pass
+        self.routes_changed.emit()
+        self.status_label.setText(f"ルート名を変更しました: {new_name}")
+        QMessageBox.information(
+            self, "ルート名変更", f"「{old_name}」→「{new_name}」に変更しました。"
+        )
 
     def _rebuild_tag_filters(self) -> None:
         previously: Set[int] = {
@@ -4198,6 +4324,10 @@ class RouteMapWidget(QWidget):
         )
         self.pick_order_btn.setEnabled(not self._build_route_mode and not self._lasso_mode)
         self.new_route_btn.setEnabled(not self._lasso_mode)
+        if hasattr(self, "rename_route_btn"):
+            self.rename_route_btn.setEnabled(
+                bool(self._editing_route_code) and not self._lasso_mode
+            )
         self.lasso_btn.setEnabled(not self._pick_mode)
         self.lasso_redo_btn.setEnabled(
             bool(self._lasso_mode)
@@ -5171,6 +5301,8 @@ class RouteMapWidget(QWidget):
         self.reverse_visit_order_btn.setEnabled(False)
         self.web_template_btn.setEnabled(False)
         self.remove_from_route_btn.setEnabled(False)
+        if hasattr(self, "rename_route_btn"):
+            self.rename_route_btn.setEnabled(False)
         self._restyle_route_checks()
         self._refresh_map()
         if fit_all:
@@ -5287,6 +5419,8 @@ class RouteMapWidget(QWidget):
         self.reverse_visit_order_btn.setEnabled(bool(code))
         self.web_template_btn.setEnabled(bool(code))
         self.remove_from_route_btn.setEnabled(bool(code))
+        if hasattr(self, "rename_route_btn"):
+            self.rename_route_btn.setEnabled(bool(code) and not self._lasso_mode)
         QTimer.singleShot(0, self._redistribute_left_splitter)
         self._load_visit_list_for_route(code)
         # ルート一覧の見た目を更新（編集中ハイライト）
