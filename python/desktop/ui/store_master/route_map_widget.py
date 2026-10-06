@@ -10,8 +10,8 @@ import sys
 import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from PySide6.QtCore import Qt, QUrl, Signal, QSettings, QTimer, QEvent
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtCore import Qt, QUrl, Signal, QSettings, QTimer, QEvent, QPoint
+from PySide6.QtGui import QAction, QBrush, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QDialog,
     QInputDialog,
+    QMenu,
 )
 
 _desktop_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -154,6 +155,34 @@ def _will_visit_from_store(store: Dict[str, Any]) -> bool:
     if "will_visit" in store:
         return bool(store.get("will_visit"))
     return _template_include_from_value(store.get("template_include"))
+
+
+def _rows_for_pick_order(
+    baseline: List[Dict[str, Any]], pick_order: List[str]
+) -> List[Dict[str, Any]]:
+    """地図クリック選択順の店舗行を組み立てる。
+
+    選んだ店は先頭＋チェックON、ルート登録済みでも未選択の店は末尾＋チェックOFF。
+    """
+    by_code: Dict[str, Dict[str, Any]] = {}
+    for row in baseline:
+        code = str(row.get("store_code") or "").strip()
+        if not code or code in by_code:
+            continue
+        by_code[code] = dict(row)
+        by_code[code]["store_code"] = code
+    picked = [str(c).strip() for c in pick_order if str(c).strip()]
+    picked_set = set(picked)
+    for code, row in by_code.items():
+        row["checked"] = code in picked_set
+    remaining = [
+        by_code[str(r.get("store_code") or "").strip()]
+        for r in baseline
+        if str(r.get("store_code") or "").strip() in by_code
+        and str(r.get("store_code") or "").strip() not in picked_set
+    ]
+    return [by_code[c] for c in picked if c in by_code] + remaining
+
 
 SETTINGS_ORG = "HIRIO"
 SETTINGS_APP = "desktop"
@@ -302,6 +331,7 @@ def _store_map_dict(store: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         checked = bool(int(store.get("collocation_checked") or 0))
     except (TypeError, ValueError):
         checked = bool(store.get("collocation_checked"))
+    entry = _member_entry_from_store(store)
     return {
         "id": store.get("id"),
         "store_code": store.get("store_code") or store.get("supplier_code") or "",
@@ -312,11 +342,31 @@ def _store_map_dict(store: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "icon_key": _icon_key_for_store(store),
         "tag_names": tag_names,
         "tag_ids": [int(t["id"]) for t in tags if t.get("id") is not None],
-        "member_names": [],
+        "member_names": [entry["store_name"]] if entry.get("store_name") else [],
         "member_brands": [brand] if brand else [],
+        "members": [entry] if entry.get("store_code") or entry.get("id") is not None else [],
         "is_hardoff_family": brand is not None,
         "collocation_checked": checked,
         "will_visit": _will_visit_from_store(store),
+    }
+
+
+def _member_entry_from_store(store: Dict[str, Any]) -> Dict[str, Any]:
+    """ポップアップの併設一覧・個別削除用の1行データ。"""
+    code = str(store.get("store_code") or store.get("supplier_code") or "").strip()
+    name = str(store.get("store_name") or "").strip()
+    sid = None
+    try:
+        if store.get("id") is not None:
+            sid = int(store.get("id"))
+    except (TypeError, ValueError):
+        sid = None
+    brand = _brand_of_store(store) or ""
+    return {
+        "id": sid,
+        "store_code": code,
+        "store_name": name,
+        "brand": brand,
     }
 
 
@@ -376,6 +426,12 @@ def _markers_from_stores(stores_raw: List[Dict[str, Any]]) -> List[Dict[str, Any
         mapped["member_ids"] = member_ids
         member_brands = _ordered_member_brands(members)
         mapped["member_brands"] = member_brands
+        member_entries = []
+        for m in members:
+            entry = _member_entry_from_store(m)
+            if entry.get("store_code") or entry.get("id") is not None:
+                member_entries.append(entry)
+        mapped["members"] = member_entries
         # 併設ピンはメンバーのいずれかが確認済みならピン全体を確認済み
         any_checked = False
         for m in members:
@@ -445,22 +501,73 @@ def _merge_marker_members(base: Dict[str, Any], other: Dict[str, Any]) -> None:
     ids = list(base.get("member_ids") or [])
     names = list(base.get("member_names") or [])
     brands = list(base.get("member_brands") or [])
+    members = list(base.get("members") or [])
 
-    for code in [other.get("store_code"), *(other.get("member_codes") or [])]:
-        cs = str(code or "").strip()
-        if cs and cs not in codes:
-            codes.append(cs)
-    for mid in [other.get("id"), *(other.get("member_ids") or [])]:
+    def _append_member(entry: Dict[str, Any]) -> None:
+        code = str(entry.get("store_code") or "").strip()
         try:
-            mid_i = int(mid)
+            sid = int(entry["id"]) if entry.get("id") is not None else None
         except (TypeError, ValueError):
-            continue
-        if mid_i and mid_i not in ids:
-            ids.append(mid_i)
-    for name in [other.get("store_name"), *(other.get("member_names") or [])]:
-        ns = str(name or "").strip()
-        if ns and ns not in names:
-            names.append(ns)
+            sid = None
+        for existing in members:
+            if code and str(existing.get("store_code") or "").strip() == code:
+                return
+            if sid is not None and existing.get("id") == sid:
+                return
+        row = {
+            "id": sid,
+            "store_code": code,
+            "store_name": str(entry.get("store_name") or "").strip(),
+            "brand": str(entry.get("brand") or "").strip().upper(),
+        }
+        members.append(row)
+        if code and code not in codes:
+            codes.append(code)
+        if sid is not None and sid not in ids:
+            ids.append(sid)
+        name = row["store_name"]
+        if name and name not in names:
+            names.append(name)
+        brand = row["brand"]
+        if brand and brand not in brands:
+            brands.append(brand)
+
+    def _seed_from_parallel(src: Dict[str, Any]) -> None:
+        src_members = src.get("members") or []
+        if src_members:
+            for entry in src_members:
+                if isinstance(entry, dict):
+                    _append_member(entry)
+            return
+        mcodes = list(src.get("member_codes") or [])
+        mids = list(src.get("member_ids") or [])
+        mnames = list(src.get("member_names") or [])
+        if not mcodes and src.get("store_code"):
+            _append_member(
+                {
+                    "id": src.get("id"),
+                    "store_code": src.get("store_code"),
+                    "store_name": src.get("store_name"),
+                    "brand": "",
+                }
+            )
+            return
+        for i, code in enumerate(mcodes):
+            mid = mids[i] if i < len(mids) else None
+            mname = mnames[i] if i < len(mnames) else ""
+            _append_member(
+                {
+                    "id": mid,
+                    "store_code": code,
+                    "store_name": mname,
+                    "brand": "",
+                }
+            )
+
+    if not members:
+        _seed_from_parallel(base)
+    _seed_from_parallel(other)
+
     for brand in other.get("member_brands") or []:
         bs = str(brand or "").strip().upper()
         if bs and bs not in brands:
@@ -469,13 +576,14 @@ def _merge_marker_members(base: Dict[str, Any], other: Dict[str, Any]) -> None:
     base["member_codes"] = codes
     base["member_ids"] = ids
     base["member_names"] = names
+    base["members"] = members
     base["member_brands"] = [b for b in _HARDOFF_BRAND_ORDER if b in brands]
     base["is_hardoff_family"] = True
     base["collocation_checked"] = bool(base.get("collocation_checked")) or bool(
         other.get("collocation_checked")
     )
     # ピン表示用アイコンはメンバー店舗数（H1/H2/H3）
-    member_count = max(len(ids), len(codes), 1)
+    member_count = max(len(ids), len(codes), len(members), 1)
     base["icon_key"] = hardoff_collocation_icon_key(member_count)
 
 
@@ -497,6 +605,7 @@ def _line_only_marker(marker: Dict[str, Any]) -> Dict[str, Any]:
         "member_ids": [],
         "member_names": [],
         "member_brands": [],
+        "members": [],
     }
 
 
@@ -670,6 +779,43 @@ def build_leaflet_html(payload: Dict[str, Any]) -> str:
     color: #1b5e20;
   }}
   .popup-actions button:hover {{ filter: brightness(0.97); }}
+  .popup-members {{
+    margin: 6px 0 2px;
+    padding: 4px 0;
+    border-top: 1px solid #eceff1;
+  }}
+  .popup-members .mem-title {{
+    font: 700 11px/1.3 sans-serif;
+    color: #455a64;
+    margin-bottom: 4px;
+  }}
+  .popup-member-row {{
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 3px 0;
+  }}
+  .popup-member-row .mem-name {{
+    flex: 1;
+    min-width: 0;
+    font: 12px/1.3 "Segoe UI","Meiryo UI",sans-serif;
+    color: #263238;
+  }}
+  .popup-member-row .mem-code {{
+    color: #607d8b;
+    font-size: 11px;
+  }}
+  .popup-member-row button.mem-del {{
+    flex: 0 0 auto;
+    background: #ffebee;
+    border: 1px solid #ef9a9a;
+    color: #b71c1c;
+    border-radius: 4px;
+    padding: 2px 6px;
+    font: 11px/1.2 "Segoe UI","Meiryo UI",sans-serif;
+    cursor: pointer;
+  }}
+  .popup-member-row button.mem-del:hover {{ filter: brightness(0.97); }}
   .popup-candidates {{
     margin-top: 8px;
     max-height: 160px;
@@ -1017,10 +1163,40 @@ function nearestRouteCandidates(store, limit) {{
 function bindStorePopup(marker, store, routeName) {{
   const tags = (store.tag_names || []).join(' / ') || '（タグなし）';
   const code = store.store_code ? '[' + store.store_code + '] ' : '';
-  const members = store.member_names || [];
+  const memberRows = (store.members && store.members.length)
+    ? store.members
+    : (store.member_names || []).map(function(n, i) {{
+        return {{
+          id: (store.member_ids || [])[i] || null,
+          store_code: (store.member_codes || [])[i] || '',
+          store_name: n || ''
+        }};
+      }});
   let extra = '';
-  if (members.length > 1) {{
-    extra = '<div>併設: ' + members.join(' / ') + '</div>';
+  if (memberRows.length > 1 && !window.__HIRIO_PICK_MODE) {{
+    extra = '<div class="popup-members"><div class="mem-title">併設（個別に削除可）</div>';
+    memberRows.forEach(function(m) {{
+      const mid = (m && m.id != null) ? String(m.id) : '';
+      const mcode = (m && m.store_code) ? String(m.store_code) : '';
+      const mname = (m && m.store_name) ? String(m.store_name) : (mcode || '（無名）');
+      extra +=
+        '<div class="popup-member-row">' +
+          '<div class="mem-name">' + mname +
+            (mcode ? ' <span class="mem-code">[' + mcode + ']</span>' : '') +
+          '</div>' +
+          '<button type="button" class="mem-del hirio-btn-delete-one"' +
+            ' data-id="' + mid + '"' +
+            ' data-code="' + encodeURIComponent(mcode) + '"' +
+            ' data-name="' + encodeURIComponent(mname) + '"' +
+          '>削除</button>' +
+        '</div>';
+    }});
+    extra += '</div>';
+  }} else if (memberRows.length > 1) {{
+    const names = memberRows.map(function(m) {{
+      return (m && m.store_name) ? m.store_name : '';
+    }}).filter(Boolean);
+    extra = '<div>併設: ' + names.join(' / ') + '</div>';
   }}
   const assigned = !!(store.route_code || '').trim();
   const routeLabel = routeName || store.route_name || (assigned ? store.route_code : '未所属');
@@ -1044,6 +1220,7 @@ function bindStorePopup(marker, store, routeName) {{
   }}
   let actions = '';
   if (!window.__HIRIO_PICK_MODE) {{
+    const deleteAllLabel = memberRows.length > 1 ? '全店をDBから削除' : 'DBから削除';
     actions =
       '<div class="popup-actions">' +
         (assigned
@@ -1056,7 +1233,7 @@ function bindStorePopup(marker, store, routeName) {{
         (showColloc
           ? '<button type="button" class="colloc hirio-btn-colloc">併設店舗登録</button>'
           : '') +
-        '<button type="button" class="danger hirio-btn-delete">DBから削除</button>' +
+        '<button type="button" class="danger hirio-btn-delete">' + deleteAllLabel + '</button>' +
       '</div>' +
       '<div class="popup-candidates" style="display:none;"></div>';
   }}
@@ -1141,6 +1318,23 @@ function bindStorePopup(marker, store, routeName) {{
         try {{ marker.closePopup(); }} catch (errDel2) {{}}
       }};
     }}
+    root.querySelectorAll('.hirio-btn-delete-one').forEach(function(btn) {{
+      btn.onclick = function(ev) {{
+        try {{ L.DomEvent.stop(ev); }} catch (errOne) {{}}
+        const tid = btn.getAttribute('data-id') || '';
+        const tcode = decodeURIComponent(btn.getAttribute('data-code') || '');
+        const tname = decodeURIComponent(btn.getAttribute('data-name') || '');
+        notifyRouteAction(
+          storeActionPayload(store, {{
+            action: 'delete_one',
+            target_store_id: tid ? Number(tid) : null,
+            target_store_code: tcode,
+            target_store_name: tname
+          }})
+        );
+        try {{ marker.closePopup(); }} catch (errOne2) {{}}
+      }};
+    }});
     if (collocBtn) {{
       collocBtn.onclick = function(ev) {{
         try {{ L.DomEvent.stop(ev); }} catch (errCol) {{}}
@@ -1969,6 +2163,8 @@ class RouteMapWidget(QWidget):
             "ルート名をダブルクリック → 店舗一覧。\n"
             "地図の店舗ピン／ルート線をダブルクリックでも選択できます。\n"
             "チェックOFF＝行かない（地図でグレー＋最後尾から点線）。\n"
+            "地図上で訪問順序選択では、選ばなかった店のチェックは自動でOFFになります。\n"
+            "「ルートから外す」でこのグループから削除（店舗自体はDBに残ります）。\n"
             "「訪問順序反転」で周回順を逆にできます。\n"
             "ドラッグで周回順変更（マスタ表示順＋最新ルート登録へ保存）。\n"
             "区切り線をドラッグで各パネルの高さを変更できます。"
@@ -2014,6 +2210,23 @@ class RouteMapWidget(QWidget):
         self.web_template_btn.clicked.connect(self.open_web_template_dialog)
         self.web_template_btn.setEnabled(False)
         visit_btns.addWidget(self.web_template_btn)
+        self.remove_from_route_btn = QPushButton("ルートから外す")
+        self.remove_from_route_btn.setToolTip(
+            "選んだ店舗を、いま編集中のルート（グループ）から外します。\n"
+            "店舗データ自体はDBに残ります（地図ポップアップのDB削除とは違います）。\n"
+            "リストを右クリック、または Delete キーでも同じ操作ができます。"
+        )
+        self.remove_from_route_btn.setStyleSheet(
+            "QPushButton { background: #c62828; color: #ffffff; border: none;"
+            " padding: 5px 10px; border-radius: 4px; }"
+            "QPushButton:disabled { background: #424242; color: #9e9e9e; }"
+            "QPushButton:hover:!disabled { background: #e53935; }"
+        )
+        self.remove_from_route_btn.clicked.connect(
+            self.remove_selected_store_from_editing_route
+        )
+        self.remove_from_route_btn.setEnabled(False)
+        visit_btns.addWidget(self.remove_from_route_btn)
         visit_btns.addStretch()
         self.visit_section.body_layout.addLayout(visit_btns)
 
@@ -2022,6 +2235,7 @@ class RouteMapWidget(QWidget):
         self.visit_list.setDefaultDropAction(Qt.MoveAction)
         self.visit_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.visit_list.setAlternatingRowColors(True)
+        self.visit_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.visit_list.setStyleSheet(
             """
             QListWidget {
@@ -2045,6 +2259,14 @@ class RouteMapWidget(QWidget):
         self.visit_list.model().rowsMoved.connect(self._on_visit_rows_moved)
         self.visit_list.itemChanged.connect(self._on_visit_item_changed)
         self.visit_list.currentItemChanged.connect(self._on_visit_current_changed)
+        self.visit_list.customContextMenuRequested.connect(
+            self._on_visit_list_context_menu
+        )
+        self._visit_delete_shortcut = QShortcut(QKeySequence.Delete, self.visit_list)
+        self._visit_delete_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self._visit_delete_shortcut.activated.connect(
+            self.remove_selected_store_from_editing_route
+        )
         self.visit_section.body_layout.addWidget(self.visit_list, 1)
         self.left_splitter.addWidget(self.visit_section)
 
@@ -2133,6 +2355,7 @@ class RouteMapWidget(QWidget):
             "ONにすると、地図上の店舗を1件ずつクリックして周回順を決められます。\n"
             "編集中ルートの既存ラインは消し、クリックした順だけ線が伸びます。\n"
             "他のルートの線はそのまま表示されます。\n"
+            "選ばなかった店は店舗リストのチェックが自動でOFF（スキップ）になります。\n"
             "同じ店をもう一度クリックすると選択解除できます。\n"
             "先にルート名をダブルクリックして編集対象を選んでください。\n"
             "もう一度押すと選択モードを終了します。"
@@ -2768,6 +2991,82 @@ class RouteMapWidget(QWidget):
                 ids.append(sid)
         return ids
 
+    def _resolve_single_store_id_from_map(
+        self, payload: Dict[str, Any]
+    ) -> Optional[int]:
+        """併設一覧の1店だけを特定する。"""
+        try:
+            tid = payload.get("target_store_id")
+            if tid is not None and str(tid).strip() != "":
+                return int(tid)
+        except (TypeError, ValueError):
+            pass
+        code = str(payload.get("target_store_code") or "").strip()
+        if not code:
+            return None
+        try:
+            store = self.db.get_store_by_code(code)
+        except Exception:
+            store = None
+        if not store:
+            return None
+        try:
+            return int(store.get("id"))
+        except (TypeError, ValueError):
+            return None
+
+    def _delete_one_store_from_map(self, payload: Dict[str, Any]) -> None:
+        """併設ポップアップから1店だけDB削除する。"""
+        sid = self._resolve_single_store_id_from_map(payload)
+        if sid is None:
+            QMessageBox.warning(self, "個別削除", "対象店舗を特定できませんでした。")
+            return
+        store = None
+        try:
+            store = self.db.get_store(sid)
+        except Exception:
+            store = None
+        label = (
+            str(payload.get("target_store_name") or "").strip()
+            or str((store or {}).get("store_name") or "").strip()
+            or str(payload.get("target_store_code") or "").strip()
+            or f"id={sid}"
+        )
+        code = (
+            str(payload.get("target_store_code") or "").strip()
+            or str((store or {}).get("store_code") or "").strip()
+        )
+        code_note = f"\n店舗コード: {code}" if code else ""
+        reply = QMessageBox.question(
+            self,
+            "個別削除の確認",
+            f"店舗「{label}」だけをDBから削除しますか？\n"
+            "（他の併設店はそのまま残ります。元に戻せません）"
+            f"{code_note}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            ok = bool(self.db.delete_store(sid))
+        except Exception as e:
+            QMessageBox.warning(self, "個別削除", f"削除に失敗しました。\n{e}")
+            return
+        if not ok:
+            QMessageBox.warning(self, "個別削除", "削除に失敗しました。")
+            return
+        if code and self._selected_store_code == code:
+            self._selected_store_code = ""
+        editing = self._editing_route_code
+        self.reload()
+        if editing and editing in self._route_checks:
+            self._set_editing_route(editing)
+        else:
+            QTimer.singleShot(200, self._fit_map_to_all_visible)
+        self.routes_changed.emit()
+        self.status_label.setText(f"個別削除: {label}")
+
     def _on_map_route_action(self, payload: Dict[str, Any]) -> None:
         """地図ポップアップ／ラインからのルート操作。"""
         action = str(payload.get("action") or "").strip()
@@ -2785,6 +3084,10 @@ class RouteMapWidget(QWidget):
             self._focus_route_on_map(to_code)
             name = self._route_names.get(to_code) or to_code
             self.status_label.setText(f"地図からルート選択: {name}")
+            return
+
+        if action == "delete_one":
+            self._delete_one_store_from_map(payload)
             return
 
         store_ids = self._resolve_store_ids_for_map_action(payload)
@@ -3374,27 +3677,17 @@ class RouteMapWidget(QWidget):
         self._update_pick_nav_buttons()
 
     def _apply_pick_order_to_ui(self, *, save: bool = True) -> None:
-        """pick_order に合わせて店舗リスト・地図を更新。"""
+        """pick_order に合わせて店舗リスト・地図を更新。
+
+        地図で選んだ店＝行く（チェックON）、未選択＝スキップ（チェックOFF）。
+        """
         baseline = self._pick_baseline_rows or self._snapshot_visit_items()
         if not baseline:
             self._refresh_map()
             self._refresh_pick_status_text()
             self._update_pick_nav_buttons()
             return
-        by_code = {r["store_code"]: dict(r) for r in baseline}
-        # いまのチェック状態を優先
-        for row in self._snapshot_visit_items():
-            code = row["store_code"]
-            if code in by_code:
-                by_code[code]["checked"] = row["checked"]
-        remaining = [
-            by_code[r["store_code"]]
-            for r in baseline
-            if r["store_code"] not in set(self._pick_order)
-        ]
-        new_rows = [
-            by_code[c] for c in self._pick_order if c in by_code
-        ] + remaining
+        new_rows = _rows_for_pick_order(baseline, self._pick_order)
         self._rebuild_visit_list_from_rows(new_rows)
         if self._pick_order:
             self._selected_store_code = self._pick_order[-1]
@@ -3488,10 +3781,42 @@ class RouteMapWidget(QWidget):
                     "store_code": code,
                     "store_name": str(item.data(Qt.UserRole + 1) or "").strip(),
                     "notes": str(item.data(Qt.UserRole + 2) or "").strip(),
+                    "store_id": item.data(Qt.UserRole + 3),
                     "checked": item.checkState() == Qt.Checked,
                 }
             )
         return rows
+
+    def _set_visit_item_data(
+        self,
+        item: QListWidgetItem,
+        *,
+        store_code: str,
+        store_name: str,
+        notes: str,
+        store_id: Any = None,
+        tip_extra: str = "",
+    ) -> None:
+        item.setData(Qt.UserRole, store_code)
+        item.setData(Qt.UserRole + 1, store_name)
+        item.setData(Qt.UserRole + 2, notes)
+        item.setData(Qt.UserRole + 3, store_id)
+        tip = f"{store_name}"
+        if store_code:
+            tip += f" [{store_code}]"
+        if notes:
+            tip += f"\n備考: {notes}"
+        if tip_extra:
+            tip += tip_extra
+        tip += "\n右クリックまたは「ルートから外す」でこのグループから削除"
+        item.setToolTip(tip)
+        item.setFlags(
+            item.flags()
+            | Qt.ItemIsEnabled
+            | Qt.ItemIsSelectable
+            | Qt.ItemIsDragEnabled
+            | Qt.ItemIsUserCheckable
+        )
 
     def _rebuild_visit_list_from_rows(self, rows: List[Dict[str, Any]]) -> None:
         self._visit_reorder_busy = True
@@ -3502,21 +3827,12 @@ class RouteMapWidget(QWidget):
             notes = str(row.get("notes") or "").strip()
             label = self._format_visit_item_label(idx, store_name, store_code, notes)
             item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, store_code)
-            item.setData(Qt.UserRole + 1, store_name)
-            item.setData(Qt.UserRole + 2, notes)
-            tip = f"{store_name}"
-            if store_code:
-                tip += f" [{store_code}]"
-            if notes:
-                tip += f"\n備考: {notes}"
-            item.setToolTip(tip)
-            item.setFlags(
-                item.flags()
-                | Qt.ItemIsEnabled
-                | Qt.ItemIsSelectable
-                | Qt.ItemIsDragEnabled
-                | Qt.ItemIsUserCheckable
+            self._set_visit_item_data(
+                item,
+                store_code=store_code,
+                store_name=store_name,
+                notes=notes,
+                store_id=row.get("store_id"),
             )
             item.setCheckState(Qt.Checked if row.get("checked", True) else Qt.Unchecked)
             self._apply_visit_item_style(item)
@@ -3720,6 +4036,7 @@ class RouteMapWidget(QWidget):
         self.save_visit_order_btn.setEnabled(bool(code))
         self.reverse_visit_order_btn.setEnabled(bool(code))
         self.web_template_btn.setEnabled(bool(code))
+        self.remove_from_route_btn.setEnabled(bool(code))
         QTimer.singleShot(0, self._redistribute_left_splitter)
         self._load_visit_list_for_route(code)
         # ルート一覧の見た目を更新（編集中ハイライト）
@@ -3782,21 +4099,12 @@ class RouteMapWidget(QWidget):
             notes = self._visit_notes_from_store(store)
             label = self._format_visit_item_label(idx, store_name, store_code, notes)
             item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, store_code)
-            item.setData(Qt.UserRole + 1, store_name)
-            item.setData(Qt.UserRole + 2, notes)
-            tip = f"{store_name}"
-            if store_code:
-                tip += f" [{store_code}]"
-            if notes:
-                tip += f"\n備考: {notes}"
-            item.setToolTip(tip)
-            item.setFlags(
-                item.flags()
-                | Qt.ItemIsEnabled
-                | Qt.ItemIsSelectable
-                | Qt.ItemIsDragEnabled
-                | Qt.ItemIsUserCheckable
+            self._set_visit_item_data(
+                item,
+                store_code=store_code,
+                store_name=store_name,
+                notes=notes,
+                store_id=store.get("id"),
             )
             will_visit = _will_visit_from_store(store)
             item.setCheckState(Qt.Checked if will_visit else Qt.Unchecked)
@@ -3804,6 +4112,126 @@ class RouteMapWidget(QWidget):
             self.visit_list.addItem(item)
         self._editing_route_name = route_name
         self._visit_reorder_busy = False
+
+    def _on_visit_list_context_menu(self, pos: QPoint) -> None:
+        item = self.visit_list.itemAt(pos)
+        if item is None:
+            return
+        self.visit_list.setCurrentItem(item)
+        menu = QMenu(self.visit_list)
+        act = QAction("このルート（グループ）から外す", menu)
+        act.triggered.connect(self.remove_selected_store_from_editing_route)
+        menu.addAction(act)
+        menu.exec(self.visit_list.mapToGlobal(pos))
+
+    def remove_selected_store_from_editing_route(self) -> None:
+        """店舗エリアで選んだ店を、編集中ルートのグループから外す。"""
+        if not self._editing_route_code:
+            QMessageBox.information(
+                self,
+                "ルートから外す",
+                "先にルート名をダブルクリックして編集対象を選んでください。",
+            )
+            return
+        item = self.visit_list.currentItem()
+        if item is None:
+            QMessageBox.information(
+                self,
+                "ルートから外す",
+                "外したい店舗をリストで選んでから押してください。",
+            )
+            return
+        self._remove_visit_item_from_editing_route(item)
+
+    def _remove_visit_item_from_editing_route(self, item: QListWidgetItem) -> None:
+        route_code = (self._editing_route_code or "").strip()
+        route_name = (self._editing_route_name or "").strip()
+        if not route_code:
+            return
+        store_code = str(item.data(Qt.UserRole) or "").strip()
+        store_name = str(item.data(Qt.UserRole + 1) or "").strip()
+        label = store_name or store_code or "店舗"
+        code_note = f"\n店舗コード: {store_code}" if store_code else ""
+        reply = QMessageBox.question(
+            self,
+            "ルートから外す確認",
+            f"「{label}」をルート「{route_name or route_code}」から外しますか？\n"
+            "店舗データ自体はDBに残ります（グループから外すだけです）。"
+            f"{code_note}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        sid = None
+        raw_id = item.data(Qt.UserRole + 3)
+        try:
+            if raw_id is not None and str(raw_id).strip() != "":
+                sid = int(raw_id)
+        except (TypeError, ValueError):
+            sid = None
+        if sid is None and store_code:
+            try:
+                store = self.db.get_store_by_code(store_code)
+            except Exception:
+                store = None
+            if store and store.get("id") is not None:
+                try:
+                    sid = int(store.get("id"))
+                except (TypeError, ValueError):
+                    sid = None
+        if sid is None:
+            QMessageBox.warning(self, "ルートから外す", "対象店舗を特定できませんでした。")
+            return
+
+        try:
+            from services.store_route_membership_service import (
+                remove_store_from_route,
+                unassign_store_completely,
+            )
+        except Exception:
+            try:
+                from store_route_membership_service import (  # type: ignore
+                    remove_store_from_route,
+                    unassign_store_completely,
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "ルートから外す", f"処理を読み込めませんでした:\n{e}"
+                )
+                return
+
+        ok = False
+        try:
+            ok = bool(remove_store_from_route(self.db, sid, route_name, route_code))
+            if not ok:
+                ok = bool(unassign_store_completely(self.db, sid))
+        except Exception as e:
+            QMessageBox.warning(self, "ルートから外す", f"外す処理に失敗しました。\n{e}")
+            return
+        if not ok:
+            QMessageBox.warning(self, "ルートから外す", "外す処理に失敗しました。")
+            return
+
+        if self._selected_store_code == store_code:
+            self._selected_store_code = ""
+        # 訪問順選択中ならベースラインからも外す
+        if self._pick_mode:
+            self._pick_order = [c for c in self._pick_order if c != store_code]
+            self._pick_baseline_rows = [
+                r
+                for r in self._pick_baseline_rows
+                if str(r.get("store_code") or "").strip() != store_code
+            ]
+        editing = route_code
+        self.reload()
+        if editing and editing in self._route_checks:
+            self._set_editing_route(editing)
+        self.routes_changed.emit()
+        self.status_label.setText(
+            f"ルートから外す: {label} ← {route_name or route_code}"
+        )
 
     def _apply_visit_item_style(self, item: QListWidgetItem) -> None:
         if item.checkState() == Qt.Checked:
@@ -3857,12 +4285,13 @@ class RouteMapWidget(QWidget):
             item.setText(
                 self._format_visit_item_label(i + 1, store_name, store_code, notes)
             )
-            tip = f"{store_name}"
-            if store_code:
-                tip += f" [{store_code}]"
-            if notes:
-                tip += f"\n備考: {notes}"
-            item.setToolTip(tip)
+            self._set_visit_item_data(
+                item,
+                store_code=store_code,
+                store_name=store_name,
+                notes=notes,
+                store_id=item.data(Qt.UserRole + 3),
+            )
             self._apply_visit_item_style(item)
         self._visit_reorder_busy = False
 

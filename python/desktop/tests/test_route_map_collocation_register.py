@@ -12,6 +12,7 @@ from ui.store_master.route_map_widget import (
     _markers_from_stores,
     _merge_cross_route_hardoff_markers,
     _missing_hardoff_brands,
+    _rows_for_pick_order,
     _store_map_dict,
     _suggest_collocated_store_name,
 )
@@ -79,6 +80,10 @@ def test_markers_aggregate_collocation_checked():
     assert markers[0]["is_hardoff_family"] is True
     assert markers[0]["collocation_checked"] is True
     assert set(markers[0]["member_brands"]) == {"HA", "OF"}
+    members = markers[0].get("members") or []
+    assert len(members) == 2
+    assert {m["store_code"] for m in members} == {"HA-1", "OF-1"}
+    assert all("id" in m and "store_name" in m for m in members)
 
 
 def test_brand_matches_and_distance_helpers():
@@ -187,3 +192,26 @@ def test_merge_cross_route_hardoff_markers_same_coords():
     assert pin["is_hardoff_family"] is True
     assert set(pin.get("member_codes") or []) >= {"HA-11", "HO-02", "HA-60"}
     assert pin.get("icon_key") == "hardoff3"
+
+
+def test_rows_for_pick_order_unchecks_unselected():
+    baseline = [
+        {"store_code": "A", "store_name": "店A", "checked": True},
+        {"store_code": "B", "store_name": "店B", "checked": True},
+        {"store_code": "C", "store_name": "店C", "checked": True},
+    ]
+    rows = _rows_for_pick_order(baseline, ["B", "A"])
+    assert [r["store_code"] for r in rows] == ["B", "A", "C"]
+    assert rows[0]["checked"] is True
+    assert rows[1]["checked"] is True
+    assert rows[2]["checked"] is False
+
+
+def test_rows_for_pick_order_empty_picks_all_skip():
+    baseline = [
+        {"store_code": "A", "checked": True},
+        {"store_code": "B", "checked": False},
+    ]
+    rows = _rows_for_pick_order(baseline, [])
+    assert [r["store_code"] for r in rows] == ["A", "B"]
+    assert all(r["checked"] is False for r in rows)
