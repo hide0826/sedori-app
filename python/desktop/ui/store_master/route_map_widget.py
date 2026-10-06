@@ -1813,7 +1813,11 @@ function hirioUpdateLegend(data) {{
   modeBadgeControl = L.control({{ position: 'topright' }});
   modeBadgeControl.onAdd = function() {{
     const div = L.DomUtil.create('div', 'mode-badge');
-    if (data.pick_mode) {{
+    if (data.build_route_mode) {{
+      const bn = (data.build_route_name || '').trim();
+      div.textContent = bn ? ('新規ルート登録中: ' + bn) : '新規ルート登録中';
+      div.style.background = 'rgba(46,125,50,0.94)';
+    }} else if (data.pick_mode) {{
       div.textContent = '訪問順クリック選択中';
       div.style.background = 'rgba(230,81,0,0.92)';
     }} else {{
@@ -1836,9 +1840,12 @@ window.__HIRIO_UPDATE = function(data, opts) {{
   try {{
   try {{ map.invalidateSize(false); }} catch (eInv) {{}}
   window.__HIRIO_DATA = data || {{}};
-  window.__HIRIO_PICK_MODE = !!data.pick_mode;
+  window.__HIRIO_PICK_MODE = !!(data.pick_mode || data.build_route_mode);
   try {{
-    document.body.classList.toggle('hirio-pick-mode', !!data.pick_mode);
+    document.body.classList.toggle(
+      'hirio-pick-mode',
+      !!(data.pick_mode || data.build_route_mode)
+    );
   }} catch (e) {{}}
   const useIcons = !!data.use_icons;
   const icons = data.map_icons || {{}};
@@ -1898,7 +1905,9 @@ window.__HIRIO_UPDATE = function(data, opts) {{
       }}
     }});
     const isEditingRoute =
-      !!data.pick_mode && !!editingCode && routeCode === editingCode;
+      !!(data.pick_mode || data.build_route_mode) &&
+      !!editingCode &&
+      routeCode === editingCode;
     if (isEditingRoute) {{
       // 編集中ルート: 既存の周回線は出さない。クリックした分だけ線を伸ばす
       if (pickPts.length >= 2) {{
@@ -2014,6 +2023,7 @@ class RouteMapWidget(QWidget):
         self._editing_route_name: str = ""
         self._selected_store_code: str = ""
         self._pick_mode: bool = False
+        self._build_route_mode: bool = False
         self._pick_order: List[str] = []
         self._pick_baseline_rows: List[Dict[str, Any]] = []
         self._pick_history: List[List[str]] = [[]]
@@ -2136,6 +2146,20 @@ class RouteMapWidget(QWidget):
             lambda: self.clear_editing_route_focus(fit_all=False)
         )
         route_btns.addWidget(self.clear_edit_route_btn)
+        self.new_route_btn = QPushButton("ルート新規登録")
+        self.new_route_btn.setToolTip(
+            "新しいルートを作り、地図上の店舗をクリックして登録します。\n"
+            "クリックした順番が訪問順になります。\n"
+            "他ルートの店は自動でそちらから外れ、未所属の店もそのまま登録できます。"
+        )
+        self.new_route_btn.setStyleSheet(
+            "QPushButton { background: #2e7d32; color: #ffffff; border: none;"
+            " padding: 5px 10px; border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover:!disabled { background: #388e3c; }"
+            "QPushButton:disabled { background: #424242; color: #9e9e9e; }"
+        )
+        self.new_route_btn.clicked.connect(self.start_new_route_build)
+        route_btns.addWidget(self.new_route_btn)
         route_btns.addStretch()
         self.route_section.body_layout.addLayout(route_btns)
 
@@ -2165,6 +2189,7 @@ class RouteMapWidget(QWidget):
             "チェックOFF＝行かない（地図でグレー＋最後尾から点線）。\n"
             "地図上で訪問順序選択では、選ばなかった店のチェックは自動でOFFになります。\n"
             "「ルートから外す」でこのグループから削除（店舗自体はDBに残ります）。\n"
+            "「ルート新規登録」で名前を付け、地図クリックで店を集めて新しいルートを作れます。\n"
             "「訪問順序反転」で周回順を逆にできます。\n"
             "ドラッグで周回順変更（マスタ表示順＋最新ルート登録へ保存）。\n"
             "区切り線をドラッグで各パネルの高さを変更できます。"
@@ -2376,6 +2401,24 @@ class RouteMapWidget(QWidget):
         )
         self.pick_order_btn.toggled.connect(self._on_pick_order_toggled)
         map_toolbar.addWidget(self.pick_order_btn, 0)
+
+        self.build_finish_btn = QPushButton("登録終了")
+        self.build_finish_btn.setFixedHeight(26)
+        self.build_finish_btn.setToolTip(
+            "ルート新規登録（地図クリック編成）を終了します。\n"
+            "いまの所属・訪問順はそのまま残ります。"
+        )
+        self.build_finish_btn.setStyleSheet(
+            "QPushButton {"
+            " background: #1565c0; color: #ffffff; border: none;"
+            " padding: 2px 10px; border-radius: 4px; font-size: 12px; font-weight: bold;"
+            "}"
+            "QPushButton:hover:!disabled { background: #1e88e5; }"
+            "QPushButton:disabled { background: #37474f; color: #78909c; }"
+        )
+        self.build_finish_btn.setEnabled(False)
+        self.build_finish_btn.clicked.connect(self.finish_build_route_mode)
+        map_toolbar.addWidget(self.build_finish_btn, 0)
 
         self.pick_undo_btn = QPushButton("戻る")
         self.pick_undo_btn.setFixedHeight(26)
@@ -2638,6 +2681,8 @@ class RouteMapWidget(QWidget):
 
     def _focus_route_on_map(self, route_code: str) -> None:
         """指定ルートを編集対象にし、店舗リスト表示＋地図拡大。"""
+        if self._build_route_mode:
+            self.finish_build_route_mode(silent=True)
         if self._pick_mode:
             # ルート切替前に選択モードを終了（現ルートの並びを保存）
             self.pick_order_btn.setChecked(False)
@@ -3062,8 +3107,7 @@ class RouteMapWidget(QWidget):
         self.reload()
         if editing and editing in self._route_checks:
             self._set_editing_route(editing)
-        else:
-            QTimer.singleShot(200, self._fit_map_to_all_visible)
+        # 地図の位置・ズームは維持（全体表示へ戻さない）
         self.routes_changed.emit()
         self.status_label.setText(f"個別削除: {label}")
 
@@ -3240,8 +3284,7 @@ class RouteMapWidget(QWidget):
             self.reload()
             if editing and editing in self._route_checks:
                 self._set_editing_route(editing)
-            else:
-                QTimer.singleShot(200, self._fit_map_to_all_visible)
+            # 地図の位置・ズームは維持（全体表示へ戻さない）
             self.routes_changed.emit()
             self.status_label.setText(f"DBから削除: {label}（{ok_count}店）")
             return
@@ -3644,15 +3687,41 @@ class RouteMapWidget(QWidget):
         self.pick_status_label.setText(msg)
         self.pick_status_label.setToolTip(msg)
 
+    def _map_click_select_active(self) -> bool:
+        """訪問順選択 or 新規ルート登録中（地図クリック有効）。"""
+        return bool(self._pick_mode or self._build_route_mode)
+
     def _update_pick_nav_buttons(self) -> None:
-        on = bool(self._pick_mode)
+        on = bool(self._pick_mode) and not self._build_route_mode
         self.pick_undo_btn.setEnabled(on and self._pick_history_index > 0)
         self.pick_redo_btn.setEnabled(
             on and self._pick_history_index < len(self._pick_history) - 1
         )
         self.pick_save_btn.setEnabled(on and bool(self._editing_route_code))
+        self.build_finish_btn.setEnabled(bool(self._build_route_mode))
+        self.pick_order_btn.setEnabled(not self._build_route_mode)
+        self.new_route_btn.setEnabled(not self._build_route_mode)
+
+    def _refresh_build_status_text(self) -> None:
+        if not self._build_route_mode:
+            return
+        name = self._editing_route_name or self._editing_route_code or "新規ルート"
+        n = len(self._pick_order)
+        if n <= 0:
+            self._set_pick_status(
+                f"「{name}」へ店舗をクリック登録（再クリックで外す）"
+            )
+            self.status_label.setText(f"新規ルート登録中: {name}")
+        else:
+            self._set_pick_status(
+                f"「{name}」 {n}店登録済み → 次は{n + 1}件目（再クリックで外す）"
+            )
+            self.status_label.setText(f"新規ルート登録中: {name}（{n}店）")
 
     def _refresh_pick_status_text(self) -> None:
+        if self._build_route_mode:
+            self._refresh_build_status_text()
+            return
         if not self._pick_mode:
             self._set_pick_status("")
             return
@@ -3700,6 +3769,16 @@ class RouteMapWidget(QWidget):
 
     def _on_pick_order_toggled(self, checked: bool) -> None:
         if checked:
+            if self._build_route_mode:
+                self.pick_order_btn.blockSignals(True)
+                self.pick_order_btn.setChecked(False)
+                self.pick_order_btn.blockSignals(False)
+                QMessageBox.information(
+                    self,
+                    "地図上で訪問順序選択",
+                    "ルート新規登録中です。先に「登録終了」してください。",
+                )
+                return
             if not self._editing_route_code:
                 self.pick_order_btn.blockSignals(True)
                 self.pick_order_btn.setChecked(False)
@@ -3868,6 +3947,9 @@ class RouteMapWidget(QWidget):
         return candidates[:1]
 
     def _on_map_store_picked(self, payload: Dict[str, Any]) -> None:
+        if self._build_route_mode:
+            self._on_map_store_build_picked(payload)
+            return
         if not self._pick_mode or not self._editing_route_code:
             return
         codes = self._codes_for_map_pick(
@@ -3896,12 +3978,269 @@ class RouteMapWidget(QWidget):
         self._push_pick_history()
         self._apply_pick_order_to_ui(save=True)
 
+    def _codes_for_map_build(
+        self, store_code: str, member_codes: Optional[List[Any]] = None
+    ) -> List[str]:
+        """新規ルート登録用。併設メンバーはまとめて対象にする。"""
+        code = (store_code or "").strip()
+        candidates: List[str] = []
+        for c in [code] + list(member_codes or []):
+            cs = str(c or "").strip()
+            if cs and cs not in candidates:
+                candidates.append(cs)
+        return candidates
+
+    def start_new_route_build(self) -> None:
+        """ルート新規登録 → 地図クリックで所属・訪問順を編成。"""
+        if self._build_route_mode:
+            QMessageBox.information(
+                self,
+                "ルート新規登録",
+                "すでに登録モード中です。先に「登録終了」してください。",
+            )
+            return
+        if self._pick_mode:
+            self.pick_order_btn.setChecked(False)
+
+        name, ok = QInputDialog.getText(
+            self,
+            "ルート新規登録",
+            "新しいルート名を入力してください:",
+        )
+        if not ok:
+            return
+        route_name = str(name or "").strip()
+        if not route_name:
+            QMessageBox.warning(self, "ルート新規登録", "ルート名を入力してください。")
+            return
+        try:
+            route_code = self.db.create_route_at_front(route_name)
+        except Exception as e:
+            QMessageBox.critical(
+                self, "ルート新規登録", f"ルートの作成に失敗しました:\n{e}"
+            )
+            return
+        if not route_code:
+            QMessageBox.warning(
+                self,
+                "ルート新規登録",
+                f"同名のルート「{route_name}」が既にあるか、作成できませんでした。",
+            )
+            return
+
+        if not self.show_unassigned_check.isChecked():
+            self.show_unassigned_check.blockSignals(True)
+            self.show_unassigned_check.setChecked(True)
+            self.show_unassigned_check.blockSignals(False)
+
+        self._build_route_mode = True
+        self._pick_mode = False
+        self._pick_order = []
+        self._pick_baseline_rows = []
+        self._pick_history = [[]]
+        self._pick_history_index = 0
+        self._selected_store_code = ""
+
+        self.reload()
+        cb = self._route_checks.get(route_code)
+        if cb is not None and not cb.isChecked():
+            cb.blockSignals(True)
+            cb.setChecked(True)
+            cb.blockSignals(False)
+        self._set_editing_route(route_code)
+        # 新規は店舗ゼロから
+        self._visit_reorder_busy = True
+        self.visit_list.clear()
+        self._visit_reorder_busy = False
+        self._update_pick_nav_buttons()
+        self._refresh_build_status_text()
+        self._refresh_map()
+        self.routes_changed.emit()
+        self.status_label.setText(
+            f"新規ルート作成: {route_name}（{route_code}）— 地図で店舗をクリック"
+        )
+
+    def finish_build_route_mode(self, silent: bool = False) -> None:
+        """新規ルート登録モードを終了（所属・訪問順は保持）。"""
+        if not self._build_route_mode:
+            return
+        if self._editing_route_code and self.visit_list.count() > 0:
+            self.save_editing_visit_order(silent=True)
+        name = self._editing_route_name or self._editing_route_code
+        count = len(self._pick_order) or self.visit_list.count()
+        self._build_route_mode = False
+        self._pick_order = []
+        self._pick_baseline_rows = []
+        self._set_pick_status("")
+        self._update_pick_nav_buttons()
+        self._refresh_map()
+        if not silent:
+            self.status_label.setText(
+                f"ルート登録を終了: {name or 'ルート'}（{count}店）"
+            )
+
+    def _row_from_store_code(self, store_code: str) -> Optional[Dict[str, Any]]:
+        code = (store_code or "").strip()
+        if not code:
+            return None
+        store = None
+        try:
+            store = self.db.get_store_by_code(code)
+        except Exception:
+            store = None
+        if not store:
+            return None
+        return {
+            "store_code": code,
+            "store_name": str(store.get("store_name") or "").strip(),
+            "notes": self._visit_notes_from_store(store),
+            "store_id": store.get("id"),
+            "checked": True,
+        }
+
+    def _on_map_store_build_picked(self, payload: Dict[str, Any]) -> None:
+        """新規ルート登録モード: クリックで所属移動＋訪問順追加／再クリックで外す。"""
+        if not self._build_route_mode or not self._editing_route_code:
+            return
+        route_code = self._editing_route_code
+        route_name = self._editing_route_name or route_code
+        codes = self._codes_for_map_build(
+            str(payload.get("store_code") or ""),
+            payload.get("member_codes")
+            if isinstance(payload.get("member_codes"), list)
+            else None,
+        )
+        if not codes:
+            return
+
+        try:
+            from services.store_route_membership_service import (
+                move_store_to_route,
+                unassign_store_completely,
+            )
+        except Exception:
+            try:
+                from store_route_membership_service import (  # type: ignore
+                    move_store_to_route,
+                    unassign_store_completely,
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "ルート新規登録", f"処理を読み込めませんでした:\n{e}"
+                )
+                return
+
+        picked_set = set(self._pick_order)
+        # 再クリック: このルートから外して未所属へ
+        if codes and all(c in picked_set for c in codes):
+            for code in codes:
+                store = None
+                try:
+                    store = self.db.get_store_by_code(code)
+                except Exception:
+                    store = None
+                if not store or store.get("id") is None:
+                    continue
+                try:
+                    sid = int(store["id"])
+                except (TypeError, ValueError):
+                    continue
+                try:
+                    unassign_store_completely(self.db, sid)
+                except Exception as e:
+                    print(f"ルート外しエラー ({code}): {e}")
+            remove = set(codes)
+            self._pick_order = [c for c in self._pick_order if c not in remove]
+            self._apply_build_order_and_reload()
+            return
+
+        # 追加: 他ルート／未所属からこのルートへ移動
+        added_any = False
+        for code in codes:
+            if code in picked_set:
+                continue
+            store = None
+            try:
+                store = self.db.get_store_by_code(code)
+            except Exception:
+                store = None
+            if not store or store.get("id") is None:
+                continue
+            try:
+                sid = int(store["id"])
+            except (TypeError, ValueError):
+                continue
+            try:
+                ok = bool(move_store_to_route(self.db, sid, route_name, route_code))
+            except Exception as e:
+                print(f"ルート移動エラー ({code}): {e}")
+                ok = False
+            if not ok:
+                continue
+            self._pick_order.append(code)
+            picked_set.add(code)
+            added_any = True
+        if not added_any:
+            return
+        self._apply_build_order_and_reload()
+
+    def _apply_build_order_and_reload(self) -> None:
+        """クリック順で店舗リストを作り、保存して地図を更新（ズーム維持）。"""
+        rows: List[Dict[str, Any]] = []
+        for code in self._pick_order:
+            row = self._row_from_store_code(code)
+            if row:
+                rows.append(row)
+        self._rebuild_visit_list_from_rows(rows)
+        if self._pick_order:
+            self._selected_store_code = self._pick_order[-1]
+        if self._editing_route_code:
+            self.save_editing_visit_order(silent=True)
+
+        editing = self._editing_route_code
+        order = list(self._pick_order)
+        selected = self._selected_store_code
+        self.reload()
+        if editing and editing in self._route_checks:
+            cb = self._route_checks.get(editing)
+            if cb is not None and not cb.isChecked():
+                cb.blockSignals(True)
+                cb.setChecked(True)
+                cb.blockSignals(False)
+            self._set_editing_route(editing)
+        # 訪問順をクリック順に揃える（reload 後も）
+        if order:
+            by_code = {
+                str(r.get("store_code") or "").strip(): r
+                for r in self._snapshot_visit_items()
+            }
+            synced = []
+            for c in order:
+                if c in by_code:
+                    synced.append(by_code[c])
+                else:
+                    row = self._row_from_store_code(c)
+                    if row:
+                        synced.append(row)
+            if synced:
+                self._rebuild_visit_list_from_rows(synced)
+                self.save_editing_visit_order(silent=True)
+        self._build_route_mode = True
+        self._pick_order = order
+        self._selected_store_code = selected
+        self._update_pick_nav_buttons()
+        self._refresh_build_status_text()
+        self._refresh_map()
+        self.routes_changed.emit()
+
     def clear_editing_route_focus(self, *, fit_all: bool = False) -> None:
         """編集中ルートを解除する。
 
         fit_all=True のときだけ全体が収まるようズームする（初回表示用）。
         ボタンからの解除では現在の地図位置・ズームを維持する。
         """
+        if self._build_route_mode:
+            self.finish_build_route_mode(silent=True)
         if self._pick_mode:
             self.pick_order_btn.blockSignals(True)
             self.pick_order_btn.setChecked(False)
@@ -3924,6 +4263,7 @@ class RouteMapWidget(QWidget):
         self.save_visit_order_btn.setEnabled(False)
         self.reverse_visit_order_btn.setEnabled(False)
         self.web_template_btn.setEnabled(False)
+        self.remove_from_route_btn.setEnabled(False)
         self._restyle_route_checks()
         self._refresh_map()
         if fit_all:
@@ -4216,8 +4556,8 @@ class RouteMapWidget(QWidget):
 
         if self._selected_store_code == store_code:
             self._selected_store_code = ""
-        # 訪問順選択中ならベースラインからも外す
-        if self._pick_mode:
+        # 訪問順選択／新規登録中ならクリック順からも外す
+        if self._pick_mode or self._build_route_mode:
             self._pick_order = [c for c in self._pick_order if c != store_code]
             self._pick_baseline_rows = [
                 r
@@ -4225,9 +4565,17 @@ class RouteMapWidget(QWidget):
                 if str(r.get("store_code") or "").strip() != store_code
             ]
         editing = route_code
+        was_build = self._build_route_mode
+        order = list(self._pick_order) if was_build else []
         self.reload()
         if editing and editing in self._route_checks:
             self._set_editing_route(editing)
+        if was_build:
+            self._build_route_mode = True
+            self._pick_order = order
+            self._update_pick_nav_buttons()
+            self._refresh_build_status_text()
+            self._refresh_map()
         self.routes_changed.emit()
         self.status_label.setText(
             f"ルートから外す: {label} ← {route_name or route_code}"
@@ -4592,7 +4940,7 @@ class RouteMapWidget(QWidget):
             stores = _markers_from_stores(stores_raw)
             # 編集中ルート: クリック選択中は番号、通常はスタート／ゴール
             if code and code == self._editing_route_code:
-                if self._pick_mode and self._pick_order:
+                if self._map_click_select_active() and self._pick_order:
                     pick_rank = {
                         c: i + 1 for i, c in enumerate(self._pick_order) if c
                     }
@@ -4723,6 +5071,8 @@ class RouteMapWidget(QWidget):
             "show_endpoints": show_endpoints,
             "show_collocation_checked": show_collocation_checked,
             "pick_mode": bool(self._pick_mode),
+            "build_route_mode": bool(self._build_route_mode),
+            "build_route_name": self._editing_route_name or self._editing_route_code or "",
             "editing_route_code": self._editing_route_code or "",
         }
 
