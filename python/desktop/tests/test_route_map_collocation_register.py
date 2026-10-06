@@ -12,6 +12,8 @@ from ui.store_master.route_map_widget import (
     _markers_from_stores,
     _merge_cross_route_hardoff_markers,
     _missing_hardoff_brands,
+    _order_groups_nearest_neighbor,
+    _point_in_polygon,
     _rows_for_pick_order,
     _store_map_dict,
     _suggest_collocated_store_name,
@@ -215,3 +217,22 @@ def test_rows_for_pick_order_empty_picks_all_skip():
     rows = _rows_for_pick_order(baseline, [])
     assert [r["store_code"] for r in rows] == ["A", "B"]
     assert all(r["checked"] is False for r in rows)
+
+
+def test_point_in_polygon_square():
+    ring = [(0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)]
+    assert _point_in_polygon(0.5, 0.5, ring) is True
+    assert _point_in_polygon(1.5, 0.5, ring) is False
+
+
+def test_order_groups_nearest_neighbor_start_goal():
+    groups = [
+        {"key": "A", "codes": ["A"], "lat": 35.0, "lng": 139.0},
+        {"key": "B", "codes": ["B"], "lat": 35.01, "lng": 139.0},
+        {"key": "C", "codes": ["C"], "lat": 35.02, "lng": 139.0},
+        {"key": "D", "codes": ["D1", "D2"], "lat": 35.03, "lng": 139.0},
+    ]
+    ordered = _order_groups_nearest_neighbor(groups, "A", "D")
+    assert ordered[0] == "A"
+    assert ordered[-2:] == ["D1", "D2"]
+    assert set(ordered) == {"A", "B", "C", "D1", "D2"}

@@ -184,6 +184,83 @@ def _rows_for_pick_order(
     return [by_code[c] for c in picked if c in by_code] + remaining
 
 
+def _point_in_polygon(
+    lat: float, lng: float, ring: List[Tuple[float, float]]
+) -> bool:
+    """多角形内判定（レイキャスト）。ring は (lat, lng) の頂点列。"""
+    if len(ring) < 3:
+        return False
+    # 経度=x / 緯度=y として扱う
+    x, y = float(lng), float(lat)
+    inside = False
+    n = len(ring)
+    for i in range(n):
+        y1, x1 = float(ring[i][0]), float(ring[i][1])
+        y2, x2 = float(ring[(i + 1) % n][0]), float(ring[(i + 1) % n][1])
+        if ((y1 > y) != (y2 > y)) and (
+            x < (x2 - x1) * (y - y1) / ((y2 - y1) or 1e-15) + x1
+        ):
+            inside = not inside
+    return inside
+
+
+def _group_distance_m(
+    a: Dict[str, Any], b: Dict[str, Any]
+) -> float:
+    try:
+        lat1, lng1 = float(a["lat"]), float(a["lng"])
+        lat2, lng2 = float(b["lat"]), float(b["lng"])
+    except (TypeError, ValueError, KeyError):
+        return 1e18
+    return _approx_distance_m((lat1, lng1), (lat2, lng2))
+
+
+def _order_groups_nearest_neighbor(
+    groups: List[Dict[str, Any]],
+    start_key: str,
+    goal_key: str,
+) -> List[str]:
+    """スタートから近傍順でグループを並べ、ゴールを最後に固定。フラットな店舗コード列を返す。"""
+    by_key = {
+        str(g.get("key") or "").strip(): g
+        for g in groups
+        if str(g.get("key") or "").strip()
+    }
+    start = str(start_key or "").strip()
+    goal = str(goal_key or "").strip()
+    if start not in by_key:
+        return []
+    if goal and goal not in by_key:
+        goal = ""
+    if goal and goal == start:
+        goal = ""
+
+    ordered_keys: List[str] = [start]
+    remaining = {
+        k for k in by_key.keys() if k != start and k != goal
+    }
+    current = by_key[start]
+    while remaining:
+        nearest = min(
+            remaining,
+            key=lambda k: _group_distance_m(current, by_key[k]),
+        )
+        ordered_keys.append(nearest)
+        remaining.remove(nearest)
+        current = by_key[nearest]
+    if goal:
+        ordered_keys.append(goal)
+
+    flat: List[str] = []
+    for key in ordered_keys:
+        g = by_key[key]
+        for code in g.get("codes") or []:
+            cs = str(code or "").strip()
+            if cs and cs not in flat:
+                flat.append(cs)
+    return flat
+
+
 SETTINGS_ORG = "HIRIO"
 SETTINGS_APP = "desktop"
 SETTINGS_MAIN_SPLITTER = "store_master/route_map/main_splitter"
@@ -1048,6 +1125,26 @@ def build_leaflet_html(payload: Dict[str, Any]) -> str:
     border: 1px solid #fff;
     vertical-align: middle;
   }}
+  body.hirio-lasso-drawing .leaflet-marker-icon,
+  body.hirio-lasso-drawing .leaflet-marker-shadow,
+  body.hirio-lasso-drawing .leaflet-interactive {{
+    pointer-events: none !important;
+  }}
+  body.hirio-lasso-drawing {{
+    cursor: crosshair;
+  }}
+  .hirio-route-line-tip {{
+    background: rgba(33, 33, 33, 0.92);
+    color: #fff;
+    border: 1px solid #616161;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font: 12px/1.35 "Segoe UI", "Meiryo UI", sans-serif;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.35);
+  }}
+  .hirio-route-line-tip::before {{
+    border-top-color: rgba(33, 33, 33, 0.92);
+  }}
   {tile_filter_css}
 </style>
 </head>
@@ -1061,9 +1158,17 @@ window.__HIRIO_MAP_VIEW = null;
 window.__HIRIO_READY = false;
 
 const layerGroup = L.layerGroup().addTo(map);
+const lassoGroup = L.layerGroup().addTo(map);
 let legendControl = null;
 let modeBadgeControl = null;
 const DEFAULT_PIN = '{DEFAULT_PIN_COLOR}';
+window.__HIRIO_LASSO_MODE = false;
+window.__HIRIO_LASSO_PHASE = '';
+const lassoDraw = {{
+  drawing: false,
+  pts: [],
+  line: null
+}};
 
 function hirioRememberView() {{
   try {{
@@ -1076,6 +1181,193 @@ function hirioRememberView() {{
 }}
 map.on('moveend', hirioRememberView);
 map.on('zoomend', hirioRememberView);
+
+function hirioLassoClearDraft() {{
+  lassoDraw.drawing = false;
+  lassoDraw.pts = [];
+  if (lassoDraw.line) {{
+    try {{ lassoGroup.removeLayer(lassoDraw.line); }} catch (e) {{}}
+    lassoDraw.line = null;
+  }}
+  hirioLassoDetachListeners();
+}}
+
+function hirioLassoCanDraw() {{
+  return (
+    !!window.__HIRIO_LASSO_MODE &&
+    (window.__HIRIO_LASSO_PHASE === 'drawing' ||
+      window.__HIRIO_LASSO_PHASE === '' ||
+      !window.__HIRIO_LASSO_PHASE)
+  );
+}}
+
+function hirioLassoSimplify(pts, maxPts) {{
+  if (!pts || pts.length <= maxPts) return pts || [];
+  const out = [pts[0]];
+  const step = (pts.length - 1) / (maxPts - 1);
+  for (let i = 1; i < maxPts - 1; i++) {{
+    out.push(pts[Math.round(i * step)]);
+  }}
+  out.push(pts[pts.length - 1]);
+  return out;
+}}
+
+function hirioLassoPathSpan(pts) {{
+  if (!pts || !pts.length) return 0;
+  let minLat = pts[0][0], maxLat = pts[0][0];
+  let minLng = pts[0][1], maxLng = pts[0][1];
+  for (let i = 1; i < pts.length; i++) {{
+    if (pts[i][0] < minLat) minLat = pts[i][0];
+    if (pts[i][0] > maxLat) maxLat = pts[i][0];
+    if (pts[i][1] < minLng) minLng = pts[i][1];
+    if (pts[i][1] > maxLng) maxLng = pts[i][1];
+  }}
+  // だいたいの距離(m)。小さすぎる囲みを弾く
+  const dy = (maxLat - minLat) * 111000;
+  const dx = (maxLng - minLng) * 111000 * Math.cos((minLat * Math.PI) / 180);
+  return Math.sqrt(dx * dx + dy * dy);
+}}
+
+function hirioLassoRoundPts(pts) {{
+  return (pts || []).map(function(p) {{
+    return [
+      Math.round(Number(p[0]) * 1e5) / 1e5,
+      Math.round(Number(p[1]) * 1e5) / 1e5
+    ];
+  }});
+}}
+
+function hirioLassoDetachListeners() {{
+  if (lassoDraw._docMove) {{
+    try {{ document.removeEventListener('mousemove', lassoDraw._docMove, true); }} catch (e1) {{}}
+    lassoDraw._docMove = null;
+  }}
+  if (lassoDraw._docUp) {{
+    try {{ document.removeEventListener('mouseup', lassoDraw._docUp, true); }} catch (e2) {{}}
+    lassoDraw._docUp = null;
+  }}
+  if (lassoDraw._mapMove) {{
+    try {{ map.off('mousemove', lassoDraw._mapMove); }} catch (e3) {{}}
+    lassoDraw._mapMove = null;
+  }}
+  if (lassoDraw._mapUp) {{
+    try {{ map.off('mouseup', lassoDraw._mapUp); }} catch (e4) {{}}
+    lassoDraw._mapUp = null;
+  }}
+}}
+
+function hirioLassoAddPoint(lat, lng) {{
+  if (!lassoDraw.drawing) return;
+  const last = lassoDraw.pts[lassoDraw.pts.length - 1];
+  // 近すぎる点は間引き（ノイズ防止）。ただし極端に間引かない
+  if (
+    last &&
+    Math.abs(last[0] - lat) < 0.00001 &&
+    Math.abs(last[1] - lng) < 0.00001
+  ) {{
+    return;
+  }}
+  lassoDraw.pts.push([lat, lng]);
+  if (lassoDraw.line) lassoDraw.line.setLatLngs(lassoDraw.pts);
+}}
+
+function hirioLassoStartAt(latlng) {{
+  hirioLassoClearDraft();
+  lassoDraw.drawing = true;
+  lassoDraw.pts = [[latlng.lat, latlng.lng]];
+  lassoDraw.line = L.polyline(lassoDraw.pts, {{
+    color: '#00897b',
+    weight: 3,
+    dashArray: '6 4',
+    interactive: false
+  }}).addTo(lassoGroup);
+  // Leaflet 正規化イベント（地図上）＋ document バックアップ（地図外で離したとき）
+  lassoDraw._mapMove = function(e) {{
+    if (!lassoDraw.drawing || !e || !e.latlng) return;
+    hirioLassoAddPoint(e.latlng.lat, e.latlng.lng);
+  }};
+  lassoDraw._mapUp = function() {{
+    if (lassoDraw.drawing) hirioLassoFinishStroke();
+  }};
+  lassoDraw._docMove = function(ev) {{
+    if (!lassoDraw.drawing) return;
+    try {{
+      const ll = map.mouseEventToLatLng(ev);
+      hirioLassoAddPoint(ll.lat, ll.lng);
+    }} catch (err) {{}}
+  }};
+  lassoDraw._docUp = function(ev) {{
+    if (!lassoDraw.drawing) return;
+    try {{ L.DomEvent.stop(ev); }} catch (err) {{}}
+    hirioLassoFinishStroke();
+  }};
+  map.on('mousemove', lassoDraw._mapMove);
+  map.on('mouseup', lassoDraw._mapUp);
+  document.addEventListener('mousemove', lassoDraw._docMove, true);
+  document.addEventListener('mouseup', lassoDraw._docUp, true);
+}}
+
+function hirioLassoFinishStroke() {{
+  if (!lassoDraw.drawing) return;
+  const pts = lassoDraw.pts.slice();
+  // リスナーだけ外す（線は Python 応答まで残す）
+  lassoDraw.drawing = false;
+  hirioLassoDetachListeners();
+  const span = hirioLassoPathSpan(pts);
+  if (pts.length < 4 || span < 40) {{
+    // 小さすぎる囲みは破棄して描き直し
+    if (lassoDraw.line) {{
+      try {{ lassoGroup.removeLayer(lassoDraw.line); }} catch (e) {{}}
+      lassoDraw.line = null;
+    }}
+    lassoDraw.pts = [];
+    notifyLasso('too_small', []);
+    return;
+  }}
+  // 点を間引き＋座標を丸めてから渡す（橋渡しサイズ対策）
+  const simplified = hirioLassoRoundPts(hirioLassoSimplify(pts, 48));
+  // 閉じた多角形として塗る（見た目用）。点列は Python 側でも閉じる
+  if (lassoDraw.line) {{
+    try {{ lassoGroup.removeLayer(lassoDraw.line); }} catch (e3) {{}}
+    lassoDraw.line = null;
+  }}
+  lassoDraw.pts = simplified;
+  L.polygon(simplified, {{
+    color: '#00897b',
+    weight: 2,
+    fillColor: '#26a69a',
+    fillOpacity: 0.18,
+    interactive: false
+  }}).addTo(lassoGroup);
+  notifyLasso('commit', simplified);
+}}
+
+map.on('mousedown', function(e) {{
+  if (!hirioLassoCanDraw()) return;
+  try {{ L.DomEvent.preventDefault(e); }} catch (err) {{}}
+  try {{ L.DomEvent.stopPropagation(e); }} catch (err2) {{}}
+  hirioLassoStartAt(e.latlng);
+}});
+// タッチ
+map.on('touchstart', function(e) {{
+  if (!hirioLassoCanDraw()) return;
+  const t = e.originalEvent && e.originalEvent.touches && e.originalEvent.touches[0];
+  if (!t) return;
+  try {{ e.originalEvent.preventDefault(); }} catch (err) {{}}
+  const latlng = map.mouseEventToLatLng(t);
+  hirioLassoStartAt(latlng);
+}});
+map.on('touchmove', function(e) {{
+  if (!lassoDraw.drawing || !hirioLassoCanDraw()) return;
+  const t = e.originalEvent && e.originalEvent.touches && e.originalEvent.touches[0];
+  if (!t) return;
+  try {{ e.originalEvent.preventDefault(); }} catch (err) {{}}
+  const latlng = map.mouseEventToLatLng(t);
+  hirioLassoAddPoint(latlng.lat, latlng.lng);
+}});
+map.on('touchend', function() {{
+  if (lassoDraw.drawing) hirioLassoFinishStroke();
+}});
 
 L.tileLayer('{tile_url}', {{
   maxZoom: 19,
@@ -1095,13 +1387,52 @@ function hirioSetGrayscale(on) {{
 }}
 
 function notifyStorePick(store) {{
-  if (!window.__HIRIO_PICK_MODE) return;
+  const lassoPhase = window.__HIRIO_LASSO_PHASE || '';
+  if (lassoPhase === 'drawing') return;
+  if (lassoPhase === 'pick_start' || lassoPhase === 'pick_goal') {{
+    // 範囲登録のスタート／ゴール指定
+  }} else if (!window.__HIRIO_PICK_MODE) {{
+    return;
+  }}
   try {{
     document.title = 'HIRIO_PICK:' + JSON.stringify({{
       store_code: store.store_code || '',
       member_codes: store.member_codes || []
     }});
   }} catch (e) {{}}
+}}
+
+function notifyLasso(action, points) {{
+  try {{
+    const ts = Date.now();
+    const payload = {{
+      action: action || 'commit',
+      points: points || [],
+      _ts: ts
+    }};
+    // バックアップ（title が切れた／失敗したとき用）
+    window.__HIRIO_LASSO_PENDING = payload;
+    // 座標は丸済みなので title に載せて同期処理（runJavaScript 変換失敗を避ける）
+    const titleBody = 'HIRIO_LASSO:' + JSON.stringify(payload);
+    if (titleBody.length > 3500) {{
+      // 長すぎるときだけ短い合図 → Python が JSON 文字列で取り出す
+      document.title = 'HIRIO_LASSO:' + JSON.stringify({{
+        action: payload.action,
+        pending: true,
+        _ts: ts
+      }});
+    }} else {{
+      document.title = titleBody;
+    }}
+  }} catch (e) {{
+    try {{
+      document.title = 'HIRIO_LASSO:' + JSON.stringify({{
+        action: action || 'commit',
+        pending: true,
+        _ts: Date.now()
+      }});
+    }} catch (e2) {{}}
+  }}
 }}
 
 function notifyRouteAction(payload) {{
@@ -1728,7 +2059,7 @@ function addIconMarker(store, routeName, icons) {{
   marker.addTo(layerGroup);
 }}
 
-function addRouteLine(pts, color, weight, opacity, dashed, routeCode) {{
+function addRouteLine(pts, color, weight, opacity, dashed, routeCode, routeName, storeCount) {{
   const optsHalo = {{
     color: '#ffffff',
     weight: weight + 2,
@@ -1758,10 +2089,16 @@ function addRouteLine(pts, color, weight, opacity, dashed, routeCode) {{
       bubblingMouseEvents: false
     }});
     hit.addTo(layerGroup);
-    hit.bindTooltip('ダブルクリックでこのルートを選択', {{
+    const name = String(routeName || '').trim() || code;
+    const n = Number.isFinite(Number(storeCount)) ? Number(storeCount) : 0;
+    const tip =
+      name + '（' + n + '店）' +
+      '<br><span style="opacity:0.9">ダブルクリックでこのルートを選択</span>';
+    hit.bindTooltip(tip, {{
       sticky: true,
-      opacity: 0.85,
-      direction: 'top'
+      opacity: 0.9,
+      direction: 'top',
+      className: 'hirio-route-line-tip'
     }});
     bindRouteFocusOnDblClick(hit, code);
   }}
@@ -1813,7 +2150,17 @@ function hirioUpdateLegend(data) {{
   modeBadgeControl = L.control({{ position: 'topright' }});
   modeBadgeControl.onAdd = function() {{
     const div = L.DomUtil.create('div', 'mode-badge');
-    if (data.build_route_mode) {{
+    const lassoPhase = data.lasso_phase || '';
+    if (lassoPhase === 'pick_start') {{
+      div.textContent = 'スタート地点をクリック';
+      div.style.background = 'rgba(21,101,192,0.94)';
+    }} else if (lassoPhase === 'pick_goal') {{
+      div.textContent = 'ゴール地点をクリック';
+      div.style.background = 'rgba(198,40,40,0.94)';
+    }} else if (data.lasso_mode) {{
+      div.textContent = '範囲選択中（ドラッグで囲む）';
+      div.style.background = 'rgba(0,121,107,0.94)';
+    }} else if (data.build_route_mode) {{
       const bn = (data.build_route_name || '').trim();
       div.textContent = bn ? ('新規ルート登録中: ' + bn) : '新規ルート登録中';
       div.style.background = 'rgba(46,125,50,0.94)';
@@ -1840,13 +2187,72 @@ window.__HIRIO_UPDATE = function(data, opts) {{
   try {{
   try {{ map.invalidateSize(false); }} catch (eInv) {{}}
   window.__HIRIO_DATA = data || {{}};
-  window.__HIRIO_PICK_MODE = !!(data.pick_mode || data.build_route_mode);
+  window.__HIRIO_LASSO_MODE = !!data.lasso_mode;
+  window.__HIRIO_LASSO_PHASE = data.lasso_phase || '';
+  window.__HIRIO_PICK_MODE = !!(
+    data.pick_mode ||
+    data.build_route_mode ||
+    data.lasso_phase === 'pick_start' ||
+    data.lasso_phase === 'pick_goal'
+  );
   try {{
     document.body.classList.toggle(
       'hirio-pick-mode',
       !!(data.pick_mode || data.build_route_mode)
     );
+    document.body.classList.toggle(
+      'hirio-lasso-drawing',
+      !!(
+        data.lasso_mode &&
+        (data.lasso_phase === 'drawing' || !data.lasso_phase)
+      )
+    );
   }} catch (e) {{}}
+  try {{
+    if (
+      data.lasso_mode &&
+      (data.lasso_phase === 'drawing' || !data.lasso_phase)
+    ) {{
+      map.dragging.disable();
+      map.doubleClickZoom.disable();
+    }} else {{
+      map.dragging.enable();
+      map.doubleClickZoom.enable();
+    }}
+  }} catch (eDrag) {{}}
+  // 囲みポリゴン再描画（描画中／送信直後の下書きは消さない）
+  try {{
+    const keepDraft =
+      lassoDraw.pts &&
+      lassoDraw.pts.length > 0 &&
+      (lassoDraw.drawing ||
+        (data.lasso_mode &&
+          (data.lasso_phase === 'drawing' || !data.lasso_phase)));
+    const draftPts = keepDraft ? lassoDraw.pts.slice() : null;
+    const wasDrawing = !!lassoDraw.drawing;
+    lassoGroup.clearLayers();
+    lassoDraw.line = null;
+    const poly = data.lasso_polygon || [];
+    if (poly.length >= 3) {{
+      L.polygon(poly, {{
+        color: '#00897b',
+        weight: 2,
+        fillColor: '#26a69a',
+        fillOpacity: 0.18,
+        interactive: false
+      }}).addTo(lassoGroup);
+      // Python がポリゴンを持ったので下書きは不要
+      if (!wasDrawing) lassoDraw.pts = [];
+    }} else if (draftPts) {{
+      lassoDraw.pts = draftPts;
+      lassoDraw.line = L.polyline(draftPts, {{
+        color: '#00897b',
+        weight: 3,
+        dashArray: '6 4',
+        interactive: false
+      }}).addTo(lassoGroup);
+    }}
+  }} catch (ePoly) {{}}
   const useIcons = !!data.use_icons;
   const icons = data.map_icons || {{}};
   const grayscale = !!data.grayscale;
@@ -1890,6 +2296,10 @@ window.__HIRIO_UPDATE = function(data, opts) {{
   (data.routes || []).forEach(function(route) {{
     const color = route.line_color || '#1e88e5';
     const routeCode = (route.route_code || '').trim();
+    const routeName = String(route.route_name || '').trim();
+    const storeCount = Number.isFinite(Number(route.store_count))
+      ? Number(route.store_count)
+      : (route.stores || []).length;
     const visitPts = [];
     const skipStores = [];
     const pickPts = [];
@@ -1913,12 +2323,21 @@ window.__HIRIO_UPDATE = function(data, opts) {{
       if (pickPts.length >= 2) {{
         pickPts.sort(function(a, b) {{ return a.idx - b.idx; }});
         const pts = pickPts.map(function(p) {{ return [p.lat, p.lng]; }});
-        addRouteLine(pts, color, dashWeight, lineOpacity, false, routeCode);
+        addRouteLine(
+          pts, color, dashWeight, lineOpacity, false,
+          routeCode, routeName, storeCount
+        );
       }}
     }} else if ((route.road_polyline || []).length >= 2) {{
-      addRouteLine(route.road_polyline, color, lineWeight, lineOpacity, false, routeCode);
+      addRouteLine(
+        route.road_polyline, color, lineWeight, lineOpacity, false,
+        routeCode, routeName, storeCount
+      );
     }} else if (visitPts.length >= 2) {{
-      addRouteLine(visitPts, color, dashWeight, lineOpacity, false, routeCode);
+      addRouteLine(
+        visitPts, color, dashWeight, lineOpacity, false,
+        routeCode, routeName, storeCount
+      );
     }}
     // 行かない店: 最後に訪問する店から薄い点線（編集中ルートの選択モード中は非表示）
     if (!isEditingRoute && visitPts.length >= 1 && skipStores.length) {{
@@ -1930,7 +2349,9 @@ window.__HIRIO_UPDATE = function(data, opts) {{
           2,
           0.45,
           true,
-          routeCode
+          routeCode,
+          routeName,
+          storeCount
         );
       }});
     }}
@@ -1970,11 +2391,14 @@ window.__HIRIO_UPDATE = function(data, opts) {{
 // ズームが変わると画面上の近接関係が変わるので、ずらしをやり直す
 // fitBounds 中の zoomend は UPDATE 完了後に回す（ずらし量を最終ズームで再計算）
 map.on('zoomend', function() {{
+  // 範囲描画中はピン再配置で下書きが消えるのを避ける
+  if (lassoDraw.drawing || hirioLassoCanDraw()) return;
   if (!window.__HIRIO_DATA || hirioFromZoomRedraw) return;
   if (hirioZoomRedrawTimer) clearTimeout(hirioZoomRedrawTimer);
   hirioZoomRedrawTimer = setTimeout(function() {{
     hirioZoomRedrawTimer = null;
     if (!window.__HIRIO_DATA || hirioFromZoomRedraw || hirioUpdating) return;
+    if (lassoDraw.drawing || hirioLassoCanDraw()) return;
     hirioFromZoomRedraw = true;
     try {{
       window.__HIRIO_UPDATE(window.__HIRIO_DATA, {{ fit: false }});
@@ -2024,6 +2448,11 @@ class RouteMapWidget(QWidget):
         self._selected_store_code: str = ""
         self._pick_mode: bool = False
         self._build_route_mode: bool = False
+        self._lasso_mode: bool = False
+        self._lasso_phase: str = ""  # drawing | pick_start | pick_goal
+        self._lasso_polygon: List[Tuple[float, float]] = []
+        self._lasso_groups: List[Dict[str, Any]] = []
+        self._lasso_start_key: str = ""
         self._pick_order: List[str] = []
         self._pick_baseline_rows: List[Dict[str, Any]] = []
         self._pick_history: List[List[str]] = [[]]
@@ -2190,6 +2619,7 @@ class RouteMapWidget(QWidget):
             "地図上で訪問順序選択では、選ばなかった店のチェックは自動でOFFになります。\n"
             "「ルートから外す」でこのグループから削除（店舗自体はDBに残ります）。\n"
             "「ルート新規登録」で名前を付け、地図クリックで店を集めて新しいルートを作れます。\n"
+            "「範囲で囲む」でフリーハンド囲み→スタート／ゴール指定→近傍順で一括登録できます。\n"
             "「訪問順序反転」で周回順を逆にできます。\n"
             "ドラッグで周回順変更（マスタ表示順＋最新ルート登録へ保存）。\n"
             "区切り線をドラッグで各パネルの高さを変更できます。"
@@ -2419,6 +2849,39 @@ class RouteMapWidget(QWidget):
         self.build_finish_btn.setEnabled(False)
         self.build_finish_btn.clicked.connect(self.finish_build_route_mode)
         map_toolbar.addWidget(self.build_finish_btn, 0)
+
+        self.lasso_btn = QPushButton("範囲で囲む")
+        self.lasso_btn.setCheckable(True)
+        self.lasso_btn.setFixedHeight(26)
+        self.lasso_btn.setToolTip(
+            "フリーハンドで店舗を囲み、一括でルートに登録します。\n"
+            "囲んだあとスタート／ゴールをクリックすると近傍順で仮並びします。\n"
+            "併設ピンはまとめて登録。微調整は訪問順序選択で。\n"
+            "先にルート新規登録、またはルートをダブルクリックしてください。"
+        )
+        self.lasso_btn.setStyleSheet(
+            """
+            QPushButton {
+                background: #00695c; color: #ffffff; border: none;
+                padding: 2px 10px; border-radius: 4px; font-weight: bold;
+            }
+            QPushButton:hover:!disabled { background: #00897b; }
+            QPushButton:checked {
+                background: #004d40; color: #ffffff;
+            }
+            QPushButton:disabled { background: #37474f; color: #78909c; }
+            """
+        )
+        self.lasso_btn.toggled.connect(self._on_lasso_toggled)
+        map_toolbar.addWidget(self.lasso_btn, 0)
+
+        self.lasso_redo_btn = QPushButton("囲み直す")
+        self.lasso_redo_btn.setFixedHeight(26)
+        self.lasso_redo_btn.setToolTip("囲みを消して、もう一度描き直します")
+        self.lasso_redo_btn.setStyleSheet(_pick_btn_css)
+        self.lasso_redo_btn.setEnabled(False)
+        self.lasso_redo_btn.clicked.connect(self._lasso_redo)
+        map_toolbar.addWidget(self.lasso_redo_btn, 0)
 
         self.pick_undo_btn = QPushButton("戻る")
         self.pick_undo_btn.setFixedHeight(26)
@@ -2681,18 +3144,34 @@ class RouteMapWidget(QWidget):
 
     def _focus_route_on_map(self, route_code: str) -> None:
         """指定ルートを編集対象にし、店舗リスト表示＋地図拡大。"""
+        if self._lasso_mode:
+            self._clear_lasso_state()
         if self._build_route_mode:
             self.finish_build_route_mode(silent=True)
         if self._pick_mode:
             # ルート切替前に選択モードを終了（現ルートの並びを保存）
             self.pick_order_btn.setChecked(False)
         self._selected_store_code = ""
+        # 左のルート一覧を開いて、該当名が見える・選択状態になるようにする
+        try:
+            self.route_section.set_expanded(True)
+        except Exception:
+            pass
         self._set_editing_route(route_code)
         cb = self._route_checks.get(route_code)
-        if cb is not None and not cb.isChecked():
-            cb.blockSignals(True)
-            cb.setChecked(True)
-            cb.blockSignals(False)
+        if cb is not None:
+            if not cb.isChecked():
+                cb.blockSignals(True)
+                cb.setChecked(True)
+                cb.blockSignals(False)
+            # 一覧内で見える位置までスクロール（選択ハイライトが画面外だと気づきにくい）
+            try:
+                self.route_scroll.ensureWidgetVisible(cb, 8, 8)
+            except Exception:
+                pass
+            QTimer.singleShot(
+                0, lambda w=cb: self.route_scroll.ensureWidgetVisible(w, 8, 8)
+            )
         # スタート／ゴール表示を反映してから拡大
         self._refresh_map()
         QTimer.singleShot(350, lambda c=route_code: self._fit_map_to_route(c))
@@ -2972,6 +3451,22 @@ class RouteMapWidget(QWidget):
                 return
             if isinstance(raw, dict):
                 self._on_map_store_picked(raw)
+            return
+        if text.startswith("HIRIO_LASSO:"):
+            try:
+                raw = json.loads(text[len("HIRIO_LASSO:") :])
+            except Exception:
+                # title が切れた可能性 → JS から JSON 文字列で取り出す
+                self._fetch_lasso_pending_from_js()
+                return
+            if not isinstance(raw, dict):
+                return
+            # 点列ありならそのまま処理。pending だけの合図なら JS から取得
+            pts = raw.get("points")
+            if raw.get("pending") and not pts:
+                self._fetch_lasso_pending_from_js()
+                return
+            self._on_lasso_from_map(raw)
             return
         if text.startswith("HIRIO_ROUTE:"):
             try:
@@ -3692,15 +4187,22 @@ class RouteMapWidget(QWidget):
         return bool(self._pick_mode or self._build_route_mode)
 
     def _update_pick_nav_buttons(self) -> None:
-        on = bool(self._pick_mode) and not self._build_route_mode
+        on = bool(self._pick_mode) and not self._build_route_mode and not self._lasso_mode
         self.pick_undo_btn.setEnabled(on and self._pick_history_index > 0)
         self.pick_redo_btn.setEnabled(
             on and self._pick_history_index < len(self._pick_history) - 1
         )
         self.pick_save_btn.setEnabled(on and bool(self._editing_route_code))
-        self.build_finish_btn.setEnabled(bool(self._build_route_mode))
-        self.pick_order_btn.setEnabled(not self._build_route_mode)
-        self.new_route_btn.setEnabled(not self._build_route_mode)
+        self.build_finish_btn.setEnabled(
+            bool(self._build_route_mode) and not self._lasso_mode
+        )
+        self.pick_order_btn.setEnabled(not self._build_route_mode and not self._lasso_mode)
+        self.new_route_btn.setEnabled(not self._lasso_mode)
+        self.lasso_btn.setEnabled(not self._pick_mode)
+        self.lasso_redo_btn.setEnabled(
+            bool(self._lasso_mode)
+            and self._lasso_phase in ("drawing", "pick_start", "pick_goal")
+        )
 
     def _refresh_build_status_text(self) -> None:
         if not self._build_route_mode:
@@ -3769,6 +4271,16 @@ class RouteMapWidget(QWidget):
 
     def _on_pick_order_toggled(self, checked: bool) -> None:
         if checked:
+            if self._lasso_mode:
+                self.pick_order_btn.blockSignals(True)
+                self.pick_order_btn.setChecked(False)
+                self.pick_order_btn.blockSignals(False)
+                QMessageBox.information(
+                    self,
+                    "地図上で訪問順序選択",
+                    "範囲選択中です。先に「範囲で囲む」をOFFにしてください。",
+                )
+                return
             if self._build_route_mode:
                 self.pick_order_btn.blockSignals(True)
                 self.pick_order_btn.setChecked(False)
@@ -3946,7 +4458,393 @@ class RouteMapWidget(QWidget):
             return in_list
         return candidates[:1]
 
+    def _clear_lasso_state(self, *, keep_button: bool = False) -> None:
+        self._lasso_mode = False
+        self._lasso_phase = ""
+        self._lasso_polygon = []
+        self._lasso_groups = []
+        self._lasso_start_key = ""
+        if not keep_button and self.lasso_btn.isChecked():
+            self.lasso_btn.blockSignals(True)
+            self.lasso_btn.setChecked(False)
+            self.lasso_btn.blockSignals(False)
+
+    def _on_lasso_toggled(self, checked: bool) -> None:
+        if checked:
+            if self._pick_mode:
+                self.lasso_btn.blockSignals(True)
+                self.lasso_btn.setChecked(False)
+                self.lasso_btn.blockSignals(False)
+                QMessageBox.information(
+                    self,
+                    "範囲で囲む",
+                    "訪問順序選択中です。先に選択を終了してください。",
+                )
+                return
+            if not self._editing_route_code:
+                self.lasso_btn.blockSignals(True)
+                self.lasso_btn.setChecked(False)
+                self.lasso_btn.blockSignals(False)
+                QMessageBox.information(
+                    self,
+                    "範囲で囲む",
+                    "先に「ルート新規登録」、またはルート名をダブルクリックして"
+                    "編集対象を選んでください。",
+                )
+                return
+            if not self.show_unassigned_check.isChecked():
+                self.show_unassigned_check.blockSignals(True)
+                self.show_unassigned_check.setChecked(True)
+                self.show_unassigned_check.blockSignals(False)
+            self._lasso_mode = True
+            self._lasso_phase = "drawing"
+            self._lasso_polygon = []
+            self._lasso_groups = []
+            self._lasso_start_key = ""
+            self._set_pick_status("ドラッグで店舗を囲んでください（囲み直すでやり直し）")
+            self.status_label.setText(
+                f"範囲選択中: {self._editing_route_name or self._editing_route_code}"
+            )
+            self._update_pick_nav_buttons()
+            self._refresh_map()
+            return
+
+        was = self._lasso_mode
+        self._clear_lasso_state(keep_button=True)
+        self._set_pick_status("")
+        self._update_pick_nav_buttons()
+        if was:
+            if self._build_route_mode:
+                self._refresh_build_status_text()
+            self._refresh_map()
+            self.status_label.setText("範囲選択を終了しました")
+
+    def _lasso_redo(self) -> None:
+        if not self._lasso_mode:
+            return
+        self._lasso_phase = "drawing"
+        self._lasso_polygon = []
+        self._lasso_groups = []
+        self._lasso_start_key = ""
+        self._set_pick_status("ドラッグで店舗を囲んでください（囲み直すでやり直し）")
+        self.status_label.setText("囲みをやり直します")
+        self._update_pick_nav_buttons()
+        self._refresh_map()
+
+    def _fetch_lasso_pending_from_js(self) -> None:
+        """window 上の囲み点列を JSON 文字列で取り出す（オブジェクト変換失敗対策）。"""
+        if self.map_view is None:
+            return
+        js = (
+            "(function(){"
+            "try {"
+            "  var p = window.__HIRIO_LASSO_PENDING;"
+            "  if (!p && typeof lassoDraw !== 'undefined' && lassoDraw.pts && lassoDraw.pts.length) {"
+            "    p = {action:'commit', points:lassoDraw.pts, _ts:Date.now()};"
+            "  }"
+            "  return p ? JSON.stringify(p) : '';"
+            "} catch (e) { return ''; }"
+            "})();"
+        )
+        try:
+            self.map_view.page().runJavaScript(js, self._on_lasso_pending_fetched)
+        except Exception:
+            self._set_pick_status(
+                "囲みが認識できませんでした。もう一度ゆっくり囲んでください"
+            )
+            self.status_label.setText("範囲選択: 囲み直し")
+
+    def _on_lasso_pending_fetched(self, result: Any) -> None:
+        """JS に置いた囲み点列を受け取って処理する。"""
+        payload: Any = None
+        if isinstance(result, str) and result.strip():
+            try:
+                payload = json.loads(result)
+            except Exception:
+                payload = None
+        elif isinstance(result, dict):
+            payload = result
+        if not isinstance(payload, dict):
+            self._set_pick_status(
+                "囲みが認識できませんでした。もう一度ゆっくり囲んでください"
+            )
+            self.status_label.setText("範囲選択: 囲み直し")
+            return
+        try:
+            if self.map_view is not None:
+                self.map_view.page().runJavaScript(
+                    "window.__HIRIO_LASSO_PENDING = null;"
+                )
+        except Exception:
+            pass
+        self._on_lasso_from_map(payload)
+
+    def _on_lasso_from_map(self, payload: Dict[str, Any]) -> None:
+        if not self._lasso_mode or self._lasso_phase not in ("drawing", ""):
+            return
+        action = str(payload.get("action") or "commit").strip()
+        if action == "too_small":
+            self._set_pick_status(
+                "囲みが小さすぎます。店舗をぐるっと大きく囲んでください"
+            )
+            self.status_label.setText("範囲選択: もう少し大きく囲んでください")
+            self._lasso_phase = "drawing"
+            self._lasso_polygon = []
+            return
+        if action != "commit":
+            return
+        raw_pts = payload.get("points") or []
+        ring: List[Tuple[float, float]] = []
+        for p in raw_pts:
+            try:
+                if isinstance(p, (list, tuple)) and len(p) >= 2:
+                    ring.append((float(p[0]), float(p[1])))
+                elif isinstance(p, dict):
+                    # まれに {lat,lng} / {0,1} 形式で届く場合
+                    if "lat" in p and "lng" in p:
+                        ring.append((float(p["lat"]), float(p["lng"])))
+                    elif 0 in p and 1 in p:
+                        ring.append((float(p[0]), float(p[1])))
+            except (TypeError, ValueError, KeyError):
+                continue
+        # 始点＝終点で閉じてヒット判定を安定させる
+        if len(ring) >= 3:
+            if (
+                abs(ring[0][0] - ring[-1][0]) > 1e-9
+                or abs(ring[0][1] - ring[-1][1]) > 1e-9
+            ):
+                ring.append(ring[0])
+        if len(ring) < 3:
+            self._set_pick_status(
+                "囲みが認識できませんでした。もう一度ゆっくり囲んでください"
+            )
+            self.status_label.setText("範囲選択: 囲み直し")
+            self._lasso_phase = "drawing"
+            self._lasso_polygon = []
+            return
+        groups = self._lasso_groups_inside_polygon(ring)
+        if not groups:
+            # 囲みは残して見えるようにする（やり直ししやすい）
+            self._lasso_polygon = ring
+            self._lasso_groups = []
+            self._lasso_phase = "drawing"
+            self._set_pick_status(
+                "囲んだ中に店舗がありません。"
+                "「囲み直す」か、ピンが中に入るようにもう一度囲んでください"
+            )
+            self.status_label.setText("範囲選択: 店舗なし（囲み直し）")
+            self._update_pick_nav_buttons()
+            self._refresh_map()
+            return
+        self._lasso_polygon = ring
+        self._lasso_groups = groups
+        self._lasso_start_key = ""
+        self._lasso_phase = "pick_start"
+        n = sum(len(g.get("codes") or []) for g in groups)
+        self._set_pick_status(
+            f"{len(groups)}地点（{n}店）— スタート地点の店舗をクリックしてください"
+        )
+        self.status_label.setText("範囲登録: スタート地点をクリック")
+        self._update_pick_nav_buttons()
+        self._refresh_map()
+
+    def _collect_visible_lasso_pins(self) -> List[Dict[str, Any]]:
+        """表示中ルート＋未所属のピン（併設統合後）。"""
+        if not self._payload_cache:
+            return []
+        selected = self._selected_route_codes()
+        map_routes: List[Dict[str, Any]] = []
+        for route in self._payload_cache.get("routes") or []:
+            code = str(route.get("route_code") or "")
+            if code not in selected:
+                continue
+            stores_raw = [
+                s
+                for s in (route.get("stores") or [])
+                if self._store_passes_tag_filter(s)
+            ]
+            stores = _markers_from_stores(stores_raw)
+            map_routes.append(
+                {
+                    "route_code": code,
+                    "route_name": route.get("route_name") or "",
+                    "stores": stores,
+                }
+            )
+        unassigned: List[Dict[str, Any]] = []
+        if self.show_unassigned_check.isChecked():
+            unassigned = _markers_from_stores(
+                [
+                    s
+                    for s in (self._payload_cache.get("unassigned") or [])
+                    if self._store_passes_tag_filter(s)
+                ]
+            )
+        _merge_cross_route_hardoff_markers(map_routes, unassigned)
+        pins: List[Dict[str, Any]] = []
+        for route in map_routes:
+            for s in route.get("stores") or []:
+                if s.get("suppress_pin"):
+                    continue
+                pins.append(s)
+        for s in unassigned:
+            if s.get("suppress_pin"):
+                continue
+            pins.append(s)
+        return pins
+
+    def _lasso_groups_inside_polygon(
+        self, ring: List[Tuple[float, float]]
+    ) -> List[Dict[str, Any]]:
+        groups: List[Dict[str, Any]] = []
+        seen_codes: Set[str] = set()
+        for pin in self._collect_visible_lasso_pins():
+            try:
+                lat = float(pin.get("lat"))
+                lng = float(pin.get("lng"))
+            except (TypeError, ValueError):
+                continue
+            if not _point_in_polygon(lat, lng, ring):
+                continue
+            codes = self._codes_for_map_build(
+                str(pin.get("store_code") or ""),
+                pin.get("member_codes")
+                if isinstance(pin.get("member_codes"), list)
+                else None,
+            )
+            codes = [c for c in codes if c and c not in seen_codes]
+            if not codes:
+                continue
+            for c in codes:
+                seen_codes.add(c)
+            key = codes[0]
+            groups.append(
+                {
+                    "key": key,
+                    "codes": codes,
+                    "lat": lat,
+                    "lng": lng,
+                    "store_name": str(pin.get("store_name") or key),
+                }
+            )
+        return groups
+
+    def _lasso_group_key_for_codes(self, codes: List[str]) -> str:
+        code_set = set(codes)
+        for g in self._lasso_groups:
+            gcodes = [str(c).strip() for c in (g.get("codes") or []) if str(c).strip()]
+            if code_set & set(gcodes):
+                return str(g.get("key") or "")
+        return codes[0] if codes else ""
+
+    def _on_lasso_endpoint_picked(self, payload: Dict[str, Any]) -> None:
+        codes = self._codes_for_map_build(
+            str(payload.get("store_code") or ""),
+            payload.get("member_codes")
+            if isinstance(payload.get("member_codes"), list)
+            else None,
+        )
+        if not codes:
+            return
+        key = self._lasso_group_key_for_codes(codes)
+        if not key:
+            QMessageBox.information(
+                self,
+                "範囲で囲む",
+                "囲んだ範囲の中の店舗をクリックしてください。",
+            )
+            return
+        if self._lasso_phase == "pick_start":
+            self._lasso_start_key = key
+            self._lasso_phase = "pick_goal"
+            self._set_pick_status(
+                "スタート確定。次にゴール地点の店舗をクリックしてください"
+            )
+            self.status_label.setText("範囲登録: ゴール地点をクリック")
+            self._update_pick_nav_buttons()
+            self._refresh_map()
+            return
+        if self._lasso_phase == "pick_goal":
+            if key == self._lasso_start_key and len(self._lasso_groups) > 1:
+                QMessageBox.information(
+                    self,
+                    "範囲で囲む",
+                    "スタートと違う店舗をゴールに選んでください。",
+                )
+                return
+            self._finalize_lasso_registration(key)
+
+    def _finalize_lasso_registration(self, goal_key: str) -> None:
+        if not self._editing_route_code or not self._lasso_groups:
+            return
+        ordered = _order_groups_nearest_neighbor(
+            self._lasso_groups, self._lasso_start_key, goal_key
+        )
+        if not ordered:
+            QMessageBox.warning(self, "範囲で囲む", "訪問順を作れませんでした。")
+            return
+        route_code = self._editing_route_code
+        route_name = self._editing_route_name or route_code
+        try:
+            from services.store_route_membership_service import move_store_to_route
+        except Exception:
+            try:
+                from store_route_membership_service import (  # type: ignore
+                    move_store_to_route,
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "範囲で囲む", f"処理を読み込めませんでした:\n{e}"
+                )
+                return
+        moved = 0
+        for code in ordered:
+            store = None
+            try:
+                store = self.db.get_store_by_code(code)
+            except Exception:
+                store = None
+            if not store or store.get("id") is None:
+                continue
+            try:
+                sid = int(store["id"])
+            except (TypeError, ValueError):
+                continue
+            try:
+                if move_store_to_route(self.db, sid, route_name, route_code):
+                    moved += 1
+            except Exception as e:
+                print(f"範囲登録の移動エラー ({code}): {e}")
+        if moved <= 0:
+            QMessageBox.warning(self, "範囲で囲む", "店舗の登録に失敗しました。")
+            return
+
+        was_build = self._build_route_mode
+        self._pick_order = list(ordered)
+        self._clear_lasso_state()
+        self._apply_build_order_and_reload(keep_build_mode=was_build)
+        if not was_build:
+            self._pick_order = []
+            self._update_pick_nav_buttons()
+            self._refresh_map()
+        self.status_label.setText(
+            f"範囲登録完了: {route_name}（{moved}店・近傍順）。"
+            "微調整は「地図上で訪問順序選択」で。"
+        )
+        QMessageBox.information(
+            self,
+            "範囲で囲む",
+            f"{moved}店を「{route_name}」に登録しました。\n"
+            "並びはスタートから近い順の仮組みです。\n"
+            "微調整は「地図上で訪問順序選択」で行えます。",
+        )
+
     def _on_map_store_picked(self, payload: Dict[str, Any]) -> None:
+        if self._lasso_phase in ("pick_start", "pick_goal"):
+            self._on_lasso_endpoint_picked(payload)
+            return
+        if self._lasso_mode and self._lasso_phase == "drawing":
+            return
         if self._build_route_mode:
             self._on_map_store_build_picked(payload)
             return
@@ -4064,6 +4962,8 @@ class RouteMapWidget(QWidget):
         """新規ルート登録モードを終了（所属・訪問順は保持）。"""
         if not self._build_route_mode:
             return
+        if self._lasso_mode:
+            self._clear_lasso_state()
         if self._editing_route_code and self.visit_list.count() > 0:
             self.save_editing_visit_order(silent=True)
         name = self._editing_route_name or self._editing_route_code
@@ -4184,7 +5084,9 @@ class RouteMapWidget(QWidget):
             return
         self._apply_build_order_and_reload()
 
-    def _apply_build_order_and_reload(self) -> None:
+    def _apply_build_order_and_reload(
+        self, *, keep_build_mode: Optional[bool] = None
+    ) -> None:
         """クリック順で店舗リストを作り、保存して地図を更新（ズーム維持）。"""
         rows: List[Dict[str, Any]] = []
         for code in self._pick_order:
@@ -4225,11 +5127,14 @@ class RouteMapWidget(QWidget):
             if synced:
                 self._rebuild_visit_list_from_rows(synced)
                 self.save_editing_visit_order(silent=True)
-        self._build_route_mode = True
-        self._pick_order = order
+        self._build_route_mode = (
+            True if keep_build_mode is None else bool(keep_build_mode)
+        )
+        self._pick_order = order if self._build_route_mode else order
         self._selected_store_code = selected
         self._update_pick_nav_buttons()
-        self._refresh_build_status_text()
+        if self._build_route_mode:
+            self._refresh_build_status_text()
         self._refresh_map()
         self.routes_changed.emit()
 
@@ -4239,6 +5144,8 @@ class RouteMapWidget(QWidget):
         fit_all=True のときだけ全体が収まるようズームする（初回表示用）。
         ボタンからの解除では現在の地図位置・ズームを維持する。
         """
+        if self._lasso_mode:
+            self._clear_lasso_state()
         if self._build_route_mode:
             self.finish_build_route_mode(silent=True)
         if self._pick_mode:
@@ -4341,6 +5248,9 @@ class RouteMapWidget(QWidget):
 
             def _after_update(result: Any) -> None:
                 if result is True:
+                    return
+                # 範囲描画中にフル再読込すると点線が消えるので避ける
+                if self._lasso_mode and self._lasso_phase in ("drawing", ""):
                     return
                 # 更新関数が無い／失敗時だけフル再読込
                 self._map_ready = False
@@ -4975,10 +5885,19 @@ class RouteMapWidget(QWidget):
                     if _store_matches_code(m, self._selected_store_code):
                         m["selected"] = True
 
+            # ツールチップ用: 登録店舗数（タグ絞り込み前の件数を優先）
+            try:
+                store_count = int(route.get("store_count") or 0)
+            except (TypeError, ValueError):
+                store_count = 0
+            if store_count <= 0:
+                store_count = len(route.get("stores") or [])
+
             map_routes.append(
                 {
                     "route_name": route.get("route_name") or "",
                     "route_code": code,
+                    "store_count": store_count,
                     "line_color": colors.get(code, ROUTE_LINE_COLORS[0]),
                     "stores": stores,
                     "road_polyline": [],
@@ -5073,6 +5992,9 @@ class RouteMapWidget(QWidget):
             "pick_mode": bool(self._pick_mode),
             "build_route_mode": bool(self._build_route_mode),
             "build_route_name": self._editing_route_name or self._editing_route_code or "",
+            "lasso_mode": bool(self._lasso_mode),
+            "lasso_phase": self._lasso_phase or "",
+            "lasso_polygon": [[lat, lng] for lat, lng in self._lasso_polygon],
             "editing_route_code": self._editing_route_code or "",
         }
 
