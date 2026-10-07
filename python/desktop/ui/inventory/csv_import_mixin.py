@@ -140,43 +140,92 @@ class InventoryCsvImportMixin:
         return str(Path.home())
 
     def import_csv(self):
-        """CSVファイルの取込"""
+        """CSVファイルの取込（複数選択可。既存一覧があるときは末尾に追記）"""
         default_dir = self._get_default_batch_root_dir()
-        
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "CSVファイルを選択",
-            default_dir,
-            "CSVファイル (*.csv);;すべてのファイル (*)"
-        )
-        
-        if file_path:
-            self._import_csv_from_path(file_path)
 
-    def _import_csv_from_path(self, file_path: str):
-        """指定パスのCSVファイルを読み込んで仕入データに展開する共通処理"""
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "CSVファイルを選択（複数可・既存データがある場合は追記）",
+            default_dir,
+            "CSVファイル (*.csv);;すべてのファイル (*)",
+        )
+
+        if file_paths:
+            self._import_csv_from_paths(list(file_paths))
+
+    def _import_csv_from_path(self, file_path: str, *, replace: bool = False, show_message: bool = True):
+        """指定パスのCSVを読み込む（既存データがあるときは追記。replace=True で差し替え）。"""
+        self._import_csv_from_paths(
+            [file_path],
+            replace=replace,
+            show_message=show_message,
+        )
+
+    def _has_inventory_rows(self) -> bool:
+        return self.inventory_data is not None and len(self.inventory_data) > 0
+
+    def _append_or_replace_inventory(self, mapped_df: pd.DataFrame, *, replace: bool) -> int:
+        """マッピング済み DataFrame を一覧へ反映。追加した行数を返す。"""
+        added = len(mapped_df)
+        if replace or not self._has_inventory_rows():
+            self.inventory_data = mapped_df.reset_index(drop=True)
+            return added
+
+        existing = self.inventory_data
+        # 列を揃えて末尾に連結（編集済みの既存行は残す）
+        for col in mapped_df.columns:
+            if col not in existing.columns:
+                existing[col] = ""
+        for col in existing.columns:
+            if col not in mapped_df.columns:
+                mapped_df[col] = ""
+        ordered = [c for c in getattr(self, "column_headers", []) if c in existing.columns]
+        extras = [c for c in existing.columns if c not in ordered]
+        cols = ordered + extras
+        self.inventory_data = pd.concat(
+            [existing[cols], mapped_df[cols]],
+            ignore_index=True,
+        )
+        return added
+
+    def _import_csv_from_paths(
+        self,
+        file_paths: List[str],
+        *,
+        replace: bool = False,
+        show_message: bool = True,
+    ):
+        """複数CSVを順に読み込み、仕入一覧へ展開（既定は追記）。"""
+        paths = [str(p).strip() for p in (file_paths or []) if str(p).strip()]
+        if not paths:
+            return
+
         try:
-            # CSVファイルの読み込み（複数エンコーディング対応）
-            df = self._read_csv_with_encoding_fallback(file_path)
-            
-            # 選択したフォルダを保存（次回の出品CSV生成時に使用）
-            try:
-                from pathlib import Path
-                selected_folder = str(Path(file_path).parent)
-                s = self._get_qsettings()
-                s.setValue("inventory/last_csv_folder", selected_folder)
-            except Exception:
-                pass
-            
-            # 列マッピングと並び替え
-            self.inventory_data = self._map_and_reorder_columns(df)
+            had_rows = self._has_inventory_rows()
+            # 連続取込の1回目だけ差し替えたい場合（replace）は最初のファイルで空にする
+            do_replace = bool(replace)
+            total_added = 0
+            loaded_names: List[str] = []
+
+            for path in paths:
+                df = self._read_csv_with_encoding_fallback(path)
+                try:
+                    selected_folder = str(Path(path).parent)
+                    s = self._get_qsettings()
+                    s.setValue("inventory/last_csv_folder", selected_folder)
+                except Exception:
+                    pass
+
+                mapped = self._map_and_reorder_columns(df)
+                total_added += self._append_or_replace_inventory(mapped, replace=do_replace)
+                do_replace = False  # 2ファイル目以降は必ず追記
+                loaded_names.append(Path(path).name)
+
             self._fill_purchase_channel_if_needed()
             # 開発タブの場合のみ、コメント列から 3-6-9 コードを自動判定して「3-6-9」列に反映
-            # （ルールは services/sku_template.py の _get_rule369_code と同一）
             if self.dev_mode and self.inventory_data is not None and "3-6-9" in self.inventory_data.columns:
                 try:
                     for idx, row in self.inventory_data.iterrows():
-                        # 既に値が入っている場合はユーザー編集を優先してスキップ
                         current_val = str(self.inventory_data.at[idx, "3-6-9"]).strip()
                         if current_val not in ("", "nan", "None"):
                             continue
@@ -184,22 +233,15 @@ class InventoryCsvImportMixin:
                         code = self._infer_rule369_from_comment(comment_val)
                         self.inventory_data.at[idx, "3-6-9"] = code
                 except Exception as e:
-                    # 自動判定全体の失敗も、CSV取込自体は継続
                     print(f"3-6-9 自動判定処理でエラー: {e}")
 
             self.filtered_data = self.inventory_data.copy()
-            
-            # SKU自動マッチング処理（商品DBから仕入れ日・ASINで検索）
             self._auto_match_sku_from_product_db()
 
-            # 仕入先に未登録店舗があれば店舗マスタへ自動登録（ネット仕入は店舗マスタに載せない）
             if getattr(self, "purchase_mode", "store") != "online":
                 self._auto_register_stores_from_inventory()
-            
-            # テーブルの更新
+
             self.update_table()
-            
-            # ボタンの有効化
             self.export_btn.setEnabled(True)
             self.clear_btn.setEnabled(True)
             if hasattr(self, "clear_sku_btn"):
@@ -207,19 +249,24 @@ class InventoryCsvImportMixin:
             self.generate_sku_btn.setEnabled(True)
             self.export_listing_btn.setEnabled(True)
             self.antique_register_btn.setEnabled(True)
-            
-            # データ件数の更新
             self.update_data_count()
-            
-            QMessageBox.information(
-                self, 
-                "取込完了", 
-                f"CSVファイルを読み込みました（{len(self.inventory_data)}行）"
-            )
-            
-            # シグナル発火
-            self.data_loaded.emit(len(self.inventory_data))
-            
+
+            total_rows = len(self.inventory_data) if self.inventory_data is not None else 0
+            if show_message:
+                file_count = len(loaded_names)
+                if had_rows and not replace:
+                    msg = (
+                        f"{file_count}件のCSVを追記しました（+{total_added}行／合計{total_rows}行）\n"
+                        "※一覧を消して入れ直すときは、先に「クリア」を押してください。"
+                    )
+                elif file_count > 1:
+                    msg = f"{file_count}件のCSVを読み込みました（{total_rows}行）"
+                else:
+                    msg = f"CSVファイルを読み込みました（{total_rows}行）"
+                QMessageBox.information(self, "取込完了", msg)
+
+            self.data_loaded.emit(total_rows)
+
         except Exception as e:
             QMessageBox.warning(self, "エラー", f"CSVファイルの読み込みに失敗しました:\n{str(e)}")
 

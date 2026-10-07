@@ -330,6 +330,11 @@ class InventoryWidget(
         workflow_layout.setSpacing(5)
 
         self.import_btn = QPushButton("CSV取込")
+        self.import_btn.setToolTip(
+            "CSVを読み込みます（複数選択可）。\n"
+            "すでに一覧があるときは末尾へ追記します。"
+            "入れ直すときは先に「クリア」を押してください。"
+        )
         self.import_btn.clicked.connect(lambda: self._run_action_with_status("CSV取込", self.import_csv))
         self.import_btn.setStyleSheet(green_button_style)
         workflow_layout.addWidget(self.import_btn)
@@ -338,7 +343,7 @@ class InventoryWidget(
         self.route_box_csv_btn.setToolTip(
             "箱の「仕入CSV/」または直下にあるCSVを読み込みます。"
             "StockList_ 以外のアマサーチCSVでもOKです（いちばん新しいファイル）。"
-            "ルート情報・画像・レシートは開きません。"
+            "すでに一覧があるときは追記します。ルート情報・画像・レシートは開きません。"
         )
         self.route_box_csv_btn.clicked.connect(
             lambda: self._run_action_with_status(
