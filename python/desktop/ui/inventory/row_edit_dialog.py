@@ -111,13 +111,21 @@ from services.flea_market_evidence_service import (
 class InventoryRowEditDialog(QDialog):
     """仕入データ1行を編集するダイアログ（コンディション説明は複数行・呼び出しボタン付き）"""
     
-    def __init__(self, column_headers: List[str], row_data: Dict[str, Any],
-                 condition_template_db, get_condition_key_func, parent=None):
+    def __init__(
+        self,
+        column_headers: List[str],
+        row_data: Dict[str, Any],
+        condition_template_db,
+        get_condition_key_func,
+        parent=None,
+        row_label: Any = None,
+    ):
         super().__init__(parent)
         self.column_headers = column_headers
         self.row_data = dict(row_data) if row_data else {}
         self.condition_template_db = condition_template_db
         self.get_condition_key = get_condition_key_func
+        self.row_label = row_label
         self._widgets = {}
         self._ai_generate_thread: Optional[_ConditionNoteAiGenerateThread] = None
         self.other_details_edit: Optional[QLineEdit] = None
@@ -556,6 +564,7 @@ class InventoryRowEditDialog(QDialog):
         panel.setMinimumHeight(280)
         panel.load_existing_row(self.row_data)
         panel.ocr_finished.connect(self._apply_ocr_fields_to_widgets)
+        panel.info_capture_clicked.connect(self._on_info_capture_clicked)
         host = getattr(self, "_evidence_host", None)
         host_layout = host.layout() if host is not None else None
         if host_layout is not None:
@@ -575,6 +584,88 @@ class InventoryRowEditDialog(QDialog):
         scroll = getattr(self, "_scroll_area", None)
         if scroll is not None:
             QTimer.singleShot(0, lambda: scroll.verticalScrollBar().setValue(0))
+
+    def _on_info_capture_clicked(self) -> None:
+        """行の編集から情報撮影（この行だけ）。既存画像は上書きしない。"""
+        inv = self.parent()
+        if inv is None or not hasattr(inv, "capture_mercari_listing_evidence"):
+            QMessageBox.warning(self, "情報撮影", "仕入画面から開けないため撮影できません。")
+            return
+        if getattr(inv, "purchase_mode", "store") != "online":
+            QMessageBox.information(self, "情報撮影", "ネット仕入モードでのみ使えます。")
+            return
+        if self.row_label is None:
+            QMessageBox.warning(self, "情報撮影", "行の識別子が無いため撮影できません。")
+            return
+
+        # フォーム上の最新値（出品URLなど）を優先
+        snapshot = dict(self.row_data)
+        for col in (
+            "出品URL",
+            "仕入れ日",
+            "ASIN",
+            "商品名",
+            "仕入チャネル",
+            "仕入先",
+            "取引ID",
+            "ユーザー名",
+        ):
+            text = self._widget_text(col)
+            if text:
+                snapshot[col] = text
+
+        panel = self.evidence_panel
+        existing_images = panel.slot_source_paths() if panel is not None else None
+        job, skipped = inv.build_mercari_capture_job_from_row(
+            row_label=self.row_label,
+            row=snapshot,
+            existing_images=existing_images,
+        )
+        if job is None:
+            if skipped:
+                QMessageBox.information(
+                    self,
+                    "情報撮影",
+                    "証憑画像がすでに3枚そろっているため、撮影しません。\n"
+                    "撮り直したい枠は「削除」してから、もう一度押してください。",
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "情報撮影",
+                    "メルカリの出品URLがありません。\n"
+                    "出品URLに https://jp.mercari.com/item/m... を入れてください。",
+                )
+            return
+
+        busy_btn = panel.info_capture_btn if panel is not None else None
+
+        def _after_done(saved_items: List[Dict[str, Any]]) -> None:
+            if not saved_items:
+                return
+            item = saved_items[0]
+            fields = item.get("fields") or {}
+            # 行データとフォームへ反映
+            for col, value in fields.items():
+                if not col or col.startswith("_"):
+                    continue
+                self.row_data[col] = value or ""
+                if col in ("取引ID", "ユーザー名", "出品URL"):
+                    self._set_widget_text(col, str(value or ""), only_if_empty=True)
+            if panel is not None:
+                panel.load_existing_row(self.row_data)
+
+        inv.capture_mercari_listing_evidence(
+            jobs=[job],
+            skipped_complete=0,
+            busy_button=busy_btn,
+            on_done=_after_done,
+            confirm_message=(
+                "この行をChromeで撮影して証憑に保存します。\n"
+                "すでに入っている画像は上書きしません。\n"
+                "いま開いている、ログイン済みのChromeで撮ります。"
+            ),
+        )
 
     def eventFilter(self, watched, event):
         if self.evidence_panel is not None and event is not None:

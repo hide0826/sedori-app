@@ -158,6 +158,7 @@ class FleaEvidencePanel(QGroupBox):
     """商品ページ2枚＋取引画面1枚の貼付と OCR 提案。"""
 
     ocr_finished = Signal(object)
+    info_capture_clicked = Signal()
 
     def __init__(self, current_purchase_datetime: str, parent=None):
         super().__init__("フリマ仕入証憑（商品ページ2枚＋取引画面）", parent)
@@ -170,6 +171,7 @@ class FleaEvidencePanel(QGroupBox):
         layout = QVBoxLayout(self)
         hint = QLabel(
             "Win+Shift+S でスクショしたあと、この画面で Ctrl+V するか「貼り付け」を押します。\n"
+            "「情報撮影」でメルカリをChrome撮影します（すでにある画像は上書きしません）。\n"
             "取引画面をOCRすると、購入日時・商品ID・出品者を下に提案します。"
         )
         hint.setWordWrap(True)
@@ -185,6 +187,19 @@ class FleaEvidencePanel(QGroupBox):
         layout.addLayout(slots_row)
 
         btn_row = QHBoxLayout()
+        self.info_capture_btn = QPushButton("情報撮影")
+        self.info_capture_btn.setToolTip(
+            "出品URLのメルカリ商品を、いま開いているChromeで撮って証憑に保存します。\n"
+            "すでに入っている画像は上書きしません（空いている枠だけ保存）。\n"
+            "最初に拡張機能を一度入れます。ヤフオクは未対応です。"
+        )
+        self.info_capture_btn.setStyleSheet(
+            "QPushButton { background-color: #2e7d32; color: white; font-weight: bold; "
+            "padding: 6px 12px; border-radius: 4px; }"
+            "QPushButton:disabled { background-color: #555555; color: #aaaaaa; }"
+        )
+        self.info_capture_btn.clicked.connect(self.info_capture_clicked.emit)
+        btn_row.addWidget(self.info_capture_btn)
         self.ocr_btn = QPushButton("取引画面をOCRして入力")
         self.ocr_btn.clicked.connect(self.run_ocr)
         btn_row.addWidget(self.ocr_btn)
@@ -214,6 +229,19 @@ class FleaEvidencePanel(QGroupBox):
             path = str(row_data.get(col) or "").strip()
             if path:
                 self.slots[i].load_path(path)
+
+    def slot_source_paths(self) -> List[str]:
+        """各枠のファイルパス（未設定は空文字）。情報撮影の上書き防止用。"""
+        paths: List[str] = []
+        for slot in self.slots:
+            path = str(getattr(slot, "source_path", "") or "").strip()
+            if path and Path(path).is_file():
+                paths.append(path)
+            else:
+                paths.append("")
+        while len(paths) < 3:
+            paths.append("")
+        return paths[:3]
 
     def has_any_image(self) -> bool:
         return any(s.image is not None and not s.image.isNull() for s in self.slots)

@@ -886,12 +886,19 @@ class InventoryTableMixin:
         if row_index < 0 or (self.filtered_data is not None and row_index >= len(self.filtered_data)):
             return
         row_data = self._get_row_data_for_edit(row_index)
+        row_label = None
+        try:
+            if self.filtered_data is not None and 0 <= row_index < len(self.filtered_data):
+                row_label = self.filtered_data.index[row_index]
+        except Exception:
+            row_label = None
         dlg = InventoryRowEditDialog(
             self.column_headers,
             row_data,
             self.condition_template_db,
             self._get_condition_key,
-            self
+            self,
+            row_label=row_label,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             result = dlg.get_result()

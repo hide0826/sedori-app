@@ -2,6 +2,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** 撮影開始前のウィンドウ状態（終わったら戻す） */
+let previousWindowState = null;
+let captureWindowId = null;
+
 function waitTabComplete(tabId) {
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
@@ -38,6 +42,86 @@ async function pageState(tabId) {
   return (res && res.result) || { url: "", login: false };
 }
 
+/**
+ * ウィンドウが全画面でなければ全画面にする。
+ * captureVisibleTab は表示中の領域だけ撮るため、小さい窓だと画像が欠ける。
+ */
+async function ensureFullscreenWindow(windowId) {
+  const win = await chrome.windows.get(windowId);
+  captureWindowId = windowId;
+  if (previousWindowState === null) {
+    previousWindowState = win.state || "normal";
+  }
+  if (win.state !== "fullscreen") {
+    await chrome.windows.update(windowId, { state: "fullscreen", focused: true });
+    await sleep(1200);
+  } else {
+    await chrome.windows.update(windowId, { focused: true });
+    await sleep(300);
+  }
+}
+
+async function restoreWindowIfNeeded() {
+  if (captureWindowId == null || previousWindowState == null) {
+    return;
+  }
+  try {
+    const win = await chrome.windows.get(captureWindowId);
+    if (win.state === "fullscreen" && previousWindowState !== "fullscreen") {
+      await chrome.windows.update(captureWindowId, { state: previousWindowState });
+    }
+  } catch (err) {
+    // ウィンドウが閉じ済み
+  }
+  previousWindowState = null;
+  captureWindowId = null;
+}
+
+/**
+ * 商品画像が読み込まれるまで待つ（早すぎて真っ白／欠ける対策）。
+ */
+async function waitForProductImages(tabId) {
+  for (let i = 0; i < 20; i += 1) {
+    try {
+      const [res] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          const imgs = [...document.querySelectorAll("img")];
+          let ready = 0;
+          let pending = 0;
+          for (const img of imgs) {
+            const src = img.currentSrc || img.src || "";
+            if (!src || src.startsWith("data:")) {
+              continue;
+            }
+            if (!img.complete) {
+              pending += 1;
+              continue;
+            }
+            const w = img.naturalWidth || 0;
+            const h = img.naturalHeight || 0;
+            if (w >= 60 && h >= 60) {
+              ready += 1;
+            }
+          }
+          return { ready, pending };
+        },
+      });
+      const result = (res && res.result) || { ready: 0, pending: 1 };
+      // 大きめの画像が1枚以上あり、読み込み待ちがなければOK
+      if (result.ready >= 1 && result.pending === 0) {
+        await sleep(1200);
+        return;
+      }
+    } catch (err) {
+      // ナビ中など
+    }
+    await sleep(500);
+  }
+  // タイムアウト時も少し待ってから撮る
+  await sleep(2000);
+}
+
 async function shotWithDebugger(tabId) {
   await chrome.debugger.attach({ tabId }, "1.3");
   try {
@@ -55,9 +139,11 @@ async function shotWithDebugger(tabId) {
 }
 
 async function shot(tab) {
+  await ensureFullscreenWindow(tab.windowId);
   await chrome.windows.update(tab.windowId, { focused: true });
   await chrome.tabs.update(tab.id, { active: true });
-  await sleep(1600);
+  // フォーカス・描画が落ち着くまで待つ
+  await sleep(2200);
   try {
     const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
     const comma = dataUrl.indexOf(",");
@@ -154,10 +240,19 @@ async function ensureLoggedIn(tabId, baseUrl, token, jobId) {
   return !state.login;
 }
 
+async function preparePageForShot(tabId) {
+  await waitTabComplete(tabId);
+  // ページ表示直後の白飛び対策：固定待ち＋画像読み込み待ち
+  await sleep(4500);
+  await waitForProductImages(tabId);
+}
+
 async function captureJob(job, baseUrl, token) {
   const created = await chrome.tabs.create({ url: job.url, active: true });
-  await waitTabComplete(created.id);
-  await sleep(3500);
+  await preparePageForShot(created.id);
+  let tab = await chrome.tabs.get(created.id);
+  await ensureFullscreenWindow(tab.windowId);
+
   const loggedIn = await ensureLoggedIn(created.id, baseUrl, token, job.id);
   if (!loggedIn) {
     await postJson(baseUrl, "/result", {
@@ -168,11 +263,10 @@ async function captureJob(job, baseUrl, token) {
     });
     return false;
   }
-  let tab = await chrome.tabs.get(created.id);
+  tab = await chrome.tabs.get(created.id);
   if (/login|signin/i.test(tab.url || "")) {
     await chrome.tabs.update(created.id, { url: job.url });
-    await waitTabComplete(created.id);
-    await sleep(3500);
+    await preparePageForShot(created.id);
     if (!(await ensureLoggedIn(created.id, baseUrl, token, job.id))) {
       await postJson(baseUrl, "/result", {
         token,
@@ -200,8 +294,7 @@ async function captureJob(job, baseUrl, token) {
     });
     return true;
   }
-  await waitTabComplete(created.id);
-  await sleep(3000);
+  await preparePageForShot(created.id);
   if (!(await ensureLoggedIn(created.id, baseUrl, token, job.id))) {
     await postJson(baseUrl, "/result", {
       token,
@@ -246,6 +339,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const token = message.token;
   const jobs = message.jobs || [];
   (async () => {
+    previousWindowState = null;
+    captureWindowId = null;
     await postJson(baseUrl, "/hello", { token });
     for (const job of jobs) {
       try {
@@ -262,10 +357,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         });
       }
     }
+    await restoreWindowIfNeeded();
     await postJson(baseUrl, "/result", { token, status: "finished" });
     sendResponse({ ok: true });
   })().catch(async (err) => {
     try {
+      await restoreWindowIfNeeded();
       await postJson(baseUrl, "/result", {
         token,
         status: "error",

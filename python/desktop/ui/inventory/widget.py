@@ -364,19 +364,7 @@ class InventoryWidget(
         self.create_online_box_btn.setVisible(self.is_online_mode)
         workflow_layout.addWidget(self.create_online_box_btn)
 
-        self.info_capture_btn = QPushButton("情報撮影")
-        self.info_capture_btn.setToolTip(
-            "出品URLのメルカリ商品を、いま開いているChromeで3枚撮って証憑に保存します。"
-            "最初に拡張機能を一度入れます。ヤフオクは未対応です。"
-        )
-        self.info_capture_btn.clicked.connect(
-            lambda: self._run_action_with_status(
-                "情報撮影", self.capture_mercari_listing_evidence
-            )
-        )
-        self.info_capture_btn.setStyleSheet(green_button_style)
-        self.info_capture_btn.setVisible(self.is_online_mode)
-        workflow_layout.addWidget(self.info_capture_btn)
+        # 「情報撮影」はネット仕入の「行の編集」ダイアログ側へ移動済み
 
         self.route_box_import_btn = QPushButton("ルート箱から取込")
         self.route_box_import_btn.setToolTip(
