@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""確定済み商品画像の JAN を画像DBへ先に書き、次のスキャンでバーコードを読ませない。"""
+"""確定済み商品画像の JAN / ASIN を画像DBへ先に書き、次のスキャンでバーコードを読ませない。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,22 @@ def _digits(value: Any) -> str:
     return re.sub(r"\D", "", str(value or ""))
 
 
-def _product_files(folder: Path, *, confirmed_only: bool) -> List[Tuple[Path, str]]:
+def _normalize_asin(value: Any) -> str:
+    s = str(value or "").strip().upper()
+    if not s:
+        return ""
+    lower = s.lower()
+    if lower.startswith("asin:"):
+        s = s[5:]
+    return "".join(c for c in s if c.isalnum())
+
+
+def _product_files(
+    folder: Path,
+    *,
+    confirmed_only: bool,
+) -> List[Tuple[Path, str, str]]:
+    """(path, jan, asin) のリスト。jan / asin のどちらかがあれば含める。"""
     route_json = Path(folder) / "route.json"
     if not route_json.is_file():
         return []
@@ -27,7 +42,7 @@ def _product_files(folder: Path, *, confirmed_only: bool) -> List[Tuple[Path, st
         return []
     if not isinstance(doc, dict):
         return []
-    found: List[Tuple[Path, str]] = []
+    found: List[Tuple[Path, str, str]] = []
     product_dir = Path(folder) / PRODUCT_DIR_NAME
 
     def take(items: Any) -> None:
@@ -37,10 +52,13 @@ def _product_files(folder: Path, *, confirmed_only: bool) -> List[Tuple[Path, st
             if confirmed_only and not item.get("confirmed"):
                 continue
             jan = _digits(item.get("jan"))
+            asin = _normalize_asin(item.get("asin"))
             name = str(item.get("file") or "").strip()
-            if not jan.isdigit() or not name:
+            if not name:
                 continue
-            found.append((product_dir / name, jan))
+            if not jan.isdigit() and not asin:
+                continue
+            found.append((product_dir / name, jan if jan.isdigit() else "", asin))
 
     take(doc.get("product_files"))
     for store in doc.get("stores") or []:
@@ -49,20 +67,21 @@ def _product_files(folder: Path, *, confirmed_only: bool) -> List[Tuple[Path, st
     return found
 
 
-def confirmed_product_files(folder: Path) -> List[Tuple[Path, str]]:
+def confirmed_product_files(folder: Path) -> List[Tuple[Path, str, str]]:
     return _product_files(folder, confirmed_only=True)
 
 
-def linked_product_files(folder: Path) -> List[Tuple[Path, str]]:
-    """JANが付いている商品画像。撮影終了前も含む。"""
+def linked_product_files(folder: Path) -> List[Tuple[Path, str, str]]:
+    """JAN または ASIN が付いている商品画像。撮影終了前も含む。"""
     return _product_files(folder, confirmed_only=False)
 
 
-def seed_product_jan(path: Path, jan: str, *, db: Any = None) -> bool:
-    """1枚を画像DBへ書く。スキャンはこのJANを使い、バーコードを読み直さない。"""
+def seed_product_jan(path: Path, jan: str, *, db: Any = None, asin: str = "") -> bool:
+    """1枚を画像DBへ書く。スキャンはこの JAN/ASIN を使い、バーコードを読み直さない。"""
     jan_s = _digits(jan)
+    asin_s = _normalize_asin(asin)
     image = Path(path)
-    if not jan_s.isdigit() or not image.is_file():
+    if (not jan_s.isdigit() and not asin_s) or not image.is_file():
         return False
     own = db is None
     if own:
@@ -71,9 +90,15 @@ def seed_product_jan(path: Path, jan: str, *, db: Any = None) -> bool:
         db = ImageDatabase()
     try:
         last_error: Optional[BaseException] = None
+        payload: Dict[str, Any] = {
+            "file_path": str(image),
+            "jan": jan_s if jan_s.isdigit() else None,
+            "asin": asin_s or None,
+            "rotation": 0,
+        }
         for _attempt in range(6):
             try:
-                db.upsert({"file_path": str(image), "jan": jan_s, "rotation": 0})
+                db.upsert(payload)
                 return True
             except sqlite3.OperationalError as exc:
                 last_error = exc
@@ -86,7 +111,12 @@ def seed_product_jan(path: Path, jan: str, *, db: Any = None) -> bool:
             db.close()
 
 
-def _seed_pairs(pairs: List[Tuple[Path, str]], *, db: Any = None) -> int:
+def seed_product_asin(path: Path, asin: str, *, db: Any = None) -> bool:
+    """ASINのみの写真を画像DBへ書く。"""
+    return seed_product_jan(path, "", db=db, asin=asin)
+
+
+def _seed_pairs(pairs: List[Tuple[Path, str, str]], *, db: Any = None) -> int:
     if not pairs:
         return 0
     own = db is None
@@ -96,8 +126,8 @@ def _seed_pairs(pairs: List[Tuple[Path, str]], *, db: Any = None) -> int:
         db = ImageDatabase()
     count = 0
     try:
-        for path, jan in pairs:
-            if seed_product_jan(path, jan, db=db):
+        for path, jan, asin in pairs:
+            if seed_product_jan(path, jan, db=db, asin=asin):
                 count += 1
     finally:
         if own:
@@ -110,7 +140,7 @@ def seed_confirmed_jans(folder: Path, *, db: Any = None) -> int:
 
 
 def seed_linked_jans(folder: Path, *, db: Any = None) -> int:
-    """撮影済みでJANがある画像を、撮影終了前でも画像DBへ書く。"""
+    """撮影済みで JAN または ASIN がある画像を、撮影終了前でも画像DBへ書く。"""
     return _seed_pairs(linked_product_files(folder), db=db)
 
 
@@ -120,7 +150,7 @@ def consume_one_scan_request(
     pending_path: Optional[Path] = None,
     db: Any = None,
 ) -> Optional[Dict[str, Any]]:
-    """依頼が1件あれば JAN を種まきし、画像管理が来ていればスキャンする。"""
+    """依頼が1件あれば JAN/ASIN を種まきし、画像管理が来ていればスキャンする。"""
     from route_web.scan_requests import peek_scans, remove_scan
 
     rows = peek_scans(pending_path)

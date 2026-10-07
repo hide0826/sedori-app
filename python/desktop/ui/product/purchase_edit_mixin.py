@@ -218,6 +218,16 @@ class PurchaseEditMixin:
         return "".join(c for c in jan if c.isdigit()).upper()
 
     @staticmethod
+    def _normalize_asin_for_match(value: Any) -> str:
+        s = str(value or "").strip().upper()
+        if not s or s == "UNKNOWN":
+            return ""
+        lower = s.lower()
+        if lower.startswith("asin:"):
+            s = s[5:]
+        return "".join(c for c in s if c.isalnum())
+
+    @staticmethod
     def _extract_purchase_record_date(raw_date: str) -> Optional[date]:
         """候補検索用の高速日付抽出"""
         if not raw_date:
@@ -249,20 +259,26 @@ class PurchaseEditMixin:
         base_dt: datetime,
         days_window: int = 7,
         jan: Optional[str] = None,
+        asin: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         指定した日時に近い仕入レコード候補を返す
 
         - 画像の撮影日時から「±N日以内」の仕入データを探す
-        - JANが分かっている場合はその行を先頭にするが、同じ期間の他商品も残す
+        - JAN / ASIN が分かっている場合はその行を先頭にするが、同じ期間の他商品も残す
         """
         if not hasattr(self, "purchase_all_records") or not self.purchase_all_records:
             return []
 
         base_date: date = base_dt.date()
         jan_norm = self._normalize_jan_for_match(jan) if jan and str(jan) != "unknown" else ""
+        asin_norm = self._normalize_asin_for_match(asin) if asin else ""
+        # jan 引数に asin:XXXX が渡された場合のフォールバック
+        if not asin_norm and jan and str(jan).lower().startswith("asin:"):
+            asin_norm = self._normalize_asin_for_match(jan)
+            jan_norm = ""
         date_matches: List[Tuple[int, Dict[str, Any]]] = []
-        jan_matches: List[Tuple[int, Dict[str, Any]]] = []
+        priority_matches: List[Tuple[int, Dict[str, Any]]] = []
 
         for record in self.purchase_all_records:
             raw_date = str(
@@ -287,9 +303,15 @@ class PurchaseEditMixin:
                     record.get("JAN") or record.get("jan") or record.get("JANコード")
                 )
                 if record_jan == jan_norm:
-                    jan_matches.append((diff_days, record))
+                    priority_matches.append((diff_days, record))
+            elif asin_norm:
+                record_asin = self._normalize_asin_for_match(
+                    record.get("ASIN") or record.get("asin")
+                )
+                if record_asin == asin_norm:
+                    priority_matches.append((diff_days, record))
 
-        source = merge_datetime_purchase_candidates(date_matches, jan_matches)
+        source = merge_datetime_purchase_candidates(date_matches, priority_matches)
 
         candidates: List[Dict[str, Any]] = []
         for diff_days, record in source:
@@ -310,48 +332,93 @@ class PurchaseEditMixin:
         target_sku: Optional[str] = None,
         clear_existing: bool = False,
         defer_table_refresh_and_snapshot: bool = False,
+        target_asin: Optional[str] = None,
     ) -> Tuple[bool, int, Optional[Dict[str, Any]]]:
         """
-        指定JANに対応する仕入レコードへ画像パスを割り当てる
+        指定JAN（または ASIN / SKU）に対応する仕入レコードへ画像パスを割り当てる
 
         Args:
-            jan: 対象とするJANコード
+            jan: 対象とするJANコード（空でも ASIN / SKU があれば可）
             image_paths: 割り当てたい画像パスのリスト
             all_records: 現在の全仕入レコード（purchase_all_records 相当）
             skip_existing: 既に画像列が埋まっている場合はスキップするかどうか
             clear_existing: 既存の画像をクリアしてから新しい画像を登録するかどうか
             defer_table_refresh_and_snapshot: True のとき、テーブル再描画とスナップショット保存を省略する。
                 画像管理の「確定処理」など複数JANを連続更新するとき、各回で全行再描画・DB保存すると極端に遅くなるため。
+            target_asin: JANが無い商品向けの ASIN
 
         Returns:
             (success, added_count, record_snapshot)
         """
-        if not jan or not image_paths or not all_records:
+        if not image_paths or not all_records:
             return False, 0, None
 
-        jan_norm = str(jan).strip().upper()
+        jan_raw = str(jan or "").strip()
+        jan_norm = ""
+        asin_norm = self._normalize_asin_for_match(target_asin) if target_asin else ""
+        if jan_raw.lower().startswith("asin:"):
+            asin_norm = asin_norm or self._normalize_asin_for_match(jan_raw)
+        else:
+            jan_norm = self._normalize_jan_for_match(jan_raw) if jan_raw else ""
 
-        # 対象レコードを探す
-        target_record: Optional[Dict[str, Any]] = None
         target_sku_norm: Optional[str] = None
         if target_sku:
-            target_sku_norm = str(target_sku).strip()
+            target_sku_norm = str(target_sku).strip() or None
 
+        if not jan_norm and not asin_norm and not target_sku_norm:
+            return False, 0, None
+
+        def _rec_jan(rec: Dict[str, Any]) -> str:
+            return self._normalize_jan_for_match(
+                rec.get("JAN") or rec.get("jan") or rec.get("JANコード") or ""
+            )
+
+        def _rec_asin(rec: Dict[str, Any]) -> str:
+            return self._normalize_asin_for_match(
+                rec.get("ASIN") or rec.get("asin") or ""
+            )
+
+        def _rec_sku(rec: Dict[str, Any]) -> str:
+            return str(rec.get("SKU") or rec.get("sku") or "").strip()
+
+        # 対象レコードを探す（優先順位）
+        target_record: Optional[Dict[str, Any]] = None
         for record in all_records:
-            record_jan = str(
-                record.get("JAN") or record.get("jan") or ""
-            ).strip().upper()
-            record_sku = str(record.get("SKU") or record.get("sku") or "").strip()
+            record_jan = _rec_jan(record)
+            record_asin = _rec_asin(record)
+            record_sku = _rec_sku(record)
 
-            # 1. SKU指定がある場合は SKU + JAN の両方が一致するレコードを優先
-            if target_sku_norm and record_sku and record_sku == target_sku_norm and record_jan == jan_norm:
+            # 1. SKU + JAN
+            if target_sku_norm and jan_norm and record_sku == target_sku_norm and record_jan == jan_norm:
+                target_record = record
+                break
+            # 2. SKU + ASIN
+            if target_sku_norm and asin_norm and record_sku == target_sku_norm and record_asin == asin_norm:
                 target_record = record
                 break
 
-            # 2. SKU指定がない場合は、JAN が一致する最初のレコードを候補にする
-            if not target_sku_norm and record_jan == jan_norm:
-                target_record = record
-                break
+        if target_record is None and jan_norm and not target_sku_norm:
+            for record in all_records:
+                if _rec_jan(record) == jan_norm:
+                    target_record = record
+                    break
+
+        if target_record is None and asin_norm and not target_sku_norm:
+            for record in all_records:
+                if _rec_asin(record) == asin_norm:
+                    target_record = record
+                    break
+
+        # 3. SKUのみ（JAN 無しレコードを候補から選んだとき）
+        if target_record is None and target_sku_norm:
+            for record in all_records:
+                if _rec_sku(record) == target_sku_norm:
+                    if jan_norm and _rec_jan(record) and _rec_jan(record) != jan_norm:
+                        continue
+                    if asin_norm and _rec_asin(record) and _rec_asin(record) != asin_norm:
+                        continue
+                    target_record = record
+                    break
 
         if target_record is None:
             return False, 0, None

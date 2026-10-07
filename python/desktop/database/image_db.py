@@ -39,6 +39,7 @@ class ImageDatabase:
             CREATE TABLE IF NOT EXISTS product_images (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               jan TEXT,
+              asin TEXT,
               group_index INTEGER,
               file_path TEXT UNIQUE,
               capture_time TEXT,
@@ -49,8 +50,15 @@ class ImageDatabase:
             """
         )
 
+        # 既存DBへの asin 列追加（CREATE IF NOT EXISTS では追加されない）
+        cur.execute("PRAGMA table_info(product_images)")
+        columns = {str(row[1]) for row in cur.fetchall()}
+        if "asin" not in columns:
+            cur.execute("ALTER TABLE product_images ADD COLUMN asin TEXT")
+
         # インデックス（検索高速化）
         cur.execute("CREATE INDEX IF NOT EXISTS idx_product_images_jan ON product_images(jan)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_product_images_asin ON product_images(asin)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_product_images_file_path ON product_images(file_path)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_product_images_capture_time ON product_images(capture_time)")
 
@@ -65,6 +73,7 @@ class ImageDatabase:
             image_record: 画像レコード辞書
                 - file_path: ファイルパス（必須）
                 - jan: JANコード（オプション）
+                - asin: ASIN（オプション。JANが無い商品用）
                 - group_index: グループインデックス（オプション）
                 - capture_time: 撮影時刻（オプション）
                 - rotation: 回転角度（オプション、デフォルト0）
@@ -78,21 +87,27 @@ class ImageDatabase:
 
         # 既存判定
         cur = self.conn.cursor()
-        cur.execute("SELECT id FROM product_images WHERE file_path = ?", (file_path,))
+        cur.execute("SELECT * FROM product_images WHERE file_path = ?", (file_path,))
         existing = cur.fetchone()
 
-        fields = ["jan", "group_index", "file_path", "capture_time", "rotation"]
-        values = [image_record.get(k) for k in fields]
+        fields = ["jan", "asin", "group_index", "file_path", "capture_time", "rotation"]
 
         if existing:
-            # 更新
+            # 渡されたキーだけ更新（未指定の asin 等を消さない）
+            existing_dict = dict(existing)
+            merged = {k: existing_dict.get(k) for k in fields}
+            for k in fields:
+                if k in image_record:
+                    merged[k] = image_record.get(k)
+            merged["file_path"] = file_path
             set_clause = ",".join([f"{k}=?" for k in fields if k != "file_path"]) + ", updated_at=CURRENT_TIMESTAMP"
-            update_values = [image_record.get(k) for k in fields if k != "file_path"] + [file_path]
+            update_values = [merged.get(k) for k in fields if k != "file_path"] + [file_path]
             cur.execute(f"UPDATE product_images SET {set_clause} WHERE file_path=?", update_values)
             self.conn.commit()
             return existing["id"]
         else:
             # 新規挿入
+            values = [image_record.get(k) for k in fields]
             placeholders = ",".join(["?"] * len(fields))
             cur.execute(
                 f"INSERT INTO product_images ({','.join(fields)}) VALUES ({placeholders})",
@@ -117,6 +132,15 @@ class ImageDatabase:
         )
         return [dict(r) for r in cur.fetchall()]
 
+    def get_by_asin(self, asin: str) -> List[Dict[str, Any]]:
+        """ASINで画像レコードを取得"""
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT * FROM product_images WHERE asin = ? ORDER BY capture_time ASC, id ASC",
+            (asin,)
+        )
+        return [dict(r) for r in cur.fetchall()]
+
     def update_rotation(self, file_path: str, rotation: int) -> bool:
         """回転角度を更新"""
         cur = self.conn.cursor()
@@ -127,12 +151,41 @@ class ImageDatabase:
         self.conn.commit()
         return cur.rowcount > 0
 
-    def update_jan(self, file_path: str, jan: str) -> bool:
+    def update_jan(self, file_path: str, jan: Optional[str]) -> bool:
         """JANコードを更新"""
         cur = self.conn.cursor()
         cur.execute(
             "UPDATE product_images SET jan = ?, updated_at = CURRENT_TIMESTAMP WHERE file_path = ?",
             (jan, file_path)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def update_asin(self, file_path: str, asin: Optional[str]) -> bool:
+        """ASINを更新"""
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE product_images SET asin = ?, updated_at = CURRENT_TIMESTAMP WHERE file_path = ?",
+            (asin, file_path)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def update_jan_and_asin(
+        self,
+        file_path: str,
+        jan: Optional[str],
+        asin: Optional[str],
+    ) -> bool:
+        """JAN と ASIN を同時に書き換える（None でクリア可）。"""
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            UPDATE product_images
+            SET jan = ?, asin = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE file_path = ?
+            """,
+            (jan, asin, file_path),
         )
         self.conn.commit()
         return cur.rowcount > 0

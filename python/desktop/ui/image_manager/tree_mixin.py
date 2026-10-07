@@ -108,6 +108,9 @@ from .support import (
     _UNLINKED_HIGHLIGHT_FG,
     _PURCHASE_IMAGE_COLUMNS,
     _normalize_jan_for_match,
+    _parse_image_group_key,
+    _format_group_key_label,
+    _group_key_from_db_fields,
     _normalize_image_path,
     _record_has_any_image_paths,
     _apply_unlinked_item_style,
@@ -138,14 +141,8 @@ class ImageManagerTreeMixin:
                     purchase_records = None
 
             for group in self.jan_groups:
-                # 親ノード（JANグループ）
-                if group.jan != "unknown":
-                    # JANコードの.0を削除（表示用の正規化）
-                    jan_text = str(group.jan).strip()
-                    if jan_text.endswith(".0"):
-                        jan_text = jan_text[:-2]
-                else:
-                    jan_text = "（JAN不明）"
+                # 親ノード（JAN / ASIN グループ）
+                jan_text = _format_group_key_label(group.jan)
                 title = self._get_product_title_by_jan(group.jan) if group.jan != "unknown" else ""
                 title_text = f" - {title}" if title else ""
                 parent_item = QTreeWidgetItem([f"{jan_text}{title_text} ({len(group.images)}枚)"])
@@ -185,6 +182,7 @@ class ImageManagerTreeMixin:
         # （ツリー再構築で選択が外れると on_tree_selection_changed だけでは ON にならない）
         can_confirm = any(g.jan != "unknown" and g.images for g in self.jan_groups)
         self.confirm_btn.setEnabled(can_confirm)
+        self._refresh_first_image_bulk_button_label()
 
 
     def clear_jan_groups(self):
@@ -292,6 +290,73 @@ class ImageManagerTreeMixin:
             return
         # True = 除外（送らない）、False = 送る
         self.first_image_flags[path] = (item.checkState(0) == Qt.Checked)
+        self._refresh_first_image_bulk_button_label()
+
+
+    def _iter_first_image_check_items(self) -> List[QTreeWidgetItem]:
+        """各JANグループの1枚目（チェック付き）ツリー項目を列挙する。"""
+        items: List[QTreeWidgetItem] = []
+        if not getattr(self, "tree_widget", None):
+            return items
+        for i in range(self.tree_widget.topLevelItemCount()):
+            parent = self.tree_widget.topLevelItem(i)
+            if parent is None or parent.childCount() <= 0:
+                continue
+            child = parent.child(0)
+            if child is None:
+                continue
+            if not (child.flags() & Qt.ItemIsUserCheckable):
+                continue
+            items.append(child)
+        return items
+
+
+    def _refresh_first_image_bulk_button_label(self) -> None:
+        """一括切替ボタンの文言を、次に行う操作に合わせて更新する。"""
+        btn = getattr(self, "toggle_first_image_checks_btn", None)
+        if btn is None:
+            return
+        items = self._iter_first_image_check_items()
+        if not items:
+            btn.setText("1枚目チェック一括切替")
+            btn.setEnabled(False)
+            return
+        btn.setEnabled(True)
+        all_on = all(item.checkState(0) == Qt.Checked for item in items)
+        if all_on:
+            btn.setText("1枚目チェックをすべてOFF")
+        else:
+            btn.setText("1枚目チェックをすべてON")
+
+
+    def toggle_all_first_image_checks(self):
+        """
+        全グループの1枚目チェックを一括でオン／オフする。
+
+        - すべてONなら → すべてOFF（1枚目も登録する）
+        - それ以外 → すべてON（1枚目は登録しない＝バーコード写真など）
+        """
+        items = self._iter_first_image_check_items()
+        if not items:
+            QMessageBox.information(self, "情報", "チェック対象の1枚目画像がありません。")
+            return
+
+        all_on = all(item.checkState(0) == Qt.Checked for item in items)
+        new_checked = not all_on
+        new_state = Qt.Checked if new_checked else Qt.Unchecked
+
+        self._updating_tree_checks = True
+        try:
+            for item in items:
+                path = item.data(0, Qt.UserRole)
+                item.setCheckState(0, new_state)
+                if path:
+                    # True = 除外（送らない）、False = 送る
+                    self.first_image_flags[str(path)] = new_checked
+        finally:
+            self._updating_tree_checks = False
+
+        self._refresh_first_image_bulk_button_label()
 
 
     def add_jan_group_manually(self):
@@ -407,17 +472,22 @@ class ImageManagerTreeMixin:
 
 
     def assign_image_to_jan(self, image_path: str, jan: str, capture_dt: Optional[datetime] = None, show_message: bool = False, refresh_tree: bool = True) -> bool:
-        """画像に指定JANを割り当て"""
+        """画像に指定JAN（または ASIN グループキー）を割り当て"""
         record = next((r for r in self.image_records if r.path == image_path), None)
         if not record:
             if show_message:
                 QMessageBox.warning(self, "エラー", "画像レコードが見つかりませんでした。")
             return False
-        
+
+        jan_norm, asin_norm = _parse_image_group_key(jan)
+        group_key = _group_key_from_db_fields(jan=jan_norm, asin=asin_norm) or (
+            None if not jan or jan == "unknown" else str(jan).strip()
+        )
+
         updated_record = ImageRecord(
             path=record.path,
             capture_dt=capture_dt or record.capture_dt,
-            jan_candidate=jan,
+            jan_candidate=group_key,
             width=record.width,
             height=record.height
         )
@@ -426,16 +496,24 @@ class ImageManagerTreeMixin:
             if r.path == image_path:
                 self.image_records[i] = updated_record
                 break
-        
-        self.image_db.update_jan(image_path, jan)
+
+        # 画像DB: JAN と ASIN を正しい列へ（ASINグループ時は jan をクリア）
+        if hasattr(self.image_db, "update_jan_and_asin"):
+            self.image_db.update_jan_and_asin(image_path, jan_norm, asin_norm)
+        else:
+            self.image_db.update_jan(image_path, jan_norm)
+            if hasattr(self.image_db, "update_asin"):
+                self.image_db.update_asin(image_path, asin_norm)
+
         self.jan_groups = self.image_service.group_by_jan(self.image_records)
-        if jan:
-            self._jan_title_cache.pop(jan, None)
+        if group_key:
+            self._jan_title_cache.pop(group_key, None)
         if refresh_tree:
             self.update_tree_widget()
         
         if show_message:
-            QMessageBox.information(self, "完了", f"画像をJANグループ {jan} に登録しました。")
+            label = _format_group_key_label(group_key) if group_key else "（JAN不明）"
+            QMessageBox.information(self, "完了", f"画像をグループ {label} に登録しました。")
         
         return True
 

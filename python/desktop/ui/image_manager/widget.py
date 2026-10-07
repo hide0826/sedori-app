@@ -372,6 +372,17 @@ class ImageManagerWidget(
         add_group_btn = QPushButton("JANグループ追加")
         add_group_btn.clicked.connect(self.add_jan_group_manually)
         left_layout.addWidget(add_group_btn)
+
+        # 各グループ1枚目の「登録しない」チェックを一括オン／オフ
+        self.toggle_first_image_checks_btn = QPushButton("1枚目チェック一括切替")
+        self.toggle_first_image_checks_btn.setToolTip(
+            "全グループの1枚目チェックをまとめて切り替えます。\n"
+            "チェックON＝登録しない（バーコード写真など）\n"
+            "チェックOFF＝登録する\n"
+            "すべてONならすべてOFF、それ以外はすべてONにします。"
+        )
+        self.toggle_first_image_checks_btn.clicked.connect(self.toggle_all_first_image_checks)
+        left_layout.addWidget(self.toggle_first_image_checks_btn)
         
         self.tree_widget = JanGroupTreeWidget(self)
         self.tree_widget.setHeaderLabel("JANグループ")

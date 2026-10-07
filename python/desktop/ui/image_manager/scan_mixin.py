@@ -108,6 +108,8 @@ from .support import (
     _UNLINKED_HIGHLIGHT_FG,
     _PURCHASE_IMAGE_COLUMNS,
     _normalize_jan_for_match,
+    _group_key_from_db_fields,
+    _parse_image_group_key,
     _normalize_image_path,
     _record_has_any_image_paths,
     _apply_unlinked_item_style,
@@ -260,10 +262,11 @@ class ImageManagerScanMixin:
             file_cache = {}
             for r in db_records:
                 path = r['file_path']
+                group_key = _group_key_from_db_fields(jan=r.get("jan"), asin=r.get("asin"))
                 rec = ImageRecord(
                     path=path,
                     capture_dt=datetime.fromisoformat(r['capture_time']) if r['capture_time'] else None,
-                    jan_candidate=r['jan'],
+                    jan_candidate=group_key,
                     width=0,
                     height=0
                 )
@@ -280,16 +283,21 @@ class ImageManagerScanMixin:
             )
             self._jan_title_cache = {}
             
-            # DBに保存済みのJANがある場合は反映（過去の割当てを復元）
+            # DBに保存済みの JAN / ASIN がある場合は反映（過去の割当てを復元）
             enriched_records: List[ImageRecord] = []
             for record in self.image_records:
                 db_record = self.image_db.get_by_file_path(record.path)
-                jan_from_db = db_record.get("jan") if db_record else None
-                if jan_from_db:
+                group_key = None
+                if db_record:
+                    group_key = _group_key_from_db_fields(
+                        jan=db_record.get("jan"),
+                        asin=db_record.get("asin"),
+                    )
+                if group_key:
                     enriched_records.append(ImageRecord(
                         path=record.path,
                         capture_dt=record.capture_dt,
-                        jan_candidate=jan_from_db,
+                        jan_candidate=group_key,
                         width=record.width,
                         height=record.height
                     ))
@@ -298,6 +306,7 @@ class ImageManagerScanMixin:
             self.image_records = enriched_records
 
             # タイムスタンプに基づく自動紐付け（JAN画像から3分以内の画像を自動追加）
+            # ASINグループ（asin:XXXX）はバーコード連続撮影の対象外
             time_window = 3 * 60  # 3分
             current_jan = None
             current_jan_time = None
@@ -311,6 +320,12 @@ class ImageManagerScanMixin:
                     current_jan_time = record.capture_dt
                     auto_linked_records.append(record)
                 
+                # ASINグループ済みは時間窓の自動紐付け対象外
+                elif record.jan_candidate and str(record.jan_candidate).lower().startswith("asin:"):
+                    current_jan = None
+                    current_jan_time = None
+                    auto_linked_records.append(record)
+
                 # JANコードがない画像
                 elif current_jan and current_jan_time and record.capture_dt:
                     time_diff = (record.capture_dt - current_jan_time).total_seconds()
@@ -347,12 +362,14 @@ class ImageManagerScanMixin:
             # JANでグルーピング（JANコードなしも含む）
             self.jan_groups = self.image_service.group_by_jan(self.image_records)
             
-            # DBに保存
+            # DBに保存（JAN と ASIN を別列へ）
             for group in self.jan_groups:
+                jan_norm, asin_norm = _parse_image_group_key(group.jan)
                 for i, record in enumerate(group.images):
                     self.image_db.upsert({
                         "file_path": record.path,
-                        "jan": group.jan if group.jan != "unknown" else None,
+                        "jan": jan_norm,
+                        "asin": asin_norm,
                         "group_index": i,
                         "capture_time": record.capture_dt.isoformat() if record.capture_dt else None,
                         "rotation": 0

@@ -371,9 +371,9 @@ async def upload_product(
     )
 
 
-def _seed_saved_jan(folder: Path, filename: str, jan: str) -> bool:
-    """保存した写真のJANを画像DBへ書く。失敗しても写真自体は残す。"""
-    if not str(jan or "").strip():
+def _seed_saved_jan(folder: Path, filename: str, jan: str, asin: str = "") -> bool:
+    """保存した写真の JAN / ASIN を画像DBへ書く。失敗しても写真自体は残す。"""
+    if not str(jan or "").strip() and not str(asin or "").strip():
         return False
     try:
         from route_web.desktop_bridge import ensure_desktop_importable
@@ -381,7 +381,13 @@ def _seed_saved_jan(folder: Path, filename: str, jan: str) -> bool:
         ensure_desktop_importable()
         from services.route_product_seed import seed_product_jan
 
-        return bool(seed_product_jan(product_dir(folder) / filename, jan))
+        return bool(
+            seed_product_jan(
+                product_dir(folder) / filename,
+                jan or "",
+                asin=asin or "",
+            )
+        )
     except Exception:
         return False
 
@@ -413,7 +419,7 @@ async def upload_route_product(
     doc = append_route_product_file(doc, filename, jan=jan or "", asin=asin or "")
     doc = stamp_updated(doc)
     save_route_json(web_id, doc)
-    seeded = _seed_saved_jan(folder, filename, jan or "")
+    seeded = _seed_saved_jan(folder, filename, jan or "", asin or "")
     return JSONResponse(
         {
             "ok": True,

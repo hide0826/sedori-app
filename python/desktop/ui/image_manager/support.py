@@ -136,6 +136,8 @@ _AMAZON_UPLOAD_BROWSER_TITLE_KEYWORDS = [
 _UNLINKED_HIGHLIGHT_BG = QColor("#ffc107")
 _UNLINKED_HIGHLIGHT_FG = QColor("#1a1a1a")
 _PURCHASE_IMAGE_COLUMNS = [f"画像{i}" for i in range(1, 7)]
+# 画像グループキー: JANが無いとき ASIN でまとめる（例: asin:B0XXXXXXXX）
+ASIN_GROUP_PREFIX = "asin:"
 
 
 def _normalize_jan_for_match(value: Any) -> str:
@@ -143,6 +145,73 @@ def _normalize_jan_for_match(value: Any) -> str:
     if jan.endswith(".0"):
         jan = jan[:-2]
     return "".join(c for c in jan if c.isdigit()).upper()
+
+
+def _normalize_asin_for_match(value: Any) -> str:
+    """ASIN を照合用に正規化する（大文字・英数字のみ）。"""
+    s = str(value or "").strip().upper()
+    if not s or s == "UNKNOWN":
+        return ""
+    lower = s.lower()
+    if lower.startswith(ASIN_GROUP_PREFIX):
+        s = s[len(ASIN_GROUP_PREFIX) :]
+    elif lower.startswith("asin:"):
+        s = s[5:]
+    return "".join(c for c in s if c.isalnum())
+
+
+def _asin_group_key(asin: Any) -> str:
+    """画像グループ用キー（asin:XXXX）。空なら空文字。"""
+    norm = _normalize_asin_for_match(asin)
+    return f"{ASIN_GROUP_PREFIX}{norm}" if norm else ""
+
+
+def _parse_image_group_key(key: Any) -> Tuple[Optional[str], Optional[str]]:
+    """
+    JanGroup.jan / jan_candidate から (JAN, ASIN) を取り出す。
+    ASIN グループは asin:XXXX。通常の JAN は数字。
+    """
+    raw = str(key or "").strip()
+    if not raw or raw == "unknown":
+        return None, None
+    if raw.lower().startswith(ASIN_GROUP_PREFIX):
+        asin = _normalize_asin_for_match(raw[len(ASIN_GROUP_PREFIX) :])
+        return None, asin or None
+    jan = _normalize_jan_for_match(raw)
+    if jan and len(jan) in (8, 12, 13, 14):
+        return jan, None
+    asin = _normalize_asin_for_match(raw)
+    # 数字だけの10桁は書籍 ISBN-10 由来 ASIN の可能性があるが、
+    # グループ表示では asin: 付きで扱う前提。素の数字は JAN 扱いを優先。
+    if asin and not raw.isdigit() and len(asin) >= 8:
+        return None, asin
+    if jan:
+        return jan, None
+    return None, None
+
+
+def _format_group_key_label(key: Any) -> str:
+    """左ツリー表示用のラベル。"""
+    raw = str(key or "").strip()
+    if not raw or raw == "unknown":
+        return "（JAN不明）"
+    jan, asin = _parse_image_group_key(raw)
+    if asin:
+        return f"ASIN: {asin}"
+    if jan:
+        return jan
+    if raw.endswith(".0"):
+        return raw[:-2]
+    return raw
+
+
+def _group_key_from_db_fields(jan: Any = None, asin: Any = None) -> Optional[str]:
+    """画像DBの jan / asin 列から ImageRecord.jan_candidate 用キーを作る。"""
+    jan_norm = _normalize_jan_for_match(jan)
+    if jan_norm:
+        return jan_norm
+    asin_key = _asin_group_key(asin)
+    return asin_key or None
 
 
 def _normalize_image_path(path: str) -> str:
@@ -169,15 +238,25 @@ def _apply_unlinked_item_style(item: QTreeWidgetItem) -> None:
         item.setForeground(col, brush_fg)
 
 
+def _record_asin_for_match(record: Dict[str, Any]) -> str:
+    return _normalize_asin_for_match(
+        record.get("ASIN") or record.get("asin") or record.get("Asin")
+    )
+
+
 def _record_jan_matches_group(record: Dict[str, Any], group_jan: str) -> bool:
-    """仕入レコードのJANがJANグループのJANと一致するか"""
+    """仕入レコードが画像グループ（JAN または ASIN）と一致するか"""
     if not group_jan or group_jan == "unknown":
         return False
-    record_jan = _normalize_jan_for_match(
-        record.get("JAN") or record.get("jan") or record.get("JANコード")
-    )
-    group_norm = _normalize_jan_for_match(group_jan)
-    return bool(record_jan and group_norm and record_jan == group_norm)
+    group_jan_norm, group_asin = _parse_image_group_key(group_jan)
+    if group_jan_norm:
+        record_jan = _normalize_jan_for_match(
+            record.get("JAN") or record.get("jan") or record.get("JANコード")
+        )
+        return bool(record_jan and record_jan == group_jan_norm)
+    if group_asin:
+        return bool(_record_asin_for_match(record) == group_asin)
+    return False
 
 
 def _candidate_is_known_linked_product(
@@ -187,11 +266,19 @@ def _candidate_is_known_linked_product(
     """
     画像一覧のJANグループで既にJAN+商品名が紐付いている商品か。
     （例: 4543112593023 - 天装戦隊ゴセイジャー… のようなグループ）
+    ASIN グループも linked_session_jans に asin:XXXX として入る。
     """
     record_jan = _normalize_jan_for_match(
         record.get("JAN") or record.get("jan") or record.get("JANコード")
     )
-    if not record_jan or record_jan not in linked_session_jans:
+    record_asin = _record_asin_for_match(record)
+    keys_to_try = []
+    if record_jan:
+        keys_to_try.append(record_jan)
+    if record_asin:
+        keys_to_try.append(_asin_group_key(record_asin))
+        keys_to_try.append(record_asin)
+    if not any(k in linked_session_jans for k in keys_to_try):
         return False
     title = str(
         record.get("商品名") or record.get("product_name") or record.get("title") or ""

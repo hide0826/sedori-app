@@ -108,6 +108,7 @@ from .support import (
     _UNLINKED_HIGHLIGHT_FG,
     _PURCHASE_IMAGE_COLUMNS,
     _normalize_jan_for_match,
+    _normalize_asin_for_match,
     _normalize_image_path,
     _record_has_any_image_paths,
     _apply_unlinked_item_style,
@@ -524,13 +525,22 @@ class ImageManagerPreviewMixin:
                             try:
                                 all_records = self.product_widget.get_all_purchase_records()
                                 image_paths = [img.path for img in current_group.images]
+                                selected_jan = _normalize_jan_for_match(
+                                    selected_record.get("JAN")
+                                    or selected_record.get("jan")
+                                    or jan
+                                )
+                                selected_asin = _normalize_asin_for_match(
+                                    selected_record.get("ASIN") or selected_record.get("asin")
+                                )
                                 success, added_count, record_snapshot = self.product_widget.update_image_paths_for_jan(
-                                    jan,
+                                    selected_jan,
                                     image_paths,
                                     all_records,
                                     skip_existing=True,
                                     target_sku=target_sku,
                                     defer_table_refresh_and_snapshot=True,
+                                    target_asin=selected_asin or None,
                                 )
                                 if success:
                                     self._finalize_purchase_db_after_image_link()

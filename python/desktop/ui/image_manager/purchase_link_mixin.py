@@ -108,8 +108,13 @@ from .support import (
     _UNLINKED_HIGHLIGHT_FG,
     _PURCHASE_IMAGE_COLUMNS,
     _normalize_jan_for_match,
+    _normalize_asin_for_match,
+    _asin_group_key,
+    _parse_image_group_key,
+    _format_group_key_label,
     _normalize_image_path,
     _record_has_any_image_paths,
+    _record_asin_for_match,
     first_image_capture_dt,
     resolve_link_image_paths,
     _apply_unlinked_item_style,
@@ -152,11 +157,11 @@ class ImageManagerPurchaseLinkMixin:
         group: JanGroup,
         all_records: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
-        """仕入DBに同一JANの商品レコードが存在するか（商品名表示と同じ基準）"""
+        """仕入DBに同一JAN / ASIN の商品レコードが存在するか（商品名表示と同じ基準）"""
         if not group or group.jan == "unknown":
             return False
-        jan_norm = _normalize_jan_for_match(group.jan)
-        if not jan_norm:
+        jan_norm, asin_norm = _parse_image_group_key(group.jan)
+        if not jan_norm and not asin_norm:
             return False
         if all_records is None:
             if not self.product_widget:
@@ -167,10 +172,13 @@ class ImageManagerPurchaseLinkMixin:
             except Exception:
                 return False
         for record in all_records:
-            record_jan = _normalize_jan_for_match(
-                record.get("JAN") or record.get("jan") or record.get("JANコード")
-            )
-            if record_jan and record_jan == jan_norm:
+            if jan_norm:
+                record_jan = _normalize_jan_for_match(
+                    record.get("JAN") or record.get("jan") or record.get("JANコード")
+                )
+                if record_jan and record_jan == jan_norm:
+                    return True
+            if asin_norm and _record_asin_for_match(record) == asin_norm:
                 return True
         return False
 
@@ -191,7 +199,7 @@ class ImageManagerPurchaseLinkMixin:
 
 
     def _collect_linked_jan_codes_from_groups(self) -> set[str]:
-        """画像一覧でJAN+商品名が紐付いているJANグループのJANコード集合"""
+        """画像一覧でJAN/ASIN+商品名が紐付いているグループキー集合"""
         purchase_records: Optional[List[Dict[str, Any]]] = None
         if self.product_widget:
             try:
@@ -202,9 +210,12 @@ class ImageManagerPurchaseLinkMixin:
         linked: set[str] = set()
         for group in self.jan_groups:
             if self._group_has_jan_in_purchase_db(group, purchase_records):
-                norm = _normalize_jan_for_match(group.jan)
-                if norm:
-                    linked.add(norm)
+                jan_norm, asin_norm = _parse_image_group_key(group.jan)
+                if jan_norm:
+                    linked.add(jan_norm)
+                if asin_norm:
+                    linked.add(_asin_group_key(asin_norm))
+                    linked.add(asin_norm)
         return linked
 
 
@@ -276,7 +287,7 @@ class ImageManagerPurchaseLinkMixin:
 
 
     def _get_product_title_by_jan(self, jan: str) -> str:
-        """JANコードに紐づく候補商品タイトルを取得"""
+        """JAN / ASIN に紐づく候補商品タイトルを取得"""
         if not jan or jan == "unknown":
             return ""
 
@@ -284,16 +295,22 @@ class ImageManagerPurchaseLinkMixin:
         
         if jan in self._jan_title_cache:
             return self._jan_title_cache[jan]
-        
+
+        jan_norm, asin_norm = _parse_image_group_key(jan)
         title = ""
         try:
             if self.product_widget:
                 purchase_records = getattr(self.product_widget, 'purchase_all_records', [])
                 for record in purchase_records:
-                    record_jan = _normalize_jan_for_match(
-                        record.get("JAN") or record.get("jan") or record.get("JANコード")
-                    )
-                    if record_jan and record_jan == _normalize_jan_for_match(jan):
+                    matched = False
+                    if jan_norm:
+                        record_jan = _normalize_jan_for_match(
+                            record.get("JAN") or record.get("jan") or record.get("JANコード")
+                        )
+                        matched = bool(record_jan and record_jan == jan_norm)
+                    elif asin_norm:
+                        matched = _record_asin_for_match(record) == asin_norm
+                    if matched:
                         title = (
                             record.get("商品名") or
                             record.get("product_name") or
@@ -346,10 +363,13 @@ class ImageManagerPurchaseLinkMixin:
                     break
 
                 progress.setValue(i)
-                progress.setLabelText(f"確定処理中... ({i+1}/{len(valid_groups)}) - JAN: {group.jan}")
+                progress.setLabelText(
+                    f"確定処理中... ({i+1}/{len(valid_groups)}) - {_format_group_key_label(group.jan)}"
+                )
                 QApplication.processEvents()
 
                 jan = group.jan
+                jan_norm, asin_norm = _parse_image_group_key(jan)
                 image_paths = self._collect_image_paths_for_group(group)
 
                 if not image_paths:
@@ -361,13 +381,14 @@ class ImageManagerPurchaseLinkMixin:
                     
                     # 更新処理を実行（既存画像をクリアしてから新しい画像で上書き）
                     success, added_count, record_snapshot = self.product_widget.update_image_paths_for_jan(
-                        jan,
+                        jan_norm or "",
                         image_paths,
                         all_records,
                         skip_existing=False,
                         target_sku=target_sku,
                         clear_existing=True,
                         defer_table_refresh_and_snapshot=True,
+                        target_asin=asin_norm,
                     )
 
                     if success:
@@ -385,11 +406,11 @@ class ImageManagerPurchaseLinkMixin:
                                 skip_barcode_classification=self._is_group_first_image_excluded(group),
                             )
                     else:
-                        failed_groups.append(jan)
+                        failed_groups.append(_format_group_key_label(jan))
 
                 except Exception as e:
-                    logger.error(f"JAN '{jan}' の確定処理中にエラー: {e}")
-                    failed_groups.append(jan)
+                    logger.error(f"グループ '{jan}' の確定処理中にエラー: {e}")
+                    failed_groups.append(_format_group_key_label(jan))
 
             # JANグループ処理が完了した段階（最終ステップの直前）
             progress.setValue(len(valid_groups))
@@ -598,15 +619,17 @@ class ImageManagerPurchaseLinkMixin:
         QApplication.processEvents()
 
         # 画像撮影日時 ±7日以内の仕入DB候補を取得（軽量読み込み）
-        search_jan = group.jan if group.jan and group.jan != "unknown" else None
-        if not search_jan and first.jan_candidate and first.jan_candidate != "unknown":
-            search_jan = first.jan_candidate
+        search_key = group.jan if group.jan and group.jan != "unknown" else None
+        if not search_key and first.jan_candidate and first.jan_candidate != "unknown":
+            search_key = first.jan_candidate
+        search_jan, search_asin = _parse_image_group_key(search_key) if search_key else (None, None)
         try:
             self._ensure_product_widget_data_loaded(full=False)
             candidates = self.product_widget.find_purchase_candidates_by_datetime(
                 base_dt,
                 days_window=7,
                 jan=search_jan,
+                asin=search_asin,
             )
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"仕入DB候補の取得中にエラーが発生しました:\n{e}")
@@ -635,17 +658,33 @@ class ImageManagerPurchaseLinkMixin:
             return
 
         selected = dialog.selected_record
-        target_jan = str(selected.get("JAN") or selected.get("jan") or "").strip()
+        target_jan = _normalize_jan_for_match(
+            selected.get("JAN") or selected.get("jan") or selected.get("JANコード") or ""
+        )
+        target_asin = _normalize_asin_for_match(
+            selected.get("ASIN") or selected.get("asin") or ""
+        )
         target_sku = str(selected.get("SKU") or selected.get("sku") or "").strip()
 
+        if not target_jan and not target_asin and not target_sku:
+            QMessageBox.warning(
+                self,
+                "紐付け不可",
+                "選択した仕入レコードに JAN / ASIN / SKU がありません。\n"
+                "いずれかが無いと画像を紐付けできません。",
+            )
+            return
+
         if not target_jan:
+            asin_note = f"\nASIN: {target_asin}" if target_asin else ""
+            sku_note = f"\nSKU: {target_sku}" if target_sku else ""
             reply = QMessageBox.question(
                 self,
                 "確認",
                 "選択した仕入レコードにはJANが設定されていません。\n"
-                "それでもこのレコードに画像を紐付けますか？",
+                f"ASIN（またはSKU）でこのレコードに画像を紐付けますか？{asin_note}{sku_note}",
                 QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
+                QMessageBox.Yes,
             )
             if reply != QMessageBox.Yes:
                 return
@@ -675,6 +714,7 @@ class ImageManagerPurchaseLinkMixin:
                 skip_existing=True,
                 target_sku=target_sku or None,
                 defer_table_refresh_and_snapshot=True,
+                target_asin=target_asin or None,
             )
         except Exception as e:
             progress.close()
@@ -687,8 +727,8 @@ class ImageManagerPurchaseLinkMixin:
             QMessageBox.warning(
                 self,
                 "紐付け失敗",
-                "選択したJANに対応する仕入レコードが見つかりませんでした。\n"
-                "（仕入DB側のJANを確認してください）",
+                "選択した仕入レコードが見つかりませんでした。\n"
+                "（仕入DB側の JAN / ASIN / SKU を確認してください）",
             )
             return
 
@@ -705,29 +745,31 @@ class ImageManagerPurchaseLinkMixin:
 
         self._finalize_purchase_db_after_image_link()
 
-        # 選択画像だけ別JANへ移す。グループ全体のときは確認してから全画像を更新する。
-        if target_jan and group.jan != target_jan:
+        # グループキー更新: JAN優先、無ければ ASIN グループへ移す
+        new_group_key = target_jan or (_asin_group_key(target_asin) if target_asin else "")
+        if new_group_key and group.jan != new_group_key:
+            label = _format_group_key_label(new_group_key)
             if subset:
                 for path in link_paths:
-                    self.assign_image_to_jan(path, target_jan, refresh_tree=False)
+                    self.assign_image_to_jan(path, new_group_key, refresh_tree=False)
                 self.jan_groups = self.image_service.group_by_jan(self.image_records)
-                self._jan_title_cache.pop(target_jan, None)
+                self._jan_title_cache.pop(new_group_key, None)
             else:
                 reply = QMessageBox.question(
                     self,
-                    "JANグループJAN更新の確認",
-                    f"このJANグループのJANを仕入DBのJAN {target_jan} に更新しますか？\n"
-                    f"（グループ内の全画像が新しいJANで再グルーピングされます）",
+                    "グループキー更新の確認",
+                    f"この画像グループを仕入DBの {label} に更新しますか？\n"
+                    f"（グループ内の全画像が新しいキーで再グルーピングされます）",
                     QMessageBox.Yes | QMessageBox.No,
                     QMessageBox.Yes,
                 )
                 if reply == QMessageBox.Yes:
                     for img_record in list(group.images):
                         self.assign_image_to_jan(
-                            img_record.path, target_jan, refresh_tree=False
+                            img_record.path, new_group_key, refresh_tree=False
                         )
                     self.jan_groups = self.image_service.group_by_jan(self.image_records)
-                    self._jan_title_cache.pop(target_jan, None)
+                    self._jan_title_cache.pop(new_group_key, None)
 
         try:
             self._jan_title_cache.clear()
@@ -738,6 +780,8 @@ class ImageManagerPurchaseLinkMixin:
             msg = f"選択した {len(link_paths)} 枚だけを仕入DBレコードに紐付けました。"
         else:
             msg = "仕入DBレコードと画像グループを紐付けました。"
+        if target_asin and not target_jan:
+            msg += f"\n（ASIN: {target_asin} で紐付け）"
         if added_count > 0:
             msg += f"\n新しく登録された画像数: {added_count}枚"
         else:
@@ -880,11 +924,13 @@ class ImageManagerPurchaseLinkMixin:
 
                 progress.setValue(i)
                 progress.setLabelText(
-                    f"指定紐付け処理中... ({i+1}/{len(valid_groups)}) - JAN: {group.jan} / 仕入日: {selected_label}"
+                    f"指定紐付け処理中... ({i+1}/{len(valid_groups)}) - "
+                    f"{_format_group_key_label(group.jan)} / 仕入日: {selected_label}"
                 )
                 QApplication.processEvents()
 
                 jan = group.jan
+                jan_norm, asin_norm = _parse_image_group_key(jan)
                 image_paths = self._collect_image_paths_for_group(group)
 
                 if not image_paths:
@@ -896,12 +942,13 @@ class ImageManagerPurchaseLinkMixin:
 
                     # 更新処理を実行（既存画像は維持しつつ、新しい画像だけ追加）
                     success, added_count, record_snapshot = self.product_widget.update_image_paths_for_jan(
-                        jan,
+                        jan_norm or "",
                         image_paths,
                         all_records,
                         skip_existing=True,
                         target_sku=target_sku,
                         clear_existing=False,
+                        target_asin=asin_norm,
                     )
 
                     if success:
@@ -918,11 +965,11 @@ class ImageManagerPurchaseLinkMixin:
                                 skip_barcode_classification=self._is_group_first_image_excluded(group),
                             )
                     else:
-                        failed_groups.append(jan)
+                        failed_groups.append(_format_group_key_label(jan))
 
                 except Exception as e:
-                    logger.error(f"JAN '{jan}' の指定紐付け処理中にエラー: {e}")
-                    failed_groups.append(jan)
+                    logger.error(f"グループ '{jan}' の指定紐付け処理中にエラー: {e}")
+                    failed_groups.append(_format_group_key_label(jan))
 
             progress.close()
 

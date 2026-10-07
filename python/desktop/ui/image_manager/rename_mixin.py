@@ -108,6 +108,9 @@ from .support import (
     _UNLINKED_HIGHLIGHT_FG,
     _PURCHASE_IMAGE_COLUMNS,
     _normalize_jan_for_match,
+    _normalize_asin_for_match,
+    _parse_image_group_key,
+    _record_asin_for_match,
     _normalize_image_path,
     _record_has_any_image_paths,
     _apply_unlinked_item_style,
@@ -430,10 +433,10 @@ class ImageManagerRenameMixin:
 
     def _get_target_sku_for_group(self, group: JanGroup, all_records: List[Dict[str, Any]]) -> Optional[str]:
         """
-        JANグループに対応するSKUを取得する
+        JAN / ASIN グループに対応するSKUを取得する
         
         1. 画像ファイル名からSKUを抽出を試みる
-        2. 抽出できない場合は、仕入DBからJANで検索して、画像の撮影日時に最も近いSKUを取得
+        2. 抽出できない場合は、仕入DBからJANまたはASINで検索して、画像の撮影日時に最も近いSKUを取得
         
         Args:
             group: JANグループ
@@ -442,7 +445,7 @@ class ImageManagerRenameMixin:
         Returns:
             対象SKU、またはNone
         """
-        jan_norm = str(group.jan).strip().upper()
+        jan_norm, asin_norm = _parse_image_group_key(group.jan)
         
         # 1. 画像ファイル名からSKUを抽出を試みる
         for img in group.images:
@@ -450,17 +453,31 @@ class ImageManagerRenameMixin:
             if sku:
                 # 抽出したSKUが仕入DBに存在するか確認
                 for record in all_records:
-                    record_jan = str(record.get("JAN") or record.get("jan") or "").strip().upper()
+                    record_jan = _normalize_jan_for_match(
+                        record.get("JAN") or record.get("jan") or ""
+                    )
+                    record_asin = _record_asin_for_match(record)
                     record_sku = str(record.get("SKU") or record.get("sku") or "").strip()
-                    if record_sku == sku and record_jan == jan_norm:
+                    if record_sku != sku:
+                        continue
+                    if jan_norm and record_jan == jan_norm:
+                        return sku
+                    if asin_norm and record_asin == asin_norm:
                         return sku
         
-        # 2. 画像ファイル名から抽出できない場合は、仕入DBからJANで検索
-        # まず、JANで直接検索を試みる
+        # 2. 画像ファイル名から抽出できない場合は、仕入DBからJAN / ASINで検索
         matching_records = []
         for record in all_records:
-            record_jan = str(record.get("JAN") or record.get("jan") or "").strip().upper()
-            if record_jan == jan_norm:
+            record_jan = _normalize_jan_for_match(
+                record.get("JAN") or record.get("jan") or ""
+            )
+            record_asin = _record_asin_for_match(record)
+            matched = False
+            if jan_norm and record_jan == jan_norm:
+                matched = True
+            elif asin_norm and record_asin == asin_norm:
+                matched = True
+            if matched:
                 record_sku = str(record.get("SKU") or record.get("sku") or "").strip()
                 if record_sku:
                     matching_records.append(record)
@@ -628,13 +645,15 @@ class ImageManagerRenameMixin:
                     all_records = self.product_widget.get_all_purchase_records()
                     
                     # 指定したSKUのレコードに画像パスを紐付け
+                    jan_norm, asin_norm = _parse_image_group_key(group.jan)
                     success, added_count, record_snapshot = self.product_widget.update_image_paths_for_jan(
-                        group.jan,
+                        jan_norm or "",
                         new_image_paths,
                         all_records,
                         skip_existing=False,  # 既存の画像を上書きする
                         target_sku=sku,
                         defer_table_refresh_and_snapshot=True,
+                        target_asin=asin_norm,
                     )
                     
                     if success and added_count > 0:
@@ -721,15 +740,15 @@ class ImageManagerRenameMixin:
                 if updated_group:
                     new_image_paths = self._collect_image_paths_for_group(updated_group)
                     all_records = self.product_widget.get_all_purchase_records()
-                    success, added_count, record_snapshot = (
-                        self.product_widget.update_image_paths_for_jan(
-                            group.jan,
-                            new_image_paths,
-                            all_records,
-                            skip_existing=False,
-                            target_sku=sku,
-                            defer_table_refresh_and_snapshot=True,
-                        )
+                    jan_norm, asin_norm = _parse_image_group_key(group.jan)
+                    success, added_count, record_snapshot = self.product_widget.update_image_paths_for_jan(
+                        jan_norm or "",
+                        new_image_paths,
+                        all_records,
+                        skip_existing=False,
+                        target_sku=sku,
+                        defer_table_refresh_and_snapshot=True,
+                        target_asin=asin_norm,
                     )
                     if success and added_count > 0:
                         linked_count = added_count
