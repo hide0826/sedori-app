@@ -3,8 +3,51 @@
 """在庫 UI の定数・ヘルパー・AI Thread。"""
 from __future__ import annotations
 
-from typing import List, Dict, Any, Optional
+import re
+from typing import List, Dict, Any, Optional, Iterable, Mapping
 from html import escape
+
+# 詳細説明タブのカスタム行キー（custom1, custom2, ...）
+_CUSTOM_KEY_RE = re.compile(r"^custom(\d+)$", re.IGNORECASE)
+_DEFAULT_CUSTOM_COUNT = 3
+
+
+def is_custom_template_key(key: Any) -> bool:
+    return bool(_CUSTOM_KEY_RE.match(str(key or "").strip()))
+
+
+def custom_template_key_number(key: Any) -> int:
+    m = _CUSTOM_KEY_RE.match(str(key or "").strip())
+    return int(m.group(1)) if m else 0
+
+
+def default_custom_template_label(key: str) -> str:
+    n = custom_template_key_number(key)
+    return f"カスタム{n}" if n else str(key or "カスタム")
+
+
+def list_custom_template_keys(
+    keywords_data: Optional[Mapping[str, Any]] = None,
+    *,
+    ensure_defaults: bool = True,
+) -> List[str]:
+    """保存データから customN キーを番号順で返す。無ければ custom1〜3。"""
+    data = keywords_data or {}
+    keys: set[str] = set()
+    for bucket in (data.get("custom_labels") or {}, data.get("keywords") or {}):
+        for raw in bucket.keys():
+            n = custom_template_key_number(raw)
+            if n > 0:
+                keys.add(f"custom{n}")
+    if not keys and ensure_defaults:
+        return [f"custom{i}" for i in range(1, _DEFAULT_CUSTOM_COUNT + 1)]
+    return sorted(keys, key=custom_template_key_number)
+
+
+def next_custom_template_key(existing: Iterable[str]) -> str:
+    nums = [custom_template_key_number(k) for k in existing]
+    nxt = (max(nums) if nums else 0) + 1
+    return f"custom{nxt}"
 
 from PySide6.QtCore import QThread, Signal
 _PRICETAR_BROWSER_TITLE_KEYWORDS = ["pricetar", "プライスター"]
@@ -161,13 +204,25 @@ def checked_detail_description(
     custom1: bool = False,
     custom2: bool = False,
     custom3: bool = False,
+    custom_flags: Optional[Mapping[str, bool]] = None,
 ) -> Optional[str]:
     """欠品・詳細がONなら、詳細説明タブの文だけを返す。未チェックなら None。
 
     チェックはあるが文が空のときは空文字。
     良い・非常に良い・可などのコンディションテンプレートは含めない。
+    custom_flags で customN を任意件数指定できる（custom1〜3 引数は互換用）。
     """
-    if not (manual or inner_box or custom1 or custom2 or custom3):
+    flags: Dict[str, bool] = {}
+    for key, on in (("custom1", custom1), ("custom2", custom2), ("custom3", custom3)):
+        flags[key] = bool(on)
+    if custom_flags:
+        for key, on in custom_flags.items():
+            k = str(key).strip()
+            if is_custom_template_key(k):
+                flags[f"custom{custom_template_key_number(k)}"] = bool(on)
+
+    any_custom = any(flags.values())
+    if not (manual or inner_box or any_custom):
         return None
     kw = keywords or {}
     parts: List[str] = []
@@ -177,8 +232,7 @@ def checked_detail_description(
         parts.append(str(kw.get("取説欠品", "") or "").strip())
     elif inner_box:
         parts.append(str(kw.get("内箱欠品", "") or "").strip())
-    for key, on in (("custom1", custom1), ("custom2", custom2), ("custom3", custom3)):
-        if on:
-            parts.append(str(kw.get(key, "") or "").strip())
+    for key in sorted((k for k, on in flags.items() if on), key=custom_template_key_number):
+        parts.append(str(kw.get(key, "") or "").strip())
     return "\n".join(part for part in parts if part)
 

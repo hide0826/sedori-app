@@ -92,10 +92,29 @@ from .support import (
     SHIPPING_METHOD_OPTIONS,
     _ConditionNoteAiGenerateThread,
     checked_detail_description,
+    default_custom_template_label,
+    list_custom_template_keys,
     _normalize_condition_note_newlines,
     _to_stored_newlines,
     _is_repricing_enabled_value,
 )
+
+_MISSING_CHECKBOX_STYLE = """
+    QCheckBox {
+        background-color: #3c3c3c;
+        color: #ffffff;
+        font-weight: bold;
+        border: 1px solid #555555;
+        border-radius: 3px;
+        padding: 2px 8px;
+    }
+    QCheckBox::indicator {
+        width: 16px;
+        height: 16px;
+    }
+"""
+_CUSTOM_CHECKBOXES_PER_ROW = 3
+
 
 class SinglePurchaseInputDialog(QDialog):
     """単品仕入のひな型入力ダイアログ（実店舗/電脳/フリマを共通入力）"""
@@ -313,32 +332,12 @@ class SinglePurchaseInputDialog(QDialog):
 
         self.missing_manual_checkbox = QCheckBox("取説欠品")
         self.missing_inner_box_checkbox = QCheckBox("内箱欠品")
-        self.missing_custom1_checkbox = QCheckBox("カスタム1")
-        self.missing_custom2_checkbox = QCheckBox("カスタム2")
-        self.missing_custom3_checkbox = QCheckBox("カスタム3")
-        _missing_cb_style = """
-                QCheckBox {
-                    background-color: #3c3c3c;
-                    color: #ffffff;
-                    font-weight: bold;
-                    border: 1px solid #555555;
-                    border-radius: 3px;
-                    padding: 2px 8px;
-                }
-                QCheckBox::indicator {
-                    width: 16px;
-                    height: 16px;
-                }
-            """
-        for cb in (
-            self.missing_manual_checkbox,
-            self.missing_inner_box_checkbox,
-            self.missing_custom1_checkbox,
-            self.missing_custom2_checkbox,
-            self.missing_custom3_checkbox,
-        ):
-            cb.setStyleSheet(_missing_cb_style)
-        self._apply_custom_missing_checkbox_labels()
+        self.missing_custom_checkboxes: Dict[str, QCheckBox] = {}
+        self.missing_custom1_checkbox = None
+        self.missing_custom2_checkbox = None
+        self.missing_custom3_checkbox = None
+        for cb in (self.missing_manual_checkbox, self.missing_inner_box_checkbox):
+            cb.setStyleSheet(_MISSING_CHECKBOX_STYLE)
         self.missing_manual_checkbox.toggled.connect(self._sync_missing_custom_checkboxes_enabled)
         self.missing_inner_box_checkbox.toggled.connect(self._sync_missing_custom_checkboxes_enabled)
 
@@ -350,12 +349,12 @@ class SinglePurchaseInputDialog(QDialog):
         row1.addWidget(self.missing_inner_box_checkbox)
         row1.addStretch()
         missing_opts_layout.addLayout(row1)
-        row2 = QHBoxLayout()
-        row2.addWidget(self.missing_custom1_checkbox)
-        row2.addWidget(self.missing_custom2_checkbox)
-        row2.addWidget(self.missing_custom3_checkbox)
-        row2.addStretch()
-        missing_opts_layout.addLayout(row2)
+        self._custom_checkbox_host = QWidget()
+        self._custom_checkbox_host_layout = QVBoxLayout(self._custom_checkbox_host)
+        self._custom_checkbox_host_layout.setContentsMargins(0, 0, 0, 0)
+        self._custom_checkbox_host_layout.setSpacing(4)
+        missing_opts_layout.addWidget(self._custom_checkbox_host)
+        self._rebuild_custom_missing_checkboxes()
         layout.addRow("欠品・詳細（選択）:", missing_opts)
 
         self.call_condition_note_btn = QPushButton("コンディション説明呼び出し")
@@ -439,25 +438,57 @@ class SinglePurchaseInputDialog(QDialog):
 
     def _apply_custom_missing_checkbox_labels(self) -> None:
         """詳細説明タブで保存したカスタム名称をチェックボックス表示に反映"""
+        self._rebuild_custom_missing_checkboxes()
+
+    def _rebuild_custom_missing_checkboxes(self) -> None:
+        """詳細説明タブのカスタム件数に合わせてチェックボックスを作り直す。"""
+        host = getattr(self, "_custom_checkbox_host", None)
+        host_layout = getattr(self, "_custom_checkbox_host_layout", None)
+        if host is None or host_layout is None:
+            return
+
+        while host_layout.count():
+            item = host_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+            nested = item.layout()
+            if nested is not None:
+                while nested.count():
+                    child = nested.takeAt(0)
+                    cw = child.widget()
+                    if cw is not None:
+                        cw.deleteLater()
+
+        self.missing_custom_checkboxes = {}
         try:
             md = self.condition_template_db.load_missing_keywords()
-            lab = md.get("custom_labels") or {}
-            defaults = {"custom1": "カスタム1", "custom2": "カスタム2", "custom3": "カスタム3"}
-            self.missing_custom1_checkbox.setText(lab.get("custom1") or defaults["custom1"])
-            self.missing_custom2_checkbox.setText(lab.get("custom2") or defaults["custom2"])
-            self.missing_custom3_checkbox.setText(lab.get("custom3") or defaults["custom3"])
         except Exception:
-            pass
+            md = {}
+        labels = md.get("custom_labels") or {}
+        keys = list_custom_template_keys(md, ensure_defaults=True)
+
+        row_layout = None
+        for i, key in enumerate(keys):
+            if i % _CUSTOM_CHECKBOXES_PER_ROW == 0:
+                row_layout = QHBoxLayout()
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                host_layout.addLayout(row_layout)
+            cb = QCheckBox(str(labels.get(key) or default_custom_template_label(key)))
+            cb.setStyleSheet(_MISSING_CHECKBOX_STYLE)
+            self.missing_custom_checkboxes[key] = cb
+            row_layout.addWidget(cb)
+        if row_layout is not None:
+            row_layout.addStretch()
+        self.missing_custom1_checkbox = self.missing_custom_checkboxes.get("custom1")
+        self.missing_custom2_checkbox = self.missing_custom_checkboxes.get("custom2")
+        self.missing_custom3_checkbox = self.missing_custom_checkboxes.get("custom3")
+        self._sync_missing_custom_checkboxes_enabled()
 
     def _sync_missing_custom_checkboxes_enabled(self) -> None:
         """取説欠品・内箱欠品のどちらかがONのときはカスタムを選べない"""
         fixed_on = self.missing_manual_checkbox.isChecked() or self.missing_inner_box_checkbox.isChecked()
-        custom_cbs = (
-            self.missing_custom1_checkbox,
-            self.missing_custom2_checkbox,
-            self.missing_custom3_checkbox,
-        )
-        for cb in custom_cbs:
+        for cb in (self.missing_custom_checkboxes or {}).values():
             if fixed_on:
                 cb.setChecked(False)
             cb.setEnabled(not fixed_on)
@@ -473,13 +504,15 @@ class SinglePurchaseInputDialog(QDialog):
             keywords = missing_data.get("keywords", {}) or {}
         except Exception:
             keywords = {}
+        custom_flags = {
+            key: bool(cb.isChecked())
+            for key, cb in (self.missing_custom_checkboxes or {}).items()
+        }
         detail = checked_detail_description(
             keywords,
             manual=bool(self.missing_manual_checkbox.isChecked()),
             inner_box=bool(self.missing_inner_box_checkbox.isChecked()),
-            custom1=bool(self.missing_custom1_checkbox.isChecked()),
-            custom2=bool(self.missing_custom2_checkbox.isChecked()),
-            custom3=bool(self.missing_custom3_checkbox.isChecked()),
+            custom_flags=custom_flags,
         )
         if detail is not None:
             if not detail:
