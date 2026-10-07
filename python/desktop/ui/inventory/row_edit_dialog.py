@@ -151,6 +151,19 @@ class InventoryRowEditDialog(QDialog):
                 else ""
             )
     
+    def _form_column_headers(self) -> List[str]:
+        """
+        行の編集フォーム用の表示順。
+        出品URLは必須入力なので、仕入れ日の直前（フォーム先頭付近）へ移す。
+        テーブル本体の列順（column_headers）は変えない。
+        """
+        headers = list(self.column_headers or [])
+        if "出品URL" not in headers or "仕入れ日" not in headers:
+            return headers
+        headers = [h for h in headers if h != "出品URL"]
+        headers.insert(headers.index("仕入れ日"), "出品URL")
+        return headers
+
     def _build_ui(self):
         layout = QVBoxLayout(self)
         scroll = QScrollArea()
@@ -200,7 +213,7 @@ class InventoryRowEditDialog(QDialog):
         self.missing_manual_checkbox.toggled.connect(self._sync_missing_custom_checkboxes_enabled)
         self.missing_inner_box_checkbox.toggled.connect(self._sync_missing_custom_checkboxes_enabled)
         
-        for col in self.column_headers:
+        for col in self._form_column_headers():
             if col in EVIDENCE_HIDDEN_COLUMNS:
                 continue
             if col == "その他詳細":
