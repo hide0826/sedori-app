@@ -163,7 +163,11 @@ class _MercariCaptureThread(QThread):
             if len(paths) < 3:
                 results.append({**job, "error": "3枚そろいませんでした。"})
                 continue
-            fields = self._save_job(job, paths)
+            fields = self._save_job(
+                job,
+                paths,
+                seller_name_hint=str(item.get("seller_name") or "").strip(),
+            )
             results.append({**job, "fields": fields})
             for path in paths:
                 try:
@@ -274,7 +278,13 @@ class _MercariCaptureThread(QThread):
 
         return Handler
 
-    def _save_job(self, job: Dict[str, Any], paths: List[str]) -> Dict[str, str]:
+    def _save_job(
+        self,
+        job: Dict[str, Any],
+        paths: List[str],
+        *,
+        seller_name_hint: str = "",
+    ) -> Dict[str, str]:
         existing_images = list(job.get("existing_images") or ["", "", ""])
         existing_urls = list(job.get("existing_urls") or ["", "", ""])
         while len(existing_images) < 3:
@@ -327,6 +337,14 @@ class _MercariCaptureThread(QThread):
                         fields[EVIDENCE_URL_COLS[i]] = existing_urls[i]
         except Exception as exc:
             return {"_error": str(exc)}
+
+        # 拡張が DOM から取った出品者名（スクショに映っていなくても可）
+        hint = str(seller_name_hint or "").strip()
+        if hint and not is_delivery_label_name(hint):
+            current_seller = str(job.get("seller_name") or "").strip()
+            if not current_seller or is_delivery_label_name(current_seller):
+                fields["ユーザー名"] = hint
+
         # 取引画面を新規に撮ったときだけ OCR（既存スロットは触らない）
         try:
             if not _evidence_slot_filled(existing_images[2]) and len(paths) >= 3 and paths[2]:
@@ -336,11 +354,11 @@ class _MercariCaptureThread(QThread):
                 parsed = parse_transaction_ocr_text(text)
                 if parsed.item_id and not str(job.get("transaction_id") or "").strip():
                     fields["取引ID"] = parsed.item_id
-                if parsed.seller_name and (
-                    not str(job.get("seller_name") or "").strip()
-                    or is_delivery_label_name(str(job.get("seller_name") or ""))
-                ):
-                    fields["ユーザー名"] = parsed.seller_name
+                # DOM で取れていなければ OCR を使う
+                if parsed.seller_name and not str(fields.get("ユーザー名") or "").strip():
+                    current_seller = str(job.get("seller_name") or "").strip()
+                    if not current_seller or is_delivery_label_name(current_seller):
+                        fields["ユーザー名"] = parsed.seller_name
         except Exception:
             pass
         return fields

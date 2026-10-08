@@ -43,21 +43,28 @@ async function pageState(tabId) {
 }
 
 /**
- * ウィンドウが全画面でなければ全画面にする。
+ * ウィンドウが最大化でなければ最大化する（真正の全画面にはしない）。
  * captureVisibleTab は表示中の領域だけ撮るため、小さい窓だと画像が欠ける。
+ * 外周（タイトルバー等）が残る「最大化」で画面いっぱいにする。
  */
-async function ensureFullscreenWindow(windowId) {
+async function ensureMaximizedWindow(windowId) {
   const win = await chrome.windows.get(windowId);
   captureWindowId = windowId;
   if (previousWindowState === null) {
     previousWindowState = win.state || "normal";
   }
-  if (win.state !== "fullscreen") {
-    await chrome.windows.update(windowId, { state: "fullscreen", focused: true });
-    await sleep(1200);
+  // fullscreen のままなら一度戻してから最大化（外周が見える状態にする）
+  if (win.state === "fullscreen") {
+    await chrome.windows.update(windowId, { state: "maximized", focused: true });
+    await sleep(700);
+    return;
+  }
+  if (win.state !== "maximized") {
+    await chrome.windows.update(windowId, { state: "maximized", focused: true });
+    await sleep(700);
   } else {
     await chrome.windows.update(windowId, { focused: true });
-    await sleep(300);
+    await sleep(200);
   }
 }
 
@@ -67,8 +74,9 @@ async function restoreWindowIfNeeded() {
   }
   try {
     const win = await chrome.windows.get(captureWindowId);
-    if (win.state === "fullscreen" && previousWindowState !== "fullscreen") {
-      await chrome.windows.update(captureWindowId, { state: previousWindowState });
+    const restoreTo = previousWindowState === "fullscreen" ? "maximized" : previousWindowState;
+    if (win.state !== restoreTo && restoreTo) {
+      await chrome.windows.update(captureWindowId, { state: restoreTo });
     }
   } catch (err) {
     // ウィンドウが閉じ済み
@@ -110,16 +118,16 @@ async function waitForProductImages(tabId) {
       const result = (res && res.result) || { ready: 0, pending: 1 };
       // 大きめの画像が1枚以上あり、読み込み待ちがなければOK
       if (result.ready >= 1 && result.pending === 0) {
-        await sleep(1200);
+        await sleep(700);
         return;
       }
     } catch (err) {
       // ナビ中など
     }
-    await sleep(500);
+    await sleep(400);
   }
   // タイムアウト時も少し待ってから撮る
-  await sleep(2000);
+  await sleep(1200);
 }
 
 async function shotWithDebugger(tabId) {
@@ -139,11 +147,11 @@ async function shotWithDebugger(tabId) {
 }
 
 async function shot(tab) {
-  await ensureFullscreenWindow(tab.windowId);
+  await ensureMaximizedWindow(tab.windowId);
   await chrome.windows.update(tab.windowId, { focused: true });
   await chrome.tabs.update(tab.id, { active: true });
   // フォーカス・描画が落ち着くまで待つ
-  await sleep(2200);
+  await sleep(1400);
   try {
     const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
     const comma = dataUrl.indexOf(",");
@@ -174,12 +182,12 @@ async function scrollToDescription(tabId) {
         return "moved";
       },
     });
-    await sleep(650);
+    await sleep(450);
     if (res && res.result === "done") {
       break;
     }
   }
-  await sleep(2200);
+  await sleep(1400);
 }
 
 async function openTransaction(tabId) {
@@ -242,16 +250,131 @@ async function ensureLoggedIn(tabId, baseUrl, token, jobId) {
 
 async function preparePageForShot(tabId) {
   await waitTabComplete(tabId);
-  // ページ表示直後の白飛び対策：固定待ち＋画像読み込み待ち
-  await sleep(4500);
+  // ページ表示直後の白飛び対策：固定待ち＋画像読み込み待ち（少し短縮）
+  await sleep(2800);
   await waitForProductImages(tabId);
+}
+
+/**
+ * 取引画面の DOM から出品者名を取る（スクショ外・OCR欠落対策）。
+ * 画面をスクロールしなくても、DOM 上にあれば取得できる。
+ */
+async function extractSellerNameFromDom(tabId) {
+  try {
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const skipFrags = [
+          "出品者情報",
+          "本人確認済",
+          "本人確認",
+          "24時間",
+          "評価を変更",
+          "取引が完了",
+          "取引完了",
+          "コピーする",
+          "ゆうゆうメルカリ便",
+          "ゆうパケット",
+          "でお届け",
+          "らくらくメルカリ便",
+          "専用資材",
+          "匿名配送",
+          "出品者負担",
+          "出品者レベル",
+          "送料",
+          "サイズ",
+          "厚さ",
+          "重さ",
+          "kg以内",
+          "cm以内",
+        ];
+        const junkOnly = new Set(["済", "円", "税込", "レベル", "プラス"]);
+        const deliveryMarkers = [
+          "ゆうパケット",
+          "メルカリ便",
+          "専用資材",
+          "匿名配送",
+          "でお届け",
+          "サイズ",
+          "厚さ",
+          "kg以内",
+          "cm以内",
+          "送料込み",
+          "出品者負担",
+        ];
+        const clean = (raw) => {
+          const text = String(raw || "").trim();
+          if (!text || /^[¥￥]/.test(text)) {
+            return "";
+          }
+          // 配送行は断片（「プラス」等）を拾わない
+          if (deliveryMarkers.some((m) => text.includes(m))) {
+            return "";
+          }
+          let parts = [text];
+          for (const frag of skipFrags) {
+            const next = [];
+            for (const p of parts) {
+              next.push(...p.split(frag));
+            }
+            parts = next;
+          }
+          for (const part of parts) {
+            const cand = part.replace(/\s+/g, " ").trim().replace(/^[:：・|\-\s]+|[:：・|\-\s]+$/g, "");
+            if (!cand || junkOnly.has(cand) || cand.length > 40) {
+              continue;
+            }
+            if (/^m\d{8,16}$/i.test(cand) || /^[0-9,]+$/.test(cand)) {
+              continue;
+            }
+            return cand;
+          }
+          return "";
+        };
+        const lines = (document.body && document.body.innerText ? document.body.innerText : "")
+          .split(/\n+/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        for (let i = 0; i < lines.length; i += 1) {
+          if (!lines[i].includes("出品者情報")) {
+            continue;
+          }
+          const same = clean(lines[i].split("出品者情報").slice(1).join("出品者情報"));
+          if (same) {
+            return same;
+          }
+          for (let j = i + 1; j < Math.min(i + 8, lines.length); j += 1) {
+            const cand = clean(lines[j]);
+            if (cand) {
+              return cand;
+            }
+          }
+        }
+        for (let i = 0; i < lines.length; i += 1) {
+          if (!lines[i].includes("本人確認")) {
+            continue;
+          }
+          for (let j = Math.max(0, i - 4); j < i; j += 1) {
+            const cand = clean(lines[j]);
+            if (cand) {
+              return cand;
+            }
+          }
+        }
+        return "";
+      },
+    });
+    return (res && res.result) || "";
+  } catch (err) {
+    return "";
+  }
 }
 
 async function captureJob(job, baseUrl, token) {
   const created = await chrome.tabs.create({ url: job.url, active: true });
   await preparePageForShot(created.id);
   let tab = await chrome.tabs.get(created.id);
-  await ensureFullscreenWindow(tab.windowId);
+  await ensureMaximizedWindow(tab.windowId);
 
   const loggedIn = await ensureLoggedIn(created.id, baseUrl, token, job.id);
   if (!loggedIn) {
@@ -279,11 +402,11 @@ async function captureJob(job, baseUrl, token) {
   }
   tab = await chrome.tabs.get(created.id);
   const top = await shot(tab);
-  await sleep(1500);
+  await sleep(900);
   await scrollToDescription(created.id);
   tab = await chrome.tabs.get(created.id);
   const desc = await shot(tab);
-  await sleep(2000);
+  await sleep(1200);
   const clicked = await openTransaction(created.id);
   if (!clicked) {
     await postJson(baseUrl, "/result", {
@@ -315,19 +438,21 @@ async function captureJob(job, baseUrl, token) {
     return true;
   }
   tab = await chrome.tabs.get(created.id);
+  const sellerName = await extractSellerNameFromDom(created.id);
   const transaction = await shot(tab);
   await postJson(baseUrl, "/result", {
     token,
     id: job.id,
     status: "ok",
     images: [top, desc, transaction],
+    seller_name: sellerName || "",
   });
   try {
     await chrome.tabs.remove(created.id);
   } catch (err) {
     // タブが残っていても撮影結果は届いている
   }
-  await sleep(2500);
+  await sleep(1600);
   return true;
 }
 

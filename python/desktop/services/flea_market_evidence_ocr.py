@@ -20,6 +20,7 @@ _TRANSACTION_HINTS = (
 
 _SELLER_SKIP_FRAGMENTS = (
     "出品者情報",
+    "本人確認済",
     "本人確認",
     "24時間",
     "評価を変更",
@@ -40,6 +41,24 @@ _SELLER_SKIP_FRAGMENTS = (
     "重さ",
     "kg以内",
     "cm以内",
+)
+
+# OCRで名前とバッジが同一行になったときのゴミ
+_SELLER_JUNK_ONLY = frozenset({"済", "円", "円税込", "税込", "レベル", "プラス"})
+
+# この文言を含む行は配送・UI行とみなし、断片名を拾わない
+_SELLER_DELIVERY_LINE_MARKERS = (
+    "ゆうパケット",
+    "メルカリ便",
+    "専用資材",
+    "匿名配送",
+    "でお届け",
+    "サイズ",
+    "厚さ",
+    "kg以内",
+    "cm以内",
+    "送料込み",
+    "出品者負担",
 )
 
 _DATE_LABEL_RE = re.compile(
@@ -172,23 +191,67 @@ def _extract_item_price(text: str) -> Optional[int]:
 
 
 def _extract_seller_name(text: str) -> str:
-    lines = [ln.strip() for ln in text.split("\n")]
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    # 1) 「出品者情報」の直後（同一行／次行）
     for i, line in enumerate(lines):
         if "出品者情報" not in line:
             continue
-        # 同じ行に名前が続く場合
         rest = line.split("出品者情報", 1)[-1].strip(" :：")
-        if rest and not _is_seller_skip_line(rest):
-            return rest
-        for follow in lines[i + 1 : i + 6]:
-            if not follow:
-                continue
-            if _is_seller_skip_line(follow):
-                continue
-            if follow.startswith("¥") or follow.startswith("￥"):
-                continue
-            return follow
+        candidate = _seller_name_from_line(rest)
+        if candidate:
+            return candidate
+        for follow in lines[i + 1 : i + 8]:
+            candidate = _seller_name_from_line(follow)
+            if candidate:
+                return candidate
+    # 2) 「本人確認済」の直前行（出品者情報がOCRで欠ける場合）
+    for i, line in enumerate(lines):
+        if "本人確認" not in line:
+            continue
+        for prev in reversed(lines[max(0, i - 4) : i]):
+            candidate = _seller_name_from_line(prev)
+            if candidate:
+                return candidate
     return ""
+
+
+def _seller_name_from_line(line: str) -> str:
+    """スキップ文言を除いた残りを出品者名候補にする。
+
+    OCRで「よう本人確認済」のように名前とバッジが同一行になることがある。
+    配送行（ゆうパケット…）は断片の「プラス」などを拾わないよう丸ごと捨てる。
+    """
+    text = (line or "").strip()
+    if not text:
+        return ""
+    if text.startswith("¥") or text.startswith("￥"):
+        return ""
+    if any(m in text for m in _SELLER_DELIVERY_LINE_MARKERS):
+        return ""
+    parts = [text]
+    for frag in _SELLER_SKIP_FRAGMENTS:
+        next_parts: List[str] = []
+        for part in parts:
+            next_parts.extend(part.split(frag))
+        parts = next_parts
+    for part in parts:
+        cand = re.sub(r"\s+", " ", part).strip(" :：・|-\t")
+        if not cand or cand in _SELLER_JUNK_ONLY:
+            continue
+        if len(cand) > 40:
+            continue
+        if _looks_like_price_or_id(cand):
+            continue
+        return cand
+    return ""
+
+
+def _looks_like_price_or_id(text: str) -> bool:
+    if re.fullmatch(r"m\d{8,16}", text, re.IGNORECASE):
+        return True
+    if re.fullmatch(r"[0-9,]+", text):
+        return True
+    return False
 
 
 def _is_seller_skip_line(line: str) -> bool:

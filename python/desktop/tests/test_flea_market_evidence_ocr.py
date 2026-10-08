@@ -81,6 +81,32 @@ def test_seller_name_skips_yu_packet_size_label():
     assert result.seller_name == "よう"
 
 
+def test_seller_name_glued_to_identity_badge():
+    """OCRで名前と本人確認が同一行になっても切り出せる。"""
+    text = """
+購入日時 2026年9月1日 12:00
+商品ID m62420345061
+出品者情報
+よう本人確認済
+出品者レベル10
+"""
+    result = parse_transaction_ocr_text(text)
+    assert result.seller_name == "よう"
+
+
+def test_seller_name_from_line_before_identity_badge():
+    """出品者情報が欠けても、本人確認の直前行から取る。"""
+    text = """
+購入日時 2026年9月1日 12:00
+商品ID m62420345061
+取引が完了しました
+よう
+本人確認済
+"""
+    result = parse_transaction_ocr_text(text)
+    assert result.seller_name == "よう"
+
+
 def test_listing_page_is_not_transaction():
     assert looks_like_transaction_page(_SAMPLE_LISTING) is False
     result = parse_transaction_ocr_text(_SAMPLE_LISTING)
