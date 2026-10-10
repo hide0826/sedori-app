@@ -28,6 +28,28 @@ from pathlib import Path
 import datetime
 
 
+def _ledger_text(value: Any) -> str:
+    """台帳に出す文字。空・None・文字列の none/nan は空にする。"""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    if text.lower() in ("none", "nan"):
+        return ""
+    return text
+
+
+_FLEA_FIELD_SOURCES = (
+    ("listing_url", ("出品URL", "listing_url")),
+    ("tracking_no", ("伝票番号", "tracking_no")),
+    ("ship_to_prefecture", ("受取都道府県", "ship_to_prefecture")),
+)
+
+
 class AntiqueWorker(QThread):
     """古物台帳生成のワーカースレッド"""
     progress_updated = Signal(int)
@@ -282,6 +304,7 @@ class AntiqueWidget(QWidget):
         # 店舗向け：下部リスト表示（店舗用項目）
         from PySide6.QtWidgets import QSizePolicy
         self.grp_store_list = QGroupBox("店舗リスト（取込プレビュー）")
+        self.grp_store_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         vl_store_list = QVBoxLayout(self.grp_store_list)
         
         # 削除ボタンエリア
@@ -312,7 +335,7 @@ class AntiqueWidget(QWidget):
         self.table_store_list.setColumnCount(len(self.preview_headers))
         self.table_store_list.setHorizontalHeaderLabels(self.preview_headers)
         vl_store_list.addWidget(self.table_store_list)
-        lay.addWidget(self.grp_store_list)
+        lay.addWidget(self.grp_store_list, 1)
 
         # アクション
         actions = QHBoxLayout()
@@ -375,9 +398,12 @@ class AntiqueWidget(QWidget):
             'counterparty_address': self.store_address.text().strip() if cp in self.COUNTERPARTY_CORP_TYPES else None,
             'contact': self.store_contact.text().strip() if cp in self.COUNTERPARTY_CORP_TYPES else None,
             'receipt_no': self.store_receipt.text().strip() if cp in self.COUNTERPARTY_CORP_TYPES else None,
-            'platform': 'フリマ' if cp == 'フリマ' else None,
+            'platform': (self.flea_platform.text().strip() or None) if cp == 'フリマ' else None,
             'platform_order_id': self.flea_order_id.text().strip() if cp == 'フリマ' else None,
             'platform_user': self.flea_user.text().strip() if cp == 'フリマ' else None,
+            'listing_url': (self.flea_url.text().strip() or None) if cp == 'フリマ' else None,
+            'tracking_no': (self.flea_tracking.text().strip() or None) if cp == 'フリマ' else None,
+            'ship_to_prefecture': (self.flea_pref.text().strip() or None) if cp == 'フリマ' else None,
             'person_name': self.person_name.text().strip() if cp == '個人' else None,
             'person_address': None,
             'id_type': 'ID',
@@ -418,7 +444,8 @@ class AntiqueWidget(QWidget):
             if hasattr(self, 'btn_import_store'):
                 self.btn_import_store.setVisible(corp)
             if hasattr(self, 'grp_store_list'):
-                self.grp_store_list.setVisible(corp)
+                # 法人は店舗の取込一覧、フリマはネット仕入の取込一覧。個人は手入力だけ。
+                self.grp_store_list.setVisible(text in ("法人", "フリマ"))
         except Exception as e:
             print(f"counterparty toggle error: {e}")
 
@@ -862,6 +889,13 @@ class AntiqueWidget(QWidget):
             pref_s = pick_series("受取都道府県")
             
             user_dict = self._load_user_dictionary()
+            default_pref = ""
+            if online:
+                try:
+                    from desktop.utils.settings_helper import get_default_receive_prefecture
+                    default_pref = get_default_receive_prefecture()
+                except Exception:
+                    default_pref = "東京都"
             # 法人マスタを一括取得（チェーン名→法人名）
             company_rows = []
             try:
@@ -969,7 +1003,8 @@ class AntiqueWidget(QWidget):
                 normalized_date = self._normalize_date(date_val) if date_val else ""
                 
                 if online:
-                    channel_val = str(channel_s.iloc[i] or "").strip() or supplier_code
+                    channel_val = _ledger_text(channel_s.iloc[i]) or supplier_code
+                    pref_val = _ledger_text(pref_s.iloc[i]) or default_pref
                     rows.append({
                         "entry_date": normalized_date,
                         "kobutsu_kind": cat,
@@ -983,11 +1018,11 @@ class AntiqueWidget(QWidget):
                         "notes": None,
                         "counterparty_name": channel_val,
                         "platform": channel_val,
-                        "platform_order_id": str(tx_s.iloc[i] or "").strip(),
-                        "platform_user": str(user_s.iloc[i] or "").strip(),
-                        "listing_url": str(url_s.iloc[i] or "").strip(),
-                        "tracking_no": str(track_s.iloc[i] or "").strip(),
-                        "ship_to_prefecture": str(pref_s.iloc[i] or "").strip(),
+                        "platform_order_id": _ledger_text(tx_s.iloc[i]),
+                        "platform_user": _ledger_text(user_s.iloc[i]),
+                        "listing_url": _ledger_text(url_s.iloc[i]),
+                        "tracking_no": _ledger_text(track_s.iloc[i]),
+                        "ship_to_prefecture": pref_val,
                         "sku": str(sku_s.iloc[i] or '') if 'SKU' in df.columns else "",
                     })
                 else:
@@ -1022,6 +1057,9 @@ class AntiqueWidget(QWidget):
             
             self._imported_store_rows = rows
             self._refresh_store_list_table()
+            # すでにフリマ／法人のままだと区分の切替通知が飛ばず、一覧が隠れたままになる
+            if hasattr(self, "grp_store_list"):
+                self.grp_store_list.setVisible(True)
             
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"データの取込でエラーが発生しました:\n{e}")
@@ -1214,6 +1252,28 @@ class AntiqueWidget(QWidget):
             self.table_store_list.setColumnCount(len(self.preview_headers))
             self.table_store_list.setHorizontalHeaderLabels(self.preview_headers)
 
+    def _ask_overwrite_same_sku(self, skus: List[str]) -> bool:
+        """同じSKUが台帳にあるとき。True なら上書き、False ならスキップ。"""
+        shown = skus[:12]
+        lines = "\n".join(shown)
+        if len(skus) > 12:
+            lines += f"\n…他 {len(skus) - 12} 件"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("同じSKUがあります")
+        box.setText(
+            "台帳に、同じSKUの行がすでにあります。\n"
+            "上書きしますか？\n\n"
+            "上書きする … そのSKUの既存行を、今回の内容に更新します（新しい行は作りません）\n"
+            "スキップする … そのSKUは変更しません\n\n"
+            f"対象 {len(skus)} 件:\n{lines}"
+        )
+        btn_yes = box.addButton("上書きする", QMessageBox.ButtonRole.AcceptRole)
+        btn_no = box.addButton("スキップする", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(btn_no)
+        box.exec()
+        return box.clickedButton() == btn_yes
+
     def _commit_imported_store_rows(self) -> None:
         """取込プレビューの店舗行を、現在の共通テンプレ値と合成して台帳へ一括登録"""
         try:
@@ -1259,9 +1319,12 @@ class AntiqueWidget(QWidget):
                     'counterparty_type': cp_sel,
                     'counterparty_name': str(r.get('counterparty_name', '')).strip(),
                     'receipt_no': str(r.get('receipt_no', '')).strip() or None,
-                    'platform': str(r.get('platform', '') or '').strip() or None if cp_sel == "フリマ" else None,
-                    'platform_order_id': str(r.get('platform_order_id', '') or '').strip() or None if cp_sel == "フリマ" else None,
-                    'platform_user': str(r.get('platform_user', '') or '').strip() or None if cp_sel == "フリマ" else None,
+                    'platform': _ledger_text(r.get('platform')) or None if cp_sel == "フリマ" else None,
+                    'platform_order_id': _ledger_text(r.get('platform_order_id')) or None if cp_sel == "フリマ" else None,
+                    'platform_user': _ledger_text(r.get('platform_user')) or None if cp_sel == "フリマ" else None,
+                    'listing_url': _ledger_text(r.get('listing_url')) or None if cp_sel == "フリマ" else None,
+                    'tracking_no': _ledger_text(r.get('tracking_no')) or None if cp_sel == "フリマ" else None,
+                    'ship_to_prefecture': _ledger_text(r.get('ship_to_prefecture')) or None if cp_sel == "フリマ" else None,
                     'person_name': None,
                     'person_address': None,  # 店舗取引なので個人住所は常にNone
                     # 店舗用フィールドを正しく反映
@@ -1282,9 +1345,9 @@ class AntiqueWidget(QWidget):
                     'amount': int(amount_v),
                     'identifier': str(r.get('identifier', '')).strip(),
                     'transaction_method': '買受',
-                    'notes': str(r.get('notes', '')).strip() or None,
+                    'notes': _ledger_text(r.get('notes')) or None,
                     'correction_of': None,
-                    'sku': r.get('sku', ''),
+                    'sku': _ledger_text(r.get('sku')),
                 }
                 to_insert.append(row)
             
@@ -1301,19 +1364,60 @@ class AntiqueWidget(QWidget):
 
             from desktop.database.ledger_db import LedgerDatabase
             db = LedgerDatabase()
-            n = db.insert_ledger_rows(to_insert)
-            
-            self._imported_store_rows = []
-            self._refresh_store_list_table()
+            existing = db.list_ids_grouped_by_sku(
+                [_ledger_text(r.get("sku")) for r in to_insert]
+            )
+            dup_skus: List[str] = []
+            seen_dup = set()
+            for row in to_insert:
+                sku = _ledger_text(row.get("sku"))
+                if not sku or sku == "未実装" or sku in seen_dup:
+                    continue
+                if existing.get(sku):
+                    dup_skus.append(sku)
+                    seen_dup.add(sku)
+            overwrite = self._ask_overwrite_same_sku(dup_skus) if dup_skus else False
+
+            fresh: List[dict] = []
+            updated = 0
+            skipped = 0
+            for row in to_insert:
+                sku = _ledger_text(row.get("sku"))
+                ids = existing.get(sku) if sku and sku != "未実装" else None
+                if ids:
+                    if overwrite:
+                        for entry_id in ids:
+                            if db.update_ledger_entry(entry_id, row):
+                                updated += 1
+                    else:
+                        skipped += 1
+                    continue
+                fresh.append(row)
+
+            n = db.insert_ledger_rows(fresh) if fresh else 0
+
+            if n or updated:
+                self._imported_store_rows = []
+                self._refresh_store_list_table()
             # 閲覧・出力タブを即時更新
             try:
                 self.reload_ledger_rows()
             except Exception:
                 pass
+            lines = []
+            if n:
+                lines.append(f"新規 {n} 件を登録しました。")
+            if updated:
+                lines.append(f"同じSKUの既存 {updated} 行を上書きしました。")
+            if skipped:
+                lines.append(f"同じSKUのため {skipped} 件はスキップしました。")
+            if not lines:
+                lines.append("登録した行はありません。")
+            lines.append("『閲覧・出力』で確認できます。")
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Icon.Information)
             box.setWindowTitle("登録完了")
-            box.setText(f"{n}件を台帳に登録しました。『閲覧・出力』で確認できます。")
+            box.setText("\n".join(lines))
             btn_back_inventory = box.addButton("仕入管理に戻る", QMessageBox.ButtonRole.ActionRole)
             box.addButton(QMessageBox.StandardButton.Ok)
             box.exec()
@@ -1727,7 +1831,7 @@ class AntiqueWidget(QWidget):
             entry_id = item.get("id")
             for j, key in enumerate(self.column_keys):
                 raw = item.get(key, "")
-                value = "" if raw is None else str(raw)
+                value = _ledger_text(raw)
                 if key == "entry_date":
                     value = self._normalize_date(value)
                 display_value = value
@@ -1830,6 +1934,10 @@ class AntiqueWidget(QWidget):
             except Exception as _e:
                 # 失敗しても致命的ではないのでログのみ
                 print(f"attach receipt urls failed: {_e}")
+            try:
+                rows = self._attach_flea_fields_from_purchases(rows)
+            except Exception as _e:
+                print(f"attach flea fields failed: {_e}")
             self.antique_data = rows
             self.apply_filters()
             self._ledger_loaded = True
@@ -1911,6 +2019,113 @@ class AntiqueWidget(QWidget):
                 # 永続化に失敗しても画面表示自体は続行する
                 pass
 
+        return rows
+
+    def _purchase_records_for_flea_fill(self) -> List[Dict[str, Any]]:
+        """仕入DBの最新一覧と、いま開いている仕入タブから行を集める。"""
+        records: List[Dict[str, Any]] = []
+        try:
+            from desktop.database.product_purchase_db import ProductPurchaseDatabase
+            pdb = ProductPurchaseDatabase()
+            snaps = pdb.list_snapshots()
+            if snaps:
+                snap = pdb.get_snapshot(int(snaps[0]["id"]))
+                data = (snap or {}).get("data") or []
+                if isinstance(data, list):
+                    records.extend(data)
+        except Exception as e:
+            print(f"purchase snapshot for flea fill failed: {e}")
+
+        window = self.window()
+        for name in (
+            "inventory_widget_online",
+            "inventory_widget_dev_online",
+            "inventory_widget",
+            "inventory_widget_dev",
+        ):
+            widget = getattr(window, name, None)
+            df = getattr(widget, "filtered_data", None)
+            if df is None or len(df) == 0:
+                df = getattr(widget, "inventory_data", None)
+            if df is None or len(df) == 0:
+                continue
+            try:
+                records.extend(df.to_dict("records"))
+            except Exception:
+                continue
+        return records
+
+    def _flea_fields_by_sku(self) -> Dict[str, Dict[str, str]]:
+        """SKUごとに出品URL・伝票番号・受取都道府県をまとめる。あとから読んだ行が優先。"""
+        by_sku: Dict[str, Dict[str, str]] = {}
+        for rec in self._purchase_records_for_flea_fill():
+            if not isinstance(rec, dict):
+                continue
+            sku = _ledger_text(rec.get("SKU") or rec.get("sku"))
+            if not sku:
+                continue
+            slot = by_sku.setdefault(sku, {})
+            for dest, sources in _FLEA_FIELD_SOURCES:
+                text = ""
+                for src in sources:
+                    text = _ledger_text(rec.get(src))
+                    if text:
+                        break
+                if text:
+                    slot[dest] = text
+        return by_sku
+
+    def _attach_flea_fields_from_purchases(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        フリマ行で空の出品URL・伝票番号・受取都道府県を、仕入データから埋めて台帳へ書き戻す。
+        受取都道府県がそれでも空なら既定（東京都）を入れる。
+        """
+        if not rows:
+            return rows
+        by_sku = self._flea_fields_by_sku()
+        try:
+            from desktop.utils.settings_helper import get_default_receive_prefecture
+            default_pref = get_default_receive_prefecture()
+        except Exception:
+            default_pref = "東京都"
+
+        updates: List[tuple] = []
+        for row in rows:
+            if str(row.get("counterparty_type") or "").strip() != "フリマ":
+                continue
+            sku = _ledger_text(row.get("sku"))
+            found = by_sku.get(sku, {}) if sku else {}
+            changed: Dict[str, str] = {}
+            for key, _sources in _FLEA_FIELD_SOURCES:
+                current = _ledger_text(row.get(key))
+                incoming = _ledger_text(found.get(key))
+                if not current and incoming:
+                    row[key] = incoming
+                    changed[key] = incoming
+            if not _ledger_text(row.get("ship_to_prefecture")) and default_pref:
+                row["ship_to_prefecture"] = default_pref
+                changed["ship_to_prefecture"] = default_pref
+            if not changed:
+                continue
+            try:
+                entry_id = int(row.get("id"))
+            except (TypeError, ValueError):
+                continue
+            updates.append((entry_id, changed))
+
+        if not updates:
+            return rows
+        try:
+            from desktop.database.ledger_db import LedgerDatabase
+            ledger_db = LedgerDatabase()
+            cur = ledger_db.conn.cursor()  # type: ignore[union-attr]
+            for entry_id, changed in updates:
+                cols = list(changed.keys())
+                sql = "UPDATE ledger_entries SET " + ", ".join(f"{c} = ?" for c in cols) + " WHERE id = ?"
+                cur.execute(sql, [changed[c] for c in cols] + [entry_id])
+            ledger_db.conn.commit()  # type: ignore[union-attr]
+        except Exception as e:
+            print(f"persist flea fields failed: {e}")
         return rows
 
     def get_filtered_rows(self):

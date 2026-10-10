@@ -106,6 +106,9 @@ class LedgerDatabase:
               platform TEXT,
               platform_order_id TEXT,
               platform_user TEXT,
+              listing_url TEXT,
+              tracking_no TEXT,
+              ship_to_prefecture TEXT,
               person_name TEXT,
               person_address TEXT,
               id_type TEXT,
@@ -151,6 +154,9 @@ class LedgerDatabase:
             ("contact", "TEXT"),
             ("transaction_method", "TEXT"),
             ("sku", "TEXT"),
+            ("listing_url", "TEXT"),
+            ("tracking_no", "TEXT"),
+            ("ship_to_prefecture", "TEXT"),
         ):
             _ensure_column("ledger_entries", name, ctype)
 
@@ -174,7 +180,8 @@ class LedgerDatabase:
         cols = [
             'entry_date','counterparty_type','counterparty_name','counterparty_branch','counterparty_address','contact','receipt_no','platform','platform_order_id','platform_user',
             'person_name','person_address','id_type','id_number','id_checked_on','id_checked_by','id_proof_ref',
-            'kobutsu_kind','hinmoku','hinmei','qty','unit_price','amount','identifier','transaction_method','notes','correction_of','sku'
+            'kobutsu_kind','hinmoku','hinmei','qty','unit_price','amount','identifier','transaction_method','notes','correction_of','sku',
+            'listing_url','tracking_no','ship_to_prefecture',
         ]
         placeholders = ",".join(["?"] * len(cols))
         sql = f"INSERT INTO ledger_entries ({','.join(cols)}) VALUES ({placeholders})"
@@ -224,6 +231,9 @@ class LedgerDatabase:
             "notes",
             "correction_of",
             "sku",
+            "listing_url",
+            "tracking_no",
+            "ship_to_prefecture",
         }
     )
 
@@ -269,6 +279,35 @@ class LedgerDatabase:
         cur.execute(f"UPDATE ledger_entries SET {placeholders} WHERE id = ?", params)
         self.conn.commit()
         return cur.rowcount > 0
+
+    def list_ids_grouped_by_sku(self, skus: List[str]) -> Dict[str, List[int]]:
+        """SKUごとの台帳行ID。空と「未実装」は照合しない。"""
+        wanted: List[str] = []
+        seen = set()
+        for raw in skus:
+            sku = str(raw or "").strip()
+            if not sku or sku == "未実装" or sku in seen:
+                continue
+            seen.add(sku)
+            wanted.append(sku)
+        grouped: Dict[str, List[int]] = {sku: [] for sku in wanted}
+        if not wanted:
+            return grouped
+        cur = self.conn.cursor()
+        chunk = 400
+        for offset in range(0, len(wanted), chunk):
+            part = wanted[offset : offset + chunk]
+            marks = ",".join("?" * len(part))
+            cur.execute(
+                "SELECT id, TRIM(sku) AS sku FROM ledger_entries "
+                f"WHERE TRIM(COALESCE(sku, '')) IN ({marks})",
+                part,
+            )
+            for row in cur.fetchall():
+                sku = str(row["sku"] or "").strip()
+                if sku in grouped:
+                    grouped[sku].append(int(row["id"]))
+        return grouped
 
     def get_ledger_entry_by_id(self, entry_id: int) -> Optional[Dict[str, Any]]:
         """id で台帳行を1件取得。"""

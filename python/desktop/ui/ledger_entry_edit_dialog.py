@@ -153,6 +153,13 @@ class LedgerEntryEditDialog(QDialog):
         flea_form.addRow("取引ID:", self.platform_order_id_edit)
         self.platform_user_edit = QLineEdit()
         flea_form.addRow("ユーザー名:", self.platform_user_edit)
+        self.listing_url_edit = QLineEdit()
+        self.listing_url_edit.setPlaceholderText("https://jp.mercari.com/item/...")
+        flea_form.addRow("出品URL:", self.listing_url_edit)
+        self.tracking_no_edit = QLineEdit()
+        flea_form.addRow("伝票番号:", self.tracking_no_edit)
+        self.ship_to_prefecture_edit = QLineEdit()
+        flea_form.addRow("受取都道府県:", self.ship_to_prefecture_edit)
         form.addRow(flea_box)
 
         person_box = QGroupBox("個人")
@@ -235,6 +242,9 @@ class LedgerEntryEditDialog(QDialog):
         self.platform_edit.setText(_as_str(r.get("platform")))
         self.platform_order_id_edit.setText(_as_str(r.get("platform_order_id")))
         self.platform_user_edit.setText(_as_str(r.get("platform_user")))
+        self.listing_url_edit.setText(_as_str(r.get("listing_url")))
+        self.tracking_no_edit.setText(_as_str(r.get("tracking_no")))
+        self.ship_to_prefecture_edit.setText(_as_str(r.get("ship_to_prefecture")))
         self.person_name_edit.setText(_as_str(r.get("person_name")))
         self.person_address_edit.setText(_as_str(r.get("person_address")))
         self.id_type_edit.setText(_as_str(r.get("id_type")))
@@ -286,6 +296,9 @@ class LedgerEntryEditDialog(QDialog):
             "platform": self.platform_edit.text().strip(),
             "platform_order_id": self.platform_order_id_edit.text().strip(),
             "platform_user": self.platform_user_edit.text().strip(),
+            "listing_url": self.listing_url_edit.text().strip(),
+            "tracking_no": self.tracking_no_edit.text().strip(),
+            "ship_to_prefecture": self.ship_to_prefecture_edit.text().strip(),
             "person_name": self.person_name_edit.text().strip(),
             "person_address": self.person_address_edit.text().strip(),
             "id_type": self.id_type_edit.text().strip(),
