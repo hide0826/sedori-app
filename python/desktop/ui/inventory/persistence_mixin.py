@@ -101,6 +101,13 @@ from .support import (
     SHIPPING_METHOD_OPTIONS,
 )
 from .snapshot_dialog import CombinedSnapshotDialog, StockProductPickDialog
+from .work_snapshot_dialog import WorkSnapshotPickDialog
+from services.inventory_work_snapshot import (
+    delete_work_snapshot,
+    list_work_snapshots,
+    load_work_snapshot,
+    save_work_snapshot,
+)
 from services.flea_market_evidence_service import (
     PURCHASE_DB_FLEA_COLUMNS,
     transaction_id_match_key,
@@ -159,6 +166,166 @@ class InventoryPersistenceMixin:
             "ストック保存",
             f"ストックを保存しました。\n{snapshot_name}\n{len(purchase_records)}件",
         )
+
+    def _work_snapshot_mode(self) -> str:
+        return "online" if getattr(self, "purchase_mode", "store") == "online" else "store"
+
+    def _work_snapshot_records(self) -> List[Dict[str, Any]]:
+        df = self.inventory_data
+        if df is None or len(df) == 0:
+            return []
+        try:
+            raw = df.fillna("").to_dict(orient="records")
+        except Exception:
+            return []
+        records: List[Dict[str, Any]] = []
+        for row in raw:
+            item: Dict[str, Any] = {}
+            for key, value in row.items():
+                if value is None or (isinstance(value, float) and pd.isna(value)):
+                    item[str(key)] = ""
+                elif isinstance(value, (str, int, float, bool)):
+                    item[str(key)] = value
+                else:
+                    item[str(key)] = str(value)
+            records.append(item)
+        return records
+
+    def save_work_inventory_snapshot(self) -> None:
+        """いまの仕入一覧を、あとから丸ごと呼び出せる作業スナップとして保存する。"""
+        records = self._work_snapshot_records()
+        if not records:
+            QMessageBox.information(self, "スナップ保存", "保存する仕入データがありません。")
+            return
+        label = "ネット仕入" if self._work_snapshot_mode() == "online" else "仕入データ"
+        default_name = f"{datetime.now().strftime('%Y-%m-%d %H:%M')} {label} {len(records)}件"
+        name, ok = QInputDialog.getText(
+            self,
+            "スナップ保存",
+            "保存名を入力してください。\nいまの一覧を、あとからそのまま呼び出せます。",
+            text=default_name,
+        )
+        if not ok:
+            return
+        name = str(name or "").strip() or default_name
+        try:
+            meta = save_work_snapshot(self._work_snapshot_mode(), name, records)
+        except Exception as exc:
+            QMessageBox.critical(self, "スナップ保存", f"保存に失敗しました。\n{exc}")
+            return
+        QMessageBox.information(
+            self,
+            "スナップ保存",
+            f"スナップショットを保存しました。\n{meta.get('name')}\n{meta.get('item_count')}件",
+        )
+
+    def open_work_inventory_snapshot(self) -> None:
+        """保存した作業スナップを、いまの一覧へ呼び出す。"""
+        mode = self._work_snapshot_mode()
+        snapshots = list_work_snapshots(mode)
+        if not snapshots:
+            QMessageBox.information(
+                self,
+                "スナップ呼出",
+                "スナップショットがありません。先に「スナップ保存」を押してください。",
+            )
+            return
+
+        def _delete(snapshot_id: str) -> List[Dict[str, Any]]:
+            delete_work_snapshot(mode, snapshot_id)
+            return list_work_snapshots(mode)
+
+        dlg = WorkSnapshotPickDialog(snapshots, _delete, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        snapshot_id = dlg.selected_id()
+        if not snapshot_id:
+            return
+        payload = load_work_snapshot(mode, snapshot_id)
+        if not payload:
+            QMessageBox.warning(self, "スナップ呼出", "選んだスナップショットを読めませんでした。")
+            return
+        records = list(payload.get("records") or [])
+        if not records:
+            QMessageBox.information(self, "スナップ呼出", "このスナップショットに商品がありません。")
+            return
+        replace = True
+        if self.inventory_data is not None and len(self.inventory_data) > 0:
+            box = QMessageBox(self)
+            box.setWindowTitle("スナップ呼出")
+            box.setText(
+                f"「{payload.get('name') or ''}」（{len(records)}件）を呼び出します。\n"
+                "いま開いている一覧はどうしますか？"
+            )
+            replace_btn = box.addButton("置き換える", QMessageBox.ButtonRole.AcceptRole)
+            append_btn = box.addButton("うしろに追加", QMessageBox.ButtonRole.ActionRole)
+            box.addButton("キャンセル", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is None or clicked not in (replace_btn, append_btn):
+                return
+            replace = clicked is replace_btn
+        self._apply_work_snapshot_records(
+            records,
+            replace=replace,
+            snapshot_name=str(payload.get("name") or ""),
+        )
+
+    def _apply_work_snapshot_records(
+        self,
+        records: List[Dict[str, Any]],
+        *,
+        replace: bool,
+        snapshot_name: str,
+    ) -> None:
+        try:
+            extra = pd.DataFrame(records).fillna("")
+            headers = list(getattr(self, "column_headers", []) or [])
+            for col in headers:
+                if col not in extra.columns:
+                    extra[col] = ""
+            if headers:
+                extras = [col for col in extra.columns if col not in headers]
+                extra = extra[headers + extras]
+            had_rows = self.inventory_data is not None and len(self.inventory_data) > 0
+            if replace or not had_rows:
+                self.inventory_data = extra.reset_index(drop=True)
+            else:
+                current = self.inventory_data
+                for col in extra.columns:
+                    if col not in current.columns:
+                        current[col] = ""
+                for col in current.columns:
+                    if col not in extra.columns:
+                        extra[col] = ""
+                cols = list(current.columns)
+                self.inventory_data = pd.concat(
+                    [current[cols], extra[cols]],
+                    ignore_index=True,
+                )
+            self.inventory_data = self.inventory_data.fillna("")
+            self.filtered_data = self.inventory_data.copy()
+            self.update_table()
+            if hasattr(self, "update_stats"):
+                self.update_stats()
+            self.update_data_count()
+            if len(self.inventory_data) > 0:
+                self.export_btn.setEnabled(True)
+                self.clear_btn.setEnabled(True)
+                if hasattr(self, "clear_sku_btn"):
+                    self.clear_sku_btn.setEnabled(True)
+                self.generate_sku_btn.setEnabled(True)
+                self.export_listing_btn.setEnabled(True)
+                self.antique_register_btn.setEnabled(True)
+            total = len(self.inventory_data)
+            if replace or not had_rows:
+                message = f"「{snapshot_name}」を呼び出しました（{total}件）。"
+            else:
+                message = f"「{snapshot_name}」の{len(records)}件をうしろに追加しました（合計{total}件）。"
+            QMessageBox.information(self, "スナップ呼出", message)
+            self.data_loaded.emit(total)
+        except Exception as exc:
+            QMessageBox.critical(self, "スナップ呼出", f"呼び出しに失敗しました。\n{exc}")
 
     def _confirm_condition_edit_then_save_to_databases(self) -> bool:
         """
@@ -269,6 +436,14 @@ class InventoryPersistenceMixin:
                         )
                         if inferred:
                             rec[PURCHASE_CHANNEL_COL] = inferred
+                    if online and not str(rec.get("受取都道府県") or "").strip():
+                        try:
+                            from utils.settings_helper import get_default_receive_prefecture
+                        except ImportError:
+                            from desktop.utils.settings_helper import (  # type: ignore
+                                get_default_receive_prefecture,
+                            )
+                        rec["受取都道府県"] = get_default_receive_prefecture()
                 
                 # 最新スナップショットから既存データを取得
                 snapshots = self.product_purchase_db.list_snapshots()

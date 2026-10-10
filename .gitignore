@@ -221,6 +221,8 @@ python/desktop/data/keepa_test_snapshot*.json
 python/desktop/data/inventory_only_skus_pending.json
 # カスタマー対応AIのチャット履歴（ローカル・最大10件）
 python/desktop/data/customer_support_sessions.json
+# 仕入一覧の作業スナップショット（仕入データ／ネット仕入）
+python/desktop/data/inventory_work_snapshots/
 *credentials*.json
 *gcv*.json
 *google*.json

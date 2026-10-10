@@ -491,6 +491,42 @@ class InventoryWidget(
         )
         aux_layout.addWidget(self.combined_load_btn)
 
+        snap_button_style = """
+            QPushButton {
+                background-color: #1565c0;
+                color: white;
+                border: none;
+                padding: 6px 10px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #0d47a1;
+            }
+        """
+        self.work_snapshot_save_btn = QPushButton("スナップ保存")
+        self.work_snapshot_save_btn.setToolTip(
+            "いまの仕入一覧を名前をつけて保存します。\n"
+            "アプリを閉じたあとでも、「スナップ呼出」で同じ一覧に戻せます。\n"
+            "仕入データとネット仕入は別々に保存されます。"
+        )
+        self.work_snapshot_save_btn.setStyleSheet(snap_button_style)
+        self.work_snapshot_save_btn.clicked.connect(
+            lambda: self._run_action_with_status("スナップ保存", self.save_work_inventory_snapshot)
+        )
+        aux_layout.addWidget(self.work_snapshot_save_btn)
+
+        self.work_snapshot_load_btn = QPushButton("スナップ呼出")
+        self.work_snapshot_load_btn.setToolTip(
+            "保存したスナップショットを呼び出します。\n"
+            "一覧があるときは、置き換えるかうしろに追加するかを選べます。"
+        )
+        self.work_snapshot_load_btn.setStyleSheet(snap_button_style)
+        self.work_snapshot_load_btn.clicked.connect(
+            lambda: self._run_action_with_status("スナップ呼出", self.open_work_inventory_snapshot)
+        )
+        aux_layout.addWidget(self.work_snapshot_load_btn)
+
         self.clear_sku_btn = QPushButton("SKUクリア")
         self.clear_sku_btn.setToolTip("仕入データは残したまま、SKU列だけをすべて『未実装』に戻します。")
         self.clear_sku_btn.clicked.connect(lambda: self._run_action_with_status("SKUクリア", self.clear_sku))

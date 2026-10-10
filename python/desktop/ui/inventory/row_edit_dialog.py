@@ -157,6 +157,7 @@ class InventoryRowEditDialog(QDialog):
         self._build_ui()
         self._apply_custom_missing_checkbox_labels()
         self._load_row_data()
+        self._apply_default_receive_prefecture()
         self._sync_missing_custom_checkboxes_enabled()
         self._attach_evidence_panel()
     
@@ -566,6 +567,22 @@ class InventoryRowEditDialog(QDialog):
         result.update(self._evidence_extra_fields)
         return result
 
+    def _is_online_purchase(self) -> bool:
+        parent = self.parent()
+        return getattr(parent, "purchase_mode", "") == "online"
+
+    def _apply_default_receive_prefecture(self) -> None:
+        """ネット仕入で受取都道府県が空なら、既定（いまは東京都）を入れる。"""
+        if not self._is_online_purchase():
+            return
+        if self._widget_text("受取都道府県"):
+            return
+        try:
+            from utils.settings_helper import get_default_receive_prefecture
+        except ImportError:
+            from desktop.utils.settings_helper import get_default_receive_prefecture  # type: ignore
+        self._set_widget_text("受取都道府県", get_default_receive_prefecture(), only_if_empty=True)
+
     def _widget_text(self, col: str) -> str:
         w = self._widgets.get(col)
         if isinstance(w, QLineEdit):
@@ -681,8 +698,9 @@ class InventoryRowEditDialog(QDialog):
                 if not col or col.startswith("_"):
                     continue
                 self.row_data[col] = value or ""
-                if col in ("取引ID", "ユーザー名", "出品URL"):
+                if col in ("取引ID", "ユーザー名", "出品URL", "受取都道府県"):
                     self._set_widget_text(col, str(value or ""), only_if_empty=True)
+            self._apply_default_receive_prefecture()
             if panel is not None:
                 panel.load_existing_row(self.row_data)
 

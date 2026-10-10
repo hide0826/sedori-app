@@ -109,6 +109,8 @@ def set_recording_mode_enabled_flag(enabled: bool) -> None:
 PURCHASE_EVIDENCE_LOCAL_ROOT_KEY = "purchase_evidence/local_root"
 ONLINE_PURCHASE_ROOT_KEY = "online_purchase/root_dir"
 ONLINE_PURCHASE_LAST_BOX_KEY = "online_purchase/last_box"
+ONLINE_PURCHASE_RECEIVE_PREFECTURE_KEY = "online_purchase/receive_prefecture"
+DEFAULT_RECEIVE_PREFECTURE = "東京都"
 
 
 def get_purchase_evidence_local_root() -> str:
@@ -139,3 +141,10 @@ def get_online_purchase_last_box() -> str:
 
 def set_online_purchase_last_box(path: str) -> None:
     _settings().setValue(ONLINE_PURCHASE_LAST_BOX_KEY, str(path or "").strip())
+
+
+def get_default_receive_prefecture() -> str:
+    """受取都道府県。設定欄は未作成。未設定のときは東京都。"""
+    v = _settings().value(ONLINE_PURCHASE_RECEIVE_PREFECTURE_KEY, "") or ""
+    text = str(v).strip()
+    return text or DEFAULT_RECEIVE_PREFECTURE

@@ -68,16 +68,13 @@ async function ensureMaximizedWindow(windowId) {
   }
 }
 
-async function restoreWindowIfNeeded() {
-  if (captureWindowId == null || previousWindowState == null) {
+/** 情報撮影が終わったら、使っていたChromeを最小化する。 */
+async function minimizeCaptureWindow() {
+  if (captureWindowId == null) {
     return;
   }
   try {
-    const win = await chrome.windows.get(captureWindowId);
-    const restoreTo = previousWindowState === "fullscreen" ? "maximized" : previousWindowState;
-    if (win.state !== restoreTo && restoreTo) {
-      await chrome.windows.update(captureWindowId, { state: restoreTo });
-    }
+    await chrome.windows.update(captureWindowId, { state: "minimized" });
   } catch (err) {
     // ウィンドウが閉じ済み
   }
@@ -482,12 +479,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         });
       }
     }
-    await restoreWindowIfNeeded();
+    await minimizeCaptureWindow();
     await postJson(baseUrl, "/result", { token, status: "finished" });
     sendResponse({ ok: true });
   })().catch(async (err) => {
     try {
-      await restoreWindowIfNeeded();
+      await minimizeCaptureWindow();
       await postJson(baseUrl, "/result", {
         token,
         status: "error",
