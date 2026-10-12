@@ -148,3 +148,63 @@ def test_blank_group_can_move_to_asin():
 def test_normalize_asin():
     assert _normalize_asin_for_match("asin:b08xyz1234") == "B08XYZ1234"
     assert _normalize_asin_for_match(" B08-XYZ ") == "B08XYZ"
+
+
+def test_scan_keeps_phone_asin_link(tmp_path: Path):
+    """スマホが ASIN だけ付けた写真は、スキャンでバーコードを読み直さず残る。"""
+    from PIL import Image
+
+    from desktop.services.image_service import ImageRecord, ImageService, kept_link_key
+    from desktop.services.route_product_seed import route_folder_for_image_dir
+
+    folder = tmp_path / "box"
+    product_dir = folder / "商品画像"
+    product_dir.mkdir(parents=True)
+    (folder / "route.json").write_text("{}", encoding="utf-8")
+    assert route_folder_for_image_dir(product_dir) == folder
+
+    image_path = product_dir / "item.jpg"
+    Image.new("RGB", (8, 8), (9, 9, 9)).save(image_path, format="JPEG")
+    link = "asin:B08XYZ1234"
+    assert kept_link_key(link) == link
+    assert kept_link_key(None) == ""
+
+    alt = str(image_path).replace("\\", "/")
+    record = ImageRecord(
+        path=alt,
+        capture_dt=None,
+        jan_candidate=link,
+        width=0,
+        height=0,
+    )
+    service = ImageService()
+    called = {"n": 0}
+
+    def _forbid(*_args, **_kwargs):
+        called["n"] += 1
+        return None
+
+    service.read_barcode_from_image = _forbid  # type: ignore
+    records = service.scan_directory(
+        str(product_dir),
+        skip_barcode_reading=False,
+        skip_exif=True,
+        skip_image_size=True,
+        file_cache={alt: {"record": record}},
+    )
+    assert called["n"] == 0
+    assert len(records) == 1
+    assert records[0].jan_candidate == link
+    groups = service.group_by_jan(records)
+    assert groups[0].jan == link
+
+
+def test_upsert_keeps_asin_when_link_omitted(tmp_path: Path):
+    """JAN不明として保存し直しても、すでに付いている ASIN は消さない。"""
+    db = ImageDatabase(str(tmp_path / "images.db"))
+    path = str(tmp_path / "photo.jpg")
+    db.upsert({"file_path": path, "jan": None, "asin": "B08XYZ1234", "rotation": 0})
+    db.upsert({"file_path": path, "group_index": 0, "rotation": 0})
+    row = db.get_by_file_path(path)
+    assert row["asin"] == "B08XYZ1234"
+    db.close()

@@ -76,6 +76,16 @@ def linked_product_files(folder: Path) -> List[Tuple[Path, str, str]]:
     return _product_files(folder, confirmed_only=False)
 
 
+def route_folder_for_image_dir(directory: str | Path) -> Optional[Path]:
+    """画像フォルダから、スマホ撮影の route.json がある箱を探す。"""
+    path = Path(directory)
+    if (path / "route.json").is_file():
+        return path
+    if path.name == PRODUCT_DIR_NAME and (path.parent / "route.json").is_file():
+        return path.parent
+    return None
+
+
 def seed_product_jan(path: Path, jan: str, *, db: Any = None, asin: str = "") -> bool:
     """1枚を画像DBへ書く。スキャンはこの JAN/ASIN を使い、バーコードを読み直さない。"""
     jan_s = _digits(jan)

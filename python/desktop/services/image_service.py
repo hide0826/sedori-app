@@ -12,12 +12,50 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import List, Dict, Any, Optional, NamedTuple, Callable, Set
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Set
 from datetime import datetime
 from PIL import Image, ExifTags, ImageEnhance, ImageOps
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def image_path_cache_key(path: str) -> str:
+    """画像パスの照合用キー。区切り文字や大文字小文字の差を吸収する。"""
+    return os.path.normcase(os.path.normpath(str(path or "").strip()))
+
+
+def kept_link_key(jan_candidate: Any) -> str:
+    """再読取しない確定キー。数字の JAN、または asin:XXXX。"""
+    text = str(jan_candidate or "").strip()
+    if not text or text in ("unknown", "None"):
+        return ""
+    if text.lower().startswith("asin:"):
+        body = "".join(ch for ch in text[5:] if ch.isalnum()).upper()
+        return f"asin:{body}" if body else ""
+    digits = text[:-2] if text.endswith(".0") else text
+    if digits.isdigit():
+        return digits
+    return ""
+
+
+def _lookup_file_cache(
+    file_cache: Optional[Dict[str, Dict[str, Any]]],
+    path_str: str,
+    by_key: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """保存パスの表記ゆれがあっても、同じファイルのキャッシュを返す。"""
+    if not file_cache:
+        return None
+    found = file_cache.get(path_str)
+    if found is not None:
+        return found
+    if by_key is None:
+        by_key = {
+            image_path_cache_key(key): value
+            for key, value in file_cache.items()
+        }
+    return by_key.get(image_path_cache_key(path_str))
 
 # バーコード読み取りライブラリ（オプション・遅延インポート）
 # zxing-cpp: Java不要。このPCの主力
@@ -495,6 +533,13 @@ class ImageService:
         total_images = len(image_paths)
         if progress_callback:
             progress_callback(0, total_images)
+
+        cache_by_key = None
+        if file_cache:
+            cache_by_key = {
+                image_path_cache_key(key): value
+                for key, value in file_cache.items()
+            }
         
         # 各画像を処理
         for index, img_path in enumerate(image_paths, start=1):
@@ -507,15 +552,15 @@ class ImageService:
                     pass
 
                 # キャッシュヒット判定
-                # JAN不明のキャッシュはバーコード再読取を妨げるので使わない
-                cached_data = file_cache.get(path_str) if file_cache else None
+                # JAN不明のキャッシュはバーコード再読取を妨げるので使わない。
+                # ASIN グループ（asin:XXXX）は JAN が無くても確定済みなので残す。
+                cached_data = _lookup_file_cache(file_cache, path_str, cache_by_key)
                 if cached_data:
                     cached_mtime = cached_data.get("mtime")
                     mtime_ok = cached_mtime is None or abs(current_mtime - cached_mtime) < 0.001
                     cached_record = cached_data.get("record") if mtime_ok else None
                     cached_jan = getattr(cached_record, "jan_candidate", None) if cached_record else None
-                    has_jan = bool(cached_jan) and str(cached_jan) not in ("unknown", "None") and str(cached_jan).replace(".0", "").isdigit()
-                    if cached_record and (has_jan or skip_barcode_reading):
+                    if cached_record and (kept_link_key(cached_jan) or skip_barcode_reading):
                         records.append(cached_record)
                         continue
 

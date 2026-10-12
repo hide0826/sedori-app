@@ -109,6 +109,7 @@ from .support import (
     _PURCHASE_IMAGE_COLUMNS,
     _normalize_jan_for_match,
     _group_key_from_db_fields,
+    _group_key_is_blank,
     _parse_image_group_key,
     _normalize_image_path,
     _record_has_any_image_paths,
@@ -200,6 +201,23 @@ class ImageManagerScanMixin:
         self.save_last_directory()
 
 
+    def _seed_route_links_before_scan(self) -> None:
+        """撮影・巡回で選んだ JAN / ASIN を、画像スキャンの前に画像DBへ書く。"""
+        try:
+            from services.route_product_seed import route_folder_for_image_dir, seed_linked_jans
+        except ImportError:
+            from desktop.services.route_product_seed import (  # type: ignore
+                route_folder_for_image_dir,
+                seed_linked_jans,
+            )
+        folder = route_folder_for_image_dir(self.current_directory or "")
+        if folder is None:
+            return
+        try:
+            seed_linked_jans(folder, db=self.image_db)
+        except Exception as exc:
+            logger.warning("撮影済み JAN/ASIN の画像DB反映に失敗: %s", exc)
+
     def scan_directory(self):
         """ディレクトリをスキャンして画像を取得"""
         if not self.current_directory:
@@ -257,9 +275,14 @@ class ImageManagerScanMixin:
                 except Exception as e:
                     logger.warning("仕入DB JAN集合の取得に失敗: %s", e)
             
-            # スキャン実行。JAN不明のキャッシュは再読取する
+            # スマホ撮影の route.json にある JAN / ASIN を、スキャン前に画像DBへ写す。
+            # 保存の瞬間に画像DBへ書けなかった写真も、ここで ASIN グループになる。
+            self._seed_route_links_before_scan()
+
+            # スキャン実行。JAN不明のキャッシュは再読取する。ASIN グループは残す。
             db_records = self.image_db.list_all()
             file_cache = {}
+            db_by_path = {}
             for r in db_records:
                 path = r['file_path']
                 group_key = _group_key_from_db_fields(jan=r.get("jan"), asin=r.get("asin"))
@@ -271,6 +294,7 @@ class ImageManagerScanMixin:
                     height=0
                 )
                 file_cache[path] = {"record": rec}
+                db_by_path[_normalize_image_path(path)] = r
 
             self.image_records = self.image_service.scan_directory(
                 self.current_directory, 
@@ -287,6 +311,8 @@ class ImageManagerScanMixin:
             enriched_records: List[ImageRecord] = []
             for record in self.image_records:
                 db_record = self.image_db.get_by_file_path(record.path)
+                if not db_record:
+                    db_record = db_by_path.get(_normalize_image_path(record.path))
                 group_key = None
                 if db_record:
                     group_key = _group_key_from_db_fields(
@@ -366,14 +392,17 @@ class ImageManagerScanMixin:
             for group in self.jan_groups:
                 jan_norm, asin_norm = _parse_image_group_key(group.jan)
                 for i, record in enumerate(group.images):
-                    self.image_db.upsert({
+                    payload = {
                         "file_path": record.path,
-                        "jan": jan_norm,
-                        "asin": asin_norm,
                         "group_index": i,
                         "capture_time": record.capture_dt.isoformat() if record.capture_dt else None,
-                        "rotation": 0
-                    })
+                        "rotation": 0,
+                    }
+                    # JAN不明の再スキャンで、スマホが付けた ASIN を消さない
+                    if jan_norm or asin_norm:
+                        payload["jan"] = jan_norm
+                        payload["asin"] = asin_norm
+                    self.image_db.upsert(payload)
             
             # UI更新（イベントフィルタ再入で落ちないよう防御）
             try:
@@ -433,8 +462,8 @@ class ImageManagerScanMixin:
         """JAN不明画像に対してOCRを実行し、候補を検索"""
         # JAN不明画像を抽出
         unknown_images = [
-            r for r in self.image_records 
-            if not r.jan_candidate or r.jan_candidate == "unknown" or not r.jan_candidate.isdigit()
+            r for r in self.image_records
+            if _group_key_is_blank(r.jan_candidate)
         ]
         
         if not unknown_images:
