@@ -875,34 +875,41 @@ class InventoryWidget(
                     dlg.source_channel_combo.setCurrentIndex(ch_idx)
             except Exception:
                 pass
+            # 保存はダイアログ内で一覧へ足す。閉じるまで何度でも追加できる。
+            dlg.exec()
+            return
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
         try:
-            row_data = dlg.get_row_data()
-            if self.inventory_data is None or len(self.inventory_data) == 0:
-                self.inventory_data = pd.DataFrame(columns=self.column_headers)
-
-            row_df = pd.DataFrame([row_data])
-            for col in self.column_headers:
-                if col not in row_df.columns:
-                    row_df[col] = ""
-            row_df = row_df[self.column_headers]
-
-            self.inventory_data = pd.concat([self.inventory_data, row_df], ignore_index=True)
-            self.filtered_data = self.inventory_data.copy()
-
-            self.update_table()
-            self.update_stats()
-            self.update_data_count()
-
-            self.clear_btn.setEnabled(True)
-            self.generate_sku_btn.setEnabled(True)
-            self.export_listing_btn.setEnabled(True)
-            self.antique_register_btn.setEnabled(True)
-
-            self.data_loaded.emit(len(self.inventory_data))
-            QMessageBox.information(self, "単品仕入", "単品仕入データを1件追加しました。")
+            self.append_single_purchase_row(dlg.get_row_data(), notify=True)
         except Exception as e:
             QMessageBox.critical(self, "単品仕入エラー", f"単品仕入の追加に失敗しました:\n{str(e)}")
+
+    def append_single_purchase_row(self, row_data: Dict[str, Any], *, notify: bool = True) -> None:
+        """単品仕入の1行を、いま開いている仕入一覧のうしろへ足す。"""
+        if self.inventory_data is None or len(self.inventory_data) == 0:
+            self.inventory_data = pd.DataFrame(columns=self.column_headers)
+
+        row_df = pd.DataFrame([row_data])
+        for col in self.column_headers:
+            if col not in row_df.columns:
+                row_df[col] = ""
+        row_df = row_df[self.column_headers]
+
+        self.inventory_data = pd.concat([self.inventory_data, row_df], ignore_index=True)
+        self.filtered_data = self.inventory_data.copy()
+
+        self.update_table()
+        self.update_stats()
+        self.update_data_count()
+
+        self.clear_btn.setEnabled(True)
+        self.generate_sku_btn.setEnabled(True)
+        self.export_listing_btn.setEnabled(True)
+        self.antique_register_btn.setEnabled(True)
+
+        self.data_loaded.emit(len(self.inventory_data))
+        if notify:
+            QMessageBox.information(self, "単品仕入", "単品仕入データを1件追加しました。")
 

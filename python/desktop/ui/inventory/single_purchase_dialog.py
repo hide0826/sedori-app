@@ -128,10 +128,24 @@ class SinglePurchaseInputDialog(QDialog):
         self.condition_template_db = condition_template_db
         self.get_condition_key = get_condition_key_func
         self._inventory_widget = inventory_widget
+        self._online_mode = bool(
+            inventory_widget is not None and getattr(inventory_widget, "is_online_mode", False)
+        )
+        self._pending_evidence: Dict[str, Any] = {}
+        self._capture_attempted_url = ""
+        self._capturing = False
+        self._saved_count = 0
+        self._suppress_url_capture = False
+        self._sp_api_thread = None
+        self._sp_api_show_message = False
+        self._sp_api_pending: Optional[Dict[str, bool]] = None
+        self._fee_timer: Optional[QTimer] = None
         self.store_db = StoreDatabase()
         self.keepa_service = KeepaService()
         self.ocr_service = OCRService()
-        self.setWindowTitle("単品仕入入力（ひな型）")
+        self.setWindowTitle(
+            "単品仕入入力（ネット仕入）" if self._online_mode else "単品仕入入力（ひな型）"
+        )
         self.setMinimumWidth(520)
         self._build_ui()
 
@@ -215,14 +229,22 @@ class SinglePurchaseInputDialog(QDialog):
 
         self.asin_edit = QLineEdit()
         self.asin_edit.setPlaceholderText("ASIN")
-        self.asin_edit.editingFinished.connect(self._on_asin_editing_finished)
         asin_row = QWidget()
         asin_row_layout = QHBoxLayout(asin_row)
         asin_row_layout.setContentsMargins(0, 0, 0, 0)
         asin_row_layout.addWidget(self.asin_edit)
-        self.keepa_fill_btn = QPushButton("Keepa補完")
-        self.keepa_fill_btn.setToolTip("ASINからKeepa情報を取得してJANと商品名を補完します")
-        self.keepa_fill_btn.clicked.connect(self._fill_from_keepa_button_clicked)
+        self.keepa_fill_btn = QPushButton("SP-API取得" if self._online_mode else "Keepa補完")
+        if self._online_mode:
+            self.asin_edit.editingFinished.connect(self._on_asin_sp_api_finished)
+            self.keepa_fill_btn.setToolTip(
+                "ASINから商品名とJANを取得します。"
+                "販売予定価格が入っていれば、販売手数料とFBA配送料も取得します。"
+            )
+            self.keepa_fill_btn.clicked.connect(lambda: self._start_sp_api_lookup(show_message=True))
+        else:
+            self.asin_edit.editingFinished.connect(self._on_asin_editing_finished)
+            self.keepa_fill_btn.setToolTip("ASINからKeepa情報を取得してJANと商品名を補完します")
+            self.keepa_fill_btn.clicked.connect(self._fill_from_keepa_button_clicked)
         asin_row_layout.addWidget(self.keepa_fill_btn)
         layout.addRow("ASIN:", asin_row)
 
@@ -309,21 +331,37 @@ class SinglePurchaseInputDialog(QDialog):
         self.storage_fee_spin.setSingleStep(10)
         layout.addRow("在庫保管手数料:", self.storage_fee_spin)
 
-        fee_action_row = QWidget()
-        fee_action_layout = QHBoxLayout(fee_action_row)
-        fee_action_layout.setContentsMargins(0, 0, 0, 0)
-        self.open_fba_simulator_btn = QPushButton("FBA料金シミュレーターを開く")
-        self.open_fba_simulator_btn.clicked.connect(self._open_fba_simulator_url)
-        fee_action_layout.addWidget(self.open_fba_simulator_btn)
-        self.ocr_fee_btn = QPushButton("貼り付けOCRで手数料読込")
-        self.ocr_fee_btn.setToolTip(
-            "コピー済みスクリーンショットをクリップボードから読み取ります（画像が無い場合はファイル選択）。"
-            "「Amazonから出荷」「出品者出荷」で発送方法（FBA/自己発送）、"
-            "「商品価格」は販売予定価格、手数料系は各欄に反映します。"
-        )
-        self.ocr_fee_btn.clicked.connect(self._load_fees_from_image_ocr)
-        fee_action_layout.addWidget(self.ocr_fee_btn)
-        layout.addRow("", fee_action_row)
+        self.profit_summary_label = None
+        if self._online_mode:
+            self.profit_summary_label = QLabel("販売予定価格と仕入れ価格を入れると、利益を計算します。")
+            self.profit_summary_label.setWordWrap(True)
+            layout.addRow("自動計算:", self.profit_summary_label)
+            for spin in (
+                self.purchase_price_spin,
+                self.planned_price_spin,
+                self.amazon_fee_spin,
+                self.shipping_cost_spin,
+            ):
+                spin.valueChanged.connect(self._refresh_profit_summary)
+            self.planned_price_spin.valueChanged.connect(self._on_planned_price_changed)
+            self.shipping_combo.currentTextChanged.connect(self._on_shipping_method_for_fees)
+            self._refresh_profit_summary()
+        else:
+            fee_action_row = QWidget()
+            fee_action_layout = QHBoxLayout(fee_action_row)
+            fee_action_layout.setContentsMargins(0, 0, 0, 0)
+            self.open_fba_simulator_btn = QPushButton("FBA料金シミュレーターを開く")
+            self.open_fba_simulator_btn.clicked.connect(self._open_fba_simulator_url)
+            fee_action_layout.addWidget(self.open_fba_simulator_btn)
+            self.ocr_fee_btn = QPushButton("貼り付けOCRで手数料読込")
+            self.ocr_fee_btn.setToolTip(
+                "コピー済みスクリーンショットをクリップボードから読み取ります（画像が無い場合はファイル選択）。"
+                "「Amazonから出荷」「出品者出荷」で発送方法（FBA/自己発送）、"
+                "「商品価格」は販売予定価格、手数料系は各欄に反映します。"
+            )
+            self.ocr_fee_btn.clicked.connect(self._load_fees_from_image_ocr)
+            fee_action_layout.addWidget(self.ocr_fee_btn)
+            layout.addRow("", fee_action_row)
 
         self.condition_note_edit = QPlainTextEdit()
         self.condition_note_edit.setMinimumHeight(70)
@@ -391,8 +429,25 @@ class SinglePurchaseInputDialog(QDialog):
         self.detail_seller_username_edit.setPlaceholderText("ユーザー名・出品者名（任意）")
         ch_form.addRow("ユーザー名:", self.detail_seller_username_edit)
         self.detail_listing_url_edit = QLineEdit()
-        self.detail_listing_url_edit.setPlaceholderText("出品ページURL（任意）")
-        ch_form.addRow("出品URL:", self.detail_listing_url_edit)
+        if self._online_mode:
+            self.detail_listing_url_edit.setPlaceholderText(
+                "メルカリの出品URL（入力すると画像を3枚取ります）"
+            )
+            url_row = QWidget()
+            url_row_layout = QHBoxLayout(url_row)
+            url_row_layout.setContentsMargins(0, 0, 0, 0)
+            url_row_layout.addWidget(self.detail_listing_url_edit)
+            self.capture_listing_btn = QPushButton("画像を3枚取り込む")
+            self.capture_listing_btn.setToolTip(
+                "メルカリの出品URLから、商品ページ2枚と取引画面1枚を取り込みます。ヤフオクは未対応です。"
+            )
+            self.capture_listing_btn.clicked.connect(self._on_capture_listing_clicked)
+            url_row_layout.addWidget(self.capture_listing_btn)
+            ch_form.addRow("出品URL:", url_row)
+            self.detail_listing_url_edit.editingFinished.connect(self._on_listing_url_finished)
+        else:
+            self.detail_listing_url_edit.setPlaceholderText("出品ページURL（任意）")
+            ch_form.addRow("出品URL:", self.detail_listing_url_edit)
         self.detail_tracking_edit = QLineEdit()
         self.detail_tracking_edit.setPlaceholderText("伝票番号・追跡番号（任意）")
         ch_form.addRow("伝票番号:", self.detail_tracking_edit)
@@ -418,10 +473,40 @@ class SinglePurchaseInputDialog(QDialog):
 
         main_layout.addWidget(self._splitter)
 
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        main_layout.addWidget(bb)
+        if self._online_mode:
+            button_row = QHBoxLayout()
+            self.entry_status_label = QLabel(
+                "「保存」でネット仕入一覧のうしろに1件足します。画面は開いたまま、次の商品を入力できます。"
+            )
+            self.entry_status_label.setWordWrap(True)
+            button_row.addWidget(self.entry_status_label, 1)
+            self.save_to_list_btn = QPushButton("保存")
+            self.save_to_list_btn.setToolTip("入力内容をネット仕入一覧へ追加します。")
+            self.save_to_list_btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #28a745;
+                    color: white;
+                    border: none;
+                    padding: 8px 16px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #218838; }
+                QPushButton:disabled { background-color: #666666; }
+                """
+            )
+            self.save_to_list_btn.clicked.connect(self._save_to_online_list)
+            button_row.addWidget(self.save_to_list_btn)
+            close_btn = QPushButton("閉じる")
+            close_btn.clicked.connect(self.reject)
+            button_row.addWidget(close_btn)
+            main_layout.addLayout(button_row)
+        else:
+            bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            bb.accepted.connect(self.accept)
+            bb.rejected.connect(self.reject)
+            main_layout.addWidget(bb)
         self._sync_missing_custom_checkboxes_enabled()
         self.source_type_combo.currentTextChanged.connect(self._on_source_type_changed)
         self.source_channel_combo.currentTextChanged.connect(self._on_detail_channel_text_for_platform)
@@ -1325,6 +1410,377 @@ class SinglePurchaseInputDialog(QDialog):
         if hasattr(inv, "sku_date_edit") and inv.sku_date_edit is not None:
             inv.sku_date_edit.setDate(QDate.currentDate())
 
+    def _set_entry_status(self, text: str) -> None:
+        label = getattr(self, "entry_status_label", None)
+        if label is not None:
+            label.setText(text)
+
+    def _refresh_profit_summary(self, _value: int = 0) -> None:
+        label = getattr(self, "profit_summary_label", None)
+        if label is None:
+            return
+        purchase = int(self.purchase_price_spin.value())
+        planned = int(self.planned_price_spin.value())
+        fee = int(self.amazon_fee_spin.value())
+        shipping = int(self.shipping_cost_spin.value())
+        break_even = purchase + fee + shipping
+        profit = planned - break_even
+        margin = (profit / planned) * 100 if planned > 0 else 0.0
+        roi = (profit / purchase) * 100 if purchase > 0 else 0.0
+        if planned <= 0 and purchase <= 0:
+            label.setText("販売予定価格と仕入れ価格を入れると、利益を計算します。")
+            return
+        label.setText(
+            f"損益分岐点 {break_even:,}円　見込み利益 {profit:,}円　"
+            f"利益率 {margin:.1f}%　ROI {roi:.1f}%"
+        )
+
+    def _on_planned_price_changed(self, value: int) -> None:
+        if not self._online_mode or int(value) <= 0:
+            return
+        if len((self.asin_edit.text() or "").strip()) != 10:
+            return
+        self._schedule_fee_lookup()
+
+    def _on_shipping_method_for_fees(self, _text: str = "") -> None:
+        if not self._online_mode:
+            return
+        if int(self.planned_price_spin.value()) <= 0:
+            return
+        if len((self.asin_edit.text() or "").strip()) != 10:
+            return
+        self._schedule_fee_lookup()
+
+    def _schedule_fee_lookup(self) -> None:
+        if self._fee_timer is None:
+            self._fee_timer = QTimer(self)
+            self._fee_timer.setSingleShot(True)
+            self._fee_timer.timeout.connect(
+                lambda: self._start_sp_api_lookup(include_catalog=False, show_message=False)
+            )
+        self._fee_timer.start(600)
+
+    def _on_asin_sp_api_finished(self) -> None:
+        self._start_sp_api_lookup(show_message=False)
+
+    def _shipping_is_fba(self) -> bool:
+        text = (self.shipping_combo.currentText() or "").strip()
+        if "自己" in text:
+            return False
+        return True
+
+    def _start_sp_api_lookup(self, include_catalog: bool = True, show_message: bool = False) -> None:
+        if not self._online_mode:
+            return
+        asin = (self.asin_edit.text() or "").strip().upper()
+        self.asin_edit.setText(asin)
+        if len(asin) != 10:
+            if show_message:
+                QMessageBox.information(self, "SP-API取得", "ASINを10文字で入力してください。")
+            return
+        running = self._sp_api_thread
+        if running is not None and running.isRunning():
+            pending = self._sp_api_pending or {}
+            self._sp_api_pending = {
+                "include_catalog": bool(include_catalog or pending.get("include_catalog")),
+                "show_message": bool(show_message or pending.get("show_message")),
+            }
+            self._sp_api_show_message = self._sp_api_show_message or show_message
+            return
+        self._sp_api_show_message = show_message
+        price = int(self.planned_price_spin.value())
+        is_fba = self._shipping_is_fba()
+        want_catalog = include_catalog
+        self.keepa_fill_btn.setEnabled(False)
+        self._set_entry_status("Amazonから商品情報を取得しています…")
+
+        class _LookupThread(QThread):
+            done = Signal(object)
+            failed = Signal(str)
+
+            def __init__(self, asin_value: str, listing_price: int, fba: bool, catalog: bool):
+                super().__init__()
+                self.asin_value = asin_value
+                self.listing_price = listing_price
+                self.fba = fba
+                self.catalog = catalog
+
+            def run(self) -> None:
+                try:
+                    from services.single_purchase_sp_api import lookup_single_purchase_sp_api
+                except ImportError:
+                    from desktop.services.single_purchase_sp_api import (  # type: ignore
+                        lookup_single_purchase_sp_api,
+                    )
+                try:
+                    payload = lookup_single_purchase_sp_api(
+                        self.asin_value,
+                        self.listing_price,
+                        is_fba=self.fba,
+                        include_catalog=self.catalog,
+                        include_fees=self.listing_price > 0,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.failed.emit(str(exc))
+                    return
+                self.done.emit(payload)
+
+        thread = _LookupThread(asin, price, is_fba, want_catalog)
+        thread.done.connect(self._on_sp_api_lookup_done)
+        thread.failed.connect(self._on_sp_api_lookup_failed)
+        thread.finished.connect(self._on_sp_api_thread_finished)
+        self._sp_api_thread = thread
+        thread.start()
+
+    def _on_sp_api_thread_finished(self) -> None:
+        thread = self._sp_api_thread
+        if thread is not None and thread.isRunning():
+            return
+        self.keepa_fill_btn.setEnabled(True)
+
+    def _run_pending_sp_api_lookup(self) -> None:
+        pending = self._sp_api_pending
+        self._sp_api_pending = None
+        if not pending:
+            return
+        self._start_sp_api_lookup(
+            include_catalog=bool(pending.get("include_catalog")),
+            show_message=bool(pending.get("show_message")),
+        )
+
+    def _on_sp_api_lookup_failed(self, message: str) -> None:
+        self._set_entry_status("Amazonからの取得に失敗しました。")
+        if self._sp_api_show_message:
+            QMessageBox.warning(self, "SP-API取得", f"取得に失敗しました。\n{message}")
+        QTimer.singleShot(0, self._run_pending_sp_api_lookup)
+
+    def _on_sp_api_lookup_done(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        title = str(data.get("title") or "").strip()
+        jan = str(data.get("jan") or "").strip()
+        filled = []
+        if title:
+            self.title_edit.setText(title)
+            filled.append("商品名")
+        if jan:
+            self.jan_edit.setText(jan)
+            filled.append("JAN")
+        platform_fee = data.get("platform_fee")
+        fba_fee = data.get("fba_shipping_fee")
+        if platform_fee is not None:
+            self.amazon_fee_spin.setValue(int(platform_fee))
+            filled.append("販売手数料")
+        if fba_fee is not None and self._shipping_is_fba():
+            self.shipping_cost_spin.setValue(int(fba_fee))
+            filled.append("FBA配送料")
+        self._refresh_profit_summary()
+        errors = [str(item) for item in (data.get("errors") or []) if str(item).strip()]
+        if filled:
+            self._set_entry_status(f"{'・'.join(filled)}を入れました。")
+        elif errors:
+            self._set_entry_status(errors[0])
+        else:
+            self._set_entry_status("取得できる商品情報はありませんでした。")
+        if self._sp_api_show_message:
+            lines = []
+            if filled:
+                lines.append(f"{'・'.join(filled)}を入れました。")
+            if errors:
+                lines.extend(errors)
+            if not lines:
+                lines.append("取得できる商品情報はありませんでした。")
+            QMessageBox.information(self, "SP-API取得", "\n".join(lines))
+        QTimer.singleShot(0, self._run_pending_sp_api_lookup)
+
+    def _on_listing_url_finished(self) -> None:
+        if self._suppress_url_capture or not self._online_mode:
+            return
+        self._maybe_capture_listing(force=False)
+
+    def _on_capture_listing_clicked(self) -> None:
+        self._maybe_capture_listing(force=True)
+
+    def _maybe_capture_listing(self, force: bool) -> None:
+        if not self._online_mode:
+            return
+        if (self.source_type_combo.currentText() or "").strip() != "フリマ":
+            return
+        raw = (self.detail_listing_url_edit.text() or "").strip()
+        try:
+            from services.mercari_evidence_capture import normalize_mercari_item_url
+        except ImportError:
+            from desktop.services.mercari_evidence_capture import (  # type: ignore
+                normalize_mercari_item_url,
+            )
+        url = normalize_mercari_item_url(raw)
+        if url:
+            self.detail_listing_url_edit.setText(url)
+            if not force and url == self._capture_attempted_url:
+                return
+            self._start_mercari_capture(url)
+            return
+        if raw and ("yahoo" in raw.lower() or "auctions.yahoo" in raw.lower()):
+            self._set_entry_status("ヤフオクの画像取り込みは、まだできません。")
+
+    def _start_mercari_capture(self, url: str) -> None:
+        inv = self._inventory_widget
+        if inv is None or not hasattr(inv, "capture_mercari_listing_evidence"):
+            self._set_entry_status("仕入画面から開けないため、画像を取り込めません。")
+            return
+        if self._capturing:
+            self._set_entry_status("画像を取り込み中です。")
+            return
+        self._capture_attempted_url = url
+        self._pending_evidence = {}
+        self._capturing = True
+        if hasattr(self, "capture_listing_btn"):
+            self.capture_listing_btn.setEnabled(False)
+        preview = {
+            "出品URL": url,
+            "商品名": self.title_edit.text().strip(),
+            "ASIN": self.asin_edit.text().strip(),
+            "仕入れ日": self.purchase_date_edit.date().toString("yyyy-MM-dd"),
+            "仕入チャネル": self.source_channel_combo.currentText().strip(),
+            "取引ID": self.detail_transaction_id_edit.text().strip(),
+            "ユーザー名": self.detail_seller_username_edit.text().strip(),
+        }
+        job, skipped = inv.build_mercari_capture_job_from_row(
+            row_label="__single_purchase__",
+            row=preview,
+        )
+        if skipped or job is None:
+            self._capturing = False
+            if hasattr(self, "capture_listing_btn"):
+                self.capture_listing_btn.setEnabled(True)
+            self._set_entry_status("このURLの画像は、すでに取り込み済みです。")
+            return
+        self._set_entry_status("メルカリの画像を3枚取り込んでいます…")
+        inv.capture_mercari_listing_evidence(
+            jobs=[job],
+            busy_button=getattr(self, "save_to_list_btn", None),
+            on_done=self._on_single_capture_done,
+            on_fail=self._on_single_capture_failed,
+            confirm_message=(
+                "このメルカリ出品の画像を3枚取り込みます。\n"
+                "ログイン済みのChromeで撮ります。"
+            ),
+            quiet=True,
+        )
+
+    def _on_single_capture_failed(self) -> None:
+        self._capturing = False
+        if hasattr(self, "capture_listing_btn"):
+            self.capture_listing_btn.setEnabled(True)
+        self._set_entry_status("画像の取り込みは完了しませんでした。内容を確認して保存できます。")
+
+    def _on_single_capture_done(self, items: List[Dict[str, Any]]) -> None:
+        self._capturing = False
+        if hasattr(self, "capture_listing_btn"):
+            self.capture_listing_btn.setEnabled(True)
+        first = items[0] if items else {}
+        fields = first.get("fields") if isinstance(first, dict) else None
+        if not isinstance(fields, dict) or fields.get("_error") or first.get("error"):
+            message = ""
+            if isinstance(first, dict):
+                message = str(first.get("error") or "")
+                if isinstance(fields, dict) and fields.get("_error"):
+                    message = str(fields.get("_error") or message)
+            self._set_entry_status(message or "画像を3枚そろえられませんでした。保存はできます。")
+            return
+        self._pending_evidence = {
+            key: value
+            for key, value in fields.items()
+            if key and not str(key).startswith("_") and value
+        }
+        tx = str(fields.get("取引ID") or "").strip()
+        seller = str(fields.get("ユーザー名") or "").strip()
+        if tx and not self.detail_transaction_id_edit.text().strip():
+            self.detail_transaction_id_edit.setText(tx)
+        if seller and not self.detail_seller_username_edit.text().strip():
+            self.detail_seller_username_edit.setText(seller)
+        pref = str(fields.get("受取都道府県") or "").strip()
+        if pref and not self.detail_prefecture_edit.text().strip():
+            self.detail_prefecture_edit.setText(pref)
+        self._set_entry_status("画像を3枚取り込みました。内容を確認して「保存」を押してください。")
+
+    def _save_to_online_list(self) -> None:
+        if not self._online_mode:
+            return
+        if self._capturing:
+            self._set_entry_status("画像の取り込みが終わるまで待ってください。")
+            return
+        if not self.asin_edit.text().strip():
+            QMessageBox.warning(self, "入力エラー", "ASINは必須です。")
+            return
+        if not self.title_edit.text().strip():
+            QMessageBox.warning(self, "入力エラー", "商品名は必須です。")
+            return
+        try:
+            from services.mercari_evidence_capture import normalize_mercari_item_url
+        except ImportError:
+            from desktop.services.mercari_evidence_capture import (  # type: ignore
+                normalize_mercari_item_url,
+            )
+        url = normalize_mercari_item_url(self.detail_listing_url_edit.text())
+        if (
+            url
+            and (self.source_type_combo.currentText() or "").strip() == "フリマ"
+            and url != self._capture_attempted_url
+            and not self._pending_evidence
+        ):
+            self._start_mercari_capture(url)
+            if self._capturing:
+                self._set_entry_status(
+                    "先にメルカリの画像を取り込んでいます。終わってから、もう一度「保存」を押してください。"
+                )
+            return
+        inv = self._inventory_widget
+        if inv is None or not hasattr(inv, "append_single_purchase_row"):
+            QMessageBox.warning(self, "保存", "仕入画面から開けないため保存できません。")
+            return
+        try:
+            inv.append_single_purchase_row(self.get_row_data(), notify=False)
+        except Exception as exc:
+            QMessageBox.critical(self, "単品仕入エラー", f"単品仕入の追加に失敗しました:\n{exc}")
+            return
+        self._saved_count += 1
+        self._reset_entry_for_next()
+        self._set_entry_status(
+            f"ネット仕入一覧に追加しました（この画面で {self._saved_count} 件）。"
+            "続けて次の商品を入力できます。"
+        )
+
+    def _reset_entry_for_next(self) -> None:
+        self._suppress_url_capture = True
+        try:
+            self.order_id_edit.clear()
+            self.asin_edit.clear()
+            self.jan_edit.clear()
+            self.sku_edit.clear()
+            self.title_edit.clear()
+            self.quantity_spin.setValue(1)
+            self.purchase_price_spin.setValue(0)
+            self.planned_price_spin.setValue(0)
+            self.amazon_fee_spin.setValue(0)
+            self.shipping_cost_spin.setValue(0)
+            self.storage_fee_spin.setValue(0)
+            self.condition_note_edit.clear()
+            self.comment_edit.clear()
+            self.missing_manual_checkbox.setChecked(False)
+            self.missing_inner_box_checkbox.setChecked(False)
+            for cb in (self.missing_custom_checkboxes or {}).values():
+                cb.setChecked(False)
+            self.detail_transaction_id_edit.clear()
+            self.detail_seller_username_edit.clear()
+            self.detail_listing_url_edit.clear()
+            self.detail_tracking_edit.clear()
+            self.detail_prefecture_edit.clear()
+        finally:
+            self._suppress_url_capture = False
+        self._pending_evidence = {}
+        self._capture_attempted_url = ""
+        self._refresh_profit_summary()
+
     def get_row_data(self) -> Dict[str, Any]:
         purchase_price = int(self.purchase_price_spin.value())
         planned_price = int(self.planned_price_spin.value())
@@ -1372,7 +1828,7 @@ class SinglePurchaseInputDialog(QDialog):
             tracking_no = ""
             recv_pref = ""
 
-        return {
+        row = {
             "仕入れ日": self.purchase_date_edit.date().toString("yyyy-MM-dd"),
             "コンディション": self.condition_combo.currentText().strip() or "中古(良い)",
             "SKU": sku_text,
@@ -1404,4 +1860,13 @@ class SinglePurchaseInputDialog(QDialog):
             "価格改定": "ON",
             "コンディション説明": condition_note,
         }
+        for key, value in (self._pending_evidence or {}).items():
+            if not key or str(key).startswith("_") or not value:
+                continue
+            if key in ("取引ID", "ユーザー名", "出品URL", "受取都道府県", "伝票番号"):
+                if not str(row.get(key) or "").strip():
+                    row[key] = value
+                continue
+            row[key] = value
+        return row
 

@@ -383,21 +383,34 @@ class InventoryMercariCaptureMixin:
         skipped_complete: int = 0,
         busy_button: Optional[QPushButton] = None,
         on_done: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+        on_fail: Optional[Callable[[], None]] = None,
         confirm_message: Optional[str] = None,
+        quiet: bool = False,
     ) -> None:
         """出品URLがあるメルカリ行を撮影し、証憑列へ保存する。
 
         jobs を渡すと一覧選択ではなく、そのジョブだけを撮る（行の編集用）。
         """
+        def _give_up() -> None:
+            if on_fail is None:
+                return
+            try:
+                on_fail()
+            except Exception:
+                pass
+
         if getattr(self, "purchase_mode", "store") != "online":
+            _give_up()
             return
         if getattr(self, "_mercari_capture_thread", None) is not None and self._mercari_capture_thread.isRunning():
             QMessageBox.information(self, "情報撮影", "いま撮影中です。")
+            _give_up()
             return
         if jobs is None:
             data = getattr(self, "filtered_data", None)
             if data is None or len(data) == 0:
                 QMessageBox.information(self, "情報撮影", "仕入データがありません。")
+                _give_up()
                 return
             jobs, skipped_complete = self._mercari_capture_jobs()
         if not jobs:
@@ -417,9 +430,11 @@ class InventoryMercariCaptureMixin:
                     "出品URLに https://jp.mercari.com/item/m... を入れてください。\n"
                     "ヤフオクは、まだ撮影できません。",
                 )
+            _give_up()
             return
         root = self._mercari_evidence_root()
         if not root:
+            _give_up()
             return
         if confirm_message:
             prompt = confirm_message
@@ -436,6 +451,7 @@ class InventoryMercariCaptureMixin:
             )
         answer = QMessageBox.question(self, "情報撮影", prompt)
         if answer != QMessageBox.Yes:
+            _give_up()
             return
         thread = _MercariCaptureThread(jobs, root)
         thread.login_needed.connect(self._on_mercari_login_needed)
@@ -445,6 +461,8 @@ class InventoryMercariCaptureMixin:
         thread.need_extension.connect(self._on_mercari_need_extension)
         self._mercari_capture_thread = thread
         self._info_capture_on_done = on_done
+        self._info_capture_on_fail = on_fail
+        self._info_capture_quiet = bool(quiet)
         self._info_capture_busy_btn = busy_button
         if busy_button is not None:
             busy_button.setEnabled(False)
@@ -586,9 +604,20 @@ class InventoryMercariCaptureMixin:
             button.setEnabled(True)
         self._info_capture_busy_btn = None
 
+    def _notify_mercari_capture_failed(self) -> None:
+        callback = getattr(self, "_info_capture_on_fail", None)
+        self._info_capture_on_fail = None
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:
+            pass
+
     def _on_mercari_need_extension(self, folder: str) -> None:
         self._finish_mercari_capture_ui()
         self._info_capture_on_done = None
+        self._notify_mercari_capture_failed()
         QMessageBox.information(
             self,
             "情報撮影",
@@ -598,12 +627,13 @@ class InventoryMercariCaptureMixin:
             "3. 「パッケージ化されていない拡張機能を読み込む」\n"
             "4. 次のフォルダを選ぶ\n"
             f"{folder}\n"
-            "5. もう一度「情報撮影」を押す",
+            "5. もう一度、画像の取り込みを実行してください",
         )
 
     def _on_mercari_capture_failed(self, message: str) -> None:
         self._finish_mercari_capture_ui()
         self._info_capture_on_done = None
+        self._notify_mercari_capture_failed()
         QMessageBox.warning(self, "情報撮影", message or "撮影に失敗しました。")
 
     def _on_mercari_capture_done(self, results: object) -> None:
@@ -640,12 +670,16 @@ class InventoryMercariCaptureMixin:
         if errors:
             lines.append("失敗:")
             lines.extend(errors[:8])
-        QMessageBox.information(self, "情報撮影", "\n".join(lines))
+        quiet = bool(getattr(self, "_info_capture_quiet", False))
+        self._info_capture_quiet = False
+        self._info_capture_on_fail = None
+        if not quiet:
+            QMessageBox.information(self, "情報撮影", "\n".join(lines))
         callback = getattr(self, "_info_capture_on_done", None)
         self._info_capture_on_done = None
         if callback is not None:
             try:
-                callback(saved_items)
+                callback(rows if quiet else saved_items)
             except Exception:
                 pass
 
