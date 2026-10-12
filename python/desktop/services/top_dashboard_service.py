@@ -19,6 +19,28 @@ FLAG_LABELS = {
     "evidence_completed": "証憑",
     "images_completed": "画像",
 }
+ONLINE_ROUTE_CODE = "NET"
+
+
+def pending_labels_for_route(route: dict) -> List[str]:
+    """
+    TOPの未実装タスクに出す項目。
+
+    店舗ルートは、出品・証憑・画像のうち未完了を出す。
+    ネット仕入は、出品CSVまで終わっていて画像登録がまだのときだけ「画像」を出す。
+    """
+    code = str(route.get("route_code") or "").strip().upper()
+    if code == ONLINE_ROUTE_CODE:
+        listing_done = bool(route.get("listing_completed") or 0)
+        images_done = bool(route.get("images_completed") or 0)
+        if listing_done and not images_done:
+            return ["画像"]
+        return []
+    return [
+        label
+        for key, label in FLAG_LABELS.items()
+        if not bool(route.get(key) or 0)
+    ]
 
 
 class TopDashboardService:
@@ -46,23 +68,34 @@ class TopDashboardService:
             return route_code
         return ""
 
+    def _online_roots(self):
+        from services.online_purchase_progress import default_online_roots
+
+        return default_online_roots()
+
     def get_pending_tasks(self) -> List[Dict[str, Any]]:
-        """チェック未完了のタスク（出品・証憑・画像）をルートごとに返す"""
+        """チェック未完了のタスクを返す。ネット仕入は出品CSV済み・画像未登録だけ。"""
+        try:
+            from services.online_purchase_progress import sync_online_listing_flags
+
+            sync_online_listing_flags(self.route_db, self._online_roots())
+        except Exception:
+            pass
         routes = self.route_db.list_route_summaries()
         tasks: List[Dict[str, Any]] = []
         for route in routes:
-            pending = [
-                label
-                for key, label in FLAG_LABELS.items()
-                if not bool(route.get(key) or 0)
-            ]
+            pending = pending_labels_for_route(route)
             if not pending:
                 continue
+            name = self._resolve_route_name(route)
+            if str(route.get("route_code") or "").strip().upper() == ONLINE_ROUTE_CODE:
+                if name and not name.startswith("ネット仕入"):
+                    name = f"ネット仕入 {name}"
             tasks.append(
                 {
                     "route_id": route.get("id"),
                     "route_date": route.get("route_date", "") or "",
-                    "route_name": self._resolve_route_name(route),
+                    "route_name": name,
                     "pending_labels": pending,
                 }
             )

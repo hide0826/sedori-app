@@ -144,6 +144,47 @@ def _pick_route_for_date_and_name(
     return None
 
 
+def parse_trailing_date_folder_name(folder_name: str) -> Optional[tuple[str, str]]:
+    """
+    名前のうしろに日付が付く箱フォルダを読む。
+
+    例: フリマ20261001 → (2026-10-01, フリマ20261001)
+    店舗ルートの「20261001つくばルート」は、末尾が日付ではないので対象外。
+    """
+    name = (folder_name or "").strip()
+    if len(name) < 9:
+        return None
+    ymd = name[-8:]
+    if not ymd.isdigit():
+        return None
+    label = name[:-8].strip(" _-")
+    if not label:
+        return None
+    try:
+        year, month, day = int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8])
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            return None
+    except ValueError:
+        return None
+    route_date = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
+    return route_date, name
+
+
+def find_route_summary_by_display_name(
+    route_db: RouteDatabase,
+    route_date: str,
+    display_name: str,
+) -> Optional[dict]:
+    """同じ日付・同じ表示名のルートサマリーを返す。"""
+    wanted = (display_name or "").strip()
+    if not route_date or not wanted:
+        return None
+    for row in route_db.list_route_summaries(start_date=route_date, end_date=route_date):
+        if (row.get("route_display_name") or "").strip() == wanted:
+            return row
+    return None
+
+
 def find_route_summary_from_folder(folder_path: str | Path) -> Optional[dict]:
     """
     フォルダパスから対応するルートサマリーを推定して取得する。
@@ -158,6 +199,12 @@ def find_route_summary_from_folder(folder_path: str | Path) -> Optional[dict]:
 
     for current in [path] + list(path.parents):
         folder_name = current.name
+        trailing = parse_trailing_date_folder_name(folder_name)
+        if trailing:
+            route_date, display_name = trailing
+            found = find_route_summary_by_display_name(route_db, route_date, display_name)
+            if found:
+                return found
         parsed = _parse_route_from_folder_name(folder_name)
         if not parsed:
             continue

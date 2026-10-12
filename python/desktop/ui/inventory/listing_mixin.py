@@ -1183,6 +1183,20 @@ class InventoryListingMixin:
                     try:
                         base_folder = selected_folder if 'selected_folder' in locals() else str(target.parent)
                         mark_route_flags_from_folder(base_folder, listing_completed=True)
+                        if getattr(self, "purchase_mode", "store") == "online":
+                            from services.online_purchase_progress import (
+                                mark_online_listing_completed,
+                            )
+
+                            last_box = ""
+                            try:
+                                from utils.settings_helper import get_online_purchase_last_box
+                            except ImportError:
+                                from desktop.utils.settings_helper import (  # type: ignore
+                                    get_online_purchase_last_box,
+                                )
+                            last_box = get_online_purchase_last_box() or ""
+                            mark_online_listing_completed(base_folder, last_box=last_box)
                     except Exception as e:
                         # ルート判定に失敗しても致命的ではないのでログのみ
                         print(f"出品フラグ更新エラー: {e}")
