@@ -110,6 +110,7 @@ from .support import (
     _normalize_jan_for_match,
     _normalize_asin_for_match,
     _asin_group_key,
+    _group_key_is_blank,
     _parse_image_group_key,
     _format_group_key_label,
     _normalize_image_path,
@@ -532,6 +533,31 @@ class ImageManagerPurchaseLinkMixin:
 
         return None
 
+    def _oldest_purchase_age_days(self, base_dt: datetime) -> Optional[int]:
+        """撮影日より前にある、いちばん古い仕入れ日までの日数。無ければ None。"""
+        records = getattr(self.product_widget, "purchase_all_records", None) or []
+        extract = getattr(self.product_widget, "_extract_purchase_record_date", None)
+        if not extract:
+            return None
+        oldest = None
+        for record in records:
+            raw_date = str(
+                record.get("仕入れ日") or record.get("purchase_date") or ""
+            ).strip()
+            if not raw_date:
+                continue
+            try:
+                rec_date = extract(raw_date)
+            except Exception:
+                rec_date = None
+            if rec_date is None:
+                continue
+            if oldest is None or rec_date < oldest:
+                oldest = rec_date
+        if oldest is None:
+            return None
+        return max(0, (base_dt.date() - oldest).days)
+
     def _link_purchase_from_current_image(self):
         """表示中・選択中の画像からJANグループを特定して仕入DB候補紐付けを開く。"""
         paths = self._selected_image_paths_from_list()
@@ -618,26 +644,34 @@ class ImageManagerPurchaseLinkMixin:
         progress.show()
         QApplication.processEvents()
 
-        # 画像撮影日時 ±7日以内の仕入DB候補を取得（軽量読み込み）
+        # 最初は過去およそ1か月。先の日付はこれまでどおり7日。もっと前は画面のボタンで広げる
+        past_days = 31
+        future_days = 7
         search_key = group.jan if group.jan and group.jan != "unknown" else None
         if not search_key and first.jan_candidate and first.jan_candidate != "unknown":
             search_key = first.jan_candidate
         search_jan, search_asin = _parse_image_group_key(search_key) if search_key else (None, None)
-        try:
-            self._ensure_product_widget_data_loaded(full=False)
-            candidates = self.product_widget.find_purchase_candidates_by_datetime(
+
+        def _load_candidates(lookback_days: int):
+            return self.product_widget.find_purchase_candidates_by_datetime(
                 base_dt,
-                days_window=7,
+                past_days=lookback_days,
+                future_days=future_days,
                 jan=search_jan,
                 asin=search_asin,
             )
+
+        try:
+            self._ensure_product_widget_data_loaded(full=False)
+            candidates = _load_candidates(past_days)
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"仕入DB候補の取得中にエラーが発生しました:\n{e}")
             return
         finally:
             progress.close()
 
-        if not candidates:
+        purchase_records = getattr(self.product_widget, "purchase_all_records", None) or []
+        if not candidates and not purchase_records:
             QMessageBox.information(
                 self,
                 "候補なし",
@@ -653,6 +687,11 @@ class ImageManagerPurchaseLinkMixin:
             group_image_paths=self._group_image_paths(group),
             linked_session_jans=self._collect_linked_jan_codes_from_groups(),
             parent=self,
+            past_days=past_days,
+            future_days=future_days,
+            older_step_days=31,
+            oldest_age_days=self._oldest_purchase_age_days(base_dt),
+            on_load_older=_load_candidates,
         )
         if dialog.exec_() != QDialog.Accepted or not dialog.selected_record:
             return
@@ -675,16 +714,27 @@ class ImageManagerPurchaseLinkMixin:
             )
             return
 
-        if not target_jan:
-            asin_note = f"\nASIN: {target_asin}" if target_asin else ""
+        if not target_jan and target_asin:
+            reply = QMessageBox.question(
+                self,
+                "確認",
+                "この商品にはJANがありません。\n"
+                f"ASIN（{target_asin}）で画像を紐付けます。よろしいですか？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply != QMessageBox.Yes:
+                return
+        elif not target_jan:
             sku_note = f"\nSKU: {target_sku}" if target_sku else ""
             reply = QMessageBox.question(
                 self,
                 "確認",
-                "選択した仕入レコードにはJANが設定されていません。\n"
-                f"ASIN（またはSKU）でこのレコードに画像を紐付けますか？{asin_note}{sku_note}",
+                "選択した仕入レコードにはJANもASINもありません。\n"
+                f"SKUだけでこのレコードに画像を付けますか？{sku_note}\n"
+                "左の一覧は JAN不明 のままです。",
                 QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
+                QMessageBox.No,
             )
             if reply != QMessageBox.Yes:
                 return
@@ -745,16 +795,14 @@ class ImageManagerPurchaseLinkMixin:
 
         self._finalize_purchase_db_after_image_link()
 
-        # グループキー更新: JAN優先、無ければ ASIN グループへ移す
+        # グループキー更新: JAN優先、無ければ ASIN グループへ移す。
+        # JAN不明の写真は、確認なしで ASIN グループへ移す。
         new_group_key = target_jan or (_asin_group_key(target_asin) if target_asin else "")
+        moved_group = False
         if new_group_key and group.jan != new_group_key:
             label = _format_group_key_label(new_group_key)
-            if subset:
-                for path in link_paths:
-                    self.assign_image_to_jan(path, new_group_key, refresh_tree=False)
-                self.jan_groups = self.image_service.group_by_jan(self.image_records)
-                self._jan_title_cache.pop(new_group_key, None)
-            else:
+            move_without_asking = subset or _group_key_is_blank(group.jan)
+            if not move_without_asking:
                 reply = QMessageBox.question(
                     self,
                     "グループキー更新の確認",
@@ -763,13 +811,14 @@ class ImageManagerPurchaseLinkMixin:
                     QMessageBox.Yes | QMessageBox.No,
                     QMessageBox.Yes,
                 )
-                if reply == QMessageBox.Yes:
-                    for img_record in list(group.images):
-                        self.assign_image_to_jan(
-                            img_record.path, new_group_key, refresh_tree=False
-                        )
-                    self.jan_groups = self.image_service.group_by_jan(self.image_records)
-                    self._jan_title_cache.pop(new_group_key, None)
+                move_without_asking = reply == QMessageBox.Yes
+            if move_without_asking:
+                paths_to_move = link_paths if subset else [img.path for img in list(group.images)]
+                for path in paths_to_move:
+                    self.assign_image_to_jan(path, new_group_key, refresh_tree=False)
+                self.jan_groups = self.image_service.group_by_jan(self.image_records)
+                self._jan_title_cache.pop(new_group_key, None)
+                moved_group = True
 
         try:
             self._jan_title_cache.clear()
@@ -782,6 +831,8 @@ class ImageManagerPurchaseLinkMixin:
             msg = "仕入DBレコードと画像グループを紐付けました。"
         if target_asin and not target_jan:
             msg += f"\n（ASIN: {target_asin} で紐付け）"
+            if moved_group:
+                msg += f"\n左の一覧は ASIN: {target_asin} にまとまります。"
         if added_count > 0:
             msg += f"\n新しく登録された画像数: {added_count}枚"
         else:

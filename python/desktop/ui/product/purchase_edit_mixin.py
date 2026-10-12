@@ -260,15 +260,21 @@ class PurchaseEditMixin:
         days_window: int = 7,
         jan: Optional[str] = None,
         asin: Optional[str] = None,
+        past_days: Optional[int] = None,
+        future_days: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """
         指定した日時に近い仕入レコード候補を返す
 
-        - 画像の撮影日時から「±N日以内」の仕入データを探す
+        - past_days / future_days を渡すと、過去と未来で別の日数にできる
+        - どちらも省略したときは、これまでどおり撮影日時の前後 days_window 日
         - JAN / ASIN が分かっている場合はその行を先頭にするが、同じ期間の他商品も残す
         """
         if not hasattr(self, "purchase_all_records") or not self.purchase_all_records:
             return []
+
+        lookback = days_window if past_days is None else max(0, int(past_days))
+        lookahead = days_window if future_days is None else max(0, int(future_days))
 
         base_date: date = base_dt.date()
         jan_norm = self._normalize_jan_for_match(jan) if jan and str(jan) != "unknown" else ""
@@ -293,9 +299,11 @@ class PurchaseEditMixin:
             if rec_date is None:
                 continue
 
-            diff_days = abs((rec_date - base_date).days)
-            if diff_days > days_window:
+            # 負の値は撮影日より前（過去）、正の値は撮影日より後
+            signed_days = (rec_date - base_date).days
+            if signed_days < -lookback or signed_days > lookahead:
                 continue
+            diff_days = abs(signed_days)
 
             date_matches.append((diff_days, record))
             if jan_norm:

@@ -11,6 +11,7 @@ from desktop.ui.image_manager.support import (
     _asin_group_key,
     _format_group_key_label,
     _group_key_from_db_fields,
+    _group_key_is_blank,
     _normalize_asin_for_match,
     _parse_image_group_key,
     _record_jan_matches_group,
@@ -135,6 +136,13 @@ def test_seed_asin_only_photo(tmp_path: Path):
     assert stored["asin"] == "B08XYZ1234"
     assert not stored.get("jan")
     db.close()
+
+
+def test_blank_group_can_move_to_asin():
+    assert _group_key_is_blank("unknown") is True
+    assert _group_key_is_blank("") is True
+    assert _group_key_is_blank("asin:B08XYZ1234") is False
+    assert _group_key_is_blank("4901234567890") is False
 
 
 def test_normalize_asin():

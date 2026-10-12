@@ -190,6 +190,15 @@ def _parse_image_group_key(key: Any) -> Tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def _group_key_is_blank(key: Any) -> bool:
+    """JANもASINも付いていない画像グループか。"""
+    raw = str(key or "").strip()
+    if not raw or raw == "unknown":
+        return True
+    jan, asin = _parse_image_group_key(raw)
+    return not jan and not asin
+
+
 def _format_group_key_label(key: Any) -> str:
     """左ツリー表示用のラベル。"""
     raw = str(key or "").strip()
@@ -507,17 +516,29 @@ class PurchaseCandidateDialog(QDialog):
         group_image_paths: Optional[List[str]] = None,
         linked_session_jans: Optional[set[str]] = None,
         parent=None,
+        past_days: Optional[int] = None,
+        future_days: Optional[int] = None,
+        older_step_days: int = 31,
+        oldest_age_days: Optional[int] = None,
+        on_load_older=None,
     ):
         super().__init__(parent)
         self.jan_group = jan_group
         self.base_dt = base_dt
-        self.candidates = candidates
+        self.candidates = list(candidates or [])
         self.group_image_paths = {
             _normalize_image_path(p) for p in (group_image_paths or []) if p
         }
         self.linked_session_jans = linked_session_jans or set()
         self.selected_record: Optional[Dict[str, Any]] = None
         self._highlight_candidate_rows: set[int] = set()
+        self.past_days = past_days
+        self.future_days = future_days
+        self.older_step_days = max(1, int(older_step_days))
+        self.oldest_age_days = oldest_age_days
+        self._on_load_older = on_load_older
+        self._older_btn: Optional[QPushButton] = None
+        self.info_label: Optional[QLabel] = None
         self.setup_ui()
 
     def setup_ui(self):
@@ -533,14 +554,10 @@ class PurchaseCandidateDialog(QDialog):
                 jan_text = jan_text[:-2]
         else:
             jan_text = "（JAN不明）"
-        info_label = QLabel(
-            f"JANグループ: {jan_text}\n"
-            f"基準日時: {self.base_dt.strftime('%Y/%m/%d %H:%M:%S')} 付近（±7日）の仕入データを表示しています。\n"
-            "今のJANと一致する行を先頭にしています。別の商品へ付け替える場合は、他の行を選んでください。\n"
-            "黄色の行は、画像一覧でJAN・商品名がまだ紐付いていない商品の候補です。"
-        )
-        info_label.setWordWrap(True)
-        layout.addWidget(info_label)
+        self._jan_text = jan_text
+        self.info_label = QLabel(self._build_info_text())
+        self.info_label.setWordWrap(True)
+        layout.addWidget(self.info_label)
 
         self.table = QTableWidget()
         self.table.setColumnCount(8)
@@ -580,6 +597,11 @@ class PurchaseCandidateDialog(QDialog):
         self.populate_table()
 
         btn_layout = QHBoxLayout()
+        if self._on_load_older is not None:
+            self._older_btn = QPushButton("過去呼び込み")
+            self._older_btn.clicked.connect(self._on_load_older_clicked)
+            btn_layout.addWidget(self._older_btn)
+            self._sync_older_button()
         btn_layout.addStretch()
         cancel_btn = QPushButton("キャンセル")
         cancel_btn.clicked.connect(self.reject)
@@ -588,6 +610,81 @@ class PurchaseCandidateDialog(QDialog):
         btn_layout.addWidget(cancel_btn)
         btn_layout.addWidget(ok_btn)
         layout.addLayout(btn_layout)
+
+    def _build_info_text(self) -> str:
+        lines = [f"JANグループ: {self._jan_text}"]
+        if self.past_days is not None and self.future_days is not None:
+            lines.append(
+                f"基準日時: {self.base_dt.strftime('%Y/%m/%d %H:%M:%S')}。"
+                f"この日時の過去{self.past_days}日〜先{self.future_days}日の仕入を表示しています。"
+            )
+            if self._on_load_older is not None:
+                lines.append("「過去呼び込み」を押すと、さらに約1か月前まで広げます。")
+        else:
+            lines.append(
+                f"基準日時: {self.base_dt.strftime('%Y/%m/%d %H:%M:%S')} 付近（±7日）の仕入データを表示しています。"
+            )
+        lines.append("今のJANと一致する行を先頭にしています。別の商品へ付け替える場合は、他の行を選んでください。")
+        lines.append("JANが空の行は、ASINで紐付けできます。")
+        lines.append("黄色の行は、画像一覧でJAN・商品名がまだ紐付いていない商品の候補です。")
+        if not self.candidates and self._on_load_older is not None:
+            lines.append("この範囲には仕入がありません。過去呼び込みで、もっと前を表示できます。")
+        return "\n".join(lines)
+
+    def _covers_oldest_purchase(self) -> bool:
+        return (
+            self.oldest_age_days is not None
+            and self.past_days is not None
+            and self.past_days >= self.oldest_age_days
+        )
+
+    def _sync_older_button(self) -> None:
+        if self._older_btn is None:
+            return
+        if self._covers_oldest_purchase():
+            self._older_btn.setEnabled(False)
+            self._older_btn.setToolTip("これより前の仕入データはありません。")
+            return
+        self._older_btn.setEnabled(True)
+        self._older_btn.setToolTip("表示をさらに約1か月前まで広げます。何度でも押せます。")
+
+    def _on_load_older_clicked(self) -> None:
+        if self._on_load_older is None or self.past_days is None:
+            return
+        if self._covers_oldest_purchase():
+            self._sync_older_button()
+            return
+        next_past = self.past_days + self.older_step_days
+        before = len(self.candidates)
+        try:
+            loaded = self._on_load_older(next_past) or []
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"過去の仕入を読み込めませんでした:\n{e}")
+            return
+        self.past_days = next_past
+        self.candidates = list(loaded)
+        self.selected_record = None
+        self.populate_table()
+        if self.info_label is not None:
+            self.info_label.setText(self._build_info_text())
+        self._sync_older_button()
+        added = len(self.candidates) - before
+        if added > 0:
+            return
+        if self._covers_oldest_purchase():
+            QMessageBox.information(
+                self,
+                "過去呼び込み",
+                "これより前の仕入データはありません。",
+            )
+            return
+        further = self.past_days + self.older_step_days
+        QMessageBox.information(
+            self,
+            "過去呼び込み",
+            f"過去{self.past_days}日まで広げましたが、追加の仕入はありませんでした。\n"
+            f"もう一度押すと、過去{further}日まで探します。",
+        )
 
     def populate_table(self):
         self._highlight_candidate_rows = set()
