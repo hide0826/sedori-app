@@ -13,8 +13,8 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QScrollArea, QFormLayout,
     QToolButton, QApplication, QAbstractItemView,
 )
-from PySide6.QtCore import Qt, QDate, QTime, QDateTime, Signal, QSettings, QThread, QTimer
-from PySide6.QtGui import QFont, QColor, QPalette, QStandardItemModel, QStandardItem, QDesktopServices
+from PySide6.QtCore import Qt, QDate, QSize, QTime, QDateTime, Signal, QSettings, QThread, QTimer
+from PySide6.QtGui import QFont, QColor, QPalette, QPixmap, QStandardItemModel, QStandardItem, QDesktopServices
 from PySide6.QtCore import QUrl
 import pandas as pd
 from pathlib import Path
@@ -114,6 +114,33 @@ _MISSING_CHECKBOX_STYLE = """
     }
 """
 _CUSTOM_CHECKBOXES_PER_ROW = 3
+_SHOT_CAPTIONS = ("1 商品ページ", "2 説明文", "3 取引画面")
+
+
+class _ShotThumb(QLabel):
+    """取り込んだ証憑を1枚表示する。クリックでその画像を開く。"""
+
+    def __init__(self, parent=None):
+        super().__init__("未取込", parent)
+        self.path = ""
+        self.setAlignment(Qt.AlignCenter)
+        self.setFixedHeight(160)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setStyleSheet(
+            "background-color: #2a2a2a; color: #aaaaaa; border: 1px solid #555555;"
+        )
+        self.setToolTip("取り込み後、クリックすると画像を開きます。")
+
+    def sizeHint(self):
+        return QSize(240, 160)
+
+    def minimumSizeHint(self):
+        return QSize(120, 160)
+
+    def mousePressEvent(self, event):
+        if self.path and Path(self.path).is_file():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self.path))
+        super().mousePressEvent(event)
 
 
 class SinglePurchaseInputDialog(QDialog):
@@ -335,7 +362,6 @@ class SinglePurchaseInputDialog(QDialog):
         if self._online_mode:
             self.profit_summary_label = QLabel("販売予定価格と仕入れ価格を入れると、利益を計算します。")
             self.profit_summary_label.setWordWrap(True)
-            layout.addRow("自動計算:", self.profit_summary_label)
             for spin in (
                 self.purchase_price_spin,
                 self.planned_price_spin,
@@ -474,6 +500,9 @@ class SinglePurchaseInputDialog(QDialog):
         main_layout.addWidget(self._splitter)
 
         if self._online_mode:
+            self._build_online_quick_entry(main_layout)
+
+        if self._online_mode:
             button_row = QHBoxLayout()
             self.entry_status_label = QLabel(
                 "「保存」でネット仕入一覧のうしろに1件足します。画面は開いたまま、次の商品を入力できます。"
@@ -511,6 +540,135 @@ class SinglePurchaseInputDialog(QDialog):
         self.source_type_combo.currentTextChanged.connect(self._on_source_type_changed)
         self.source_channel_combo.currentTextChanged.connect(self._on_detail_channel_text_for_platform)
         self._on_source_type_changed(self.source_type_combo.currentText())
+        if self._online_mode:
+            self.setMinimumSize(1100, 720)
+            self.resize(1240, 820)
+
+    def _build_online_quick_entry(self, main_layout: QVBoxLayout) -> None:
+        """ネット仕入では、画像3枚と毎回使う入力を画面の下に固定する。"""
+        shot_row = QHBoxLayout()
+        shot_row.setSpacing(8)
+        self._shot_labels: List[_ShotThumb] = []
+        for caption in _SHOT_CAPTIONS:
+            column = QVBoxLayout()
+            column.setSpacing(2)
+            title = QLabel(caption)
+            title.setAlignment(Qt.AlignCenter)
+            thumb = _ShotThumb()
+            column.addWidget(title)
+            column.addWidget(thumb)
+            shot_row.addLayout(column, 1)
+            self._shot_labels.append(thumb)
+        main_layout.addLayout(shot_row)
+
+        quick = QWidget()
+        grid = QGridLayout(quick)
+        grid.setContentsMargins(0, 6, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+
+        self.quick_listing_url_edit = QLineEdit()
+        self.quick_listing_url_edit.setPlaceholderText("メルカリの出品URL")
+        self._bind_line_edits(self.detail_listing_url_edit, self.quick_listing_url_edit)
+        self.quick_listing_url_edit.editingFinished.connect(self._on_listing_url_finished)
+        grid.addWidget(QLabel("出品URL"), 0, 0)
+        grid.addWidget(self.quick_listing_url_edit, 0, 1, 1, 5)
+        if hasattr(self, "capture_listing_btn"):
+            parent = self.capture_listing_btn.parentWidget()
+            if parent is not None and parent.layout() is not None:
+                parent.layout().removeWidget(self.capture_listing_btn)
+            grid.addWidget(self.capture_listing_btn, 0, 6)
+
+        self.quick_asin_edit = QLineEdit()
+        self.quick_asin_edit.setPlaceholderText("ASIN")
+        self._bind_line_edits(self.asin_edit, self.quick_asin_edit)
+        self.quick_asin_edit.editingFinished.connect(self._on_asin_sp_api_finished)
+        grid.addWidget(QLabel("ASIN"), 1, 0)
+        grid.addWidget(self.quick_asin_edit, 1, 1)
+
+        self.quick_purchase_price_spin = QSpinBox()
+        self.quick_purchase_price_spin.setRange(0, 10_000_000)
+        self.quick_purchase_price_spin.setSingleStep(100)
+        self._bind_spin_boxes(self.purchase_price_spin, self.quick_purchase_price_spin)
+        grid.addWidget(QLabel("仕入れ価格"), 1, 2)
+        grid.addWidget(self.quick_purchase_price_spin, 1, 3)
+
+        self.quick_planned_price_spin = QSpinBox()
+        self.quick_planned_price_spin.setRange(0, 10_000_000)
+        self.quick_planned_price_spin.setSingleStep(100)
+        self._bind_spin_boxes(self.planned_price_spin, self.quick_planned_price_spin)
+        grid.addWidget(QLabel("販売予定価格"), 1, 4)
+        grid.addWidget(self.quick_planned_price_spin, 1, 5)
+        grid.setColumnStretch(1, 2)
+        grid.setColumnStretch(6, 0)
+
+        if self.profit_summary_label is not None:
+            grid.addWidget(self.profit_summary_label, 2, 0, 1, 7)
+        main_layout.addWidget(quick)
+
+    @staticmethod
+    def _bind_line_edits(source: QLineEdit, mirror: QLineEdit) -> None:
+        """上下の入力欄を同じ文字にする。"""
+        def source_to_mirror(text: str) -> None:
+            if mirror.text() != text:
+                mirror.blockSignals(True)
+                mirror.setText(text)
+                mirror.blockSignals(False)
+
+        def mirror_to_source(text: str) -> None:
+            if source.text() != text:
+                source.blockSignals(True)
+                source.setText(text)
+                source.blockSignals(False)
+
+        source.textChanged.connect(source_to_mirror)
+        mirror.textChanged.connect(mirror_to_source)
+
+    @staticmethod
+    def _bind_spin_boxes(source: QSpinBox, mirror: QSpinBox) -> None:
+        """上下の金額欄を同じ数値にする。上の欄の計算はそのまま動く。"""
+        def source_to_mirror(value: int) -> None:
+            if mirror.value() != value:
+                mirror.blockSignals(True)
+                mirror.setValue(value)
+                mirror.blockSignals(False)
+
+        def mirror_to_source(value: int) -> None:
+            if source.value() != value:
+                source.setValue(value)
+
+        source.valueChanged.connect(source_to_mirror)
+        mirror.valueChanged.connect(mirror_to_source)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._rescale_shot_labels()
+
+    def _show_captured_images(self) -> None:
+        labels = getattr(self, "_shot_labels", None) or []
+        columns = ("証憑画像1", "証憑画像2", "証憑画像3")
+        for index, label in enumerate(labels):
+            path = str((self._pending_evidence or {}).get(columns[index]) or "").strip()
+            label.path = path if path and Path(path).is_file() else ""
+        self._rescale_shot_labels()
+
+    def _rescale_shot_labels(self) -> None:
+        for label in getattr(self, "_shot_labels", None) or []:
+            if not label.path:
+                label.setPixmap(QPixmap())
+                label.setText("未取込")
+                continue
+            pixmap = QPixmap(label.path)
+            if pixmap.isNull():
+                label.setPixmap(QPixmap())
+                label.setText("表示できません")
+                continue
+            target_w = max(label.width() - 8, 80)
+            target_h = max(label.height() - 8, 80)
+            label.setText("")
+            label.setPixmap(
+                pixmap.scaled(target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
 
     def accept(self):
         if not self.asin_edit.text().strip():
@@ -698,7 +856,7 @@ class SinglePurchaseInputDialog(QDialog):
         if hasattr(self, "register_flea_user_master_btn"):
             self.register_flea_user_master_btn.setVisible(st == "フリマ")
         if show:
-            self.setMinimumWidth(960)
+            self.setMinimumWidth(1100 if self._online_mode else 960)
             self._channel_detail_title.setText(
                 "フリマ取引情報" if st == "フリマ" else "電脳取引情報"
             )
@@ -1632,6 +1790,7 @@ class SinglePurchaseInputDialog(QDialog):
             return
         self._capture_attempted_url = url
         self._pending_evidence = {}
+        self._show_captured_images()
         self._capturing = True
         if hasattr(self, "capture_listing_btn"):
             self.capture_listing_btn.setEnabled(False)
@@ -1701,6 +1860,8 @@ class SinglePurchaseInputDialog(QDialog):
         pref = str(fields.get("受取都道府県") or "").strip()
         if pref and not self.detail_prefecture_edit.text().strip():
             self.detail_prefecture_edit.setText(pref)
+        self._show_captured_images()
+        QTimer.singleShot(0, self._rescale_shot_labels)
         self._set_entry_status("画像を3枚取り込みました。内容を確認して「保存」を押してください。")
 
     def _save_to_online_list(self) -> None:
@@ -1779,6 +1940,7 @@ class SinglePurchaseInputDialog(QDialog):
             self._suppress_url_capture = False
         self._pending_evidence = {}
         self._capture_attempted_url = ""
+        self._show_captured_images()
         self._refresh_profit_summary()
 
     def get_row_data(self) -> Dict[str, Any]:
