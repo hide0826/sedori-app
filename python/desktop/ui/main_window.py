@@ -36,7 +36,28 @@ class APIServerThread(QThread):
     def __init__(self):
         super().__init__()
         self.process = None
-        
+        self._log_handle = None
+        self._log_path = None
+
+    def _read_log_tail(self, limit: int = 2000) -> str:
+        import os
+
+        path = self._log_path
+        if self._log_handle:
+            try:
+                self._log_handle.flush()
+            except Exception:
+                pass
+        if not path or not os.path.isfile(path):
+            return "(ログなし)"
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                data = handle.read()
+            text = data[-limit:] if data else ""
+            return text.strip() or "(ログなし)"
+        except Exception:
+            return "(ログなし)"
+
     def run(self):
         """FastAPIサーバーの起動（python/app.py を正しい cwd で実行）"""
         try:
@@ -50,31 +71,31 @@ class APIServerThread(QThread):
                 self.server_error.emit(f"app.py が見つかりません:\n{app_py}")
                 return
 
+            log_dir = os.path.join(python_dir, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            self._log_path = os.path.join(log_dir, "api_server.log")
+            # PIPE のまま誰も読まないと、ログが溜まった時点でサーバーが応答しなくなる。
+            self._log_handle = open(self._log_path, "wb")
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            env["HIRIO_API_RELOAD"] = "0"
+
             self.process = subprocess.Popen(
                 [sys.executable, app_py],
                 cwd=python_dir,
-                stdout=subprocess.PIPE,
+                stdout=self._log_handle,
                 stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                env=env,
             )
 
             health_url = "http://127.0.0.1:8000/health"
             for _ in range(60):
                 if self.process.poll() is not None:
-                    tail = ""
-                    if self.process.stdout:
-                        try:
-                            tail = self.process.stdout.read() or ""
-                        except Exception:
-                            pass
-                    tail = tail[-2000:] if tail else "(ログなし)"
                     self.server_error.emit(
                         "FastAPIプロセスがすぐ終了しました。\n"
                         "・別の黒い画面で API を起動していないか確認\n"
                         "・8000番ポートが他アプリで使われていないか確認\n\n"
-                        f"ログ末尾:\n{tail}"
+                        f"ログ末尾:\n{self._read_log_tail()}"
                     )
                     return
                 try:
@@ -87,16 +108,35 @@ class APIServerThread(QThread):
 
             self.server_error.emit(
                 "起動後30秒以内に API に接続できませんでした。\n"
-                f"確認: ブラウザで {health_url} を開いてください。"
+                f"確認: ブラウザで {health_url} を開いてください。\n\n"
+                f"ログ末尾:\n{self._read_log_tail()}"
             )
         except Exception as e:
             self.server_error.emit(str(e))
     
     def stop_server(self):
-        """サーバーの停止"""
-        if self.process:
-            self.process.terminate()
-            self.process = None
+        """サーバーの停止（子プロセスも含めて止める）"""
+        proc = self.process
+        self.process = None
+        if proc and proc.poll() is None:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    text=True,
+                )
+            else:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    proc.kill()
+        if self._log_handle:
+            try:
+                self._log_handle.close()
+            except Exception:
+                pass
+            self._log_handle = None
 
 
 class MainWindow(QMainWindow):
@@ -913,13 +953,15 @@ class MainWindow(QMainWindow):
                 self.api_status_label.setText("API: 接続失敗")
                 self.api_status_label.setStyleSheet("color: red;")
                 base = getattr(self.api_client, "base_url", "http://127.0.0.1:8000")
+                detail = getattr(self.api_client, "last_connection_error", "") or ""
                 QMessageBox.warning(
                     self,
                     "API接続テスト",
                     "FastAPIサーバーに接続できませんでした。\n\n"
-                    f"接続先: {base}/health\n\n"
-                    "確認:\n"
-                    "1) ツール → FastAPIサーバー起動（または python フォルダで python app.py）\n"
+                    f"接続先: {base}/health\n"
+                    + (f"\n{detail}\n" if detail else "\n")
+                    + "\n確認:\n"
+                    "1) HIRIO を一度終了して起動し直す\n"
                     "2) 黒い画面を2つ開いていないか（8000番の取り合い）\n"
                     "3) 設定の API URL が http://127.0.0.1:8000 か\n"
                     "4) 価格改定プレビュー処理中は数十秒かかることがあります（完了まで待つ）",

@@ -66,4 +66,12 @@ app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
+
+    # デスクトップアプリから起動するときは HIRIO_API_RELOAD=0。
+    # reload だと Windows で子プロセスが増え、標準出力が詰まると応答が止まる。
+    reload_flag = os.environ.get("HIRIO_API_RELOAD", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=reload_flag)

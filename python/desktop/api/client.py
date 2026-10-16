@@ -18,6 +18,25 @@ import logging
 import math
 
 
+def health_check_urls(base_url: str) -> list[str]:
+    """接続テストで試すURL。localhost は IPv6 で固まることがあるので 127.0.0.1 を先に試す。"""
+    raw = (base_url or "").strip().rstrip("/") or "http://127.0.0.1:8000"
+    ordered: list[str] = []
+
+    def add(url: str) -> None:
+        if url and url not in ordered:
+            ordered.append(url)
+
+    if "://localhost" in raw:
+        add(raw.replace("://localhost", "://127.0.0.1"))
+        add(raw)
+    else:
+        add(raw)
+        if "://127.0.0.1" in raw:
+            add(raw.replace("://127.0.0.1", "://localhost"))
+    return ordered
+
+
 class APIClient:
     """FastAPIクライアント"""
 
@@ -27,7 +46,10 @@ class APIClient:
     def __init__(self, base_url: str = "http://127.0.0.1:8000", request_timeout: Optional[int] = None):
         self.base_url = base_url
         self.request_timeout = request_timeout if request_timeout is not None else self._load_timeout_from_settings()
+        self.last_connection_error = ""
         self.session = requests.Session()
+        # このクライアントは手元の FastAPI 専用。プロキシ経由だと localhost が失敗する。
+        self.session.trust_env = False
         self.session.headers.update({
             'Accept': 'application/json'
         })
@@ -52,24 +74,24 @@ class APIClient:
         return t
         
     def test_connection(self) -> bool:
-        """API接続テスト（localhost は 127.0.0.1 にフォールバック）"""
-        bases = [self.base_url.rstrip("/")]
-        alt = bases[0].replace("://localhost", "://127.0.0.1")
-        if alt not in bases:
-            bases.append(alt)
-        last_error: Optional[Exception] = None
-        for base in bases:
+        """API接続テスト（localhost は 127.0.0.1 を先に試す）"""
+        errors: list[str] = []
+        original = (self.base_url or "").strip().rstrip("/")
+        for base in health_check_urls(self.base_url):
+            url = f"{base}/health"
             try:
-                response = self.session.get(f"{base}/health", timeout=5)
+                response = self.session.get(url, timeout=5)
                 if response.status_code == 200:
-                    if base != bases[0]:
+                    if base != original:
                         self.base_url = base
+                    self.last_connection_error = ""
                     return True
+                errors.append(f"{url} → HTTP {response.status_code}")
             except Exception as e:
-                last_error = e
+                errors.append(f"{url} → {e}")
                 self.logger.error(f"API接続テスト失敗 ({base}): {e}")
-        if last_error:
-            self.logger.error(f"API接続テスト失敗: {last_error}")
+        self.last_connection_error = "\n".join(errors) if errors else "接続失敗"
+        self.logger.error(f"API接続テスト失敗: {self.last_connection_error}")
         return False
     
     # 価格改定API

@@ -61,10 +61,11 @@ def explain_api_error(
                 "FastAPIサーバーが起動していない可能性があります。\n"
                 "ターミナルでバックエンド（uvicorn 等）を起動してから再テストしてください。"
             )
-        if "timed out" in combined or "timeout" in combined:
+        if "timed out" in combined or "timeout" in combined or "タイムアウト" in combined:
             hints.append(
-                "指定URLへの接続がタイムアウトしました。\n"
-                "APIベースURL・ファイアウォール・VPN を確認してください。"
+                "サーバーは起動した表示でも、応答が止まっていることがあります。\n"
+                "HIRIO を一度完全に終了して、起動し直してから再テストしてください。\n"
+                "（画面下の「起動完了」は、起動した瞬間の結果で、その後止まっても緑のままです）"
             )
         if "name or service not known" in combined or "getaddrinfo failed" in combined:
             hints.append("URLのホスト名が解決できません。スペルミスや http/https の誤りを確認してください。")
@@ -162,10 +163,15 @@ def test_fastapi_connection(base_url: str, *, test_fn) -> ApiTestResult:
                 "FastAPIサーバーに正常に接続できました",
                 f"接続先: {url.rstrip('/')}/health",
             )
+        detail = "接続失敗"
+        client = getattr(test_fn, "__self__", None)
+        last_error = getattr(client, "last_connection_error", "") if client else ""
+        if last_error:
+            detail = last_error
         return ApiTestResult(
             False,
             "FastAPIサーバーに接続できませんでした",
-            explain_api_error("fastapi", "接続失敗", url=url),
+            explain_api_error("fastapi", detail, url=url),
         )
     except Exception as exc:
         return ApiTestResult(
