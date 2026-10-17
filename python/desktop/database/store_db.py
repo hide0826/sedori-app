@@ -830,10 +830,13 @@ class StoreDatabase:
     def resolve_supplier_for_sku(self, supplier_code: str) -> Optional[Dict[str, Any]]:
         """
         SKU生成向けに仕入先を解決する。
-        実店舗(stores) → 電脳店舗(online_stores) → フリマ(flea_markets)の順で検索する。
+        実店舗(stores) → 電脳店舗(online_stores) → フリマ(flea_markets)
+        → ECコード(online_platforms) の順で検索する。
 
-        フリマは「設定 > 店舗コード設定 > フリマコード」のマスタ（flea_markets）で一致させ、
-        SKUテンプレートの supplier トークンには code_prefix（未設定時は platform_code）を渡す。
+        フリマは「設定 > 店舗コード設定 > フリマコード」、
+        ECは「設定 > 店舗コード設定 > ECコード」で一致させる。
+        ネット仕入の仕入チャネル（例: オフモール）は名称でも探す。
+        SKUの supplier には code_prefix（未設定時は platform_code）を渡す。
         戻り: {"supplier_code", "store_name", "store_id"} または None
         """
         code = (supplier_code or "").strip()
@@ -870,6 +873,22 @@ class StoreDatabase:
             if not sku_token:
                 sku_token = code.upper()
             pname = (flea.get("platform_name") or "").strip()
+            return {
+                "supplier_code": sku_token,
+                "store_name": pname or sku_token,
+                "store_id": None,
+            }
+
+        # ECコード（仕入チャネルに「オフモール」などの名称が入る）
+        plat_key = code.split(":", 1)[-1].strip() if ":" in code else code
+        plat = self.get_online_platform_for_sku(code)
+        if not plat and plat_key != code:
+            plat = self.get_online_platform_for_sku(plat_key)
+        if plat:
+            sku_token = (plat.get("code_prefix") or plat.get("platform_code") or "").strip().upper()
+            if not sku_token:
+                sku_token = plat_key.upper()
+            pname = (plat.get("platform_name") or "").strip()
             return {
                 "supplier_code": sku_token,
                 "store_name": pname or sku_token,
@@ -3263,6 +3282,23 @@ class StoreDatabase:
         cursor.execute("SELECT * FROM online_platforms WHERE platform_name = ?", (name,))
         row = cursor.fetchone()
         return dict(row) if row else None
+
+    def get_online_platform_for_sku(self, key: str) -> Optional[Dict[str, Any]]:
+        """ECコードを、コード・短縮名・名称のいずれかで1件取得する。"""
+        raw = (key or "").strip()
+        if not raw:
+            return None
+        code_u = raw.upper()
+        name_l = raw.lower()
+        for plat in self.list_online_platforms(active_only=False):
+            platform_code = (plat.get("platform_code") or "").strip().upper()
+            prefix = (plat.get("code_prefix") or "").strip().upper()
+            name = (plat.get("platform_name") or "").strip()
+            if code_u and code_u in {platform_code, prefix}:
+                return plat
+            if name and (name == raw or name.lower() == name_l):
+                return plat
+        return None
 
     def list_online_platforms(self, active_only: bool = False, category: Optional[str] = None) -> List[Dict[str, Any]]:
         conn = self._get_connection()

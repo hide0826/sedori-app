@@ -55,3 +55,39 @@ def test_resolve_supplier_for_sku_legacy_lookup_returns_legacy_code(temp_store_d
     resolved = temp_store_db.resolve_supplier_for_sku("C2-001")
     assert resolved is not None
     assert resolved["supplier_code"] == "C2-001"
+
+
+def test_resolve_supplier_for_sku_matches_ec_platform_name(temp_store_db: StoreDatabase):
+    """仕入チャネルの名称「オフモール」を、ECコードの短縮名にする。"""
+    temp_store_db.add_online_platform(
+        {
+            "platform_code": "OFM",
+            "platform_name": "オフモール",
+            "category": "モール",
+            "code_prefix": "OFM",
+            "is_active": 1,
+        }
+    )
+    resolved = temp_store_db.resolve_supplier_for_sku("オフモール")
+    assert resolved is not None
+    assert resolved["supplier_code"] == "OFM"
+    assert resolved["store_name"] == "オフモール"
+
+
+def test_resolve_supplier_for_sku_matches_ec_platform_code_and_prefix(temp_store_db: StoreDatabase):
+    """ECコード本体と短縮名のどちらでも同じ短縮名を返す。"""
+    temp_store_db.add_online_platform(
+        {
+            "platform_code": "OFM",
+            "platform_name": "オフモール",
+            "category": "モール",
+            "code_prefix": "OF",
+            "is_active": 1,
+        }
+    )
+    by_code = temp_store_db.resolve_supplier_for_sku("OFM")
+    by_prefix = temp_store_db.resolve_supplier_for_sku("of")
+    by_typed = temp_store_db.resolve_supplier_for_sku("電脳:オフモール")
+    assert by_code is not None and by_code["supplier_code"] == "OF"
+    assert by_prefix is not None and by_prefix["supplier_code"] == "OF"
+    assert by_typed is not None and by_typed["supplier_code"] == "OF"

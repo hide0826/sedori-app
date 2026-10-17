@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -144,6 +145,25 @@ def save_route_json(web_id: str, payload: Dict[str, Any]) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def update_folder_location(old_folder: Path, new_folder: Path, route_date: str) -> None:
+    """index.json のフォルダパスと日付を、箱をリネームしたあとに合わせる。"""
+    old_path = Path(old_folder)
+    old_key = os.path.normcase(str(old_path))
+    data = load_index()
+    changed = False
+    for entry in (data.get("routes") or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        current = Path(str(entry.get("folder_path") or ""))
+        if current != old_path and os.path.normcase(str(current)) != old_key:
+            continue
+        entry["folder_path"] = str(new_folder)
+        entry["route_date"] = route_date
+        changed = True
+    if changed:
+        save_index(data)
 
 
 def make_web_id(route_date_ymd: str, route_name: str) -> str:

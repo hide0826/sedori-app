@@ -598,8 +598,9 @@ class InventoryListingMixin:
                 if len(unique_warnings) > 5:
                     warning_msg += f"\n他 {len(unique_warnings) - 5}件..."
                 warning_msg += (
-                    "\n\n店舗マスタに未登録のコードです。"
-                    "設定 → 店舗マスタで登録するか、ルート照合で使った店舗コードか確認してください。"
+                    "\n\n店舗マスタ、または設定の店舗コード設定（ECコード／フリマコード）に"
+                    "この名前かコードがありません。\n"
+                    "オフモールのようにネットの仕入先は、ECコードの名称と仕入チャネルを同じ文字にしてください。"
                 )
                 QMessageBox.warning(self, "店舗情報警告", warning_msg)
             

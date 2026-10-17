@@ -127,6 +127,11 @@
   <div class="card">
     <h2>全体</h2>
     <div class="row">
+      <label>日付</label>
+      <input type="date" id="route_date" />
+    </div>
+    <p class="hint">日付を変えて保存すると、箱の名前・Excel・レシート・商品画像など、日付の入ったファイル名も一緒に変わります。</p>
+    <div class="row">
       <label>出発</label>
       <input type="time" id="departure_time" />
       <button type="button" class="secondary" data-now="departure_time">今の時刻</button>
@@ -291,6 +296,7 @@
       document.getElementById("subtitle").textContent =
         (data.route_date || "") + " / " + (data.route_code || "") + " / " + WEB_ID;
 
+      document.getElementById("route_date").value = data.route_date || "";
       document.getElementById("departure_time").value = data.departure_time || "";
       document.getElementById("return_time").value = data.return_time || "";
       document.getElementById("toll_outbound").value = data.toll_outbound || "";
@@ -341,6 +347,7 @@
 
     function collectForm() {
       const next = Object.assign({}, doc);
+      next.route_date = document.getElementById("route_date").value || next.route_date || "";
       next.departure_time = document.getElementById("departure_time").value || "";
       next.return_time = document.getElementById("return_time").value || "";
       next.toll_outbound = document.getElementById("toll_outbound").value || "";
@@ -639,6 +646,21 @@
       const el = ev.target;
       if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) return;
       if (el.type === "file") return;
+      if (el.id === "route_date") {
+        const prev = (doc && doc.route_date) || "";
+        const next = el.value || "";
+        if (!next || next === prev) return;
+        const ok = window.confirm(
+          "日付を " + (prev || "（空）") + " から " + next + " に変えます。\n" +
+          "箱のフォルダ名、Excel、レシート、商品画像など、日付の入ったファイル名も変わります。"
+        );
+        if (!ok) {
+          el.value = prev;
+          return;
+        }
+        saveRoute();
+        return;
+      }
       if (isAutosaveField(el)) scheduleAutosave(200);
     });
 

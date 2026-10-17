@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from route_web import ROUTE_WEB_PORT
+from route_web.date_rename import RouteDateRenameError, change_route_date, parse_route_date
 from route_web.csv_inbox import (
     append_csv_file,
     inbox_dir,
@@ -202,9 +203,30 @@ def get_route(web_id: str) -> JSONResponse:
 @app.put("/api/route/{web_id}")
 def put_route(web_id: str, body: Dict[str, Any]) -> JSONResponse:
     existing = _require_doc(web_id)
+    folder = _require_folder(web_id)
     body = dict(body)
+    incoming_date = str(body.get("route_date") or "").strip()
+    if incoming_date:
+        try:
+            new_iso = parse_route_date(incoming_date)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        old_raw = str(existing.get("route_date") or "").strip()
+        old_iso = ""
+        if old_raw:
+            try:
+                old_iso = parse_route_date(old_raw)
+            except ValueError:
+                old_iso = ""
+        if old_iso and new_iso != old_iso:
+            try:
+                body = change_route_date(folder, body, old_iso, new_iso)
+            except RouteDateRenameError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        body["route_date"] = new_iso
     body["web_id"] = web_id
-    body["folder_path"] = existing.get("folder_path") or body.get("folder_path")
+    if not body.get("folder_path"):
+        body["folder_path"] = existing.get("folder_path") or str(folder)
     body["schema_version"] = existing.get("schema_version") or 1
     body = stamp_updated(body)
     try:
