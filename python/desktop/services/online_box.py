@@ -267,6 +267,7 @@ def build_photo_candidate_rows(
                 "jan": jan,
                 "asin": asin,
                 "product_name": name,
+                "condition": _cell(record, "コンディション", "condition", "condition_note"),
                 "store_code": ONLINE_ROUTE_CODE,
                 "store_name": "ネット仕入",
                 "purchase_date": route_date or _cell(record, "仕入れ日", "purchase_date"),

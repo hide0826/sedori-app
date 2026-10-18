@@ -490,6 +490,7 @@ def get_done_products(web_id: str) -> JSONResponse:
                 "no_image": no_image,
                 "product_name": row.get("product_name") or "",
                 "sku": row.get("sku") or "",
+                "condition": row.get("condition") or "",
                 "route_name": str(doc.get("route_name") or ""),
                 "route_date": str(doc.get("route_date") or ""),
             }

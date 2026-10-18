@@ -101,6 +101,7 @@ def _list_online_photo_candidates(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "jan": jan,
                 "asin": asin,
                 "product_name": name,
+                "condition": _condition_text(item),
                 "store_code": str(item.get("store_code") or "NET").strip() or "NET",
                 "store_name": str(item.get("store_name") or "ネット仕入").strip(),
                 "purchase_date": _date_key(item.get("purchase_date")) or route_meta["route_date"],
@@ -109,7 +110,50 @@ def _list_online_photo_candidates(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "route_date": route_meta["route_date"],
             }
         )
+    if any(not row.get("condition") and row.get("sku") for row in out):
+        by_sku: Dict[str, str] = {}
+        for snap in _latest_snapshot_rows(None):
+            snap_sku = str(snap.get("sku") or "").strip()
+            cond = str(snap.get("condition") or "").strip()
+            if snap_sku and cond:
+                by_sku.setdefault(snap_sku, cond)
+        for row in out:
+            if not row.get("condition"):
+                row["condition"] = by_sku.get(str(row.get("sku") or ""), "")
     return out
+
+
+_CONDITION_BY_CODE = {
+    1: "中古(ほぼ新品)",
+    2: "中古(非常に良い)",
+    3: "中古(良い)",
+    4: "中古(可)",
+    5: "コレクター商品(ほぼ新品)",
+    6: "コレクター商品(非常に良い)",
+    7: "コレクター商品(良い)",
+    8: "コレクター商品(可)",
+    10: "再生品",
+    11: "新品",
+}
+
+
+def _condition_text(*sources: Dict[str, Any]) -> str:
+    """仕入行のコンディション文言。番号だけのときは画面と同じ名前にする。"""
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in ("condition", "コンディション", "condition_note"):
+            text = str(source.get(key) or "").strip()
+            if text and text.lower() not in ("nan", "none"):
+                return text
+        try:
+            code = int(source.get("condition_code"))
+        except (TypeError, ValueError):
+            continue
+        label = _CONDITION_BY_CODE.get(code)
+        if label:
+            return label
+    return ""
 
 
 def _jan_key(value: Any) -> str:
@@ -175,7 +219,8 @@ def _latest_snapshot_rows(db_path: Optional[str]) -> List[Dict[str, Any]]:
                     "jan": record.get("JAN") if record.get("JAN") not in (None, "") else record.get("jan") or "",
                     "asin": record.get("ASIN") or record.get("asin") or "",
                     "product_name": str(record.get("商品名") or record.get("product_name") or "").strip(),
-                    "purchase_date": record.get("仕入日") or record.get("purchase_date") or "",
+                    "condition": _condition_text(record),
+                    "purchase_date": record.get("仕入日") or record.get("仕入れ日") or record.get("purchase_date") or "",
                     "store_code": str(record.get("仕入先") or record.get("store_code") or "").strip(),
                     "store_name": str(record.get("都道府県") or record.get("store_name") or "").strip(),
                 }
@@ -229,7 +274,9 @@ def list_route_purchases(doc: Dict[str, Any], *, db_path: str | None = None) -> 
     found: List[Dict[str, Any]] = []
     seen = set()
     pcur = purchases.conn.cursor()
-    pcur.execute("SELECT sku, purchase_date, store_code, store_name FROM purchases")
+    pcur.execute(
+        "SELECT sku, purchase_date, store_code, store_name, condition_note, condition_code FROM purchases"
+    )
     purchase_items = list(_latest_snapshot_rows(db_path))
     purchase_items.extend(dict(row) for row in pcur.fetchall())
     for item in purchase_items:
@@ -250,6 +297,7 @@ def list_route_purchases(doc: Dict[str, Any], *, db_path: str | None = None) -> 
                 "jan": jan,
                 "asin": asin,
                 "product_name": name,
+                "condition": _condition_text(item, product),
                 "store_code": code,
                 "store_name": str(item.get("store_name") or product.get("store_name") or "").strip(),
                 "purchase_date": route_date,
@@ -283,6 +331,7 @@ def list_route_purchases(doc: Dict[str, Any], *, db_path: str | None = None) -> 
                 "jan": jan,
                 "asin": asin,
                 "product_name": str(product.get("product_name") or "").strip(),
+                "condition": _condition_text(product),
                 "store_code": code,
                 "store_name": str(product.get("store_name") or "").strip(),
                 "purchase_date": route_date,
@@ -410,6 +459,7 @@ def _catalog_rows(db_path: Optional[str]) -> Tuple[List[Dict[str, Any]], List[Di
                     "jan": jan,
                     "asin": asin,
                     "product_name": str(item.get("product_name") or product.get("product_name") or "").strip(),
+                    "condition": _condition_text(item, product),
                     "store_code": code,
                     "store_name": str(
                         item.get("store_name") or product.get("store_name") or ""
@@ -432,7 +482,9 @@ def _catalog_rows(db_path: Optional[str]) -> Tuple[List[Dict[str, Any]], List[Di
         for record in _latest_snapshot_rows(db_path):
             add_once(str(record.get("sku") or ""), record, record)
         pcur = purchases.conn.cursor()
-        pcur.execute("SELECT sku, purchase_date, store_code, store_name FROM purchases")
+        pcur.execute(
+            "SELECT sku, purchase_date, store_code, store_name, condition_note, condition_code FROM purchases"
+        )
         for row in pcur.fetchall():
             item = dict(row)
             sku = str(item.get("sku") or "").strip()

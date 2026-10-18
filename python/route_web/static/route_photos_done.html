@@ -14,7 +14,7 @@
     h1 { font-size:1.15rem; margin:0 0 4px; }
     .sub { color:var(--muted); font-size:.85rem; margin-bottom:12px; }
     .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:12px; }
-    button { display:block; width:100%; text-align:left; background:#243044; color:#fff; border:0; border-radius:8px; padding:10px 12px; font-size:1rem; }
+    button { display:block; width:100%; text-align:left; background:#243044; color:#fff; border:0; border-radius:8px; padding:10px 12px; font-size:1rem; white-space:pre-line; line-height:1.35; }
     .badge { display:inline-block; margin-right:8px; padding:2px 8px; border-radius:999px; background:#6b4f1d; color:#ffe08a; font-size:.8rem; vertical-align:middle; }
     .hint { color:var(--muted); font-size:.85rem; }
     #status.ok { color:#3fb950; }
@@ -45,9 +45,17 @@
     function label(row) {
       const code = row.jan ? ("JAN " + row.jan) : ("ASIN " + (row.asin || ""));
       const photos = (row.files || []).length
-        ? (" / 写真 " + row.files.length + "枚")
+        ? ("写真 " + row.files.length + "枚")
         : "";
-      return (row.product_name || row.sku || "名称なし") + " / " + code + photos;
+      const cond = String(row.condition || "").trim();
+      const sku = String(row.sku || "").trim();
+      const lines = [(row.product_name || "名称なし") + " / " + code];
+      const meta = [];
+      if (cond) meta.push(cond);
+      if (sku && sku !== "未実装") meta.push("SKU " + sku);
+      if (photos) meta.push(photos);
+      if (meta.length) lines.push(meta.join(" / "));
+      return lines.join("\n");
     }
 
     function askReshoot(row) {

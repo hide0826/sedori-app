@@ -23,6 +23,7 @@ from services.online_box import (
     PHOTO_CANDIDATES_FILE,
     PRODUCT_DIR_NAME,
     build_online_box_name,
+    build_photo_candidate_rows,
     create_online_purchase_box,
     ensure_online_route_registration,
     format_box_date,
@@ -95,6 +96,22 @@ def test_resolve_default_online_root(tmp_path: Path):
     assert resolve_default_online_root([a, b]) == b
     a.mkdir()
     assert resolve_default_online_root([a, b]) == a
+
+
+def test_photo_candidate_keeps_condition_and_sku():
+    rows = build_photo_candidate_rows(
+        [
+            {
+                "SKU": "20261017-14200-OFM-6P-001",
+                "JAN": "4571157325181",
+                "商品名": "ワイヤレスヘッドホン",
+                "コンディション": "中古(非常に良い)",
+            }
+        ]
+    )
+    assert rows[0]["sku"] == "20261017-14200-OFM-6P-001"
+    assert rows[0]["condition"] == "中古(非常に良い)"
+    assert rows[0]["jan"] == "4571157325181"
 
 
 def test_register_online_box_and_candidates(tmp_path: Path, monkeypatch=None):
