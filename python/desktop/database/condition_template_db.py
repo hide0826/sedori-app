@@ -10,10 +10,21 @@
 
 import sqlite3
 import json
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from .db_path_resolve import resolve_hirio_db_path
+
+
+def _flatten_condition_description(text: str) -> str:
+    """Amazon非対応の改行を空白に潰して1行にする。"""
+    if not text:
+        return ""
+    t = str(text).replace("\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
+    t = re.sub(r"\n+", " ", t)
+    t = re.sub(r"[ \t　]+", " ", t)
+    return t.strip()
 
 
 class ConditionTemplateDatabase:
@@ -141,7 +152,8 @@ class ConditionTemplateDatabase:
         return dict(row) if row else {}
 
     def save_condition_description(self, condition_key: str, condition_name: str, description: str):
-        """説明文保存"""
+        """説明文保存（Amazon非対応のため常に1行化）"""
+        description = _flatten_condition_description(description)
         conn = self._get_connection()
         cursor = conn.cursor()
         
@@ -309,10 +321,10 @@ class ConditionTemplateDatabase:
             raise Exception(f"欠品キーワード辞書の保存に失敗しました: {str(e)}")
     
     def get_condition_description_text(self, condition_key: str) -> str:
-        """コンディションキーから説明文のテキストのみを取得"""
+        """コンディションキーから説明文のテキストのみを取得（常に1行）"""
         condition = self.get_condition_by_key(condition_key)
         if condition and condition.get('description'):
-            return condition['description']
+            return _flatten_condition_description(condition['description'])
         return ""
 
     def close(self):

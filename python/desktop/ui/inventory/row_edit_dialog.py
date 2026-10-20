@@ -128,7 +128,7 @@ _CUSTOM_CHECKBOXES_PER_ROW = 3
 
 
 class InventoryRowEditDialog(QDialog):
-    """仕入データ1行を編集するダイアログ（コンディション説明は複数行・呼び出しボタン付き）"""
+    """仕入データ1行を編集するダイアログ（コンディション説明は1行・呼び出しボタン付き）"""
     
     def __init__(
         self,
@@ -291,9 +291,9 @@ class InventoryRowEditDialog(QDialog):
                 self._widgets["その他詳細"] = self.other_details_edit
                 form.addRow("その他詳細:", self.other_details_edit)
 
-                w = QPlainTextEdit()
-                w.setPlaceholderText("複数行入力可。改行は\\nで保存されます。")
-                w.setMinimumHeight(120)
+                # Amazonは改行非対応のため1行入力
+                w = QLineEdit()
+                w.setPlaceholderText("1行で入力（Amazonでは改行が反映されません）")
                 self._widgets[col] = w
                 form.addRow(QLabel(col + ":"), w)
             elif col == "コメント":
@@ -360,7 +360,7 @@ class InventoryRowEditDialog(QDialog):
                 val = ""
             val = str(val).strip() if val != "" else ""
             if col == "コンディション説明":
-                # 保存時は改行を\nで扱うので、表示時はリテラル \n を実際の改行に
+                # 旧・段落保存分も含め1行に揃えて表示
                 val = _normalize_condition_note_newlines(val)
             if isinstance(w, QPlainTextEdit):
                 w.setPlainText(val)
@@ -381,8 +381,16 @@ class InventoryRowEditDialog(QDialog):
     
     def _on_clear_condition_note(self) -> None:
         note_w = self._widgets.get("コンディション説明")
-        if note_w and isinstance(note_w, QPlainTextEdit):
+        if note_w and isinstance(note_w, (QPlainTextEdit, QLineEdit)):
             note_w.clear()
+
+    def _set_condition_note_text(self, text: str) -> None:
+        note_w = self._widgets.get("コンディション説明")
+        flat = _normalize_condition_note_newlines(text)
+        if isinstance(note_w, QLineEdit):
+            note_w.setText(flat)
+        elif isinstance(note_w, QPlainTextEdit):
+            note_w.setPlainText(flat)
 
     def _checked_detail_description(self) -> Optional[str]:
         """欠品・詳細がONなら詳細説明の文だけ。未チェックなら None。"""
@@ -413,8 +421,7 @@ class InventoryRowEditDialog(QDialog):
                     "チェックした項目の文が、詳細説明に登録されていません。",
                 )
                 return
-            if note_w and isinstance(note_w, QPlainTextEdit):
-                note_w.setPlainText(_normalize_condition_note_newlines(detail))
+            self._set_condition_note_text(detail)
             return
 
         other_details = ""
@@ -436,8 +443,7 @@ class InventoryRowEditDialog(QDialog):
         if not text:
             QMessageBox.information(self, "呼び出し", f"コンディション「{condition_text}」に対応する説明が登録されていません。\nコンディション説明タブで登録してください。")
             return
-        text = _normalize_condition_note_newlines(text)
-        note_w.setPlainText(text)
+        self._set_condition_note_text(text)
 
     def _collect_missing_selection_items(self) -> List[Dict[str, str]]:
         """欠品・詳細チェックと詳細説明タブの文面を収集する。"""
@@ -525,9 +531,7 @@ class InventoryRowEditDialog(QDialog):
         self._ai_generate_thread.start()
 
     def _on_ai_generate_finished(self, text: str) -> None:
-        note_w = self._widgets.get("コンディション説明")
-        if note_w and isinstance(note_w, QPlainTextEdit):
-            note_w.setPlainText(_normalize_condition_note_newlines(text))
+        self._set_condition_note_text(text)
 
     def _on_ai_generate_error(self, message: str) -> None:
         QMessageBox.warning(self, "呼び出し", message)
@@ -553,7 +557,7 @@ class InventoryRowEditDialog(QDialog):
             else:
                 val = w.text().strip()
             if col == "コンディション説明":
-                # 保存時は改行を \n で扱う（1行表示で行区切りに\nが入る形）
+                # 保存時も1行に正規化（Amazon反映用）
                 val = _to_stored_newlines(val) if val else ""
             elif col == "発送方法":
                 val = val or "FBA"

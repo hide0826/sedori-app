@@ -116,17 +116,22 @@ def _format_workflow_pipeline_html(active_step: Optional[int], segments: Optiona
 
 
 def _normalize_condition_note_newlines(s: str) -> str:
-    """DBなどでリテラル '\\n' として保存された改行を実際の改行に変換（表示用）"""
+    """コンディション説明を1行に正規化する。
+
+    Amazon のコンディション説明は改行が反映されないため、
+    リテラル '\\n'・実改行・連続空白をすべて空白1つへ潰す。
+    """
     if not s:
         return ""
-    return str(s).replace("\\n", "\n")
+    text = str(s).replace("\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\n+", " ", text)
+    text = re.sub(r"[ \t　]+", " ", text)
+    return text.strip()
 
 
 def _to_stored_newlines(s: str) -> str:
-    """実際の改行をリテラル '\\n' に変換（保存用・1行表示で行区切りに\\nが入る形）"""
-    if not s:
-        return ""
-    return str(s).replace("\r\n", "\n").replace("\n", "\\n").replace("\r", "\\n")
+    """保存用: 改行を空白に潰して1行にする（Amazon反映用）。"""
+    return _normalize_condition_note_newlines(s)
 
 
 def _is_repricing_enabled_value(value: Any) -> bool:
@@ -234,5 +239,6 @@ def checked_detail_description(
         parts.append(str(kw.get("内箱欠品", "") or "").strip())
     for key in sorted((k for k, on in flags.items() if on), key=custom_template_key_number):
         parts.append(str(kw.get(key, "") or "").strip())
-    return "\n".join(part for part in parts if part)
+    # Amazon 非対応のため改行ではなく空白でつなぐ
+    return " ".join(part for part in parts if part)
 

@@ -6,6 +6,7 @@ Gemini による Amazon 出品用コンディション説明の生成。
 from __future__ import annotations
 
 import logging
+import re
 from typing import Dict, List, Optional, Tuple
 
 try:
@@ -27,14 +28,23 @@ SYSTEM_PROMPT = """
 - 選択された欠品・詳細、その他詳細の内容は漏れなく記載する。ない情報は捏造しない。
 - 過剰な美品表現や、事実と異なる記述はしない。
 - {欠品} プレースホルダーがテンプレートにあれば、欠品情報で置き換えた形にする。
-- 改行は実際の改行で出力する（\\n という文字列は使わない）。
+- Amazonでは改行が反映されないため、必ず1行のみで出力する（改行・段落・\\n は使わない。区切りは空白や【】見出しで表現する）。
 """.strip()
 
 
 def _normalize_template_newlines(text: str) -> str:
+    """テンプレートを1行に正規化する（改行・リテラル\\n → 空白）。"""
     if not text:
         return ""
-    return str(text).replace("\\n", "\n")
+    text = str(text).replace("\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\n+", " ", text)
+    text = re.sub(r"[ \t　]+", " ", text)
+    return text.strip()
+
+
+def _flatten_to_single_line(text: str) -> str:
+    """生成結果も1行に揃える。"""
+    return _normalize_template_newlines(text)
 
 
 class GeminiConditionDescriptionService:
@@ -152,6 +162,6 @@ class GeminiConditionDescriptionService:
         )
         if text:
             self.model_name = used_model or self.model_name
-            return text, ""
+            return _flatten_to_single_line(text), ""
         self.last_error = error
         return None, error

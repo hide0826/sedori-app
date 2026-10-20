@@ -326,6 +326,12 @@ def _load_purchase_cost_map(skus: Sequence[str]) -> Dict[str, Dict[str, Any]]:
             if condition in (None, ""):
                 condition = rec.get("condition") or ""
             note = str(rec.get("condition_note") or rec.get("コンディション説明") or "")
+            # Amazon コンディション説明は改行非対応のため1行化
+            if note:
+                import re
+                note = note.replace("\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
+                note = re.sub(r"\n+", " ", note)
+                note = re.sub(r"[ \t　]+", " ", note).strip()
             result[sku] = {
                 "cost": cost,
                 "condition": condition if condition not in (None, "") else "",

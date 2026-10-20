@@ -9,6 +9,7 @@ from desktop.ui.inventory.support import (
     default_custom_template_label,
     list_custom_template_keys,
     next_custom_template_key,
+    _normalize_condition_note_newlines,
 )
 
 
@@ -50,7 +51,7 @@ def test_checked_detail_description_custom_flags():
         inner_box=False,
         custom_flags={"custom1": True, "custom4": True},
     )
-    assert text == "文1\n文4"
+    assert text == "文1 文4"
 
     assert (
         checked_detail_description(
@@ -61,3 +62,9 @@ def test_checked_detail_description_custom_flags():
         )
         is None
     )
+
+
+def test_normalize_condition_note_to_single_line():
+    assert _normalize_condition_note_newlines("あ\\nい\\nう") == "あ い う"
+    assert _normalize_condition_note_newlines("あ\nい\nう") == "あ い う"
+    assert _normalize_condition_note_newlines("  あ  い  ") == "あ い"

@@ -55,35 +55,29 @@ except ImportError:
 
 
 class ConditionTextEdit(QWidget):
-    """テーブルセル内に配置するテキストエリア"""
-    
+    """テーブルセル内に配置する1行入力（Amazonは改行非対応のため）"""
+
+    _ROW_HEIGHT = 36
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        from PySide6.QtWidgets import QPlainTextEdit
         from PySide6.QtGui import QFont
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(0)
-        # QPlainTextEditを使用（文字の重複表示を防ぐため）
-        self.text_edit = QPlainTextEdit()
-        self.text_edit.setMaximumHeight(100)
-        # QPlainTextEditは常にプレーンテキストのみなので、setAcceptRichText()は不要
-        
-        # フォント設定を明示的に指定（文字の重複表示を防ぐ）
+        # Amazon コンディション説明は改行が反映されないため、最初から1行入力にする
+        self.text_edit = QLineEdit()
+        self.text_edit.setPlaceholderText("1行で入力（改行は使えません）")
+
         font = QFont("Segoe UI", 9)
         font.setWeight(QFont.Weight.Normal)
         font.setStyleHint(QFont.StyleHint.SansSerif)
-        font.setHintingPreference(QFont.HintingPreference.PreferDefaultHinting)
         self.text_edit.setFont(font)
-        
-        # テーブルセル内のウィジェットとして正しく描画されるように設定
+
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
-        
-        # スタイルシートを直接設定（文字の重複表示を防ぐ）
-        # 背景色はrgbaではなくrgbを使用（重複描画を防ぐ）
-        # QPlainTextEdit用のスタイル
+
         self.text_edit.setStyleSheet("""
-            QPlainTextEdit {
+            QLineEdit {
                 background-color: rgb(60, 60, 60);
                 color: rgb(255, 255, 255);
                 border: 1px solid rgb(85, 85, 85);
@@ -95,25 +89,30 @@ class ConditionTextEdit(QWidget):
                 selection-background-color: rgb(0, 120, 212);
                 selection-color: rgb(255, 255, 255);
             }
-            QPlainTextEdit:focus {
+            QLineEdit:focus {
                 border: 1px solid rgb(90, 162, 255);
                 background-color: rgb(64, 64, 64);
             }
         """)
-        
-        # documentのスタイル設定（文字の重複表示を防ぐ）
-        doc = self.text_edit.document()
-        doc.setDefaultFont(font)
-        # ドキュメントのマージンを0にして重複描画を防ぐ
-        doc.setDocumentMargin(0)
-        
+
         layout.addWidget(self.text_edit)
-    
+
+    @staticmethod
+    def _flatten_to_single_line(text: str) -> str:
+        """既存の段落／\\n 保存分も1行に揃える。"""
+        if not text:
+            return ""
+        import re
+        t = str(text).replace("\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
+        t = re.sub(r"\n+", " ", t)
+        t = re.sub(r"[ \t　]+", " ", t)
+        return t.strip()
+
     def setText(self, text: str):
-        self.text_edit.setPlainText(text)
-    
+        self.text_edit.setText(self._flatten_to_single_line(text))
+
     def text(self) -> str:
-        return self.text_edit.toPlainText()
+        return self._flatten_to_single_line(self.text_edit.text())
 
 
 class ConditionTemplateWidget(QWidget):
@@ -218,7 +217,8 @@ class ConditionTemplateWidget(QWidget):
         
         # プレースホルダーの説明
         hint_label = QLabel(
-            "欠品情報を挿入したい位置に `{欠品}` と入力してください。\n"
+            "Amazonでは改行が反映されないため、各スタイルは1行で入力してください。\n"
+            "欠品情報を挿入したい位置に `{欠品}` と入力してください。"
             "欠品情報がない場合は自動的に削除されます。"
         )
         hint_label.setStyleSheet("color: #666; padding: 5px;")
@@ -246,13 +246,13 @@ class ConditionTemplateWidget(QWidget):
             name_item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
             self.table.setItem(i, 0, name_item)
             
-            # 説明文（テキストエリア）
+            # 説明文（1行入力）
             text_edit = ConditionTextEdit()
             self.text_edits[condition['key']] = text_edit
             self.table.setCellWidget(i, 1, text_edit)
             
-            # 行の高さを調整
-            self.table.setRowHeight(i, 100)
+            # 行の高さを調整（1行入力）
+            self.table.setRowHeight(i, ConditionTextEdit._ROW_HEIGHT)
         
         layout.addWidget(self.table)
         
@@ -336,7 +336,7 @@ class ConditionTemplateWidget(QWidget):
             text_edit = ConditionTextEdit()
             self.missing_text_edits[row_def["key"]] = text_edit
             self.keywords_table.setCellWidget(row_i, 1, text_edit)
-            self.keywords_table.setRowHeight(row_i, 100)
+            self.keywords_table.setRowHeight(row_i, ConditionTextEdit._ROW_HEIGHT)
 
         layout.addWidget(self.keywords_table)
 
@@ -432,7 +432,7 @@ class ConditionTemplateWidget(QWidget):
         text_edit.setText(comment or "")
         self.missing_text_edits[key] = text_edit
         self.keywords_table.setCellWidget(row_i, 1, text_edit)
-        self.keywords_table.setRowHeight(row_i, 100)
+        self.keywords_table.setRowHeight(row_i, ConditionTextEdit._ROW_HEIGHT)
         self._custom_row_keys.append(key)
 
     def _clear_custom_rows(self) -> None:
@@ -453,14 +453,13 @@ class ConditionTemplateWidget(QWidget):
             # データベースのデータを辞書に変換
             db_data = {cond['condition_key']: cond for cond in conditions}
             
-            # 各コンディションの説明文を設定（DBでは改行を "\\n" で保存しているので表示用に実際の改行に変換）
+            # 各コンディションの説明文を設定（旧・段落保存分も1行に揃えて表示）
             for condition in CONDITIONS:
                 key = condition['key']
                 text_edit = self.text_edits.get(key)
                 if text_edit:
                     if key in db_data:
                         description = db_data[key].get('description', '') or ''
-                        description = (description or "").replace("\\n", "\n")
                         text_edit.setText(description)
                     else:
                         text_edit.setText('')
@@ -472,7 +471,7 @@ class ConditionTemplateWidget(QWidget):
             )
     
     def save_data(self):
-        """データをデータベースに保存（改行は "\\n" で保存し、1行表示で行区切りに\\nが入る形にする）"""
+        """データをデータベースに保存（Amazon非対応のため常に1行で保存）"""
         try:
             for condition in CONDITIONS:
                 key = condition['key']
@@ -480,7 +479,7 @@ class ConditionTemplateWidget(QWidget):
                 text_edit = self.text_edits.get(key)
                 
                 if text_edit:
-                    description = text_edit.text().replace("\r\n", "\n").replace("\n", "\\n").replace("\r", "\\n")
+                    description = text_edit.text()
                     self.condition_db.save_condition_description(key, name, description)
             
             QMessageBox.information(
@@ -613,7 +612,8 @@ class ConditionTemplateWidget(QWidget):
             for row_def in MISSING_FIXED_ROWS:
                 key = row_def["key"]
                 text_edit = self.missing_text_edits.get(key)
-                text_val = text_edit.text().strip() if text_edit else ""
+                # text() 側で1行化済み
+                text_val = text_edit.text() if text_edit else ""
                 if text_val:
                     keywords[key] = text_val
                 else:
@@ -622,7 +622,7 @@ class ConditionTemplateWidget(QWidget):
             custom_labels: dict = {}
             for ck in list(self._custom_row_keys):
                 text_edit = self.missing_text_edits.get(ck)
-                text_val = text_edit.text().strip() if text_edit else ""
+                text_val = text_edit.text() if text_edit else ""
                 if text_val:
                     keywords[ck] = text_val
                 le = self.missing_label_edits.get(ck)

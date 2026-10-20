@@ -861,7 +861,7 @@ class InventoryListingMixin:
                 
                 # 欠品情報がある場合のみコンディション説明を生成
                 if missing_info is not None:
-                    # コンディション説明を生成（アプリ内表示用: 改行あり）
+                    # コンディション説明を生成（Amazon向け: 常に1行）
                     condition_note = self._build_condition_note(condition_key, str(comment), for_csv=False)
                     
                     # 生成されたコンディション説明を設定
@@ -898,73 +898,39 @@ class InventoryListingMixin:
 
     def _build_condition_note(self, condition_key: str, comment: str, for_csv: bool = False) -> str:
         """
-        conditionNoteを生成（【付属品】の後ろを欠品情報に置き換え）
-        
-        Args:
-            condition_key: コンディションキー（'new', 'like_new', etc.）
-            comment: 仕入データのコメント欄
-            for_csv: CSV出力用の場合True（改行を削除）
-        
-        Returns:
-            生成されたconditionNote（改行なし、1行）
+        conditionNoteを生成（1行・Amazon向け）。
+
+        `{欠品}` があれば置き換え。なければ `【付属品】` の直後を欠品情報に置き換え。
+        どちらも無ければ先頭へ付与する。
         """
         try:
             import re
-            
-            # テンプレート説明文を取得（DBでは改行を "\\n" で保存しているので実際の改行に変換）
+
             template_text = self.condition_template_db.get_condition_description_text(condition_key)
             if not template_text:
                 template_text = ""
             template_text = _normalize_condition_note_newlines(template_text)
-            
-            # 欠品情報を抽出
+
             missing_info = self._extract_missing_info(comment)
-            
-            # 欠品情報がある場合のみ処理
+
             if missing_info is not None and missing_info:
-                # 【付属品】の行を見つけて、その後の部分を欠品情報に置き換え
-                # パターン: 【付属品】で始まる行の【付属品】より後ろを置き換え
-                lines = template_text.split('\n')
-                replaced = False
-                
-                for i, line in enumerate(lines):
-                    if line.strip().startswith('【付属品】'):
-                        # 【付属品】の後ろの部分を欠品情報に置き換え
-                        # 「【付属品】」の部分は残して、その後の部分を削除して欠品情報を追加
-                        lines[i] = f"【付属品】{missing_info}"
-                        replaced = True
-                        break
-                
-                # 【付属品】の行が見つからない場合は、先頭に追加
-                if not replaced:
-                    # テンプレートの先頭に【付属品】行を追加
-                    if template_text.strip():
-                        template_text = f"【付属品】{missing_info}\n{template_text}"
-                    else:
-                        template_text = f"【付属品】{missing_info}"
+                if "{欠品}" in template_text:
+                    template_text = template_text.replace("{欠品}", missing_info)
+                elif "【付属品】" in template_text:
+                    # 1行内の【付属品】直後〜次の【見出し】手前までを置き換え
+                    template_text = re.sub(
+                        r"【付属品】[^【]*",
+                        f"【付属品】{missing_info}",
+                        template_text,
+                        count=1,
+                    )
                 else:
-                    # 置き換えが成功したので、linesを結合してtemplate_textを更新
-                    template_text = '\n'.join(lines)
-            else:
-                # 欠品情報がない場合はテンプレートをそのまま使用
-                pass
-            
-            # 改行を削除して1行にする
-            result = template_text.strip()
-            # 改行を空白に置換（連続する改行も1つの空白に）
-            result = re.sub(r'\n+', ' ', result)
-            # 連続する空白を1つに
-            result = re.sub(r' +', ' ', result)
-            result = result.strip()
-            
-            return result
-        except Exception as e:
-            # エラー時はコメントをそのまま返す（改行削除）
-            result = comment if comment else ""
-            import re
-            result = re.sub(r'\n+', ' ', result)
-            result = re.sub(r' +', ' ', result).strip()
-            return result
+                    prefix = f"【付属品】{missing_info}"
+                    template_text = f"{prefix} {template_text}".strip() if template_text.strip() else prefix
+
+            return _normalize_condition_note_newlines(template_text)
+        except Exception:
+            return _normalize_condition_note_newlines(comment if comment else "")
 
     def _normalize_asin_jan(self, value):
         """
@@ -1077,16 +1043,11 @@ class InventoryListingMixin:
                 # コンディション文字列を取得（そのままcondition列に出力）
                 condition_text = row.get('コンディション', '新品')
 
-                # 仕入データ一覧の「コンディション説明」カラムの内容をそのまま使用
-                # ※ユーザーが画面で確認している文章をそのままCSVに出したい要件
-                import re
+                # 仕入データ一覧の「コンディション説明」を1行化してCSVへ
                 existing_condition_note = row.get('コンディション説明', '')
-                condition_note = str(existing_condition_note or "").strip()
-                # 改行はCSV上では1行にしたいので空白に変換
-                if condition_note:
-                    condition_note = re.sub(r'\r\n|\r|\n', ' ', condition_note)
-                    # 連続する空白を1つに
-                    condition_note = re.sub(r' +', ' ', condition_note).strip()
+                condition_note = _normalize_condition_note_newlines(
+                    str(existing_condition_note or "")
+                )
                 
                 # ASIN/JANコードの科学的記数法を正規化
                 asin_value = self._normalize_asin_jan(row.get('ASIN', ''))

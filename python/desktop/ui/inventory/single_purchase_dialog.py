@@ -389,9 +389,9 @@ class SinglePurchaseInputDialog(QDialog):
             fee_action_layout.addWidget(self.ocr_fee_btn)
             layout.addRow("", fee_action_row)
 
-        self.condition_note_edit = QPlainTextEdit()
-        self.condition_note_edit.setMinimumHeight(70)
-        self.condition_note_edit.setPlaceholderText("コンディション説明（任意）")
+        # Amazonは改行非対応のため1行入力
+        self.condition_note_edit = QLineEdit()
+        self.condition_note_edit.setPlaceholderText("コンディション説明（任意・1行）")
         layout.addRow("コンディション説明:", self.condition_note_edit)
 
         self.missing_manual_checkbox = QCheckBox("取説欠品")
@@ -765,7 +765,7 @@ class SinglePurchaseInputDialog(QDialog):
                     "チェックした項目の文が、詳細説明に登録されていません。",
                 )
                 return
-            self.condition_note_edit.setPlainText(_normalize_condition_note_newlines(detail))
+            self.condition_note_edit.setText(_normalize_condition_note_newlines(detail))
             return
 
         condition_text = self.condition_combo.currentText().strip()
@@ -782,7 +782,7 @@ class SinglePurchaseInputDialog(QDialog):
                     f"コンディション「{condition_text}」に対応する説明が登録されていません。\nコンディション説明タブで登録してください。"
                 )
                 return
-            self.condition_note_edit.setPlainText(_normalize_condition_note_newlines(text))
+            self.condition_note_edit.setText(_normalize_condition_note_newlines(text))
         except Exception as e:
             QMessageBox.warning(self, "呼び出しエラー", f"コンディション説明の呼び出しに失敗しました。\n{str(e)}")
 
@@ -1969,7 +1969,7 @@ class SinglePurchaseInputDialog(QDialog):
         body_comment = self.comment_edit.toPlainText().strip()
         merged_comment = f"{header_comment} {body_comment}".strip()
 
-        condition_note = _to_stored_newlines(self.condition_note_edit.toPlainText().strip())
+        condition_note = _to_stored_newlines(self.condition_note_edit.text().strip())
 
         sku_text = self.sku_edit.text().strip()
         if not sku_text:
