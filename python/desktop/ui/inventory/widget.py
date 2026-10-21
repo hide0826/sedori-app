@@ -111,6 +111,7 @@ from .mercari_capture_mixin import InventoryMercariCaptureMixin
 from .row_edit_dialog import InventoryRowEditDialog  # noqa: F401
 from .spot_purchase_dialog import SpotPurchaseDialog
 from .single_purchase_dialog import SinglePurchaseInputDialog
+from .standby_dialog import HitStandbyDialog
 from .snapshot_dialog import CombinedSnapshotDialog  # noqa: F401
 
 
@@ -272,6 +273,11 @@ class InventoryWidget(
 
     def _apply_purchase_mode_ui(self) -> None:
         """ネット仕入タブではルート関連を隠す。"""
+        standby = getattr(self, "standby_btn", None)
+        if standby is not None:
+            # スタンバイはネット仕入だけ
+            standby.setVisible(self.is_online_mode)
+            standby.setEnabled(self.is_online_mode)
         if not self.is_online_mode:
             return
         for attr in (
@@ -541,6 +547,17 @@ class InventoryWidget(
         )
         self.single_purchase_btn.setStyleSheet(green_button_style)
         aux_layout.addWidget(self.single_purchase_btn)
+
+        self.standby_btn = QPushButton("スタンバイ")
+        self.standby_btn.setToolTip(
+            "Discordの仕入れ候補（画像・購入入力済み）を見ます。\n"
+            "「仕入一覧に送る」でネット仕入一覧へ足し、出品CSV生成できます。"
+        )
+        self.standby_btn.clicked.connect(
+            lambda: self._run_action_with_status("スタンバイ", self.open_hit_standby_dialog)
+        )
+        self.standby_btn.setStyleSheet(green_button_style)
+        aux_layout.addWidget(self.standby_btn)
 
         self.spot_purchase_btn = QPushButton("スポット")
         self.spot_purchase_btn.setToolTip(
@@ -856,6 +873,18 @@ class InventoryWidget(
             QMessageBox.critical(self, "エラー", f"スポット仕入ルート追加中にエラーが発生しました:\n{str(e)}")
             import traceback
             traceback.print_exc()
+
+    def open_hit_standby_dialog(self) -> None:
+        """Discord仕入れ候補のスタンバイ画面を開く（ネット仕入のみ）。"""
+        if not self.is_online_mode:
+            QMessageBox.information(self, "スタンバイ", "ネット仕入タブだけで使えます。")
+            return
+
+        def _send(row: Dict[str, Any]) -> None:
+            self.append_single_purchase_row(row, notify=False)
+
+        dlg = HitStandbyDialog(on_send_row=_send, parent=self)
+        dlg.exec()
 
     def open_single_purchase_dialog(self):
         """単品仕入ダイアログを開き、入力データを仕入一覧へ1行追加する"""
