@@ -119,9 +119,16 @@ def _image_abs_paths(row: Dict[str, Any], shared: Optional[Path] = None) -> List
     return out
 
 
-def load_standby_items(*, shared: Optional[Path] = None) -> List[Dict[str, Any]]:
+def load_standby_items(
+    *,
+    shared: Optional[Path] = None,
+    include_pending: bool = False,
+) -> List[Dict[str, Any]]:
     """
     スタンバイ一覧（新しい順）。
+
+    既定は購入入力済みだけ（ネット仕入へ送る対象）。
+    include_pending=True のときだけ未購入スナップショットも混ぜる。
 
     各要素:
       kind: purchased | pending
@@ -162,48 +169,50 @@ def load_standby_items(*, shared: Optional[Path] = None) -> List[Dict[str, Any]]
             }
         )
 
-    # 未購入スナップショット（購入台帳に無いもの）
-    snap_root = snapshots_dir(shared_root)
-    if snap_root.is_dir():
-        for child in snap_root.iterdir():
-            if not child.is_dir():
-                continue
-            token = child.name
-            if token in seen_tokens:
-                continue
-            meta_path = child / "meta.json"
-            if not meta_path.is_file():
-                continue
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if not isinstance(meta, dict):
-                continue
-            if meta.get("kept"):
-                # 購入済だが purchases 行が無い稀ケース
-                continue
-            items.append(
-                {
-                    "kind": "pending",
-                    "token": token,
-                    "at": str(meta.get("notified_at") or ""),
-                    "action": "",
-                    "title": str(meta.get("title") or ""),
-                    "asin": str(meta.get("asin") or "").upper(),
-                    "url": str(meta.get("url") or ""),
-                    "keyword": str(meta.get("keyword") or ""),
-                    "source": str(meta.get("source") or ""),
-                    "buy_yen": _as_int(meta.get("buy_default_yen") or meta.get("price_yen")),
-                    "sell_yen": _as_int(meta.get("sell_estimate_yen")),
-                    "profit_yen": None,
-                    "margin_rate": None,
-                    "fee_note": "未購入（Discord通知のスナップショット）",
-                    "image_files": _image_abs_paths(meta, shared_root),
-                    "imported": False,
-                    "raw": meta,
-                }
-            )
+    if include_pending:
+        # 未購入スナップショット（購入台帳に無いもの）
+        snap_root = snapshots_dir(shared_root)
+        if snap_root.is_dir():
+            for child in snap_root.iterdir():
+                if not child.is_dir():
+                    continue
+                token = child.name
+                if token in seen_tokens:
+                    continue
+                meta_path = child / "meta.json"
+                if not meta_path.is_file():
+                    continue
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if not isinstance(meta, dict):
+                    continue
+                if meta.get("kept"):
+                    continue
+                items.append(
+                    {
+                        "kind": "pending",
+                        "token": token,
+                        "at": str(meta.get("notified_at") or ""),
+                        "action": "",
+                        "title": str(meta.get("title") or ""),
+                        "asin": str(meta.get("asin") or "").upper(),
+                        "url": str(meta.get("url") or ""),
+                        "keyword": str(meta.get("keyword") or ""),
+                        "source": str(meta.get("source") or ""),
+                        "buy_yen": _as_int(
+                            meta.get("buy_default_yen") or meta.get("price_yen")
+                        ),
+                        "sell_yen": _as_int(meta.get("sell_estimate_yen")),
+                        "profit_yen": None,
+                        "margin_rate": None,
+                        "fee_note": "未購入（Discord通知のスナップショット）",
+                        "image_files": _image_abs_paths(meta, shared_root),
+                        "imported": False,
+                        "raw": meta,
+                    }
+                )
 
     items.sort(key=lambda r: str(r.get("at") or ""), reverse=True)
     return items

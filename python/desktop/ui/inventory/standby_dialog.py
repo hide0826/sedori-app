@@ -4,6 +4,7 @@
 ネット仕入のスタンバイ画面。
 
 Discord 審査通過 →（Webで購入入力）→ ここに表示 → ネット仕入一覧へ送る。
+購入済みだけを表示し、チェックした複数件をまとめて送れる。
 """
 from __future__ import annotations
 
@@ -41,9 +42,12 @@ except ImportError:
         resolve_hirio_shared_dir,
     )
 
+# 列: 0=チェック, 1=状態, 2=日時, 3=商品名, 4=仕入, 5=販売予定, 6=粗利
+_COL_CHECK = 0
+
 
 class HitStandbyDialog(QDialog):
-    """Discord仕入れ候補のスタンバイ一覧。"""
+    """Discord仕入れ候補のスタンバイ一覧（購入済みのみ）。"""
 
     def __init__(
         self,
@@ -61,8 +65,8 @@ class HitStandbyDialog(QDialog):
         root = QVBoxLayout(self)
         shared = resolve_hirio_shared_dir()
         self.hint = QLabel(
-            "Discordで審査を通った候補です。"
-            "購入入力済みの行を選んで「仕入一覧に送る」と、ネット仕入一覧へ足します"
+            "購入入力済みの候補だけを表示します。"
+            "チェックした商品を「チェックした商品を仕入一覧に送る」でまとめて送れます"
             "（出品CSV生成できる形式）。\n"
             f"データ場所: {shared}"
         )
@@ -75,16 +79,30 @@ class HitStandbyDialog(QDialog):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
+
+        check_row = QHBoxLayout()
+        self.select_all_btn = QPushButton("未送信を全選択")
+        self.select_all_btn.setToolTip("まだ送っていない購入済みにチェックを付けます")
+        self.select_all_btn.clicked.connect(self._select_all_unsent)
+        check_row.addWidget(self.select_all_btn)
+        self.clear_check_btn = QPushButton("チェック解除")
+        self.clear_check_btn.clicked.connect(self._clear_checks)
+        check_row.addWidget(self.clear_check_btn)
+        check_row.addStretch()
+        left_layout.addLayout(check_row)
+
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
+        self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(
-            ["状態", "日時", "商品名", "仕入", "販売予定", "粗利"]
+            ["", "状態", "日時", "商品名", "仕入", "販売予定", "粗利"]
         )
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.itemSelectionChanged.connect(self._on_select)
+        self.table.cellClicked.connect(self._on_cell_clicked)
+        self.table.itemChanged.connect(self._on_item_changed)
         left_layout.addWidget(self.table)
         splitter.addWidget(left)
 
@@ -115,10 +133,9 @@ class HitStandbyDialog(QDialog):
         self.open_url_btn.setEnabled(False)
         btn_row.addWidget(self.open_url_btn)
 
-        self.send_btn = QPushButton("仕入一覧に送る")
+        self.send_btn = QPushButton("チェックした商品を仕入一覧に送る")
         self.send_btn.setToolTip(
-            "選んだ購入済み候補を、ネット仕入一覧のうしろへ1件足します。"
-            "出品CSV生成と同じ列形式です。"
+            "チェックした購入済み候補を、ネット仕入一覧のうしろへまとめて足します。"
         )
         self.send_btn.setStyleSheet(
             "QPushButton { background-color: #2e7d32; color: white; font-weight: bold; "
@@ -126,7 +143,7 @@ class HitStandbyDialog(QDialog):
             "QPushButton:hover { background-color: #1b5e20; }"
             "QPushButton:disabled { background-color: #555; color: #aaa; }"
         )
-        self.send_btn.clicked.connect(self._send_current)
+        self.send_btn.clicked.connect(self._send_checked)
         self.send_btn.setEnabled(False)
         btn_row.addWidget(self.send_btn)
         btn_row.addStretch()
@@ -149,63 +166,106 @@ class HitStandbyDialog(QDialog):
 
     def reload(self) -> None:
         try:
-            self._items = load_standby_items()
+            # 購入入力済みだけ（未購入スナップショットは出さない）
+            self._items = load_standby_items(include_pending=False)
         except Exception as exc:  # noqa: BLE001
             self._items = []
             QMessageBox.warning(self, "スタンバイ", f"読込に失敗しました:\n{exc}")
         self._fill_table()
-        self._clear_detail()
 
     def _fill_table(self) -> None:
-        self.table.setRowCount(len(self._items))
-        for row, item in enumerate(self._items):
-            kind = str(item.get("kind") or "")
-            imported = bool(item.get("imported"))
-            if kind == "pending":
-                status = "未購入"
-            elif imported:
-                status = "送済"
-            else:
-                status = "購入済"
+        self.table.blockSignals(True)
+        try:
+            self.table.setRowCount(len(self._items))
+            for row, item in enumerate(self._items):
+                imported = bool(item.get("imported"))
+                status = "送済" if imported else "購入済"
 
-            def _cell(text: str) -> QTableWidgetItem:
-                cell = QTableWidgetItem(text)
-                cell.setData(Qt.ItemDataRole.UserRole, row)
-                return cell
+                check = QTableWidgetItem()
+                check.setFlags(
+                    Qt.ItemFlag.ItemIsUserCheckable
+                    | Qt.ItemFlag.ItemIsEnabled
+                    | Qt.ItemFlag.ItemIsSelectable
+                )
+                # 送済はチェック不可（再送防止）
+                if imported:
+                    check.setFlags(Qt.ItemFlag.ItemIsSelectable)
+                    check.setCheckState(Qt.CheckState.Unchecked)
+                else:
+                    check.setCheckState(Qt.CheckState.Unchecked)
+                check.setData(Qt.ItemDataRole.UserRole, row)
+                self.table.setItem(row, _COL_CHECK, check)
 
-            self.table.setItem(row, 0, _cell(status))
-            self.table.setItem(row, 1, _cell(str(item.get("at") or "")[:19]))
-            self.table.setItem(row, 2, _cell((str(item.get("title") or ""))[:60]))
-            buy = item.get("buy_yen")
-            sell = item.get("sell_yen")
-            profit = item.get("profit_yen")
-            self.table.setItem(
-                row, 3, _cell(f"{int(buy):,}円" if isinstance(buy, int) else "-")
-            )
-            self.table.setItem(
-                row, 4, _cell(f"{int(sell):,}円" if isinstance(sell, int) else "-")
-            )
-            self.table.setItem(
-                row, 5, _cell(f"{int(profit):,}円" if isinstance(profit, int) else "-")
-            )
-        self.table.resizeColumnsToContents()
+                values = [
+                    status,
+                    str(item.get("at") or "")[:19],
+                    (str(item.get("title") or ""))[:60],
+                    f"{int(item['buy_yen']):,}円"
+                    if isinstance(item.get("buy_yen"), int)
+                    else "-",
+                    f"{int(item['sell_yen']):,}円"
+                    if isinstance(item.get("sell_yen"), int)
+                    else "-",
+                    f"{int(item['profit_yen']):,}円"
+                    if isinstance(item.get("profit_yen"), int)
+                    else "-",
+                ]
+                for col, text in enumerate(values, start=1):
+                    cell = QTableWidgetItem(text)
+                    cell.setData(Qt.ItemDataRole.UserRole, row)
+                    self.table.setItem(row, col, cell)
+            self.table.resizeColumnsToContents()
+            self.table.setColumnWidth(_COL_CHECK, 36)
+            if self._items:
+                self.table.selectRow(0)
+        finally:
+            self.table.blockSignals(False)
+
         if self._items:
-            self.table.selectRow(0)
+            self._show_item(0)
+        else:
+            self._clear_detail()
+        self._update_send_btn()
 
     def _clear_detail(self) -> None:
         self._current = None
         self.detail_title.setText("（行を選んでください）")
         self.detail_meta.setText("")
         self.open_url_btn.setEnabled(False)
-        self.send_btn.setEnabled(False)
         self._set_thumbs([])
 
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        if item is not None and item.column() == _COL_CHECK:
+            self._update_send_btn()
+
+    def _on_cell_clicked(self, row: int, column: int) -> None:
+        # チェック列クリック時はトグル（送済以外）
+        if column == _COL_CHECK:
+            cell = self.table.item(row, _COL_CHECK)
+            if cell is not None and (cell.flags() & Qt.ItemFlag.ItemIsUserCheckable):
+                self.table.blockSignals(True)
+                try:
+                    if cell.checkState() == Qt.CheckState.Checked:
+                        cell.setCheckState(Qt.CheckState.Unchecked)
+                    else:
+                        cell.setCheckState(Qt.CheckState.Checked)
+                finally:
+                    self.table.blockSignals(False)
+                self._update_send_btn()
+        self._show_item(row)
+
     def _on_select(self) -> None:
-        rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
-        if not rows:
-            self._clear_detail()
-            return
-        idx = rows[0].row()
+        idx = self.table.currentRow()
+        if idx < 0:
+            model = self.table.selectionModel()
+            rows = model.selectedRows() if model is not None else []
+            if not rows:
+                self._clear_detail()
+                return
+            idx = rows[0].row()
+        self._show_item(idx)
+
+    def _show_item(self, idx: int) -> None:
         if idx < 0 or idx >= len(self._items):
             self._clear_detail()
             return
@@ -216,11 +276,10 @@ class HitStandbyDialog(QDialog):
         sell = item.get("sell_yen")
         profit = item.get("profit_yen")
         margin = item.get("margin_rate")
-        margin_txt = f"{float(margin) * 100:.1f}%" if isinstance(margin, (int, float)) else "-"
-        kind = item.get("kind")
-        if kind == "pending":
-            status = "未購入（Webの購入ボタンで金額を入れてください）"
-        elif item.get("imported"):
+        margin_txt = (
+            f"{float(margin) * 100:.1f}%" if isinstance(margin, (int, float)) else "-"
+        )
+        if item.get("imported"):
             status = "ネット仕入へ送済"
         else:
             status = "購入済・未送信"
@@ -234,9 +293,52 @@ class HitStandbyDialog(QDialog):
             f"{item.get('fee_note') or ''}"
         )
         self.open_url_btn.setEnabled(bool(str(item.get("url") or "").strip()))
-        can_send = kind == "purchased" and not bool(item.get("imported"))
-        self.send_btn.setEnabled(can_send)
         self._set_thumbs(list(item.get("image_files") or []))
+
+    def _checked_rows(self) -> List[int]:
+        rows: List[int] = []
+        for row in range(self.table.rowCount()):
+            cell = self.table.item(row, _COL_CHECK)
+            if cell is None:
+                continue
+            if cell.checkState() == Qt.CheckState.Checked:
+                rows.append(row)
+        return rows
+
+    def _update_send_btn(self) -> None:
+        n = len(self._checked_rows())
+        self.send_btn.setEnabled(n > 0)
+        if n > 0:
+            self.send_btn.setText(f"チェックした商品を仕入一覧に送る（{n}件）")
+        else:
+            self.send_btn.setText("チェックした商品を仕入一覧に送る")
+
+    def _select_all_unsent(self) -> None:
+        self.table.blockSignals(True)
+        try:
+            for row, item in enumerate(self._items):
+                cell = self.table.item(row, _COL_CHECK)
+                if cell is None:
+                    continue
+                if item.get("imported"):
+                    cell.setCheckState(Qt.CheckState.Unchecked)
+                    continue
+                if cell.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                    cell.setCheckState(Qt.CheckState.Checked)
+        finally:
+            self.table.blockSignals(False)
+        self._update_send_btn()
+
+    def _clear_checks(self) -> None:
+        self.table.blockSignals(True)
+        try:
+            for row in range(self.table.rowCount()):
+                cell = self.table.item(row, _COL_CHECK)
+                if cell is not None:
+                    cell.setCheckState(Qt.CheckState.Unchecked)
+        finally:
+            self.table.blockSignals(False)
+        self._update_send_btn()
 
     def _set_thumbs(self, paths: List[Path]) -> None:
         while self.thumbs_layout.count():
@@ -273,39 +375,54 @@ class HitStandbyDialog(QDialog):
         if url:
             QDesktopServices.openUrl(QUrl(url))
 
-    def _send_current(self) -> None:
-        item = self._current
-        if not item:
-            return
-        if item.get("kind") != "purchased":
+    def _send_checked(self) -> None:
+        rows = self._checked_rows()
+        if not rows:
             QMessageBox.information(
-                self,
-                "スタンバイ",
-                "未購入の候補は送れません。先に Discord の「購入した」から金額を保存してください。",
+                self, "スタンバイ", "送る商品にチェックを付けてください。"
             )
             return
-        if item.get("imported"):
-            QMessageBox.information(self, "スタンバイ", "この候補はすでに送済みです。")
-            return
-        asin = str(item.get("asin") or "").strip()
-        if not asin:
-            QMessageBox.warning(self, "スタンバイ", "ASIN が無いため送れません。")
-            return
-        try:
-            row = purchase_to_inventory_row(item)
-            self._on_send_row(row)
-            mark_imported(str(item.get("token") or ""))
-            item["imported"] = True
-            self._fill_table()
-            # 同じ行を再選択
-            for i, it in enumerate(self._items):
-                if it.get("token") == item.get("token"):
-                    self.table.selectRow(i)
-                    break
-            QMessageBox.information(
+
+        ok_count = 0
+        skip: List[str] = []
+        errors: List[str] = []
+        for row in rows:
+            if row < 0 or row >= len(self._items):
+                continue
+            item = self._items[row]
+            title = (str(item.get("title") or "")[:40]) or "(無題)"
+            if item.get("imported"):
+                skip.append(f"{title}（送済）")
+                continue
+            asin = str(item.get("asin") or "").strip()
+            if not asin:
+                skip.append(f"{title}（ASINなし）")
+                continue
+            try:
+                inv_row = purchase_to_inventory_row(item)
+                self._on_send_row(inv_row)
+                mark_imported(str(item.get("token") or ""))
+                item["imported"] = True
+                ok_count += 1
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{title}: {exc}")
+
+        self._fill_table()
+
+        parts = [f"{ok_count} 件をネット仕入一覧に送りました。"]
+        if skip:
+            parts.append("スキップ: " + " / ".join(skip[:8]))
+            if len(skip) > 8:
+                parts.append(f"ほか {len(skip) - 8} 件")
+        if errors:
+            parts.append("失敗: " + " / ".join(errors[:5]))
+        if ok_count > 0 and not errors:
+            QMessageBox.information(self, "スタンバイ", "\n".join(parts))
+        elif ok_count > 0:
+            QMessageBox.warning(self, "スタンバイ", "\n".join(parts))
+        else:
+            QMessageBox.warning(
                 self,
                 "スタンバイ",
-                "ネット仕入一覧に1件送りました。出品CSV生成が使えます。",
+                "送れる商品がありませんでした。\n" + "\n".join(parts[1:]),
             )
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "スタンバイ", f"送信に失敗しました:\n{exc}")
