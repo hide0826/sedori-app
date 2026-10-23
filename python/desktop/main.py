@@ -185,7 +185,23 @@ def main():
     print("HIRIO デスクトップアプリを起動中...")
     # グローバル例外ハンドラ（コンソールが一瞬で閉じる環境でもログに残す）
     sys.excepthook = _global_excepthook
-    
+
+    # 夜の再起動で戻ってきたとき、完了マークをここで付ける
+    try:
+        from services.backup_service import complete_nightly_restart_on_startup
+    except ImportError:
+        try:
+            from desktop.services.backup_service import (  # type: ignore
+                complete_nightly_restart_on_startup,
+            )
+        except ImportError:
+            complete_nightly_restart_on_startup = None  # type: ignore
+    if complete_nightly_restart_on_startup is not None:
+        try:
+            complete_nightly_restart_on_startup()
+        except Exception:
+            pass
+
     # アプリケーションの作成と実行
     hirio_app = HIRIOApplication()
     exit_code = hirio_app.run()

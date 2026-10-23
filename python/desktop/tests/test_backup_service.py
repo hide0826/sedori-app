@@ -130,3 +130,29 @@ def test_nightly_restart_due_only_inside_window() -> None:
     assert nightly_restart_due(still_open, True, "03:00", "") is True
     closed = datetime(2026, 9, 24, 6, 0)
     assert nightly_restart_due(closed, True, "03:00", "") is False
+    # 再起動待ち中は二重に閉じない
+    assert nightly_restart_due(at_three, True, "03:00", "", "2026-09-24") is False
+
+
+def test_complete_nightly_restart_on_startup_clears_busy(tmp_path, monkeypatch) -> None:
+    from datetime import datetime as real_dt
+
+    from desktop.services import backup_service as bs
+
+    busy = tmp_path / "nightly_restart.busy"
+    busy.write_text("2026-09-24\n", encoding="utf-8")
+    marked: list[str] = []
+
+    class _FakeDateTime:
+        @staticmethod
+        def now():
+            return real_dt(2026, 9, 24, 3, 5)
+
+    monkeypatch.setattr(bs, "nightly_restart_busy_flag", lambda: busy)
+    monkeypatch.setattr(bs, "get_nightly_restart_done_date", lambda: "")
+    monkeypatch.setattr(bs, "mark_nightly_restart_done", lambda day: marked.append(day))
+    monkeypatch.setattr(bs, "datetime", _FakeDateTime)
+
+    bs.complete_nightly_restart_on_startup()
+    assert marked == ["2026-09-24"]
+    assert not busy.exists()

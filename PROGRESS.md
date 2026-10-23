@@ -2,11 +2,13 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-10-21（ネット仕入・スタンバイ画面）
+更新日: 2026-10-23（デスクトップ常時起動・番人）
 
 ---
 
 ## いまの状態
+
+**2026-10-23（デスクトップ常時起動）:** 本体GUIに番人が無かったため、放置や夜の再起動失敗で落ちたままになっていた。`python/desktop/watch_hirio_desktop.ps1` を追加し、タスク `HIRIO_desktop`（ログオン／起動／5分）を登録済み。落ちたら約20秒周期で `start_hirio.bat` を起こす。夜の再起動中は `logs/nightly_restart.busy` があるあいだ（最大15分）触らない。意図的に止めたいときは `pause_desktop_watchdog.cmd`（`desktop.paused`）。再開は `resume_desktop_watchdog.cmd`。夜の再起動は待ちタイムアウト・起動確認・失敗時の busy 解除を強化。`hirio_boot_recover` の番人一覧にも desktop を追加（watcher 側）。反映は **いまの HIRIO を一度閉じて開き直す**（番人は既に稼働中）。ログ: `python/desktop/logs/desktop_watchdog.log` / `nightly_restart.log`。
 
 **2026-10-21（ネット仕入・スタンバイ）:** 仕入管理 → ネット仕入に「スタンバイ」ボタン。Discord審査通過の候補（`C:\HIRIO\shared\hit_purchases.jsonl` ＋画像スナップショット）を一覧表示。購入入力済みを「仕入一覧に送る」でネット仕入一覧へ追加（出品CSV生成と同じ列）。未購入は表示のみ。送済は `hit_purchases_imported.jsonl` で記録。関連: `services/hit_standby.py` / `ui/inventory/standby_dialog.py` / `widget.py`。反映は **HIRIO 再起動**。Web一覧は従来どおり `:8790/purchases`。  
 **2026-10-21（スタンバイ選択バグ）:** 開いた直後に詳細を消してしまい、同じ行をクリックしても「仕入一覧に送る」が押せなかった。選択／クリックで詳細を更新するよう修正。反映は **HIRIO 再起動**。  

@@ -116,6 +116,58 @@ def mark_nightly_restart_done(day: str) -> None:
     settings.sync()
 
 
+def nightly_restart_log_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "logs"
+
+
+def nightly_restart_busy_flag() -> Path:
+    """番人用。夜の再起動の待ち中はデスクトップ番人に触らせない。"""
+    return nightly_restart_log_dir() / "nightly_restart.busy"
+
+
+def write_nightly_restart_busy(day: Optional[str] = None) -> None:
+    path = nightly_restart_busy_flag()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = day or datetime.now().strftime("%Y-%m-%d")
+    path.write_text(f"{stamp}\n", encoding="utf-8")
+
+
+def clear_nightly_restart_busy() -> None:
+    path = nightly_restart_busy_flag()
+    try:
+        if path.is_file():
+            path.unlink()
+    except OSError:
+        logger.info("nightly busy flag を消せませんでした: %s", path)
+
+
+def read_nightly_restart_busy_day() -> str:
+    path = nightly_restart_busy_flag()
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8").strip().splitlines()[0].strip()
+    except OSError:
+        return ""
+
+
+def complete_nightly_restart_on_startup() -> None:
+    """
+    起動直後に呼ぶ。夜の再起動の busy フラグを消し、完了マークを確実に残す。
+
+    完了マーク自体は begin_nightly_restart でも付ける（二重に閉じないため）。
+    復帰に失敗してもデスクトップ番人が起こすので、朝まで落ちたままにはしない。
+    """
+    day = read_nightly_restart_busy_day()
+    if not day:
+        return
+    today = datetime.now().strftime("%Y-%m-%d")
+    if day == today and get_nightly_restart_done_date() != today:
+        mark_nightly_restart_done(day)
+        logger.info("nightly restart completed on startup (done=%s)", day)
+    clear_nightly_restart_busy()
+
+
 def parse_hhmm(text: str) -> Tuple[int, int]:
     try:
         hour_text, minute_text = str(text).strip().split(":", 1)
@@ -146,10 +198,15 @@ def nightly_restart_due(
     enabled: bool,
     hhmm: str,
     done_date: str,
+    busy_day: str = "",
 ) -> bool:
     if not enabled:
         return False
-    if done_date == now.strftime("%Y-%m-%d"):
+    today = now.strftime("%Y-%m-%d")
+    if done_date == today:
+        return False
+    # 再起動待ち中は二重に閉じない（新しいプロセス側のタイマー対策）
+    if busy_day == today:
         return False
     hour, minute = parse_hhmm(hhmm)
     return is_within_nightly_window(now, hour, minute)
@@ -162,16 +219,25 @@ def nightly_restart_is_due(now: Optional[datetime] = None) -> bool:
         is_nightly_restart_enabled(),
         get_nightly_restart_hhmm(),
         get_nightly_restart_done_date(),
+        read_nightly_restart_busy_day(),
     )
 
 
 def begin_nightly_restart() -> bool:
-    """時刻が来ていれば、終了後の再起動を予約して真を返す。"""
+    """時刻が来ていれば、終了後の再起動を予約して真を返す。
+
+    完了マークはここで付ける（同じ夜に何度も閉じないため）。
+    復帰失敗時はデスクトップ番人（watch_hirio_desktop.ps1）が起こす。
+    busy フラグは番人に「今は夜の再起動中」と伝える。
+    """
     if not nightly_restart_is_due():
         return False
+    day = datetime.now().strftime("%Y-%m-%d")
+    write_nightly_restart_busy(day)
     if not schedule_relaunch_after_exit():
+        clear_nightly_restart_busy()
         return False
-    mark_nightly_restart_done(datetime.now().strftime("%Y-%m-%d"))
+    mark_nightly_restart_done(day)
     return True
 
 
