@@ -2,13 +2,13 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-10-23（SP-API無人価格改定）
+更新日: 2026-10-25（SP-API無人価格改定・出品レポート待ち）
 
 ---
 
 ## いまの状態
 
-**2026-10-23（SP-API無人価格改定）:** shared に Reports / Listings PATCH 等を追加。CLI `python/desktop/scripts/run_sp_api_reprice_job.py`（`weekly369` / `follow` / `smoke`）。追従帯（`priceTrace` / `*_follow`）と週次3-6-9を排他分割（`sp_api_reprice_band.py`）。タスク `HIRIO_reprice_weekly_369`（日曜4:00）と `HIRIO_reprice_follow`（8時間）を **`--max-patch 1` 付きで登録済み**（件数を広げるときは `install_sp_api_reprice_tasks.ps1 -MaxPatch N` または引数なし）。smoke（ping）OK。出品レポートは件数が多く完了まで10分超えることあり（待ち上限20分）。**手元確認:** SP-API改定タブで①→⑤（N=1）し Seller Central で価格を見る。ログ: `python/desktop/logs/sp_api_reprice_*.log`。
+**2026-10-25（SP-API無人価格改定）:** 追従タスクが実PATCH済み。SKU `20251220-used1-014` → **3448**（2026-10-24 06:26 / 10-25 06:22 / 10-25 14:26。失敗0）。Listings API の `purchasable_offer` も 3448。offers 側に 3452 が残ることがあるので、Seller Central でこのSKUを目視確認してから MaxPatch を上げる。週次3-6-9は 10-25 04:00 に対象7件・変更0。出品レポート待ちは安定化済み（直近90分のDONE再利用、進行中は新規作成せず待つ、作成1回再試行、タイムアウト後DONE再利用、ログは状態変化＋約1分ごと、待ち上限30分）。失敗SKUは `logs/sp_api_reprice_*_failed_*.csv`（今回は未出力）。タスクはまだ `--max-patch 1`。未コミット。
 
 **2026-10-23（デスクトップ常時起動）:** 本体GUIに番人が無かったため、放置や夜の再起動失敗で落ちたままになっていた。`python/desktop/watch_hirio_desktop.ps1` を追加し、タスク `HIRIO_desktop`（ログオン／起動／5分）を登録済み。落ちたら約20秒周期で `start_hirio.bat` を起こす。夜の再起動中は `logs/nightly_restart.busy` があるあいだ（最大15分）触らない。意図的に止めたいときは `pause_desktop_watchdog.cmd`（`desktop.paused`）。再開は `resume_desktop_watchdog.cmd`。夜の再起動は待ちタイムアウト・起動確認・失敗時の busy 解除を強化。`hirio_boot_recover` の番人一覧にも desktop を追加（watcher 側）。反映は **いまの HIRIO を一度閉じて開き直す**（番人は既に稼働中）。ログ: `python/desktop/logs/desktop_watchdog.log` / `nightly_restart.log`。
 

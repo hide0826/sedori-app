@@ -13,6 +13,8 @@ import csv
 import io
 import re
 import tempfile
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -36,6 +38,9 @@ except ImportError:
 
 
 REPORT_MERCHANT_LISTINGS_ALL = "GET_MERCHANT_LISTINGS_ALL_DATA"
+LISTINGS_REPORT_REUSE_MAX_AGE_SEC = 90 * 60
+LISTINGS_REPORT_LOOKBACK_HOURS = 6
+LISTINGS_REPORT_TIMEOUT_SEC = 1800.0
 
 # 既存 /repricer/preview が期待する列（pwa/test_repricer.csv と同順）
 PRICETAR_COLUMNS: Tuple[str, ...] = (
@@ -132,6 +137,75 @@ def _payload(body: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(payload, dict):
         return payload
     return body if isinstance(body, dict) else {}
+
+
+def extract_report_list(body: Any) -> List[Dict[str, Any]]:
+    """list_reports の応答から reports 配列を取り出す。"""
+    if not isinstance(body, dict):
+        return []
+    reports = body.get("reports")
+    if not isinstance(reports, list):
+        payload = body.get("payload")
+        if isinstance(payload, dict):
+            reports = payload.get("reports")
+    if not isinstance(reports, list):
+        return []
+    return [row for row in reports if isinstance(row, dict)]
+
+
+def parse_report_created_epoch(value: Any) -> Optional[float]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
+def pick_reusable_listings_report(
+    reports: Sequence[Mapping[str, Any]],
+    *,
+    now_epoch: Optional[float] = None,
+    max_age_sec: float = LISTINGS_REPORT_REUSE_MAX_AGE_SEC,
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """新しい順に見て、再利用できる DONE と進行中レポートを返す。"""
+    now = float(now_epoch if now_epoch is not None else time.time())
+    scored: List[Tuple[float, Dict[str, Any]]] = []
+    for row in reports:
+        created = parse_report_created_epoch(row.get("createdTime")) or 0.0
+        scored.append((created, dict(row)))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    done: Optional[Dict[str, Any]] = None
+    inflight: Optional[Dict[str, Any]] = None
+    for created, row in scored:
+        status = str(row.get("processingStatus") or "").upper()
+        if (
+            status == "DONE"
+            and str(row.get("reportDocumentId") or "").strip()
+            and created
+            and (now - created) <= float(max_age_sec)
+        ):
+            if done is None:
+                done = row
+        elif status in ("IN_QUEUE", "IN_PROGRESS") and inflight is None:
+            inflight = row
+    return done, inflight
+
+
+def humanize_listings_report_error(exc: BaseException) -> str:
+    text = str(exc)
+    low = text.lower()
+    if "secret token" in low and "expired" in low:
+        return (
+            "LWAクライアントシークレットの期限切れです。"
+            "Amazon開発者コンソールでシークレットを再発行し、"
+            ".env の SP_API_CLIENT_SECRET を更新してください。"
+            f" 詳細: {text}"
+        )
+    return text
 
 
 def _normalize_header(name: Any) -> str:
@@ -509,48 +583,146 @@ def write_pricetar_temp_csv(df: pd.DataFrame, *, prefix: str = "hirio_sp_api_lis
     return str(path)
 
 
+def _list_recent_listings_reports(client: Any) -> List[Dict[str, Any]]:
+    if not hasattr(client, "list_reports"):
+        return []
+    since = (
+        datetime.now(timezone.utc) - timedelta(hours=LISTINGS_REPORT_LOOKBACK_HOURS)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    body = client.list_reports(
+        report_types=[REPORT_MERCHANT_LISTINGS_ALL],
+        created_since=since,
+        page_size=10,
+    )
+    return extract_report_list(body)
+
+
+def _download_listings_document(
+    client: Any,
+    done: Mapping[str, Any],
+    *,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> List[Dict[str, str]]:
+    doc_id = str(done.get("reportDocumentId") or "").strip()
+    if not doc_id:
+        raise RuntimeError(f"{REPORT_MERCHANT_LISTINGS_ALL}: reportDocumentId がありません")
+    if on_progress:
+        on_progress("レポートダウンロード中…")
+    doc = client.get_report_document(doc_id)
+    text = download_report_document(doc)
+    rows = parse_merchant_listings_text(text)
+    if on_progress:
+        cols = summarize_report_columns(rows)
+        on_progress(f"出品レポート取得完了: {len(rows)} 行（列: {cols}）")
+    return rows
+
+
 def fetch_merchant_listings_report(
     client: Any,
     *,
     should_cancel: Optional[Callable[[], bool]] = None,
     on_progress: Optional[Callable[[str], None]] = None,
-    timeout_sec: float = 1200.0,
+    timeout_sec: float = LISTINGS_REPORT_TIMEOUT_SEC,
 ) -> Tuple[List[Dict[str, str]], Optional[str]]:
     """
     GET_MERCHANT_LISTINGS_ALL_DATA を作成→完了待ち→TSV行取得。
+
+    直近90分以内の DONE があれば再利用し、進行中があれば新規作成せず待つ。
+    待ち切れても完了済みがあればそれを使う。
 
     Returns:
         (rows, error_message_or_None)
     """
     try:
-        if on_progress:
-            on_progress(f"レポート作成: {REPORT_MERCHANT_LISTINGS_ALL}")
-        # 出品一覧は期間指定不要
-        created = client.create_report(REPORT_MERCHANT_LISTINGS_ALL)
-        report_id = str(_payload(created).get("reportId") or created.get("reportId") or "").strip()
-        if not report_id:
-            return [], f"{REPORT_MERCHANT_LISTINGS_ALL}: reportId がありません"
-        done = wait_report_done(
-            client,
-            report_id,
-            timeout_sec=timeout_sec,
-            should_cancel=should_cancel,
-            on_progress=on_progress,
-        )
-        doc_id = str(done.get("reportDocumentId") or "").strip()
-        if not doc_id:
-            return [], f"{REPORT_MERCHANT_LISTINGS_ALL}: reportDocumentId がありません"
-        if on_progress:
-            on_progress("レポートダウンロード中…")
-        doc = client.get_report_document(doc_id)
-        text = download_report_document(doc)
-        rows = parse_merchant_listings_text(text)
-        if on_progress:
-            cols = summarize_report_columns(rows)
-            on_progress(f"出品レポート取得完了: {len(rows)} 行（列: {cols}）")
+        done_payload: Optional[Dict[str, Any]] = None
+        done_rep: Optional[Dict[str, Any]] = None
+        inflight_rep: Optional[Dict[str, Any]] = None
+        try:
+            listed = _list_recent_listings_reports(client)
+            done_rep, inflight_rep = pick_reusable_listings_report(listed)
+        except Exception as list_exc:  # noqa: BLE001
+            if on_progress:
+                on_progress(f"既存レポート検索をスキップ: {list_exc}")
+
+        if done_rep:
+            if on_progress:
+                on_progress(
+                    f"直近の出品レポートを再利用: {done_rep.get('reportId')} "
+                    f"({done_rep.get('createdTime') or '時刻不明'})"
+                )
+            done_payload = dict(done_rep)
+        elif inflight_rep and str(inflight_rep.get("reportId") or "").strip():
+            report_id = str(inflight_rep.get("reportId")).strip()
+            if on_progress:
+                on_progress(
+                    f"作成済みレポートの完了を待ちます: {report_id} "
+                    f"{inflight_rep.get('processingStatus')}"
+                )
+            try:
+                done_payload = wait_report_done(
+                    client,
+                    report_id,
+                    timeout_sec=timeout_sec,
+                    should_cancel=should_cancel,
+                    on_progress=on_progress,
+                )
+            except Exception as wait_exc:  # noqa: BLE001
+                if on_progress:
+                    on_progress(f"進行中レポート待ち失敗、新規作成します: {wait_exc}")
+                done_payload = None
+
+        if done_payload is None:
+            if on_progress:
+                on_progress(f"レポート作成: {REPORT_MERCHANT_LISTINGS_ALL}")
+            created = None
+            last_create_exc: Optional[BaseException] = None
+            for attempt in range(2):
+                try:
+                    created = client.create_report(REPORT_MERCHANT_LISTINGS_ALL)
+                    last_create_exc = None
+                    break
+                except Exception as create_exc:  # noqa: BLE001
+                    last_create_exc = create_exc
+                    if attempt == 0:
+                        if on_progress:
+                            on_progress(f"レポート作成を再試行します: {create_exc}")
+                        time.sleep(3.0)
+            if last_create_exc is not None:
+                raise last_create_exc
+            report_id = str(
+                _payload(created or {}).get("reportId") or (created or {}).get("reportId") or ""
+            ).strip()
+            if not report_id:
+                return [], f"{REPORT_MERCHANT_LISTINGS_ALL}: reportId がありません"
+            try:
+                done_payload = wait_report_done(
+                    client,
+                    report_id,
+                    timeout_sec=timeout_sec,
+                    should_cancel=should_cancel,
+                    on_progress=on_progress,
+                )
+            except Exception as wait_exc:  # noqa: BLE001
+                fallback = None
+                try:
+                    listed = _list_recent_listings_reports(client)
+                    fallback, _ = pick_reusable_listings_report(listed)
+                except Exception:  # noqa: BLE001
+                    fallback = None
+                if fallback:
+                    if on_progress:
+                        on_progress(
+                            f"待ちタイムアウト後、完了済みレポートを再利用: "
+                            f"{fallback.get('reportId')}（原因: {wait_exc}）"
+                        )
+                    done_payload = dict(fallback)
+                else:
+                    raise wait_exc
+
+        rows = _download_listings_document(client, done_payload, on_progress=on_progress)
         return rows, None
     except Exception as exc:  # noqa: BLE001
-        return [], str(exc)
+        return [], humanize_listings_report_error(exc)
 
 
 def fetch_listings_dataframe_for_repricer(

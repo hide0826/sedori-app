@@ -12,6 +12,7 @@ from desktop.services.sp_api_refunds import (
     merge_refund_records,
     parse_finance_refund_events,
     parse_tsv_text,
+    wait_report_done,
 )
 
 
@@ -101,3 +102,34 @@ def test_merge_and_estimate_and_apply():
     out = apply_refund_to_sale(sale, {"return_quantity": 1, "refund_amount": 5000})
     assert out["refund_total"] == 5000
     assert out["net_profit"] == -2800  # 2200 - 5000
+
+
+def test_wait_report_done_logs_status_once_until_done():
+    class _Client:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_report(self, report_id: str):
+            self.calls += 1
+            if self.calls == 1:
+                return {"processingStatus": "IN_PROGRESS", "reportId": report_id}
+            return {
+                "processingStatus": "DONE",
+                "reportId": report_id,
+                "reportDocumentId": "doc-1",
+            }
+
+    logs: list[str] = []
+    client = _Client()
+    done = wait_report_done(
+        client,
+        "r-1",
+        poll_sec=0.01,
+        timeout_sec=5,
+        log_interval_sec=60,
+        on_progress=logs.append,
+    )
+    assert done["reportDocumentId"] == "doc-1"
+    assert client.calls == 2
+    assert any("IN_PROGRESS" in msg for msg in logs)
+    assert any("DONE" in msg for msg in logs)

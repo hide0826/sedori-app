@@ -168,6 +168,15 @@ def run_weekly369(
     )
     if err:
         on_progress(f"ERROR fetch: {err}")
+        _save_summary(
+            log_path,
+            "weekly369",
+            dry_run=dry_run,
+            targets=0,
+            patched=0,
+            failed=0,
+            extra={"error": err},
+        )
         return 1
     on_progress(f"取得完了 rows={len(df)} csv={csv_path}")
 
@@ -213,6 +222,7 @@ def run_weekly369(
         targets=len(targets),
         patched=int(patch.get("success_count") or 0),
         failed=int(patch.get("failed_count") or 0),
+        extra={"failed_csv": str(failed_path) if failed_path else ""},
     )
     try:
         from services.repricer_execution_store import record_repricer_execution
@@ -243,6 +253,15 @@ def run_follow(
     )
     if err:
         on_progress(f"ERROR fetch: {err}")
+        _save_summary(
+            log_path,
+            "follow",
+            dry_run=dry_run,
+            targets=0,
+            patched=0,
+            failed=0,
+            extra={"error": err},
+        )
         return 1
     on_progress(f"取得完了 rows={len(df)} csv={csv_path}")
     rows = df.to_dict(orient="records")
@@ -273,6 +292,7 @@ def run_follow(
         targets=changed,
         patched=int(patch.get("success_count") or 0),
         failed=int(patch.get("failed_count") or 0),
+        extra={"failed_csv": str(failed_path) if failed_path else ""},
     )
     return 0 if int(patch.get("failed_count") or 0) == 0 else 5
 
@@ -285,6 +305,7 @@ def _save_summary(
     targets: int,
     patched: int,
     failed: int,
+    extra: Optional[Dict[str, Any]] = None,
 ) -> None:
     summary = {
         "mode": mode,
@@ -294,6 +315,8 @@ def _save_summary(
         "failed": failed,
         "at": datetime.now().isoformat(timespec="seconds"),
     }
+    if extra:
+        summary.update(extra)
     out = log_path.with_suffix(".summary.json")
     out.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     _log(log_path, f"summary {summary}")

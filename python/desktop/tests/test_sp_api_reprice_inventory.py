@@ -9,9 +9,11 @@ from pathlib import Path
 import pandas as pd
 
 from desktop.services.sp_api_inventory import (
+    humanize_listings_report_error,
     listings_rows_to_dataframe,
     merchant_listing_row_to_pricetar,
     parse_merchant_listings_text,
+    pick_reusable_listings_report,
     write_pricetar_temp_csv,
 )
 from desktop.services import sp_api_inventory as inv
@@ -181,3 +183,54 @@ def test_collect_price_patch_targets_only_changed():
 def test_extract_product_type():
     assert extract_product_type({"summaries": [{"productType": "LUGGAGE"}]}) == "LUGGAGE"
     assert extract_product_type({}) == "PRODUCT"
+
+
+def test_pick_reusable_listings_report_prefers_fresh_done():
+    now = 1_700_000_000.0
+    reports = [
+        {
+            "reportId": "old-done",
+            "processingStatus": "DONE",
+            "reportDocumentId": "doc-old",
+            "createdTime": "2023-11-14T22:00:00Z",
+        },
+        {
+            "reportId": "fresh-done",
+            "processingStatus": "DONE",
+            "reportDocumentId": "doc-fresh",
+            "createdTime": "2023-11-14T22:10:00Z",
+        },
+        {
+            "reportId": "running",
+            "processingStatus": "IN_PROGRESS",
+            "createdTime": "2023-11-14T22:12:00Z",
+        },
+    ]
+    done, inflight = pick_reusable_listings_report(reports, now_epoch=now)
+    assert done is not None
+    assert done["reportId"] == "fresh-done"
+    assert inflight is not None
+    assert inflight["reportId"] == "running"
+
+
+def test_pick_reusable_listings_report_skips_stale_done():
+    now = 1_700_000_000.0
+    reports = [
+        {
+            "reportId": "stale",
+            "processingStatus": "DONE",
+            "reportDocumentId": "doc-stale",
+            "createdTime": "2023-11-14T18:00:00Z",
+        }
+    ]
+    done, inflight = pick_reusable_listings_report(reports, now_epoch=now, max_age_sec=90 * 60)
+    assert done is None
+    assert inflight is None
+
+
+def test_humanize_listings_report_error_secret_expired():
+    msg = humanize_listings_report_error(
+        RuntimeError("HTTP 403 body={'errors': [{'message': 'The LWA secret token you provided has expired.'}]}")
+    )
+    assert "クライアントシークレット" in msg
+    assert "SP_API_CLIENT_SECRET" in msg

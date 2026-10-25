@@ -98,28 +98,47 @@ def wait_report_done(
     client: Any,
     report_id: str,
     *,
-    poll_sec: float = 3.0,
+    poll_sec: float = 5.0,
     timeout_sec: float = 300.0,
+    max_poll_sec: float = 30.0,
+    log_interval_sec: float = 60.0,
     should_cancel: Optional[Callable[[], bool]] = None,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
-    """レポートが DONE になるまで待つ。"""
+    """レポートが DONE になるまで待つ。状態変化と約1分ごとに進捗を出す。"""
     started = time.time()
+    last_log = -1.0
+    last_status = ""
+    current_poll = max(1.0, float(poll_sec))
     while True:
         if should_cancel and should_cancel():
             raise RuntimeError("キャンセルされました")
         body = client.get_report(report_id)
         payload = _payload(body)
         status = str(payload.get("processingStatus") or "").upper()
-        if on_progress:
-            on_progress(f"レポート処理中… {status} ({report_id})")
+        elapsed = time.time() - started
+        if on_progress and (
+            last_log < 0
+            or status != last_status
+            or elapsed - last_log >= float(log_interval_sec)
+        ):
+            on_progress(
+                f"レポート処理中… {status} ({report_id}) "
+                f"経過{int(elapsed)}秒 / 上限{int(timeout_sec)}秒"
+            )
+            last_log = elapsed
+            last_status = status
         if status == "DONE":
             return payload
         if status in ("FATAL", "CANCELLED", "CANCELED"):
             raise RuntimeError(f"レポート失敗: status={status} detail={payload}")
-        if time.time() - started > timeout_sec:
-            raise RuntimeError(f"レポートタイムアウト: status={status}")
-        time.sleep(max(1.0, float(poll_sec)))
+        if elapsed > timeout_sec:
+            raise RuntimeError(
+                f"レポートタイムアウト: status={status} reportId={report_id} "
+                f"経過{int(elapsed)}秒 / 上限{int(timeout_sec)}秒"
+            )
+        time.sleep(current_poll)
+        current_poll = min(float(max_poll_sec), current_poll * 1.5)
 
 
 def fetch_report_rows(
