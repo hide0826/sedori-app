@@ -173,6 +173,7 @@ class FollowRepriceWorker(QThread):
         runs_per_day: int = 3,
         max_listings: Optional[int] = None,
         patch_max_items: Optional[int] = None,
+        only_follow_band: bool = False,
     ):
         super().__init__()
         self.listings_rows = list(listings_rows or [])
@@ -182,6 +183,7 @@ class FollowRepriceWorker(QThread):
         self.runs_per_day = runs_per_day
         self.max_listings = max_listings
         self.patch_max_items = patch_max_items
+        self.only_follow_band = only_follow_band
 
     def run(self):
         try:
@@ -219,6 +221,7 @@ class FollowRepriceWorker(QThread):
                 runs_per_day=self.runs_per_day,
                 max_listings=self.max_listings,
                 patch_max_items=self.patch_max_items,
+                only_follow_band=self.only_follow_band,
                 on_progress=_prog2,
             )
             self.result_ready.emit(result)

@@ -7,24 +7,40 @@
 
 from __future__ import annotations
 
+import importlib.util
+import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
-try:
-    from services.repricer_common import get_days_since_listed
-except ImportError:
-    from desktop.services.repricer_common import get_days_since_listed  # type: ignore
+
+def _load_python_services_module(module_file: str):
+    """
+    python/services/*.py を desktop/services と衝突せずに読む。
+
+    desktop を sys.path 先頭にすると `services` が desktop 側になるため。
+    """
+    python_services = Path(__file__).resolve().parents[2] / "services" / module_file
+    name = f"_hirio_py_services_{python_services.stem}"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, python_services)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {python_services}")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
 
 try:
-    from services.repricer_purchase_db import (
-        load_repricing_enabled_map_from_purchase_db,
-        load_tp_map_from_purchase_db,
-    )
+    from services.sp_api_reprice_band import get_days_since_listed
 except ImportError:
-    from desktop.services.repricer_purchase_db import (  # type: ignore
-        load_repricing_enabled_map_from_purchase_db,
-        load_tp_map_from_purchase_db,
-    )
+    from desktop.services.sp_api_reprice_band import get_days_since_listed  # type: ignore
+
+_purchase_db = _load_python_services_module("repricer_purchase_db.py")
+load_repricing_enabled_map_from_purchase_db = _purchase_db.load_repricing_enabled_map_from_purchase_db
+load_tp_map_from_purchase_db = _purchase_db.load_tp_map_from_purchase_db
 
 try:
     from services.sp_api_offers import fetch_min_prices_for_asins, parse_listing_condition_code
@@ -273,6 +289,39 @@ def build_follow_items_from_listings(
     }
 
 
+def filter_listings_to_follow_band(
+    listings_rows: Sequence[Mapping[str, Any]],
+    *,
+    only_follow_band: bool = True,
+    today: Optional[datetime] = None,
+) -> List[Mapping[str, Any]]:
+    """
+    追従期間の SKU だけ残す（週次 3-6-9 と二重 PATCH しないため）。
+
+    only_follow_band=False ならフィルタしない（手動タブ互換）。
+    """
+    rows = list(listings_rows)
+    if not only_follow_band:
+        return rows
+    try:
+        from services.sp_api_reprice_band import load_369_config, sku_is_in_follow_band
+    except ImportError:
+        from desktop.services.sp_api_reprice_band import (  # type: ignore
+            load_369_config,
+            sku_is_in_follow_band,
+        )
+    config = load_369_config()
+    now = today or datetime.now()
+    out: List[Mapping[str, Any]] = []
+    for row in rows:
+        sku = str(_row_get(row, "SKU", "sku") or "").strip()
+        if not sku:
+            continue
+        if sku_is_in_follow_band(sku, config=config, today=now):
+            out.append(row)
+    return out
+
+
 def run_follow_repricer(
     listings_rows: Sequence[Mapping[str, Any]],
     *,
@@ -283,13 +332,21 @@ def run_follow_repricer(
     runs_per_day: int = DEFAULT_RUNS_PER_DAY,
     max_listings: Optional[int] = None,
     patch_max_items: Optional[int] = None,
+    only_follow_band: bool = False,
     should_cancel: Optional[Callable[[], bool]] = None,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """
     出品行に対して最安取得→追従計算（任意で PATCH）。
+
+    only_follow_band=True のとき、ルール上の追従帯 SKU だけ処理する（無人ジョブ用）。
     """
     rows = list(listings_rows)
+    if only_follow_band:
+        before = len(rows)
+        rows = filter_listings_to_follow_band(rows, only_follow_band=True)
+        if on_progress:
+            on_progress(f"追従帯フィルタ: {before} → {len(rows)} 件")
     if max_listings is not None:
         rows = rows[: int(max_listings)]
     skus = [str(_row_get(r, "SKU", "sku") or "").strip() for r in rows]

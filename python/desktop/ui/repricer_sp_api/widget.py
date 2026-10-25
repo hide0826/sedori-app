@@ -233,7 +233,8 @@ class RepricerSpApiWidget(QWidget):
         follow_note = QLabel(
             "150日未満: 同条件最安に揃える（TPより下げない）。"
             "150日以降: TPへ少しずつ下げ、自分より安い出品があればその価格−100円（下限はTP）。"
-            "自動巡回は PC とアプリが起動しているときだけ動きます。"
+            "ルール帯が追従（priceTrace / tp0_follow）の SKU だけ対象。"
+            "無人運用はタスク HIRIO_reprice_follow（8時間ごと）。画面の自動巡回は補助です。"
         )
         follow_note.setWordWrap(True)
         follow_note.setStyleSheet("color: #9e9e9e;")
@@ -735,6 +736,8 @@ class RepricerSpApiWidget(QWidget):
             runs_per_day=runs_per_day,
             max_listings=int(self.follow_max_spin.value()),
             patch_max_items=None,
+            # タイマー／無人相当は追従帯のみ（週次3-6-9と二重にしない）
+            only_follow_band=bool(from_timer),
         )
         self._worker.progress_message.connect(lambda m: self.source_edit.setText(m))
         self._worker.result_ready.connect(self._on_follow_completed)

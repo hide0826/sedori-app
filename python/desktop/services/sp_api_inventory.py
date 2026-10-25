@@ -514,7 +514,7 @@ def fetch_merchant_listings_report(
     *,
     should_cancel: Optional[Callable[[], bool]] = None,
     on_progress: Optional[Callable[[str], None]] = None,
-    timeout_sec: float = 600.0,
+    timeout_sec: float = 1200.0,
 ) -> Tuple[List[Dict[str, str]], Optional[str]]:
     """
     GET_MERCHANT_LISTINGS_ALL_DATA を作成→完了待ち→TSV行取得。
