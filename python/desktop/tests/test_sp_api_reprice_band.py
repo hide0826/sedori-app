@@ -19,6 +19,7 @@ class TestSpApiRepriceBand(unittest.TestCase):
     def test_is_follow_rule_price_trace(self) -> None:
         self.assertTrue(is_follow_rule({"action": "priceTrace", "value": 1}))
         self.assertFalse(is_follow_rule({"action": "price_down_1"}))
+        self.assertFalse(is_follow_rule({"action": "clearance"}))
         self.assertTrue(is_follow_rule({"action": "tp_down", "tp_target": "tp0_follow"}))
 
     def test_sku_follow_band_with_fake_config(self) -> None:

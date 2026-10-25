@@ -12,6 +12,7 @@ from core.config import CONFIG_PATH
 ACTION_NAMES_JP = {
     "maintain": "維持",
     "priceTrace": "Trace変更",
+    "clearance": "売り切り",
     "instant_reprice": "即時改定",
     "tp_down": "TP値下げ",
     "price_down_1": "1%値下げ",

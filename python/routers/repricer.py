@@ -118,6 +118,7 @@ class RepriceRule(BaseModel):
         "price_down_3",
         "price_down_4",
         "price_down_ignore",
+        "clearance",
         "exclude"
     ]
     value: Optional[float] = None
@@ -134,6 +135,7 @@ class RepriceConfig(BaseModel):
     rule_profiles: Dict[str, Any] = {}
     default_profile: Optional[str] = "6"
     interval_days: Optional[int] = 7
+    clearance_final_price: Optional[int] = 500
     alerts: Dict[str, Any] = {}
     repricer_preset_369: Optional[str] = "custom"
     tp0_gradual_follow: Optional[bool] = False
@@ -179,6 +181,7 @@ def get_config(mode: Optional[str] = Query(default="standard")):
                 "rule_profiles": config_data.get("rule_profiles", {}),
                 "default_profile": config_data.get("default_profile", "6"),
                 "interval_days": config_data.get("interval_days", 7),
+                "clearance_final_price": config_data.get("clearance_final_price", 500),
                 "alerts": config_data.get("alerts", {"enabled": True, "reason_prefix": "ALERT"}),
                 "repricer_preset_369": config_data.get("repricer_preset_369", "custom"),
                 "tp0_gradual_follow": config_data.get("tp0_gradual_follow", False),
@@ -226,6 +229,9 @@ def update_config(config: RepriceConfig = Body(...), mode: Optional[str] = Query
             existing_data["exception_reprice_rules"] = payload.get("exception_reprice_rules", existing_data.get("exception_reprice_rules", []))
             existing_data["default_profile"] = payload.get("default_profile", existing_data.get("default_profile", "6"))
             existing_data["interval_days"] = payload.get("interval_days", existing_data.get("interval_days", 7))
+            existing_data["clearance_final_price"] = payload.get(
+                "clearance_final_price", existing_data.get("clearance_final_price", 500)
+            )
             existing_data["alerts"] = payload.get("alerts", existing_data.get("alerts", {"enabled": True, "reason_prefix": "ALERT"}))
             existing_data["repricer_preset_369"] = payload.get(
                 "repricer_preset_369", existing_data.get("repricer_preset_369", "custom")

@@ -28,6 +28,47 @@ from utils.repricer_tp_target import (
 )
 
 
+CLEARANCE_END_DAY = 330
+DEFAULT_CLEARANCE_FINAL_PRICE = 500
+
+
+def clearance_final_price(config: Dict[str, Any]) -> int:
+    """売り切りの最終価格。未設定や不正値は500円。"""
+    raw = config.get("clearance_final_price", DEFAULT_CLEARANCE_FINAL_PRICE)
+    try:
+        price = int(round(float(raw)))
+    except (TypeError, ValueError):
+        price = DEFAULT_CLEARANCE_FINAL_PRICE
+    return max(1, price)
+
+
+def compute_clearance_price(
+    price: float,
+    days_since_listed: int,
+    final_price: int,
+    interval_days: int,
+    *,
+    end_day: int = CLEARANCE_END_DAY,
+) -> int:
+    """
+    271日〜330日の売り切り価格。
+
+    330日までに最終価格へ着くよう、改定間隔で割って1段下げる。
+    最終価格以下にはしない。すでに以下なら現在価格を維持する。
+    """
+    current = int(round(float(price or 0)))
+    floor = max(1, int(final_price))
+    if current <= floor:
+        return max(current, 0)
+    if int(days_since_listed) >= int(end_day):
+        return floor
+    interval = max(1, int(interval_days or 1))
+    remaining = max(0, int(end_day) - int(days_since_listed))
+    steps = max(1, math.ceil(remaining / interval))
+    delta = (current - floor) / steps
+    return max(floor, int(round(current - delta)))
+
+
 def _get_tp_band(days_since_listed: int) -> Tuple[str, int]:
     if days_since_listed <= 90:
         return "tp0", 90
@@ -515,6 +556,21 @@ def apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[st
             else:
                 new_price = round(price)
             new_price_trace = rule_trace_value
+        elif raw_action == "clearance":
+            final_price = clearance_final_price(config)
+            new_price = compute_clearance_price(
+                price,
+                days_since_listed,
+                final_price,
+                interval_days,
+            )
+            if int(round(price)) <= final_price:
+                reason_tokens.append(f"売り切り: 既に最終価格{final_price}円以下のため維持")
+            else:
+                reason_tokens.append(
+                    f"売り切り: {days_since_listed}日→{CLEARANCE_END_DAY}日で{final_price}円へ段階調整"
+                )
+            new_price_trace = 0
         elif raw_action == "tp_down":
             if tp_key == "tp0" and not tp0_gradual_follow:
                 new_price = round(price)
@@ -561,10 +617,14 @@ def apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[st
         else:
             new_price = round(price)
 
-        akaji_guard_from_price = round(new_price * (1.0 - akaji_drop_percent / 100.0))
-        final_akaji = max(0, akaji_guard_from_price)
-        skip_maintain_below = tp0_floor_guard and use_db_tp and tp_floor > 0 and price < tp_floor
-        if price > final_akaji and new_price <= final_akaji:
+        if raw_action == "clearance":
+            final_akaji = 0
+            skip_maintain_below = True
+        else:
+            akaji_guard_from_price = round(new_price * (1.0 - akaji_drop_percent / 100.0))
+            final_akaji = max(0, akaji_guard_from_price)
+            skip_maintain_below = tp0_floor_guard and use_db_tp and tp_floor > 0 and price < tp_floor
+        if raw_action != "clearance" and price > final_akaji and new_price <= final_akaji:
             new_price = final_akaji
             reason_tokens.append("TP下限に到達（維持）")
         elif price <= final_akaji and not skip_maintain_below:

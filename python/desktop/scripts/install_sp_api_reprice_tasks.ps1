@@ -50,7 +50,7 @@ function New-HirioRepriceTask {
         -MultipleInstances IgnoreNew `
         -RestartCount 3 `
         -RestartInterval (New-TimeSpan -Minutes 5) `
-        -ExecutionTimeLimit (New-TimeSpan -Hours 4)
+        -ExecutionTimeLimit (New-TimeSpan -Hours 8)
     $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
     Register-ScheduledTask `
         -TaskName $TaskName `
@@ -81,4 +81,6 @@ if ($DryRunDefault) {
     Write-Host "Then raise -MaxPatch or omit for full runs."
 } elseif ($MaxPatch -gt 0) {
     Write-Host "Live PATCH capped at MaxPatch=$MaxPatch"
+} else {
+    Write-Host "Live PATCH has no count cap. Each run updates every changed SKU in order."
 }

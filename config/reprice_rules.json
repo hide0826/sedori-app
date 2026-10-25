@@ -266,7 +266,7 @@
         },
         {
           "days_from": 300,
-          "action": "priceTrace",
+          "action": "clearance",
           "value": 1,
           "tp_target": "tp3",
           "akaji_drop_percent": 10,
@@ -274,7 +274,7 @@
         },
         {
           "days_from": 330,
-          "action": "priceTrace",
+          "action": "clearance",
           "value": 1,
           "tp_target": "tp3",
           "akaji_drop_percent": 10,
@@ -282,7 +282,7 @@
         },
         {
           "days_from": 360,
-          "action": "priceTrace",
+          "action": "maintain",
           "value": 1,
           "tp_target": "tp3",
           "akaji_drop_percent": 10,
@@ -525,8 +525,9 @@
     "enabled": true,
     "reason_prefix": "ALERT"
   },
-  "repricer_preset_369": "turnover",
+  "repricer_preset_369": "custom",
   "tp0_gradual_follow": true,
   "tp0_floor_guard": false,
-  "updated_at": "2026-06-18 14:43:05.111603"
+  "updated_at": "2026-06-18 14:43:05.111603",
+  "clearance_final_price": 500
 }

@@ -343,6 +343,15 @@ class RepricerSettingsWidget(QWidget):
         self.interval_days_spin.setValue(7)
         common_layout.addWidget(self.interval_days_spin, 0, 1)
 
+        common_layout.addWidget(QLabel("売り切り最終価格(円):"), 0, 2)
+        self.clearance_final_price_spin = QSpinBox()
+        self.clearance_final_price_spin.setRange(1, 999999)
+        self.clearance_final_price_spin.setValue(500)
+        self.clearance_final_price_spin.setToolTip(
+            "アクションが「売り切り」の期間に、この金額まで段階的に下げます。初期値は500円です。"
+        )
+        common_layout.addWidget(self.clearance_final_price_spin, 0, 3)
+
         common_layout.addWidget(QLabel("デフォルトプロファイル:"), 1, 0)
         self.default_profile_combo = QComboBox()
         self.default_profile_combo.addItem("3ルール", "3")
@@ -451,6 +460,7 @@ class RepricerSettingsWidget(QWidget):
         ]
         if is_369_table:
             actions.insert(2, ("tp_down", "TP値下げ"))
+            actions.insert(3, ("clearance", "売り切り"))
         
         # priceTrace設定の選択肢（日本語）
         price_trace_options = [
@@ -667,6 +677,11 @@ class RepricerSettingsWidget(QWidget):
             ),
             "default_profile": self.default_profile_combo.currentData(),
             "interval_days": self.interval_days_spin.value(),
+            "clearance_final_price": (
+                int(self.clearance_final_price_spin.value())
+                if hasattr(self, "clearance_final_price_spin")
+                else int((self.config_data or {}).get("clearance_final_price", 500) or 500)
+            ),
             "alerts": {
                 "enabled": self.alert_enabled_check.isChecked(),
                 "reason_prefix": self.alert_prefix_edit.text().strip() or "ALERT",
@@ -809,9 +824,16 @@ class RepricerSettingsWidget(QWidget):
                         "takane_rise_percent": rule.get("takane_rise_percent", 0),
                     }
             self.update_rules_table(rules_dict, table=table)
+            self.update_price_trace_visibility(table)
 
         interval_days = int(config.get("interval_days", 7) or 7)
         self.interval_days_spin.setValue(max(1, interval_days))
+        if hasattr(self, "clearance_final_price_spin"):
+            try:
+                clearance_price = int(round(float(config.get("clearance_final_price", 500) or 500)))
+            except (TypeError, ValueError):
+                clearance_price = 500
+            self.clearance_final_price_spin.setValue(max(1, clearance_price))
 
         default_profile = str(config.get("default_profile", "6"))
         index = self.default_profile_combo.findData(default_profile)
@@ -931,6 +953,8 @@ class RepricerSettingsWidget(QWidget):
                         spin.setValue(float(default_tp.get(profile_key, {}).get(tp_key, 0)))
                 self.default_profile_combo.setCurrentIndex(self.default_profile_combo.findData("6"))
                 self.interval_days_spin.setValue(7)
+                if hasattr(self, "clearance_final_price_spin"):
+                    self.clearance_final_price_spin.setValue(500)
                 self.alert_enabled_check.setChecked(True)
                 self.alert_prefix_edit.setText("ALERT")
             else:

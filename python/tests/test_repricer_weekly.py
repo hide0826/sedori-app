@@ -82,6 +82,16 @@ def test_get_days_since_listed() -> None:
     assert get_days_since_listed("INVALID-SKU", today) == -1
 
 
+def test_compute_clearance_price_steps_to_500() -> None:
+    from services.repricer_369 import compute_clearance_price
+
+    assert compute_clearance_price(3452, 309, 500, 7) == 2468
+    assert compute_clearance_price(3452, 271, 500, 7) == 3124
+    assert compute_clearance_price(3452, 330, 500, 7) == 500
+    assert compute_clearance_price(400, 300, 500, 7) == 400
+    assert compute_clearance_price(500, 280, 500, 7) == 500
+
+
 def test_detect_369_profile_from_sku() -> None:
     assert detect_369_profile_from_sku("20240605-SS-20-1780-6P-007", "6") == ("6", False)
     assert detect_369_profile_from_sku("20240605-SS-20-1780-3N-001", "6") == ("3", False)
