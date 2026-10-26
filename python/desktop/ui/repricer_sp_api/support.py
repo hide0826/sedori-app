@@ -125,16 +125,23 @@ class RepriceCalcWorker(QThread):
 
 
 class AmazonPatchWorker(QThread):
-    """Listings PATCH 一括反映ワーカー。"""
+    """価格一括反映ワーカー（既定: Feeds）。"""
 
     progress_message = Signal(str)
     result_ready = Signal(dict)
     error_occurred = Signal(str)
 
-    def __init__(self, targets: List[Dict[str, Any]], *, max_items: Optional[int] = None):
+    def __init__(
+        self,
+        targets: List[Dict[str, Any]],
+        *,
+        max_items: Optional[int] = None,
+        transport: str = "feed",
+    ):
         super().__init__()
         self.targets = targets
         self.max_items = max_items
+        self.transport = transport
 
     def run(self):
         try:
@@ -150,6 +157,7 @@ class AmazonPatchWorker(QThread):
                 self.targets,
                 on_progress=_prog,
                 max_items=self.max_items,
+                transport=self.transport,
             )
             self.result_ready.emit(result)
         except Exception as exc:  # noqa: BLE001
@@ -157,7 +165,7 @@ class AmazonPatchWorker(QThread):
 
 
 class FollowRepriceWorker(QThread):
-    """同コンディション最安追従（取得→計算→任意で PATCH）。"""
+    """同コンディション最安追従（取得→計算→任意で Amazon 反映）。"""
 
     progress_message = Signal(str)
     result_ready = Signal(dict)
@@ -174,6 +182,7 @@ class FollowRepriceWorker(QThread):
         max_listings: Optional[int] = None,
         patch_max_items: Optional[int] = None,
         only_follow_band: bool = False,
+        transport: str = "feed",
     ):
         super().__init__()
         self.listings_rows = list(listings_rows or [])
@@ -184,6 +193,7 @@ class FollowRepriceWorker(QThread):
         self.max_listings = max_listings
         self.patch_max_items = patch_max_items
         self.only_follow_band = only_follow_band
+        self.transport = transport
 
     def run(self):
         try:
@@ -223,6 +233,7 @@ class FollowRepriceWorker(QThread):
                 patch_max_items=self.patch_max_items,
                 only_follow_band=self.only_follow_band,
                 on_progress=_prog2,
+                transport=self.transport,
             )
             self.result_ready.emit(result)
         except Exception as exc:  # noqa: BLE001

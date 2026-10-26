@@ -342,11 +342,13 @@ def run_follow_repricer(
     only_follow_band: bool = False,
     should_cancel: Optional[Callable[[], bool]] = None,
     on_progress: Optional[Callable[[str], None]] = None,
+    transport: str = "feed",
 ) -> Dict[str, Any]:
     """
-    出品行に対して最安取得→追従計算（任意で PATCH）。
+    出品行に対して最安取得→追従計算（任意で Amazon 反映）。
 
     only_follow_band=True のとき、ルール上の追従帯 SKU だけ処理する（無人ジョブ用）。
+    transport: feed（既定）または patch。
     """
     rows = list(listings_rows)
     if only_follow_band:
@@ -400,7 +402,7 @@ def run_follow_repricer(
     if apply_amazon:
         targets = collect_price_patch_targets(result.get("items") or [])
         if on_progress:
-            on_progress(f"Amazonへ価格反映 {len(targets)} 件…")
+            on_progress(f"Amazonへ価格反映 {len(targets)} 件（{transport}）…")
         if targets:
             patch_result = apply_price_patches(
                 targets,
@@ -408,6 +410,7 @@ def run_follow_repricer(
                 should_cancel=should_cancel,
                 on_progress=on_progress,
                 max_items=patch_max_items,
+                transport=transport,
             )
         else:
             patch_result = {

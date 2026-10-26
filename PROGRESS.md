@@ -2,11 +2,25 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-10-26（ルート撮影をSKU単位＋とりあえず撮影）
+更新日: 2026-10-26（価格改定 Discord 通知）
 
 ---
 
 ## いまの状態
+
+**2026-10-26（価格改定 Discord 通知）:** 無人ジョブ（追従・週次）の完了／一部失敗／エラーを Discord Webhook へ1通通知。設定 → 詳細設定 → 「価格改定 Discord 通知」で URL 入力・表示切替・テスト送信。空なら送らない。dry-run / smoke は送らない。QSettings キー `reprice/discord_webhook_url`。反映は **HIRIO 再起動**（または設定保存後の次回ジョブ）。試験: `python/desktop/tests/test_reprice_discord_notify.py`（ALL OK）。
+
+主なファイル: `python/desktop/services/reprice_discord_notify.py` / `python/desktop/scripts/run_sp_api_reprice_job.py` / `python/desktop/ui/settings_widget.py` / `python/desktop/utils/settings_helper.py`
+
+**2026-10-26（Feeds一括価格送信）:** 価格反映の既定を Listings PATCH 連打から **`JSON_LISTINGS_FEED`** に切替。計算・追従帯排他はそのまま。失敗SKUは PATCH フォールバック。CLI に `--transport feed|patch`（既定 feed）。
+
+- shared: `create_feed_document` / `upload_feed_document` / `create_feed` / `wait_feed_done` / `submit_json_listings_feed`（ネット切れは数回リトライ）
+- sedori: `build_json_listings_price_feed` / `parse_listings_feed_result` / `apply_price_patches(transport=...)`
+- 単体: shared `test_sp_api_client_reprice.py` 12件 OK。sedori の Feed 組み立て・結果パース・feed+patch フォールバックテスト OK（pytest 未導入のため関数直接実行）
+- 実機: SKU `20251220-used1-014` → 3364、`feedId=656189020752`、`transport=feed`、success 1 / failed 0（フォールバック無し）
+- 追従全件PATCHは3回とも完走済み（239/239・224/224・225/225、いずれも失敗0・`end code=0`）
+
+主なファイル: `C:\HIRIO\shared\sp_api_client.py` / `python/desktop/services/sp_api_reprice.py` / `python/desktop/scripts/run_sp_api_reprice_job.py` / `python/desktop/services/sp_api_follow_reprice.py`
 
 **2026-10-26（ルート撮影SKU単位＋とりあえず撮影）:** 同JANの別SKUが、1点の撮影終了でまとめて「撮影済み」になっていた。完了・画像不要・再撮影・撮影済み一覧のキーを **SKU優先**（無ければJAN→ASIN）に変更。写真保存時もSKUを書く。あわせて、ルート／商品リストなしで写真だけ残す「とりあえず撮影」を追加（`/quick-photos`、保存先 `D:\せどり総合\中古画像一時\日付\`）。ルート一覧ホームから入れる。ルートWeb再起動済み。スマホは画面を再読み込み。試験: `python/route_web/test_product_images_sku.py`（同JAN2SKUで1点だけ確定）。
 
@@ -24,15 +38,15 @@
 
 主なファイル: `services/sp_api_receipt_date.py` / `services/sp_api_sales_sync.py` / `scripts/run_sp_api_daily_sync_job.py` / `scripts/install_sp_api_reprice_tasks.ps1`（`-DailySyncOnly` なら日次タスクだけ。全実行は追従の次回時刻をずらす）。テストは `tests/test_sp_api_receipt_date.py` と `tests/test_sp_api_sales_sync.py`（pytest は未導入。`PYTHONPATH=python` で関数を直接実行して通過）。
 
-**2026-10-26（追従の全件）:** 件数上限なしの1回目は 10/26 1:11 に 239/239、失敗0、`end code=0`。2回目は 7:13 に 224/224、失敗0。3回目は 14:17 開始で、17時時点ではまだ送信中。3回とも最後まで成功したら Feeds 一括へ進む。
+**2026-10-26（追従の全件）:** 件数上限なしの1回目は 10/26 1:11 に 239/239、失敗0、`end code=0`。2回目は 7:13 に 224/224、失敗0。3回目は 14:17開始→**17:14完了**で 225/225、失敗0、`end code=0`。条件達成後に Feeds 一括を実装済み（本節先頭）。
 
-**2026-10-25（SP-API無人価格改定）:** 価格の書き込みは Feeds ではなく、SKU ごとの Listings PATCH。追従タスクが `--max-patch 1` で `20251220-used1-014` → **3448**（10-24 06:26 / 10-25 06:22 / 10-25 14:26。失敗0）。Seller Central の販売価格も 3448 で目視確認済み。HIRIO 画面の 3364 は 3-6-9 プレビュー（週次は追従帯を送らない）。法人価格 3452 は未更新のことがある。週次3-6-9は 10-25 04:00 に対象7件・変更0。出品レポート待ちは安定化済み（直近90分のDONE再利用、進行中は新規作成せず待つ、作成1回再試行、タイムアウト後DONE再利用、ログは状態変化＋約1分ごと、待ち上限30分）。コードは `feature/sp-api` `4b098b0`、shared `e9de1fb` まで push 済み。
+**2026-10-25（SP-API無人価格改定）:** 当時は SKU ごとの Listings PATCH。追従タスクが `--max-patch 1` で `20251220-used1-014` → **3448**（10-24 06:26 / 10-25 06:22 / 10-25 14:26。失敗0）。Seller Central の販売価格も 3448 で目視確認済み。HIRIO 画面の 3364 は 3-6-9 プレビュー（週次は追従帯を送らない）。法人価格 3452 は未更新のことがある。週次3-6-9は 10-25 04:00 に対象7件・変更0。出品レポート待ちは安定化済み（直近90分のDONE再利用、進行中は新規作成せず待つ、作成1回再試行、タイムアウト後DONE再利用、ログは状態変化＋約1分ごと、待ち上限30分）。コードは `feature/sp-api` `4b098b0`、shared `e9de1fb` まで push 済み。**現在の書き込み既定は Feeds**（本節先頭）。
 
 **2026-10-25（件数上限を外した）:** `--max-patch 1` だと先頭の1件しか送らず、同じSKUが繰り返される。追従・週次とも上限なしで、変わったSKUを先頭から順に全部 PATCH する。1件あたり数十秒あるので、追従250件前後なら数時間になり得る。タスクの打ち切りは4時間から8時間に延ばした。次回の追従は今日 22:17、週次は 11/1 4:00。サインイン中だけ動く。
 
 **2026-10-25（売り切り）:** 6ルールの271–300日と301–330日をアクション「売り切り」にした。この期間の6ルール商品は、日曜の週次で330日までに最終500円へ1段ずつ下がる。仕入値や赤線では止めない。500円以下にはしない。331–360日は「維持」。最終価格はルール画面の「売り切り最終価格(円)」。追従（8時間）はこの期間を送らない。3ルールと9ルールは今まで通り。反映は **HIRIO再起動** 後に設定画面で確認。週次ジョブはJSONを直接読むので、次の日曜4時からこのルールで動く。
 
-**次に実装:** 明日9時の日次同期が受領の続きを取り切り、出品日が入ったことをログで確認する。追従の全件PATCHが3回完走したら、Feeds API の `JSON_LISTINGS_FEED` で価格変更を1ファイルにまとめて送る。計算（週次3-6-9と追従帯の排他）はそのまま。失敗SKUが分かるログは残す。
+**次に実装:** 明日9時の日次同期が受領の続きを取り切り、出品日が入ったことをログで確認する。無人ジョブの次回追従／週次が `--transport feed` で完走するかログ（`feedId` / summary）を見る。通信が悪い日は `--transport patch` で切り戻し可。
 
 **2026-10-23（デスクトップ常時起動）:** 本体GUIに番人が無かったため、放置や夜の再起動失敗で落ちたままになっていた。`python/desktop/watch_hirio_desktop.ps1` を追加し、タスク `HIRIO_desktop`（ログオン／起動／5分）を登録済み。落ちたら約20秒周期で `start_hirio.bat` を起こす。夜の再起動中は `logs/nightly_restart.busy` があるあいだ（最大15分）触らない。意図的に止めたいときは `pause_desktop_watchdog.cmd`（`desktop.paused`）。再開は `resume_desktop_watchdog.cmd`。夜の再起動は待ちタイムアウト・起動確認・失敗時の busy 解除を強化。`hirio_boot_recover` の番人一覧にも desktop を追加（watcher 側）。反映は **いまの HIRIO を一度閉じて開き直す**（番人は既に稼働中）。ログ: `python/desktop/logs/desktop_watchdog.log` / `nightly_restart.log`。
 

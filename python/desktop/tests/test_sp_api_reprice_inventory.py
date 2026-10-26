@@ -18,8 +18,11 @@ from desktop.services.sp_api_inventory import (
 )
 from desktop.services import sp_api_inventory as inv
 from desktop.services.sp_api_reprice import (
+    apply_price_patches,
+    build_json_listings_price_feed,
     collect_price_patch_targets,
     extract_product_type,
+    parse_listings_feed_result,
 )
 
 
@@ -234,3 +237,136 @@ def test_humanize_listings_report_error_secret_expired():
     )
     assert "クライアントシークレット" in msg
     assert "SP_API_CLIENT_SECRET" in msg
+
+
+def test_build_json_listings_price_feed_messages():
+    targets = [
+        {"sku": "SKU-A", "new_price": 1980, "price": 2000},
+        {"sku": "SKU-B", "new_price": 3000, "price": 3100},
+        {"sku": "", "new_price": 100},
+    ]
+    payload = build_json_listings_price_feed(targets, "A1SELLER")
+    assert payload["header"]["sellerId"] == "A1SELLER"
+    assert payload["header"]["version"] == "2.0"
+    assert len(payload["messages"]) == 2
+    msg0 = payload["messages"][0]
+    assert msg0["messageId"] == 1
+    assert msg0["sku"] == "SKU-A"
+    assert msg0["productType"] == "PRODUCT"
+    assert msg0["operationType"] == "PATCH"
+    offer = msg0["patches"][0]["value"][0]
+    assert offer["audience"] == "ALL"
+    assert offer["our_price"][0]["schedule"][0]["value_with_tax"] == 1980
+    assert payload["messages"][1]["messageId"] == 2
+    assert payload["messages"][1]["sku"] == "SKU-B"
+
+
+def test_parse_listings_feed_result_splits_errors():
+    id_map = {
+        1: {"sku": "A", "new_price": 100},
+        2: {"sku": "B", "new_price": 200},
+    }
+    result = {
+        "issues": [
+            {"messageId": 2, "severity": "ERROR", "code": "4000001", "message": "bad"},
+            {"messageId": 1, "severity": "WARNING", "code": "W1", "message": "warn"},
+        ]
+    }
+    success, failed = parse_listings_feed_result(result, id_map)
+    assert len(success) == 1
+    assert success[0]["sku"] == "A"
+    assert len(failed) == 1
+    assert failed[0]["sku"] == "B"
+    assert "4000001" in failed[0]["error"]
+
+
+def test_apply_price_patches_feed_transport(monkeypatch):
+    class FakeCreds:
+        seller_id = "A1SELLER"
+
+    class FakeApi:
+        credentials = FakeCreds()
+
+        def ensure_credentials(self):
+            return None
+
+        def submit_json_listings_feed(self, payload, **kwargs):
+            assert len(payload["messages"]) == 2
+            assert kwargs.get("wait") is True
+            return {
+                "feedId": "feed-1",
+                "result": {
+                    "issues": [
+                        {
+                            "messageId": 2,
+                            "severity": "ERROR",
+                            "code": "X",
+                            "message": "fail-sku-b",
+                        }
+                    ]
+                },
+            }
+
+        def patch_listing_price(self, sku, new_price, product_type="PRODUCT"):
+            assert sku == "B"
+            assert new_price == 200
+            return {"status": "ACCEPTED", "issues": []}
+
+        def get_listing_item(self, *args, **kwargs):
+            raise AssertionError("feed 経路では productType GET しない")
+
+    targets = [
+        {"sku": "A", "new_price": 100, "price": 110},
+        {"sku": "B", "new_price": 200, "price": 210},
+    ]
+    import desktop.services.sp_api_reprice as reprice_mod
+
+    monkeypatch.setattr(reprice_mod.time, "sleep", lambda *_a, **_k: None)
+    out = apply_price_patches(
+        targets,
+        client=FakeApi(),
+        transport="feed",
+        feed_fallback_patch=True,
+    )
+    assert out["transport"] == "feed+patch"
+    assert out["feedId"] == "feed-1"
+    assert out["success_count"] == 2
+    assert out["failed_count"] == 0
+    assert {r["sku"] for r in out["success"]} == {"A", "B"}
+
+
+def test_apply_price_patches_feed_no_fallback_keeps_failed(monkeypatch):
+    class FakeCreds:
+        seller_id = "A1SELLER"
+
+    class FakeApi:
+        credentials = FakeCreds()
+
+        def ensure_credentials(self):
+            return None
+
+        def submit_json_listings_feed(self, payload, **kwargs):
+            return {
+                "feedId": "feed-2",
+                "result": {
+                    "issues": [
+                        {
+                            "messageId": 1,
+                            "severity": "ERROR",
+                            "code": "E",
+                            "message": "nope",
+                        }
+                    ]
+                },
+            }
+
+    out = apply_price_patches(
+        [{"sku": "Z", "new_price": 999, "price": 1000}],
+        client=FakeApi(),
+        transport="feed",
+        feed_fallback_patch=False,
+    )
+    assert out["transport"] == "feed"
+    assert out["success_count"] == 0
+    assert out["failed_count"] == 1
+    assert out["failed"][0]["sku"] == "Z"

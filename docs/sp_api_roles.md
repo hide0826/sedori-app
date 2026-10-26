@@ -25,7 +25,7 @@ Amazon 側でロールを追加・変更したら、ここも更新してくだ�
 | # | Seller Central 表示名 | 英語名（公式） | 主な用途 | HIRIO での状態 |
 |---|----------------------|----------------|----------|----------------|
 | 1 | **商品の出品** | Product Listing | Listings Items API（出品の取得・更新） | 仕入DB「SP-API取得」で出品日取得。watcher 出品制限もあり |
-| 2 | **料金** | Pricing | Product Pricing / Fees | 仕入DBで手数料・FBA出荷費用見積を取得。価格改定は SP-API改定タブ⑤（Listings PATCH） |
+| 2 | **料金** | Pricing | Product Pricing / Fees | 仕入DBで手数料・FBA出荷費用見積を取得。価格改定は SP-API改定タブ⑤（**Feeds一括・失敗時PATCH**） |
 | 3 | **在庫と注文の追跡** | Inventory and Order Tracking | 在庫・注文の取得 | 販売DB「SP-API更新」＋返品取込。出品一覧は SP-API改定タブ①（Reports）。保管料は未実装 |
 
 ※ 返金の**実額明細**（Finances API）には **財務と会計** ロールが別途必要（現状未承認 → レポート推定で運用）
@@ -125,20 +125,20 @@ Amazon 側でロールを追加・変更したら、ここも更新してくだ�
 | 2 | 販売DBの注文取込＋仕入販売済み連動 | 在庫と注文の追跡（実装済） |
 | 3 | 販売DBの返品・返金取込 | 料金 + 在庫と注文の追跡（実装済・Finances実額は財務ロール待ち） |
 | 4 | **在庫・出品同期**（改定の入口。プライスターCSV代替） | 在庫と注文の追跡 + 商品の出品（**SP-API改定タブ① / 無人ジョブで実装済**） |
-| 5 | 価格改定の API 反映（改定の出口。Listings PATCH 等） | 料金 + 商品の出品（**タブ⑤＋無人週次ジョブ。shared `patch_listing_price` 実装済**） |
-| 6 | **同コンディション最安追従**（追従帯のみ・定期） | 料金（Offers）+ 商品の出品（PATCH）。タスク `HIRIO_reprice_follow` |
+| 5 | 価格改定の API 反映（改定の出口。**Feeds一括＋PATCHフォールバック**） | 料金 + 商品の出品（**タブ⑤＋無人ジョブ。shared `submit_json_listings_feed` / `patch_listing_price`**） |
+| 6 | **同コンディション最安追従**（追従帯のみ・定期） | 料金（Offers）+ 商品の出品（Feeds／PATCH）。タスク `HIRIO_reprice_follow` |
 | — | 返金実額（Finances） | 財務と会計（未承認） |
 
 ### 無人価格改定（2026-10-23）
 
 | タスク | 内容 | 初期 |
 |--------|------|------|
-| `HIRIO_reprice_weekly_369` | 日曜 4:00。追従帯以外へ 3-6-9 → PATCH | 登録スクリプトあり |
-| `HIRIO_reprice_follow` | 8時間ごと。ルール帯が `priceTrace` / `*_follow` の SKU のみ最安追従 → PATCH | 同上 |
+| `HIRIO_reprice_weekly_369` | 日曜 4:00。追従帯以外へ 3-6-9 → Feeds（失敗時PATCH） | 登録スクリプトあり |
+| `HIRIO_reprice_follow` | 8時間ごと。ルール帯が `priceTrace` / `*_follow` の SKU のみ最安追従 → Feeds（失敗時PATCH） | 同上 |
 
-CLI: `python/desktop/scripts/run_sp_api_reprice_job.py`（`--mode weekly369|follow|smoke` / `--dry-run` / `--max-patch`）  
+CLI: `python/desktop/scripts/run_sp_api_reprice_job.py`（`--mode weekly369|follow|smoke` / `--dry-run` / `--max-patch` / `--transport feed|patch`）  
 登録: `python/desktop/scripts/install_sp_api_reprice_tasks.ps1`  
-クライアント: `C:\HIRIO\shared\sp_api_client.py`（Reports / Listings GET・PATCH / Orders / Fees / Offers batch / 429再試行）
+クライアント: `C:\HIRIO\shared\sp_api_client.py`（Reports / Feeds `JSON_LISTINGS_FEED` / Listings GET・PATCH / Orders / Fees / Offers batch / 429・ネット切れ再試行）
 
 ※ 2026-08-13 方針: **Amazonの最新在庫・出品を取得 → 仕入DBと突合 → 既存ルール計算 → 価格反映** の閉じたループ。  
 ※ 既存「改定実行」（プライスターCSV）は非破壊で維持。

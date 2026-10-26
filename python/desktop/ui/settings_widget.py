@@ -576,6 +576,38 @@ class SettingsWidget(QWidget):
         amazon_layout.addWidget(self.amazon_inventory_loader_upload_url_edit, 3, 1)
         layout.addWidget(amazon_group)
 
+        # 価格改定 Discord 通知（無人ジョブ follow / weekly369）
+        reprice_discord_group = QGroupBox("価格改定 Discord 通知")
+        reprice_discord_layout = QGridLayout(reprice_discord_group)
+        reprice_discord_layout.addWidget(QLabel("Webhook URL:"), 0, 0)
+        self.reprice_discord_webhook_edit = QLineEdit()
+        self.reprice_discord_webhook_edit.setPlaceholderText(
+            "https://discord.com/api/webhooks/..."
+        )
+        self.reprice_discord_webhook_edit.setEchoMode(QLineEdit.Password)
+        self.reprice_discord_webhook_edit.setClearButtonEnabled(True)
+        self.reprice_discord_webhook_edit.setToolTip(
+            "無人価格改定（追従・週次3-6-9）の完了・エラーを Discord に送ります。\n"
+            "空のときは通知しません。設定の「保存」後にジョブへ反映されます。"
+        )
+        reprice_discord_layout.addWidget(self.reprice_discord_webhook_edit, 0, 1)
+        self.reprice_discord_webhook_show_cb = QCheckBox("表示")
+        self.reprice_discord_webhook_show_cb.toggled.connect(
+            lambda checked: self.reprice_discord_webhook_edit.setEchoMode(
+                QLineEdit.Normal if checked else QLineEdit.Password
+            )
+        )
+        reprice_discord_layout.addWidget(self.reprice_discord_webhook_show_cb, 0, 2)
+        self.reprice_discord_test_btn = QPushButton("テスト送信")
+        self.reprice_discord_test_btn.clicked.connect(self.test_reprice_discord_webhook)
+        reprice_discord_layout.addWidget(self.reprice_discord_test_btn, 1, 0, 1, 3)
+        hint = QLabel(
+            "全件完了・一部失敗・エラー発生を1通ずつ通知します（dry-run は送りません）。"
+        )
+        hint.setWordWrap(True)
+        reprice_discord_layout.addWidget(hint, 2, 0, 1, 3)
+        layout.addWidget(reprice_discord_group)
+
         # プライスター（CSV出品・価格改定画面URL）
         pricetar_group = QGroupBox("プライスター")
         pricetar_layout = QGridLayout(pricetar_group)
@@ -1386,6 +1418,37 @@ PySide6 バージョン: {__import__('PySide6').__version__}
         finally:
             self.api_client.base_url = original_url
 
+    def test_reprice_discord_webhook(self):
+        """価格改定 Discord Webhook のテスト送信。"""
+        url = ""
+        if hasattr(self, "reprice_discord_webhook_edit"):
+            url = self.reprice_discord_webhook_edit.text().strip()
+        if not url:
+            QMessageBox.warning(
+                self,
+                "テスト送信",
+                "Webhook URL を入力してください。\n（保存前でも、入力中のURLで送れます）",
+            )
+            return
+        try:
+            try:
+                from services.reprice_discord_notify import send_reprice_discord_test
+            except ImportError:
+                from desktop.services.reprice_discord_notify import (  # type: ignore
+                    send_reprice_discord_test,
+                )
+            err = send_reprice_discord_test(url)
+            if err:
+                QMessageBox.critical(self, "テスト送信失敗", err)
+            else:
+                QMessageBox.information(
+                    self,
+                    "テスト送信",
+                    "Discord へテストメッセージを送りました。\nチャンネルを確認してください。",
+                )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "テスト送信失敗", str(exc))
+
     def test_maps_api_key(self):
         """Google Maps APIキーの接続テスト"""
         result = test_maps_api(self.maps_api_key_edit.text())
@@ -1564,6 +1627,10 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                 DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
             )
         )
+        if hasattr(self, "reprice_discord_webhook_edit"):
+            self.reprice_discord_webhook_edit.setText(
+                self.settings.value("reprice/discord_webhook_url", "")
+            )
         self.pricetar_listing_url_edit.setText(
             self.settings.value("pricetar/listing_url", DEFAULT_PRICETAR_LISTING_URL)
         )
@@ -1681,6 +1748,11 @@ PySide6 バージョン: {__import__('PySide6').__version__}
                 self.amazon_inventory_loader_upload_url_edit.text().strip()
                 or DEFAULT_AMAZON_INVENTORY_LOADER_UPLOAD_URL,
             )
+            if hasattr(self, "reprice_discord_webhook_edit"):
+                self.settings.setValue(
+                    "reprice/discord_webhook_url",
+                    self.reprice_discord_webhook_edit.text().strip(),
+                )
             self.settings.setValue(
                 "pricetar/listing_url",
                 self.pricetar_listing_url_edit.text().strip() or DEFAULT_PRICETAR_LISTING_URL,

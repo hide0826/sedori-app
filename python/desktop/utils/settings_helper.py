@@ -148,3 +148,16 @@ def get_default_receive_prefecture() -> str:
     v = _settings().value(ONLINE_PURCHASE_RECEIVE_PREFECTURE_KEY, "") or ""
     text = str(v).strip()
     return text or DEFAULT_RECEIVE_PREFECTURE
+
+
+REPRICE_DISCORD_WEBHOOK_KEY = "reprice/discord_webhook_url"
+
+
+def get_reprice_discord_webhook_url() -> str:
+    """価格改定ジョブ完了・エラー通知用 Discord Webhook URL。未設定は空。"""
+    v = _settings().value(REPRICE_DISCORD_WEBHOOK_KEY, "") or ""
+    return str(v).strip()
+
+
+def set_reprice_discord_webhook_url(url: str) -> None:
+    _settings().setValue(REPRICE_DISCORD_WEBHOOK_KEY, str(url or "").strip())
