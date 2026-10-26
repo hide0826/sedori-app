@@ -42,17 +42,24 @@
       el.className = kind || "";
     }
 
+    function skuText(row) {
+      const sku = String((row && row.sku) || "").trim();
+      return (!sku || sku === "未実装") ? "" : sku;
+    }
+
     function label(row) {
-      const code = row.jan ? ("JAN " + row.jan) : ("ASIN " + (row.asin || ""));
+      const sku = skuText(row);
+      const code = sku
+        ? ("SKU " + sku)
+        : (row.jan ? ("JAN " + row.jan) : ("ASIN " + (row.asin || "")));
       const photos = (row.files || []).length
         ? ("写真 " + row.files.length + "枚")
         : "";
       const cond = String(row.condition || "").trim();
-      const sku = String(row.sku || "").trim();
       const lines = [(row.product_name || "名称なし") + " / " + code];
       const meta = [];
       if (cond) meta.push(cond);
-      if (sku && sku !== "未実装") meta.push("SKU " + sku);
+      if (sku && row.jan) meta.push("JAN " + row.jan);
       if (photos) meta.push(photos);
       if (meta.length) lines.push(meta.join(" / "));
       return lines.join("\n");
@@ -78,15 +85,26 @@
       if (!ok) return;
       const res = await fetch(
         "/api/route/" + encodeURIComponent(WEB_ID) + "/products/reopen",
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jan: row.jan || "", asin: row.asin || "" }) }
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sku: skuText(row) || "",
+            jan: row.jan || "",
+            asin: row.asin || ""
+          })
+        }
       );
       if (!res.ok) {
         setStatus("写真を消せませんでした", "err");
         return;
       }
-      const back = row.jan
-        ? ("jan=" + encodeURIComponent(row.jan))
-        : ("asin=" + encodeURIComponent(row.asin || ""));
+      const sku = skuText(row);
+      const back = sku
+        ? ("sku=" + encodeURIComponent(sku))
+        : (row.jan
+          ? ("jan=" + encodeURIComponent(row.jan))
+          : ("asin=" + encodeURIComponent(row.asin || "")));
       location.href = "/route/" + encodeURIComponent(WEB_ID) + "/photos?" + back;
     }
 

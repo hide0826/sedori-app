@@ -2,11 +2,15 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-10-26（FBA受領日と販売・返金の朝同期）
+更新日: 2026-10-26（ルート撮影をSKU単位＋とりあえず撮影）
 
 ---
 
 ## いまの状態
+
+**2026-10-26（ルート撮影SKU単位＋とりあえず撮影）:** 同JANの別SKUが、1点の撮影終了でまとめて「撮影済み」になっていた。完了・画像不要・再撮影・撮影済み一覧のキーを **SKU優先**（無ければJAN→ASIN）に変更。写真保存時もSKUを書く。あわせて、ルート／商品リストなしで写真だけ残す「とりあえず撮影」を追加（`/quick-photos`、保存先 `D:\せどり総合\中古画像一時\日付\`）。ルート一覧ホームから入れる。ルートWeb再起動済み。スマホは画面を再読み込み。試験: `python/route_web/test_product_images_sku.py`（同JAN2SKUで1点だけ確定）。
+
+主なファイル: `route_web/product_images.py` / `route_web/app.py` / `route_web/quick_photos.py` / `static/route_photos.html` / `static/route_photos_done.html` / `static/quick_photos.html` / `static/index.html`。
 
 **2026-10-26（FBA受領日と朝の同期）:** 毎朝9時のタスク `HIRIO_sp_api_daily_sync`（サインイン中だけ、打ち切り8時間）。ログは `python/desktop/logs/sp_api_daily_sync.log`。手動実行は `python\desktop\scripts\run_sp_api_daily_sync_job.py`。
 
@@ -171,7 +175,37 @@
 
 ---
 
----
+## 2026-10-26 ルート撮影をSKU単位にし、とりあえず撮影を追加
+
+同JANの商品が複数あるとき、1点の「撮影終了」や「画像不要」で、同じJANの別点までリストから消えていた。完了判定がJAN優先だったため。あわせて、仕入リストに載せる前でも中古写真だけ先に残したい場面用の簡易画面を追加した。
+
+### 動き
+
+1. 写真保存・撮影終了・画像不要・再撮影・撮影済み一覧は **SKU** で1点を特定する（SKUが無いときだけJAN→ASIN）
+2. 以前JANだけで確定した古い記録は、互換のためJANキーでも「済み」と見る
+3. ホームページに「とりあえず撮影」を追加。`/quick-photos` でカメラ／アルバムから送ると `D:\せどり総合\中古画像一時\YYYY-MM-DD\` に保存
+4. メモ（任意）はファイル名に入る。ルートやJANは不要
+
+### 追加・変更
+
+| 何 | 場所 |
+|----|------|
+| SKUキー・確定／不要／破棄 | `python/route_web/product_images.py` |
+| API（skuフォーム／ConfirmBody） | `python/route_web/app.py` |
+| 撮影画面 | `python/route_web/static/route_photos.html` |
+| 撮影済み画面 | `python/route_web/static/route_photos_done.html` |
+| とりあえず撮影 | `python/route_web/quick_photos.py` / `static/quick_photos.html` |
+| ホーム導線 | `python/route_web/static/index.html` |
+| 試験 | `python/route_web/test_product_images_sku.py` |
+
+### 確認
+
+- 同JAN・別SKUの仮データで、1点だけ確定してもう1点の未確定が残ること
+- `http://127.0.0.1:8792/health` と `/quick-photos` が 200。テスト送信で日付フォルダへJPEG保存
+
+### 次の一手
+
+スマホを再読み込みし、同JANの2点で1点だけ撮影終了してもう1点が残るか、とりあえず撮影が中古画像一時に入るかを見る。
 
 ---
 

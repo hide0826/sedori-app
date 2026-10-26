@@ -101,7 +101,7 @@
     let nearbyRoutes = [];
     let candidateRows = [];
     let candidateGroups = [];
-    let doneJans = {};
+    let doneKeys = {};
     let selected = null;
     let shotCount = 0;
 
@@ -113,6 +113,12 @@
         || String((route && route.route_code) || "").toUpperCase() === "NET";
     }
 
+    function skuKey(row) {
+      const sku = String((row && row.sku) || "").trim();
+      if (!sku || sku === "未実装") return "";
+      return sku;
+    }
+
     function janKey(row) {
       return String((row && row.jan) || "").replace(/\D/g, "");
     }
@@ -122,6 +128,8 @@
     }
 
     function linkId(row) {
+      const sku = skuKey(row);
+      if (sku) return "sku:" + sku;
       const jan = janKey(row);
       if (jan) return "jan:" + jan;
       const asin = asinKey(row);
@@ -130,6 +138,8 @@
     }
 
     function idText(row) {
+      const sku = skuKey(row);
+      if (sku) return "SKU " + sku;
       const jan = janKey(row);
       if (jan) return "JAN " + jan;
       const asin = asinKey(row);
@@ -138,15 +148,29 @@
     }
 
     function isDone(row) {
-      const key = linkId(row);
-      return !!key && !!doneJans[key];
+      const sku = skuKey(row);
+      if (sku && doneKeys["sku:" + sku]) return true;
+      // 以前JAN単位で確定した古い記録だけ互換で見る
+      const jan = janKey(row);
+      if (jan && doneKeys["jan:" + jan]) return true;
+      const asin = asinKey(row);
+      if (asin && doneKeys["asin:" + asin]) return true;
+      return false;
     }
 
     function sameProduct(a, b) {
       if (!a || !b) return false;
-      if (a.sku && b.sku) return a.sku === b.sku;
+      if (skuKey(a) && skuKey(b)) return skuKey(a) === skuKey(b);
       if (janKey(a) && janKey(a) === janKey(b)) return true;
       return !!(asinKey(a) && asinKey(a) === asinKey(b));
+    }
+
+    function productBody(row) {
+      return {
+        sku: skuKey(row) || "",
+        jan: row.jan || "",
+        asin: row.asin || ""
+      };
     }
 
     function setStatus(msg, kind) {
@@ -158,11 +182,13 @@
     function listLabel(row) {
       const name = (row && row.product_name) || "名称なし";
       const cond = String((row && row.condition) || "").trim();
-      const sku = String((row && row.sku) || "").trim();
+      const sku = skuKey(row);
+      const jan = janKey(row);
       const lines = [name + " / " + idText(row)];
       const meta = [];
       if (cond) meta.push(cond);
-      if (sku && sku !== "未実装") meta.push("SKU " + sku);
+      if (sku && jan) meta.push("JAN " + jan);
+      else if (!sku && jan) meta.push("JAN " + jan);
       if (meta.length) lines.push(meta.join(" / "));
       lines.push(routeText(row));
       return lines.join("\n");
@@ -189,7 +215,7 @@
 
     function chooseProduct(row) {
       if (!linkId(row)) {
-        setStatus("この商品にはJANもASINもありません", "err");
+        setStatus("この商品にはSKU・JAN・ASINがありません", "err");
         return;
       }
       selected = row;
@@ -346,13 +372,13 @@
       if (!yes) return;
       const res = await fetch(
         "/api/route/" + encodeURIComponent(WEB_ID) + "/products/no-image",
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jan: row.jan || "", asin: row.asin || "" }) }
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(productBody(row)) }
       );
       if (!res.ok) {
         setStatus("画像不要にできませんでした", "err");
         return;
       }
-      doneJans[linkId(row)] = true;
+      doneKeys[linkId(row)] = true;
       if (selected && sameProduct(selected, row)) {
         selected = null;
         shotCount = 0;
@@ -434,10 +460,15 @@
     async function loadAll() {
       const doneRes = await fetch("/api/route/" + encodeURIComponent(WEB_ID) + "/products/done");
       const doneData = await doneRes.json();
-      doneJans = {};
+      doneKeys = {};
       (doneData.done || []).forEach((row) => {
         const key = linkId(row);
-        if (key) doneJans[key] = true;
+        if (key) doneKeys[key] = true;
+        // 旧データがJANだけ持っている場合もキーとして残す
+        const jan = janKey(row);
+        if (jan) doneKeys["jan:" + jan] = doneKeys["jan:" + jan] || !skuKey(row);
+        const asin = asinKey(row);
+        if (asin && !skuKey(row) && !jan) doneKeys["asin:" + asin] = true;
       });
       const routeRes = await fetch("/api/route/" + encodeURIComponent(WEB_ID));
       const route = await routeRes.json();
@@ -459,12 +490,17 @@
       if (!purchases.length) setStatus(buy.message || "", buy.empty ? "err" : "ok");
       renderProducts();
       const params = new URLSearchParams(location.search);
+      const wantSku = String(params.get("sku") || "").trim();
       const wantJan = (params.get("jan") || "").replace(/\D/g, "");
       const wantAsin = (params.get("asin") || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-      if (wantJan || wantAsin) {
+      if (wantSku || wantJan || wantAsin) {
         const all = purchases.slice();
         nearbyRoutes.forEach((group) => (group.purchases || []).forEach((row) => all.push(row)));
-        const row = all.find((item) => (wantJan && janKey(item) === wantJan) || (wantAsin && asinKey(item) === wantAsin));
+        const row = all.find((item) =>
+          (wantSku && skuKey(item) === wantSku)
+          || (!wantSku && wantJan && janKey(item) === wantJan)
+          || (!wantSku && !wantJan && wantAsin && asinKey(item) === wantAsin)
+        );
         if (row) chooseProduct(row);
       }
     }
@@ -515,6 +551,7 @@
       }
       const fd = new FormData();
       fd.append("file", file, file.name || "product.jpg");
+      if (skuKey(selected)) fd.append("sku", skuKey(selected));
       if (selected.jan) fd.append("jan", selected.jan);
       if (selected.asin) fd.append("asin", selected.asin);
       const res = await fetch(
@@ -562,13 +599,13 @@
       }
       const res = await fetch(
         "/api/route/" + encodeURIComponent(WEB_ID) + "/products/confirm",
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jan: selected.jan || "", asin: selected.asin || "" }) }
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(productBody(selected)) }
       );
       if (!res.ok) {
         setStatus("撮影終了を保存できませんでした", "err");
         return;
       }
-      doneJans[linkId(selected)] = true;
+      doneKeys[linkId(selected)] = true;
       selected = null;
       shotCount = 0;
       document.getElementById("shotList").innerHTML = "";

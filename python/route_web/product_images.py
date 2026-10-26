@@ -42,6 +42,15 @@ def _safe_asin(asin: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", (asin or "").upper())[:16]
 
 
+def _safe_sku(sku: str) -> str:
+    """仕入1点の識別子。同JANでもSKUは別になる。"""
+    text = str(sku or "").strip()
+    if not text or text == "未実装":
+        return ""
+    text = re.sub(r"[^A-Za-z0-9\-_.]", "", text)
+    return text[:96]
+
+
 def next_product_filename(folder: Path, route_date: str, store_code: str) -> str:
     """YYYY-MM-DD-STORE-item-NN.jpg の次の連番。"""
     date = (route_date or "").strip() or "0000-00-00"
@@ -118,17 +127,25 @@ def append_product_file(
     store_code: str,
     filename: str,
     jan: str = "",
+    asin: str = "",
+    sku: str = "",
 ) -> Dict[str, Any]:
     code = (store_code or "").strip()
     stores: List[Dict[str, Any]] = list(doc.get("stores") or [])
     found = False
     jan_s = _safe_jan(jan)
+    asin_s = _safe_asin(asin)
+    sku_s = _safe_sku(sku)
     for st in stores:
         if str(st.get("store_code") or "").strip().upper() == code.upper():
             files = list(st.get("product_files") or [])
             entry: Dict[str, Any] = {"file": filename}
+            if sku_s:
+                entry["sku"] = sku_s
             if jan_s:
                 entry["jan"] = jan_s
+            if asin_s:
+                entry["asin"] = asin_s
             # 同名があれば上書き
             files = [f for f in files if not (
                 (isinstance(f, dict) and f.get("file") == filename)
@@ -145,12 +162,20 @@ def append_product_file(
     return doc
 
 
-def confirm_product_group(doc: Dict[str, Any], store_code: str, jan: str) -> Dict[str, Any]:
-    """同じ店舗・同じJANの商品画像を、撮影終了として確定する。"""
+def confirm_product_group(
+    doc: Dict[str, Any],
+    store_code: str,
+    jan: str = "",
+    asin: str = "",
+    sku: str = "",
+) -> Dict[str, Any]:
+    """同じ店舗・同じSKU（無ければJAN/ASIN）の商品画像を撮影終了にする。"""
     code = (store_code or "").strip()
+    sku_s = _safe_sku(sku)
     jan_s = _safe_jan(jan)
-    if not jan_s:
-        raise ValueError("jan required")
+    asin_s = _safe_asin(asin)
+    if not _product_link_key(sku_s, jan_s, asin_s):
+        raise ValueError("sku, jan, or asin required")
     stores: List[Dict[str, Any]] = list(doc.get("stores") or [])
     found = False
     confirmed = 0
@@ -160,9 +185,11 @@ def confirm_product_group(doc: Dict[str, Any], store_code: str, jan: str) -> Dic
         found = True
         files: List[Any] = []
         for item in st.get("product_files") or []:
-            if isinstance(item, dict) and _safe_jan(str(item.get("jan") or "")) == jan_s:
+            if _matches_product(item, sku_s, jan_s, asin_s):
                 updated = dict(item)
                 updated["confirmed"] = True
+                if sku_s and not _safe_sku(str(updated.get("sku") or "")):
+                    updated["sku"] = sku_s
                 files.append(updated)
                 confirmed += 1
             else:
@@ -183,12 +210,16 @@ def append_route_product_file(
     filename: str,
     jan: str = "",
     asin: str = "",
+    sku: str = "",
 ) -> Dict[str, Any]:
     """商品画像をルート直下に足す。店舗は覚えていなくても保存できる。"""
     files = list(doc.get("product_files") or [])
     jan_s = _safe_jan(jan)
     asin_s = _safe_asin(asin)
+    sku_s = _safe_sku(sku)
     entry: Dict[str, Any] = {"file": filename}
+    if sku_s:
+        entry["sku"] = sku_s
     if jan_s:
         entry["jan"] = jan_s
     if asin_s:
@@ -207,31 +238,48 @@ def append_route_product_file(
     return out
 
 
-def _matches_product(item: Dict[str, Any], jan_s: str, asin_s: str) -> bool:
-    """JANがあればJANで、無ければASINで同じ商品か見る。"""
+def _matches_product(
+    item: Dict[str, Any],
+    sku_s: str = "",
+    jan_s: str = "",
+    asin_s: str = "",
+) -> bool:
+    """SKUがあればSKUで1点を特定。無ければ従来どおりJAN→ASIN。"""
     if not isinstance(item, dict):
         return False
+    item_sku = _safe_sku(str(item.get("sku") or ""))
     item_jan = _safe_jan(str(item.get("jan") or ""))
     item_asin = _safe_asin(str(item.get("asin") or ""))
+    if sku_s:
+        # 同JAN複数点があるので、SKU指定時はSKU一致のみ（JANへフォールバックしない）
+        return item_sku == sku_s
     if jan_s:
-        return item_jan == jan_s
+        return (not item_sku) and item_jan == jan_s
     if asin_s:
-        return (not item_jan) and item_asin == asin_s
+        return (not item_sku) and (not item_jan) and item_asin == asin_s
     return False
 
 
-def confirm_route_product_group(doc: Dict[str, Any], jan: str, asin: str = "") -> Dict[str, Any]:
-    """同じ商品の画像を、ルート単位で撮影終了にする。JANが無ければASIN。"""
+def confirm_route_product_group(
+    doc: Dict[str, Any],
+    jan: str = "",
+    asin: str = "",
+    sku: str = "",
+) -> Dict[str, Any]:
+    """同じ商品の画像をルート単位で撮影終了にする。優先: SKU → JAN → ASIN。"""
+    sku_s = _safe_sku(sku)
     jan_s = _safe_jan(jan)
     asin_s = _safe_asin(asin)
-    if not jan_s and not asin_s:
-        raise ValueError("jan or asin required")
+    if not _product_link_key(sku_s, jan_s, asin_s):
+        raise ValueError("sku, jan, or asin required")
     confirmed = 0
     files: List[Any] = []
     for item in doc.get("product_files") or []:
-        if _matches_product(item, jan_s, asin_s):
+        if _matches_product(item, sku_s, jan_s, asin_s):
             updated = dict(item)
             updated["confirmed"] = True
+            if sku_s and not _safe_sku(str(updated.get("sku") or "")):
+                updated["sku"] = sku_s
             files.append(updated)
             confirmed += 1
         else:
@@ -243,9 +291,11 @@ def confirm_route_product_group(doc: Dict[str, Any], jan: str, asin: str = "") -
             continue
         store_files: List[Any] = []
         for item in store.get("product_files") or []:
-            if _matches_product(item, jan_s, asin_s):
+            if _matches_product(item, sku_s, jan_s, asin_s):
                 updated = dict(item)
                 updated["confirmed"] = True
+                if sku_s and not _safe_sku(str(updated.get("sku") or "")):
+                    updated["sku"] = sku_s
                 store_files.append(updated)
                 confirmed += 1
             else:
@@ -268,7 +318,10 @@ def _iter_product_file_lists(doc: Dict[str, Any]):
             yield store.get("product_files") or []
 
 
-def _product_link_key(jan: str, asin: str) -> str:
+def _product_link_key(sku: str = "", jan: str = "", asin: str = "") -> str:
+    sku_s = _safe_sku(sku)
+    if sku_s:
+        return "sku:" + sku_s
     jan_s = _safe_jan(jan)
     if jan_s:
         return "jan:" + jan_s
@@ -285,39 +338,52 @@ def list_no_image_products(doc: Dict[str, Any]) -> List[Dict[str, str]]:
     for item in doc.get("no_image_products") or []:
         if not isinstance(item, dict):
             continue
+        sku = _safe_sku(str(item.get("sku") or ""))
         jan = _safe_jan(str(item.get("jan") or ""))
         asin = _safe_asin(str(item.get("asin") or ""))
-        key = _product_link_key(jan, asin)
+        key = _product_link_key(sku, jan, asin)
         if not key or key in seen:
             continue
         seen.add(key)
-        found.append({"jan": jan, "asin": asin})
+        found.append({"sku": sku, "jan": jan, "asin": asin})
     return found
 
 
-def mark_no_image(doc: Dict[str, Any], jan: str, asin: str = "") -> Dict[str, Any]:
+def mark_no_image(
+    doc: Dict[str, Any],
+    jan: str = "",
+    asin: str = "",
+    sku: str = "",
+) -> Dict[str, Any]:
     """新品などで写真が不要な商品を、画像なしの撮影済みにする。"""
+    sku_s = _safe_sku(sku)
     jan_s = _safe_jan(jan)
     asin_s = _safe_asin(asin)
-    if not _product_link_key(jan_s, asin_s):
-        raise ValueError("jan or asin required")
+    key = _product_link_key(sku_s, jan_s, asin_s)
+    if not key:
+        raise ValueError("sku, jan, or asin required")
     rows = list_no_image_products(doc)
-    if not any(_product_link_key(row["jan"], row["asin"]) == _product_link_key(jan_s, asin_s) for row in rows):
-        rows.append({"jan": jan_s, "asin": asin_s})
+    if not any(_product_link_key(row.get("sku", ""), row.get("jan", ""), row.get("asin", "")) == key for row in rows):
+        rows.append({"sku": sku_s, "jan": jan_s, "asin": asin_s})
     out = dict(doc)
     out["no_image_products"] = rows
     return out
 
 
-def clear_no_image(doc: Dict[str, Any], jan: str, asin: str = "") -> tuple[Dict[str, Any], bool]:
+def clear_no_image(
+    doc: Dict[str, Any],
+    jan: str = "",
+    asin: str = "",
+    sku: str = "",
+) -> tuple[Dict[str, Any], bool]:
     """画像不要を取り消し、選ぶリストへ戻せるようにする。"""
-    key = _product_link_key(jan, asin)
+    key = _product_link_key(sku, jan, asin)
     if not key:
-        raise ValueError("jan or asin required")
+        raise ValueError("sku, jan, or asin required")
     kept: List[Dict[str, str]] = []
     removed = False
     for row in list_no_image_products(doc):
-        if _product_link_key(row["jan"], row["asin"]) == key:
+        if _product_link_key(row.get("sku", ""), row.get("jan", ""), row.get("asin", "")) == key:
             removed = True
             continue
         kept.append(row)
@@ -327,36 +393,47 @@ def clear_no_image(doc: Dict[str, Any], jan: str, asin: str = "") -> tuple[Dict[
 
 
 def confirmed_product_groups(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """撮影終了済みの商品と、その画像ファイル名。JANが無ければASIN。"""
+    """撮影終了済みの商品と、その画像ファイル名。優先: SKU → JAN → ASIN。"""
     groups: Dict[str, Dict[str, Any]] = {}
     for items in _iter_product_file_lists(doc):
         for item in items:
             if not isinstance(item, dict) or not item.get("confirmed"):
                 continue
+            sku = _safe_sku(str(item.get("sku") or ""))
             jan = _safe_jan(str(item.get("jan") or ""))
             asin = _safe_asin(str(item.get("asin") or ""))
             name = str(item.get("file") or "").strip()
-            if not name or not (jan or asin):
+            key = _product_link_key(sku, jan, asin)
+            if not name or not key:
                 continue
-            key = "jan:" + jan if jan else "asin:" + asin
-            bucket = groups.setdefault(key, {"jan": jan, "asin": asin, "files": []})
+            bucket = groups.setdefault(
+                key,
+                {"sku": sku, "jan": jan, "asin": asin, "files": []},
+            )
             if name not in bucket["files"]:
                 bucket["files"].append(name)
     return list(groups.values())
 
 
-def discard_product_group(doc: Dict[str, Any], folder: Path, jan: str, asin: str = "") -> Dict[str, Any]:
+def discard_product_group(
+    doc: Dict[str, Any],
+    folder: Path,
+    jan: str = "",
+    asin: str = "",
+    sku: str = "",
+) -> Dict[str, Any]:
     """再撮影のため、その商品の画像を記録とファイルから消す。"""
+    sku_s = _safe_sku(sku)
     jan_s = _safe_jan(jan)
     asin_s = _safe_asin(asin)
-    if not jan_s and not asin_s:
-        raise ValueError("jan or asin required")
+    if not _product_link_key(sku_s, jan_s, asin_s):
+        raise ValueError("sku, jan, or asin required")
     removed: List[str] = []
 
     def strip(items: Any) -> List[Any]:
         kept: List[Any] = []
         for item in items or []:
-            if _matches_product(item, jan_s, asin_s):
+            if _matches_product(item, sku_s, jan_s, asin_s):
                 name = str(item.get("file") or "").strip()
                 if name:
                     removed.append(name)

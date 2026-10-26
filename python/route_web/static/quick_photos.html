@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>HIRIO とりあえず撮影</title>
+  <link rel="icon" href="/icon.png" type="image/png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="とりあえず撮影" />
+  <meta name="theme-color" content="#2a9fe0" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <style>
+    :root {
+      --bg: #0f1419;
+      --card: #1a2332;
+      --text: #e7ecf3;
+      --muted: #8b9bb4;
+      --accent: #3d8bfd;
+      --ok: #2ea043;
+      --border: #2a3548;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 12px 12px 48px;
+      line-height: 1.45;
+    }
+    a { color: #9ecbff; text-decoration: none; }
+    h1 { font-size: 1.15rem; margin: 0 0 4px; }
+    h2 { font-size: 0.95rem; margin: 0 0 8px; color: var(--muted); }
+    .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 12px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    .hint { color: var(--muted); font-size: 0.85rem; margin: 0 0 10px; }
+    label.field {
+      display: block;
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    input[type="text"] {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #121a26;
+      color: var(--text);
+      font-size: 1rem;
+      margin-bottom: 10px;
+    }
+    input[type="file"] { display: none; }
+    #takeBtn {
+      display: block;
+      width: 100%;
+      text-align: center;
+      font-size: 1.45rem;
+      font-weight: 700;
+      padding: 26px 16px;
+      margin: 0 0 8px;
+      background: var(--accent);
+      color: #fff;
+      border: 0;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    #pickBtn {
+      display: block;
+      width: 100%;
+      text-align: center;
+      font-size: 0.95rem;
+      padding: 12px;
+      background: #243044;
+      color: #fff;
+      border: 0;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    #status { min-height: 1.3em; margin-top: 8px; font-size: 0.9rem; color: var(--muted); }
+    #status.ok { color: #3fb950; }
+    #status.err { color: #ff7b72; }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li {
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.85rem;
+      word-break: break-all;
+    }
+    li:last-child { border-bottom: 0; }
+    .meta { color: var(--muted); font-size: 0.78rem; }
+    code { color: #9ecbff; word-break: break-all; font-size: 0.8rem; }
+  </style>
+</head>
+<body>
+  <p><a href="/">← 一覧に戻る</a></p>
+  <h1>とりあえず撮影</h1>
+  <div class="sub">商品リストに載せる前でも、写真だけ先に残せます</div>
+
+  <div class="card">
+    <p class="hint">
+      保存先: <code>D:\せどり総合\中古画像一時\日付\</code><br />
+      ルート紐付けや JAN は不要です。あとで PC から振り分けてください。
+    </p>
+    <label class="field" for="note">メモ（任意・ファイル名に入ります）</label>
+    <input id="note" type="text" maxlength="40" placeholder="例: 箱あり / ASIN / キズ" autocomplete="off" />
+    <label class="btn" id="takeBtn">写真を撮る
+      <input id="cameraShot" type="file" accept="image/*" capture="environment" />
+    </label>
+    <label class="btn" id="pickBtn">アルバムから選ぶ
+      <input id="albumShot" type="file" accept="image/*" multiple />
+    </label>
+    <div id="status"></div>
+  </div>
+
+  <div class="card">
+    <h2>最近送った写真</h2>
+    <ul id="recentList"><li class="meta">読み込み中…</li></ul>
+  </div>
+
+  <script>
+    function setStatus(msg, kind) {
+      const el = document.getElementById("status");
+      el.textContent = msg || "";
+      el.className = kind || "";
+    }
+
+    function escapeHtml(s) {
+      return String(s || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function formatBytes(n) {
+      if (!n && n !== 0) return "";
+      if (n < 1024) return n + " B";
+      if (n < 1024 * 1024) return (n / 1024).toFixed(0) + " KB";
+      return (n / (1024 * 1024)).toFixed(1) + " MB";
+    }
+
+    async function loadRecent() {
+      const ul = document.getElementById("recentList");
+      try {
+        const res = await fetch("/api/quick-photos");
+        if (!res.ok) throw new Error("status " + res.status);
+        const data = await res.json();
+        const items = data.items || [];
+        if (!items.length) {
+          ul.innerHTML = '<li class="meta">まだ写真はありません</li>';
+          return;
+        }
+        ul.innerHTML = items.map(function (it) {
+          return "<li><div>" + escapeHtml(it.relative_path) + "</div>" +
+            '<div class="meta">' + escapeHtml(it.saved_at || "") +
+            " · " + escapeHtml(formatBytes(it.bytes)) + "</div></li>";
+        }).join("");
+      } catch (e) {
+        ul.innerHTML = '<li class="meta">一覧を読めませんでした</li>';
+      }
+    }
+
+    async function uploadFiles(fileList) {
+      const files = Array.from(fileList || []).filter(Boolean);
+      if (!files.length) return;
+      const note = (document.getElementById("note").value || "").trim();
+      let ok = 0;
+      let fail = 0;
+      setStatus("送信中… (" + files.length + " 枚)", "");
+      for (let i = 0; i < files.length; i++) {
+        const fd = new FormData();
+        fd.append("file", files[i], files[i].name || "photo.jpg");
+        if (note) fd.append("note", note);
+        try {
+          const res = await fetch("/api/quick-photos", { method: "POST", body: fd });
+          if (!res.ok) {
+            fail += 1;
+            continue;
+          }
+          ok += 1;
+        } catch (e) {
+          fail += 1;
+        }
+      }
+      if (fail === 0) {
+        setStatus(ok + " 枚保存しました", "ok");
+      } else {
+        setStatus("成功 " + ok + " / 失敗 " + fail, "err");
+      }
+      await loadRecent();
+    }
+
+    document.getElementById("cameraShot").addEventListener("change", async function (ev) {
+      const input = ev.target;
+      await uploadFiles(input.files);
+      input.value = "";
+    });
+    document.getElementById("albumShot").addEventListener("change", async function (ev) {
+      const input = ev.target;
+      await uploadFiles(input.files);
+      input.value = "";
+    });
+
+    loadRecent();
+  </script>
+</body>
+</html>
