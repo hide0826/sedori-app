@@ -563,6 +563,7 @@ def normalize_status_code(raw: Any) -> str:
         "販売中": "selling",
         "一部販売済み": "partially_sold",
         "販売済み": "sold",
+        "返金": "refunded",
     }
     for label, code in label_to_code.items():
         if s == label.lower() or s == label:
@@ -620,6 +621,10 @@ def apply_purchase_db_fields_to_display_record(
     if er is not None and str(er).strip() and not row.get("想定ROI"):
         row["想定ROI"] = er
         row["expected_roi"] = er
+    listed = str(db_row.get("listed_date") or "").strip()
+    if listed:
+        row["出品日"] = listed
+        row["listed_date"] = listed
 
 
 def purchase_display_record_from_db_row(db_row: Dict[str, Any]) -> Dict[str, Any]:
@@ -702,6 +707,8 @@ def purchase_record_from_db_row(db_row: Dict[str, Any]) -> Dict[str, Any]:
         "sku": sku,
         "仕入れ日": purchase_date or "",
         "purchase_date": purchase_date or "",
+        "出品日": str(db_row.get("listed_date") or "").strip(),
+        "listed_date": str(db_row.get("listed_date") or "").strip(),
         "ASIN": db_row.get("asin") or "",
         "商品名": db_row.get("product_name") or db_row.get("title") or "",
         "仕入れ個数": db_row.get("quantity") or 1,

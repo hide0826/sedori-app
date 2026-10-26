@@ -106,6 +106,50 @@ def load_tp_map_from_purchase_db(sku_list: List[str]) -> Dict[str, Dict[str, flo
     return result
 
 
+def load_listed_date_map_from_purchase_db(sku_list: List[str]) -> Dict[str, str]:
+    """仕入DBの出品日（受領日）を SKU 単位で読む。空の行は含めない。"""
+    result: Dict[str, str] = {}
+    if not sku_list:
+        return result
+
+    db_path = _resolve_purchase_db_path()
+    if not db_path.exists():
+        return result
+
+    unique_skus = []
+    seen = set()
+    for sku in sku_list:
+        text = str(sku or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        unique_skus.append(text)
+    if not unique_skus:
+        return result
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        chunk_size = 900
+        for i in range(0, len(unique_skus), chunk_size):
+            chunk = unique_skus[i:i + chunk_size]
+            placeholders = ",".join(["?"] * len(chunk))
+            cur.execute(
+                f"SELECT sku, listed_date FROM purchases WHERE sku IN ({placeholders})",
+                tuple(chunk),
+            )
+            for row in cur.fetchall():
+                sku = str(row["sku"] or "").strip()
+                listed = str(row["listed_date"] or "").strip()
+                if sku and listed:
+                    result[sku] = listed
+        conn.close()
+    except Exception as e:
+        print(f"[WARNING 3-6-9] 仕入DBの出品日読込に失敗: {e}")
+    return result
+
+
 def load_repricing_enabled_map_from_purchase_db(sku_list: List[str]) -> Dict[str, bool]:
     """仕入DBからSKU単位の価格改定フラグ（True=ON）を読み込む。"""
     result: Dict[str, bool] = {}

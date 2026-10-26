@@ -8,11 +8,12 @@ from services.repricer_common import (
     RepriceOutputs,
     calculate_new_price_and_trace,
     format_trace_value,
-    get_days_since_listed,
+    resolve_days_since_listed,
     get_rule_for_days,
 )
 from services.repricer_purchase_db import (
     is_repricing_off,
+    load_listed_date_map_from_purchase_db,
     load_repricing_enabled_map_from_purchase_db,
 )
 
@@ -33,6 +34,7 @@ def apply_standard_repricing_rules(
             _sku = _sku[2:-1]
         sku_candidates.append(str(_sku or "").strip())
     repricing_enabled_map_by_sku = load_repricing_enabled_map_from_purchase_db(sku_candidates)
+    listed_date_map_by_sku = load_listed_date_map_from_purchase_db(sku_candidates)
 
     rules = config["reprice_rules"]
 
@@ -60,7 +62,9 @@ def apply_standard_repricing_rules(
             excluded_inventory_data.append(row.to_dict())
             continue
 
-        days_since_listed = get_days_since_listed(sku, today)
+        days_since_listed = resolve_days_since_listed(
+            sku, today, listed_date_map_by_sku.get(str(sku).strip())
+        )
 
         # 日付不明の場合は維持
         if days_since_listed == -1:

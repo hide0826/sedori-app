@@ -190,10 +190,24 @@ def run_weekly369(
 
     config = load_369_config()
     before = len(items)
+    listed_map: Dict[str, str] = {}
+    try:
+        with _python_services_precedence():
+            from services.repricer_purchase_db import load_listed_date_map_from_purchase_db
+
+            listed_map = load_listed_date_map_from_purchase_db(
+                [str(it.get("sku") or "").strip() for it in items]
+            )
+    except Exception as exc:  # noqa: BLE001
+        on_progress(f"出品日の読込をスキップ: {exc}")
     items = [
         it
         for it in items
-        if not sku_is_in_follow_band(str(it.get("sku") or ""), config=config)
+        if not sku_is_in_follow_band(
+            str(it.get("sku") or ""),
+            config=config,
+            listed_date=listed_map.get(str(it.get("sku") or "").strip()),
+        )
     ]
     on_progress(f"追従帯除外: {before} → {len(items)}（週次対象）")
 

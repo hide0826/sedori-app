@@ -41,6 +41,7 @@ except ImportError:
 _purchase_db = _load_python_services_module("repricer_purchase_db.py")
 load_repricing_enabled_map_from_purchase_db = _purchase_db.load_repricing_enabled_map_from_purchase_db
 load_tp_map_from_purchase_db = _purchase_db.load_tp_map_from_purchase_db
+load_listed_date_map_from_purchase_db = _purchase_db.load_listed_date_map_from_purchase_db
 
 try:
     from services.sp_api_offers import fetch_min_prices_for_asins, parse_listing_condition_code
@@ -232,6 +233,7 @@ def build_follow_items_from_listings(
     early_days: int = EARLY_DAYS,
     runs_per_day: int = DEFAULT_RUNS_PER_DAY,
     max_items: Optional[int] = None,
+    listed_date_map: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
     """出品行 + 最安マップから改定 items を組み立てる。"""
     now = today or datetime.now()
@@ -247,7 +249,8 @@ def build_follow_items_from_listings(
         asin = str(_row_get(row, "ASIN", "asin") or "").strip().upper()
         title = str(_row_get(row, "title", "Title") or "")
         price = _to_int(_row_get(row, "price"), 0)
-        days = get_days_since_listed(sku, now)
+        listed = (listed_date_map or {}).get(sku)
+        days = get_days_since_listed(sku, now, listed)
         tp_floor = resolve_tp_floor(days, tp_map.get(sku))
         min_same = min_by_asin.get(asin) if asin else None
         calc = compute_follow_price(
@@ -312,12 +315,16 @@ def filter_listings_to_follow_band(
         )
     config = load_369_config()
     now = today or datetime.now()
+    skus = [str(_row_get(row, "SKU", "sku") or "").strip() for row in rows]
+    listed_map = load_listed_date_map_from_purchase_db([sku for sku in skus if sku])
     out: List[Mapping[str, Any]] = []
     for row in rows:
         sku = str(_row_get(row, "SKU", "sku") or "").strip()
         if not sku:
             continue
-        if sku_is_in_follow_band(sku, config=config, today=now):
+        if sku_is_in_follow_band(
+            sku, config=config, today=now, listed_date=listed_map.get(sku)
+        ):
             out.append(row)
     return out
 
@@ -355,6 +362,7 @@ def run_follow_repricer(
         on_progress("仕入DBのTP・改定ON/OFFを読込中…")
     tp_map = load_tp_map_from_purchase_db(skus)
     enabled_map = load_repricing_enabled_map_from_purchase_db(skus)
+    listed_date_map = load_listed_date_map_from_purchase_db(skus)
 
     specs = []
     for r in rows:
@@ -383,6 +391,7 @@ def run_follow_repricer(
         min_by_asin=min_by_asin,
         tp_map=tp_map,
         enabled_map=enabled_map,
+        listed_date_map=listed_date_map,
         chase_yen=chase_yen,
         early_days=early_days,
         runs_per_day=runs_per_day,

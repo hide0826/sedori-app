@@ -2066,6 +2066,7 @@ class PurchaseTableMixin:
                     status_combo.addItem("販売中", "selling")
                     status_combo.addItem("一部販売済み", "partially_sold")
                     status_combo.addItem("販売済み", "sold")
+                    status_combo.addItem("返金", "refunded")
                     status_combo.addItem("在庫専用", "inventory_only")
                     
                     # 現在の値を設定
@@ -2804,6 +2805,7 @@ class PurchaseTableMixin:
             "selling": QColor(20, 80, 40),  # 販売中：緑系
             "partially_sold": QColor(20, 70, 70),  # 一部販売済み：青緑系
             "sold": QColor(60, 60, 60),  # 販売済み：やや暗め
+            "refunded": QColor(90, 20, 20),  # 返金：赤系
             "inventory_only": QColor(42, 58, 72),  # 在庫専用：青灰（在庫CSV登録）
         }
         

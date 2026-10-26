@@ -2,11 +2,25 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-10-25（6ルールに売り切りを追加）
+更新日: 2026-10-26（FBA受領日と販売・返金の朝同期）
 
 ---
 
 ## いまの状態
+
+**2026-10-26（FBA受領日と朝の同期）:** 毎朝9時のタスク `HIRIO_sp_api_daily_sync`（サインイン中だけ、打ち切り8時間）。ログは `python/desktop/logs/sp_api_daily_sync.log`。手動実行は `python\desktop\scripts\run_sp_api_daily_sync_job.py`。
+
+- 出品日は、倉庫に残っている個数の一番古い受領日。自己発送・在庫0・受領の合計が現在庫より少ないSKUは上書きしない。空または出品可能だけ販売中にする。
+- 出品レポートの「在庫数」はFBAだと空。倉庫数は `GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA` の `afn-warehouse-quantity`。10/26 15:25 時点で在庫あり 415 SKU。
+- 旧受領レポート `GET_FBA_FULFILLMENT_INVENTORY_RECEIPTS_DATA` は Amazon が拒否（report type 2607）。代わりに在庫台帳 `GET_LEDGER_DETAIL_VIEW_DATA`（`eventType=Receipts`）。このロールは Amazon Fulfillment。古いリフレッシュトークンでは 403。新しいトークンで 10/26 15:24 に一覧が通った。
+- 初回は過去約18か月を月ごと。結果は `python/desktop/logs/fba_receipts_cache.json`。10/26 は 2025-05-04〜2026-04-30 の 1,976件まで保存し、2026-05 の作成で 429（QuotaExceeded）。途中まででは出品日を書かない（新しい受領が欠けると日付が古くずれる）。`covered_through` は `2026-04-30`。明日9時は続きから取る。作成間隔は約75秒。429 のときは待って少数回だけやり直す。
+- 同じ朝に、注文は直近2日、返品は直近14日。個数が仕入数以上なら販売済み、残があれば一部販売済み。販売がすべて全額返金のときだけ仕入を `refunded`（表示「返金」）。一部返金は返金総額だけ。販売DBは返金総額が0でない行を赤文字（黄背景は外した）。反映は **HIRIO再起動**。
+- 10/26 の実行で、販売の追加と「販売済み」「返金」への更新は入っている。財務イベントAPIは未接続で、返金金額の新規取込は販売価格からの推定のまま。
+- 価格改定の経過日数は、仕入DBの出品日があればそれを使う。空なら今までどおりSKU先頭の日付。週次と追従の両方。
+
+主なファイル: `services/sp_api_receipt_date.py` / `services/sp_api_sales_sync.py` / `scripts/run_sp_api_daily_sync_job.py` / `scripts/install_sp_api_reprice_tasks.ps1`（`-DailySyncOnly` なら日次タスクだけ。全実行は追従の次回時刻をずらす）。テストは `tests/test_sp_api_receipt_date.py` と `tests/test_sp_api_sales_sync.py`（pytest は未導入。`PYTHONPATH=python` で関数を直接実行して通過）。
+
+**2026-10-26（追従の全件）:** 件数上限なしの1回目は 10/26 1:11 に 239/239、失敗0、`end code=0`。2回目は 7:13 に 224/224、失敗0。3回目は 14:17 開始で、17時時点ではまだ送信中。3回とも最後まで成功したら Feeds 一括へ進む。
 
 **2026-10-25（SP-API無人価格改定）:** 価格の書き込みは Feeds ではなく、SKU ごとの Listings PATCH。追従タスクが `--max-patch 1` で `20251220-used1-014` → **3448**（10-24 06:26 / 10-25 06:22 / 10-25 14:26。失敗0）。Seller Central の販売価格も 3448 で目視確認済み。HIRIO 画面の 3364 は 3-6-9 プレビュー（週次は追従帯を送らない）。法人価格 3452 は未更新のことがある。週次3-6-9は 10-25 04:00 に対象7件・変更0。出品レポート待ちは安定化済み（直近90分のDONE再利用、進行中は新規作成せず待つ、作成1回再試行、タイムアウト後DONE再利用、ログは状態変化＋約1分ごと、待ち上限30分）。コードは `feature/sp-api` `4b098b0`、shared `e9de1fb` まで push 済み。
 
@@ -14,7 +28,7 @@
 
 **2026-10-25（売り切り）:** 6ルールの271–300日と301–330日をアクション「売り切り」にした。この期間の6ルール商品は、日曜の週次で330日までに最終500円へ1段ずつ下がる。仕入値や赤線では止めない。500円以下にはしない。331–360日は「維持」。最終価格はルール画面の「売り切り最終価格(円)」。追従（8時間）はこの期間を送らない。3ルールと9ルールは今まで通り。反映は **HIRIO再起動** 後に設定画面で確認。週次ジョブはJSONを直接読むので、次の日曜4時からこのルールで動く。
 
-**次に実装（決定 2026-10-25）:** 1件ずつの PATCH 確認が取れたので、Feeds API の `JSON_LISTINGS_FEED` で価格変更を1ファイルにまとめて送る。計算（週次3-6-9と追従帯の排他）はそのまま。送る先だけ一括にする。失敗SKUが分かるログは残す。新しいロール申請は通常不要（商品の出品）。着手は次チャット。一括ができるまでは、上記の順次PATCHで全件を送る。
+**次に実装:** 明日9時の日次同期が受領の続きを取り切り、出品日が入ったことをログで確認する。追従の全件PATCHが3回完走したら、Feeds API の `JSON_LISTINGS_FEED` で価格変更を1ファイルにまとめて送る。計算（週次3-6-9と追従帯の排他）はそのまま。失敗SKUが分かるログは残す。
 
 **2026-10-23（デスクトップ常時起動）:** 本体GUIに番人が無かったため、放置や夜の再起動失敗で落ちたままになっていた。`python/desktop/watch_hirio_desktop.ps1` を追加し、タスク `HIRIO_desktop`（ログオン／起動／5分）を登録済み。落ちたら約20秒周期で `start_hirio.bat` を起こす。夜の再起動中は `logs/nightly_restart.busy` があるあいだ（最大15分）触らない。意図的に止めたいときは `pause_desktop_watchdog.cmd`（`desktop.paused`）。再開は `resume_desktop_watchdog.cmd`。夜の再起動は待ちタイムアウト・起動確認・失敗時の busy 解除を強化。`hirio_boot_recover` の番人一覧にも desktop を追加（watcher 側）。反映は **いまの HIRIO を一度閉じて開き直す**（番人は既に稼働中）。ログ: `python/desktop/logs/desktop_watchdog.log` / `nightly_restart.log`。
 

@@ -33,9 +33,35 @@ def load_369_config() -> Dict[str, Any]:
     return config
 
 
-def get_days_since_listed(sku: str, today: Optional[datetime] = None) -> int:
-    """SKU 埋め込み日付から経過日数。読めなければ -1。"""
+def _days_from_listed_text(listed_date: Optional[str], today: datetime) -> Optional[int]:
+    """出品日文字列から経過日数。空や不正なら None。"""
+    text = str(listed_date or "").strip()
+    if not text or text.lower() in ("nan", "none"):
+        return None
+    if "T" in text:
+        text = text.split("T", 1)[0]
+    normalized = text.replace(".", "-").replace("/", "-")[:10]
+    try:
+        listed = datetime.strptime(normalized, "%Y-%m-%d")
+    except ValueError:
+        compact = "".join(ch for ch in text if ch.isdigit())[:8]
+        try:
+            listed = datetime.strptime(compact, "%Y%m%d")
+        except ValueError:
+            return None
+    return max(0, (today.date() - listed.date()).days)
+
+
+def get_days_since_listed(
+    sku: str,
+    today: Optional[datetime] = None,
+    listed_date: Optional[str] = None,
+) -> int:
+    """出品日があればその経過日数。無ければ SKU 埋め込み日付。読めなければ -1。"""
     now = today or datetime.now()
+    from_listed = _days_from_listed_text(listed_date, now)
+    if from_listed is not None:
+        return from_listed
     text = str(sku or "")
     if text.startswith('="') and text.endswith('"'):
         text = text[2:-1]
@@ -148,6 +174,7 @@ def resolve_active_rule_for_sku(
     *,
     config: Optional[Mapping[str, Any]] = None,
     today: Optional[datetime] = None,
+    listed_date: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], int, str]:
     """
     SKU の現行ルール帯を返す。
@@ -159,7 +186,7 @@ def resolve_active_rule_for_sku(
     now = today or datetime.now()
     default_profile = str(cfg.get("default_profile") or "6")
     profile = detect_369_profile_from_sku(sku, default_profile)
-    days = get_days_since_listed(sku, now)
+    days = get_days_since_listed(sku, now, listed_date)
     rules = _profile_rules(cfg, profile) or _fallback_rules(cfg)
     rule = _rule_for_days(days if days >= 0 else 999, rules)
     return rule, days, profile
@@ -170,9 +197,12 @@ def sku_is_in_follow_band(
     *,
     config: Optional[Mapping[str, Any]] = None,
     today: Optional[datetime] = None,
+    listed_date: Optional[str] = None,
 ) -> bool:
-    """SKU がいま追従期間か。"""
-    rule, days, _ = resolve_active_rule_for_sku(sku, config=config, today=today)
+    """SKU がいま追従期間か。出品日があれば SKU 日付より優先する。"""
+    rule, days, _ = resolve_active_rule_for_sku(
+        sku, config=config, today=today, listed_date=listed_date
+    )
     if days < 0:
         return False
     return is_follow_rule(rule)
@@ -183,17 +213,19 @@ def partition_skus_by_follow_band(
     *,
     config: Optional[Mapping[str, Any]] = None,
     today: Optional[datetime] = None,
+    listed_dates: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, List[str]]:
     """SKU を follow / weekly に分割する。"""
     cfg = config or load_369_config()
     now = today or datetime.now()
+    dates = listed_dates or {}
     follow: List[str] = []
     weekly: List[str] = []
     for raw in skus:
         sku = str(raw or "").strip()
         if not sku:
             continue
-        if sku_is_in_follow_band(sku, config=cfg, today=now):
+        if sku_is_in_follow_band(sku, config=cfg, today=now, listed_date=dates.get(sku)):
             follow.append(sku)
         else:
             weekly.append(sku)

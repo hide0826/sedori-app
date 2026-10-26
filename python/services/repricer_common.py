@@ -2,7 +2,7 @@ import json
 import os
 import re
 from datetime import datetime
-from typing import Any, Dict, List, NamedTuple, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import pandas as pd
 
@@ -199,6 +199,32 @@ def get_days_since_listed(sku: str, today: datetime) -> int:
                 continue
 
     return -1
+
+
+def parse_listed_date(value: Any) -> Optional[datetime]:
+    """仕入DBの出品日を datetime にする。読めなければ None。"""
+    text = str(value or "").strip()
+    if not text or text.lower() in ("nan", "none"):
+        return None
+    if "T" in text:
+        text = text.split("T", 1)[0]
+    normalized = text.replace(".", "-").replace("/", "-")[:10]
+    try:
+        return datetime.strptime(normalized, "%Y-%m-%d")
+    except ValueError:
+        compact = "".join(ch for ch in text if ch.isdigit())[:8]
+        try:
+            return datetime.strptime(compact, "%Y%m%d")
+        except ValueError:
+            return None
+
+
+def resolve_days_since_listed(sku: str, today: datetime, listed_date: Any = None) -> int:
+    """出品日が読めるときはその経過日数。空や不正なら SKU の日付。"""
+    parsed = parse_listed_date(listed_date)
+    if parsed is not None:
+        return max(0, (today.date() - parsed.date()).days)
+    return get_days_since_listed(sku, today)
 
 
 def get_rule_for_days(days: int, rules: Dict[str, Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:

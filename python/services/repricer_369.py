@@ -9,13 +9,14 @@ from services.repricer_common import (
     RepriceOutputs,
     detect_369_profile_from_sku,
     format_trace_value,
-    get_days_since_listed,
+    resolve_days_since_listed,
     to_float_or_none,
 )
 from services.repricer_purchase_db import (
     csv_profit_from_inventory_row,
     is_repricing_off,
     load_ladder_map_from_purchase_db,
+    load_listed_date_map_from_purchase_db,
     load_repricing_enabled_map_from_purchase_db,
     load_tp_map_from_purchase_db,
 )
@@ -372,6 +373,7 @@ def apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[st
     tp_map_by_sku = load_tp_map_from_purchase_db(sku_candidates)
     repricing_enabled_map_by_sku = load_repricing_enabled_map_from_purchase_db(sku_candidates)
     ladder_map_by_sku = load_ladder_map_from_purchase_db(sku_candidates)
+    listed_date_map_by_sku = load_listed_date_map_from_purchase_db(sku_candidates)
 
     for _, row in df.iterrows():
         sku = row.get("SKU", "")
@@ -412,7 +414,9 @@ def apply_repricing_rules_369(df: pd.DataFrame, today: datetime, config: Dict[st
             excluded_inventory_data.append(row.to_dict())
             continue
 
-        days_since_listed = get_days_since_listed(sku, today)
+        days_since_listed = resolve_days_since_listed(
+            sku, today, listed_date_map_by_sku.get(str(sku).strip())
+        )
         if days_since_listed == -1:
             log_data.append({
                 "sku": sku, "asin": asin, "title": title, "days": -1, "action": "維持",

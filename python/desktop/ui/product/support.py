@@ -87,6 +87,7 @@ _PURCHASE_STATUS_FILTER_OPTIONS: Tuple[Tuple[str, str], ...] = (
     ("販売中", "selling"),
     ("一部販売済み", "partially_sold"),
     ("販売済み", "sold"),
+    ("返金", "refunded"),
     ("在庫専用", "inventory_only"),
 )
 

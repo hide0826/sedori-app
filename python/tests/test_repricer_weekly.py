@@ -82,6 +82,19 @@ def test_get_days_since_listed() -> None:
     assert get_days_since_listed("INVALID-SKU", today) == -1
 
 
+def test_resolve_days_prefers_listed_date() -> None:
+    from services.repricer_common import resolve_days_since_listed
+
+    today = datetime(2026, 10, 25)
+    sku = "20251220-used1-014"
+    from_sku = get_days_since_listed(sku, today)
+    from_listed = resolve_days_since_listed(sku, today, "2026/08/01")
+    assert from_listed == 85
+    assert from_listed != from_sku
+    assert resolve_days_since_listed(sku, today, "") == from_sku
+    assert resolve_days_since_listed(sku, today, "not-a-date") == from_sku
+
+
 def test_compute_clearance_price_steps_to_500() -> None:
     from services.repricer_369 import compute_clearance_price
 
