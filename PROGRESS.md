@@ -2,13 +2,17 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-10-26（価格改定 Discord 通知）
+更新日: 2026-10-26（設定画面・Discord通知の実機確認）
 
 ---
 
 ## いまの状態
 
-**2026-10-26（価格改定 Discord 通知）:** 無人ジョブ（追従・週次）の完了／一部失敗／エラーを Discord Webhook へ1通通知。設定 → 詳細設定 → 「価格改定 Discord 通知」で URL 入力・表示切替・テスト送信。空なら送らない。dry-run / smoke は送らない。QSettings キー `reprice/discord_webhook_url`。反映は **HIRIO 再起動**（または設定保存後の次回ジョブ）。試験: `python/desktop/tests/test_reprice_discord_notify.py`（ALL OK）。
+**2026-10-26（設定画面・Discord通知の実機確認）:** 詳細設定の行潰れと Webhook テスト送信（`hit_actions` 未検出）を修正。ユーザー実機で **潰れ改善・テスト送信成功** を確認済み。shared は上へ辿って `hit_actions.py` を探す（無ければ `requests` 直送）。詳細設定は `QScrollArea`＋最小高さ維持。
+
+主なファイル: `python/desktop/ui/settings_widget.py` / `python/desktop/services/reprice_discord_notify.py`
+
+**2026-10-26（価格改定 Discord 通知）:** 無人ジョブ（追従・週次）の完了／一部失敗／エラーを Discord Webhook へ1通通知。設定 → 詳細設定 → 「価格改定 Discord 通知」で URL 入力・表示切替・テスト送信。空なら送らない。dry-run / smoke は送らない。QSettings キー `reprice/discord_webhook_url`。試験: `python/desktop/tests/test_reprice_discord_notify.py`（ALL OK）。
 
 主なファイル: `python/desktop/services/reprice_discord_notify.py` / `python/desktop/scripts/run_sp_api_reprice_job.py` / `python/desktop/ui/settings_widget.py` / `python/desktop/utils/settings_helper.py`
 

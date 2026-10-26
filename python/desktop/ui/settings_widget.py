@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QTabWidget, QTextEdit, QFileDialog,
     QMessageBox, QComboBox, QSlider, QTableWidget,
     QTableWidgetItem, QHeaderView, QDialog, QProgressDialog,
-    QApplication, QTimeEdit,
+    QApplication, QTimeEdit, QScrollArea, QSizePolicy, QFrame,
 )
 from PySide6.QtCore import Qt, QSettings, QTime, Signal, QThread
 from PySide6.QtGui import QFont
@@ -394,12 +394,33 @@ class SettingsWidget(QWidget):
         parent.addTab(display_widget, "表示設定")
         
     def setup_advanced_tab(self, parent):
-        """詳細設定タブ"""
-        advanced_widget = QWidget()
+        """詳細設定タブ（内容が多くても潰さないようスクロール）"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        class _AdvancedScrollContent(QWidget):
+            """スクロール内で縦に押し潰されないよう、最小高さを内容に合わせる。"""
+
+            def minimumSizeHint(self):
+                return self.sizeHint()
+
+        advanced_widget = _AdvancedScrollContent()
         layout = QVBoxLayout(advanced_widget)
-        
+        layout.setSpacing(12)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
+        advanced_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+
+        def _keep_group_height(group: QGroupBox) -> QGroupBox:
+            # Preferred: Fixed だとスクロール領域で帯状に伸びることがある
+            group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+            return group
+
         # 3-6-9版
-        pro_group = QGroupBox("3-6-9版")
+        pro_group = _keep_group_height(QGroupBox("3-6-9版"))
         pro_layout = QGridLayout(pro_group)
         self.pro_enabled_cb = QCheckBox("3-6-9版を有効にする")
         self.pro_enabled_cb.setToolTip("有効にすると、3-6-9版機能が利用できます。今後の機能追加は3-6-9版を前提に進めます。")
@@ -408,7 +429,7 @@ class SettingsWidget(QWidget):
         pro_layout.addWidget(self.pro_enabled_cb, 0, 0, 1, 2)
         layout.addWidget(pro_group)
 
-        recording_group = QGroupBox("デモモード")
+        recording_group = _keep_group_height(QGroupBox("デモモード"))
         recording_layout = QVBoxLayout(recording_group)
         self.recording_mode_cb = QCheckBox("デモモードを有効にする")
         self.recording_mode_cb.setToolTip(
@@ -433,7 +454,7 @@ class SettingsWidget(QWidget):
         self.recording_mode_cb.toggled.connect(self._on_recording_toggled)
         
         # パフォーマンス設定
-        perf_group = QGroupBox("パフォーマンス設定")
+        perf_group = _keep_group_height(QGroupBox("パフォーマンス設定"))
         perf_layout = QGridLayout(perf_group)
         
         # 最大表示行数
@@ -483,7 +504,7 @@ class SettingsWidget(QWidget):
         layout.addWidget(perf_group)
         
         # ログ設定
-        log_group = QGroupBox("ログ設定")
+        log_group = _keep_group_height(QGroupBox("ログ設定"))
         log_layout = QGridLayout(log_group)
         
         # ログレベル
@@ -510,7 +531,7 @@ class SettingsWidget(QWidget):
         layout.addWidget(log_group)
         
         # OCR設定
-        ocr_group = QGroupBox("OCR設定")
+        ocr_group = _keep_group_height(QGroupBox("OCR設定"))
         ocr_layout = QGridLayout(ocr_group)
         
         # Tesseract実行ファイルパス
@@ -550,7 +571,7 @@ class SettingsWidget(QWidget):
         layout.addWidget(ocr_group)
 
         # Amazon（自店セラーID — Keepa オファー表示などとの突き合わせ用）
-        amazon_group = QGroupBox("Amazon")
+        amazon_group = _keep_group_height(QGroupBox("Amazon"))
         amazon_layout = QGridLayout(amazon_group)
         amazon_layout.addWidget(QLabel("自店のセラーID:"), 0, 0)
         self.amazon_seller_id_edit = QLineEdit()
@@ -577,7 +598,7 @@ class SettingsWidget(QWidget):
         layout.addWidget(amazon_group)
 
         # 価格改定 Discord 通知（無人ジョブ follow / weekly369）
-        reprice_discord_group = QGroupBox("価格改定 Discord 通知")
+        reprice_discord_group = _keep_group_height(QGroupBox("価格改定 Discord 通知"))
         reprice_discord_layout = QGridLayout(reprice_discord_group)
         reprice_discord_layout.addWidget(QLabel("Webhook URL:"), 0, 0)
         self.reprice_discord_webhook_edit = QLineEdit()
@@ -609,7 +630,7 @@ class SettingsWidget(QWidget):
         layout.addWidget(reprice_discord_group)
 
         # プライスター（CSV出品・価格改定画面URL）
-        pricetar_group = QGroupBox("プライスター")
+        pricetar_group = _keep_group_height(QGroupBox("プライスター"))
         pricetar_layout = QGridLayout(pricetar_group)
         pricetar_layout.addWidget(QLabel("CSV出品用URL:"), 0, 0)
         self.pricetar_listing_url_edit = QLineEdit()
@@ -635,9 +656,10 @@ class SettingsWidget(QWidget):
         )
         pricetar_layout.addWidget(self.pricetar_repricing_url_edit, 1, 1)
         layout.addWidget(pricetar_group)
-        
-        layout.addStretch()
-        parent.addTab(advanced_widget, "詳細設定")
+
+        # 余白用 stretch は付けない（中身が潰れる原因になる）
+        scroll.setWidget(advanced_widget)
+        parent.addTab(scroll, "詳細設定")
     
     def setup_db_settings_tab(self, parent):
         """DB設定タブ（チェーン店コードマッピング）"""

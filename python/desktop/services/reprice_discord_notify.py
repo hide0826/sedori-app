@@ -26,12 +26,48 @@ _COLOR_PARTIAL = 0xE67E22
 _COLOR_ERROR = 0xE74C3C
 
 
-def _ensure_shared_on_path() -> None:
-    # .../python/desktop/services -> parents[4] = C:\HIRIO
-    hirio_shared = Path(__file__).resolve().parents[4] / "shared"
-    text = str(hirio_shared)
-    if hirio_shared.is_dir() and text not in sys.path:
-        sys.path.insert(0, text)
+def _ensure_shared_on_path() -> Optional[Path]:
+    """
+    C:\\HIRIO\\shared を sys.path に載せる。
+
+    parents[n] の固定番号は誤りやすいので、上へ辿って hit_actions.py を探す。
+    """
+    here = Path(__file__).resolve()
+    candidates = []
+    for parent in here.parents:
+        candidates.append(parent / "shared")
+        if parent.name.upper() == "HIRIO":
+            candidates.append(parent / "shared")
+    candidates.extend(
+        [
+            Path(r"C:\HIRIO\shared"),
+            Path(r"D:\HIRIO\shared"),
+        ]
+    )
+    for shared in candidates:
+        if shared.is_dir() and (shared / "hit_actions.py").is_file():
+            text = str(shared)
+            if text not in sys.path:
+                sys.path.insert(0, text)
+            return shared
+    return None
+
+
+def _post_discord_webhook(url: str, payload: Dict[str, Any], *, timeout: int = 15) -> Any:
+    """shared の post_discord_webhook。無ければ requests で直接 POST。"""
+    shared = _ensure_shared_on_path()
+    try:
+        from hit_actions import post_discord_webhook
+
+        return post_discord_webhook(url, payload, timeout=timeout)
+    except ImportError:
+        import requests
+
+        if shared is None:
+            raise ImportError(
+                "hit_actions が見つかりません。C:\\HIRIO\\shared を確認してください。"
+            )
+        return requests.post(url, json=payload, timeout=timeout)
 
 
 def mode_label(mode: str) -> str:
@@ -159,10 +195,7 @@ def notify_reprice_result(
             error=error,
             failed_skus=failed_skus,
         )
-        _ensure_shared_on_path()
-        from hit_actions import post_discord_webhook
-
-        response = post_discord_webhook(url, payload, timeout=15)
+        response = _post_discord_webhook(url, payload, timeout=15)
         status = int(getattr(response, "status_code", 0) or 0)
         return 200 <= status < 300
     except Exception:  # noqa: BLE001
@@ -199,10 +232,7 @@ def send_reprice_discord_test(webhook_url: Optional[str] = None) -> str:
                 }
             ],
         }
-        _ensure_shared_on_path()
-        from hit_actions import post_discord_webhook
-
-        response = post_discord_webhook(url, payload, timeout=15)
+        response = _post_discord_webhook(url, payload, timeout=15)
         status = int(getattr(response, "status_code", 0) or 0)
         if 200 <= status < 300:
             return ""
