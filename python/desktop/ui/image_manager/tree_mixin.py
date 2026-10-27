@@ -158,9 +158,9 @@ class ImageManagerTreeMixin:
                     file_name = Path(record.path).name
                     capture_text = record.capture_dt.strftime("%Y/%m/%d %H:%M:%S") if record.capture_dt else "（日時不明）"
                     child_item = QTreeWidgetItem([f"{file_name} - {capture_text}"])
-                    # 各JANグループの1枚目画像にチェックボックスを表示（デフォルトは除外＝チェックON）
+                    # 各JANグループの1枚目画像にチェックボックスを表示（デフォルトは登録する＝チェックOFF）
                     if idx == 0:
-                        flag = self.first_image_flags.get(record.path, True)
+                        flag = self.first_image_flags.get(record.path, False)
                         child_item.setFlags(child_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                         child_item.setCheckState(0, Qt.Checked if flag else Qt.Unchecked)
                         if not needs_highlight:
@@ -531,7 +531,7 @@ class ImageManagerTreeMixin:
         sorted_images = self._sorted_group_images(group)
         for idx, img in enumerate(sorted_images):
             img_path = img.path
-            if idx == 0 and self.first_image_flags.get(img_path, True):
+            if idx == 0 and self.first_image_flags.get(img_path, False):
                 continue
             if not Path(img_path).exists():
                 db_record = self.image_db.get_by_file_path(img_path)
@@ -542,10 +542,10 @@ class ImageManagerTreeMixin:
 
 
     def _is_group_first_image_excluded(self, group: JanGroup) -> bool:
-        """JANグループ1枚目が「送信しない」チェックONか（デフォルトON＝バーコード用として除外）"""
+        """JANグループ1枚目が「送信しない」チェックONか（デフォルトOFF＝1枚目も登録）"""
         if not group or not group.images:
             return False
-        return bool(self.first_image_flags.get(group.images[0].path, True))
+        return bool(self.first_image_flags.get(group.images[0].path, False))
 
 
     def on_tree_context_menu(self, position):

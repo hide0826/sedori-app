@@ -162,8 +162,8 @@ class ImageManagerWidget(
         # 「起点」となるデフォルトフォルダ（ユーザーが任意に登録可能）
         self.default_root_dir: str = ""
         # JANグループ1枚目画像のチェック状態
-        #   True  = 1枚目を送信しない（除外）
-        #   False = 1枚目も送信する（例外的に含める）
+        #   True  = 1枚目を送信しない（除外・バーコード写真など）
+        #   False = 1枚目も送信する（デフォルト）
         self.first_image_flags: Dict[str, bool] = {}
         # ツリー更新中フラグ（itemChangedの再入防止）
         self._updating_tree_checks: bool = False
@@ -378,7 +378,7 @@ class ImageManagerWidget(
         self.toggle_first_image_checks_btn.setToolTip(
             "全グループの1枚目チェックをまとめて切り替えます。\n"
             "チェックON＝登録しない（バーコード写真など）\n"
-            "チェックOFF＝登録する\n"
+            "チェックOFF＝登録する（初期状態）\n"
             "すべてONならすべてOFF、それ以外はすべてONにします。"
         )
         self.toggle_first_image_checks_btn.clicked.connect(self.toggle_all_first_image_checks)
