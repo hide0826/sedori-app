@@ -2,11 +2,19 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-10-27（画像管理・1枚目チェック初期OFF）
+更新日: 2026-10-28（BOOKOFF PLUS を BO 付番）
 
 ---
 
 ## いまの状態
+
+**2026-10-28（BOOKOFF PLUS→BO／仁戸名店ダブルネーム）:**  
+原因: BO対応パターンが `BOOKOFF SUPER BAZAAR` / `BOOK OFF` 等だけで、`BOOKOFF PLUS` が未一致→その他用 `EN` に流れていた。  
+対応（本番 `hirio.db`）:
+1. チェーン店コードマッピング BO に `BOOKOFF PLUS` と `BOOKOFF` を追加
+2. PLUS 16店を `EN-02`〜`EN-18` → `BO-32`〜`BO-47` に付け直し
+3. **千葉仁戸名店だけ** 新表記 `BO-43`、旧 `EN-13` を `supplier_code` に残す（既存仕入SKU・レシート照合用）。`get_store_by_code("EN-13")` / `resolve_supplier_for_sku("EN-13")` で同一店舗に解決  
+店舗一覧は再読み込み（必要なら HIRIO 再起動）。コード変更なし（データのみ）。
 
 **2026-10-27（画像管理・1枚目チェック初期OFF）:** JANグループ1枚目の「登録しない」チェックの初期値を **OFF（登録する）** に変更。バーコード写真だけ除外したいとき手動／一括でON。反映には **HIRIO 再起動**。
 
