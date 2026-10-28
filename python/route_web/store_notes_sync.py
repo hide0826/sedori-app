@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""店舗マスタ備考と route.json stores[].notes の同期。"""
+"""店舗マスタ備考・座標と route.json stores[] の同期。"""
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def _store_code(store: Dict[str, Any]) -> str:
@@ -12,6 +12,38 @@ def _store_code(store: Dict[str, Any]) -> str:
 
 def _notes_text(store: Dict[str, Any]) -> str:
     return str(store.get("notes") or "").strip()
+
+
+def _parse_coord(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if num != num:  # NaN
+        return None
+    return num
+
+
+def _has_coords(store: Dict[str, Any]) -> bool:
+    return (
+        _parse_coord(store.get("latitude")) is not None
+        and _parse_coord(store.get("longitude")) is not None
+    )
+
+
+def _open_store_db():
+    try:
+        from route_web.desktop_bridge import ensure_desktop_importable
+
+        ensure_desktop_importable()
+        from database.store_db import StoreDatabase
+
+        return StoreDatabase()
+    except Exception as exc:
+        print(f"店舗マスタの読込をスキップ: {exc}")
+        return None
 
 
 def enrich_store_notes_from_master(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -23,15 +55,8 @@ def enrich_store_notes_from_master(doc: Dict[str, Any]) -> Dict[str, Any]:
     need_codes = [c for c in need_codes if c]
     if not need_codes:
         return doc
-    try:
-        from route_web.desktop_bridge import ensure_desktop_importable
-
-        ensure_desktop_importable()
-        from database.store_db import StoreDatabase
-
-        db = StoreDatabase()
-    except Exception as exc:
-        print(f"店舗マスタ備考の読込をスキップ: {exc}")
+    db = _open_store_db()
+    if db is None:
         return doc
 
     out = dict(doc)
@@ -56,6 +81,57 @@ def enrich_store_notes_from_master(doc: Dict[str, Any]) -> Dict[str, Any]:
                         merged = f"{sql_notes}, {cf_notes}"
                     if merged:
                         copy["notes"] = merged
+        new_stores.append(copy)
+    out["stores"] = new_stores
+    return out
+
+
+def enrich_store_coords_from_master(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """route.json の店舗に緯度経度／住所が無いとき、店舗マスタから補完する（Maps案内用）。"""
+    stores = doc.get("stores")
+    if not isinstance(stores, list) or not stores:
+        return doc
+
+    need = False
+    for st in stores:
+        if not isinstance(st, dict):
+            continue
+        if not _store_code(st):
+            continue
+        if not _has_coords(st) or not str(st.get("address") or "").strip():
+            need = True
+            break
+    if not need:
+        return doc
+
+    db = _open_store_db()
+    if db is None:
+        return doc
+
+    out = dict(doc)
+    new_stores: List[Dict[str, Any]] = []
+    for st in stores:
+        if not isinstance(st, dict):
+            new_stores.append(st)
+            continue
+        copy = dict(st)
+        code = _store_code(copy)
+        if code and (not _has_coords(copy) or not str(copy.get("address") or "").strip()):
+            try:
+                master = db.get_store_by_code(code)
+            except Exception:
+                master = None
+            if master:
+                if not _has_coords(copy):
+                    lat = _parse_coord(master.get("latitude"))
+                    lng = _parse_coord(master.get("longitude"))
+                    if lat is not None and lng is not None:
+                        copy["latitude"] = lat
+                        copy["longitude"] = lng
+                if not str(copy.get("address") or "").strip():
+                    addr = str(master.get("address") or "").strip()
+                    if addr:
+                        copy["address"] = addr
         new_stores.append(copy)
     out["stores"] = new_stores
     return out
@@ -93,15 +169,8 @@ def sync_changed_store_notes_to_master(
     if not changed:
         return 0, 0
 
-    try:
-        from route_web.desktop_bridge import ensure_desktop_importable
-
-        ensure_desktop_importable()
-        from database.store_db import StoreDatabase
-
-        db = StoreDatabase()
-    except Exception as exc:
-        print(f"店舗マスタ備考の同期をスキップ: {exc}")
+    db = _open_store_db()
+    if db is None:
         return 0, len(changed)
 
     updated = 0

@@ -2,11 +2,15 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-10-28（BOOKOFF PLUS を BO 付番）
+更新日: 2026-10-28（ルート時刻・店舗名からMaps案内）
 
 ---
 
 ## いまの状態
+
+**2026-10-28（ルート時刻Web・店舗名タップでMaps案内）:** 巡回画面の店舗名をタップすると、現在地→その店の Google マップ車案内が開く。座標は GET 時に店舗マスタから補完（既存ルートも作り直し不要）。無い店は住所→店名の順。新規 `route.json` にも座標があれば保存。ルートWeb再起動済み。スマホは画面を再読み込み。
+
+主なファイル: `route_web/static/route.html` / `route_web/store_notes_sync.py` / `route_web/schema.py` / `route_web/app.py`
 
 **2026-10-28（BOOKOFF PLUS→BO／仁戸名店ダブルネーム）:**  
 原因: BO対応パターンが `BOOKOFF SUPER BAZAAR` / `BOOK OFF` 等だけで、`BOOKOFF PLUS` が未一致→その他用 `EN` に流れていた。  

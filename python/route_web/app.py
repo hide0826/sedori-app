@@ -54,6 +54,7 @@ from route_web.registry import (
 )
 from route_web.schema import stamp_updated
 from route_web.store_notes_sync import (
+    enrich_store_coords_from_master,
     enrich_store_notes_from_master,
     sync_changed_store_notes_to_master,
 )
@@ -232,6 +233,7 @@ def route_page(web_id: str):
 @app.get("/api/route/{web_id}")
 def get_route(web_id: str) -> JSONResponse:
     doc = enrich_store_notes_from_master(_require_doc(web_id))
+    doc = enrich_store_coords_from_master(doc)
     return JSONResponse(doc)
 
 

@@ -82,6 +82,13 @@
     button:active, label.btn:active { opacity: 0.85; }
     .store-title { font-weight: 600; margin-bottom: 8px; }
     .store-code { color: var(--muted); font-size: 0.8rem; font-weight: 400; }
+    a.store-maps-link {
+      color: var(--accent);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+      font-weight: 600;
+    }
+    a.store-maps-link:active { opacity: 0.85; }
     .receipt-block, .product-block { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
     .thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
     .thumbs a {
@@ -212,6 +219,25 @@
         .replace(/"/g, "&quot;");
     }
 
+    /** 現在地→店舗の Google マップ案内URL。座標優先、なければ住所／店名。 */
+    function mapsDirectionsUrl(st) {
+      if (!st || typeof st !== "object") return "";
+      const lat = Number(st.latitude);
+      const lng = Number(st.longitude);
+      let dest = "";
+      if (Number.isFinite(lat) && Number.isFinite(lng)) {
+        dest = lat + "," + lng;
+      } else {
+        dest = String(st.address || st.store_name || "").trim();
+      }
+      if (!dest) return "";
+      return (
+        "https://www.google.com/maps/dir/?api=1&destination=" +
+        encodeURIComponent(dest) +
+        "&travelmode=driving"
+      );
+    }
+
     function productFileName(item) {
       if (item && typeof item === "object") return item.file || "";
       return String(item || "");
@@ -307,12 +333,19 @@
       wrap.innerHTML = "";
       (data.stores || []).forEach((st, i) => {
         const code = st.store_code || "";
+        const nameText = st.store_name || code;
+        const mapsUrl = mapsDirectionsUrl(st);
+        const nameHtml = mapsUrl
+          ? '<a class="store-maps-link" href="' + escapeHtml(mapsUrl) +
+            '" target="_blank" rel="noopener noreferrer" title="現在地からこの店へ案内">' +
+            escapeHtml(nameText) + "</a>"
+          : escapeHtml(nameText);
         const card = document.createElement("div");
         card.className = "card";
         card.dataset.storeIndex = String(i);
         card.innerHTML =
           '<div class="store-title">' +
-          (st.order || i + 1) + ". " + escapeHtml(st.store_name || code) +
+          (st.order || i + 1) + ". " + nameHtml +
           ' <span class="store-code">' + escapeHtml(code) + "</span></div>" +
           '<div class="row"><label>IN</label>' +
           '<input type="time" data-store="' + i + '" data-field="in_time" value="' + (st.in_time || "") + '" />' +

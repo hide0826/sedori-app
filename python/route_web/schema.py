@@ -53,17 +53,28 @@ def build_route_document(
             except (TypeError, ValueError):
                 purchase_item_count = None
 
-        store_rows.append(
-            {
-                "order": order_i,
-                "store_code": code,
-                "store_name": str(store.get("store_name") or "").strip(),
-                "in_time": str(store.get("store_in_time") or store.get("in_time") or "").strip(),
-                "out_time": str(store.get("store_out_time") or store.get("out_time") or "").strip(),
-                "purchase_item_count": purchase_item_count,
-                "notes": str(store.get("notes") or "").strip(),
-            }
-        )
+        row: Dict[str, Any] = {
+            "order": order_i,
+            "store_code": code,
+            "store_name": str(store.get("store_name") or "").strip(),
+            "in_time": str(store.get("store_in_time") or store.get("in_time") or "").strip(),
+            "out_time": str(store.get("store_out_time") or store.get("out_time") or "").strip(),
+            "purchase_item_count": purchase_item_count,
+            "notes": str(store.get("notes") or "").strip(),
+        }
+        # Maps案内用（店舗マスタ／地図側から渡ってきた座標・住所）
+        try:
+            lat = float(store["latitude"]) if store.get("latitude") not in (None, "") else None
+            lng = float(store["longitude"]) if store.get("longitude") not in (None, "") else None
+        except (TypeError, ValueError, KeyError):
+            lat, lng = None, None
+        if lat is not None and lng is not None and lat == lat and lng == lng:
+            row["latitude"] = lat
+            row["longitude"] = lng
+        addr = str(store.get("address") or "").strip()
+        if addr:
+            row["address"] = addr
+        store_rows.append(row)
     store_rows.sort(key=lambda r: (r["order"], r["store_code"]))
 
     now = datetime.now(JST).isoformat(timespec="seconds")
