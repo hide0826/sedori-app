@@ -44,8 +44,38 @@ def test_purchase_to_inventory_row_has_listing_columns(tmp_path: Path) -> None:
     assert row["出品URL"].startswith("https://")
     assert row["SKU"] == "未実装"
     assert row["仕入れ日"] == "2026-10-21"
+    assert row["コンディション"] == "中古(良い)"  # 旧レコード互換の既定
     assert "見込み利益" in row
     assert "損益分岐点" in row
+
+
+def test_purchase_to_inventory_row_uses_saved_condition() -> None:
+    item = {
+        "kind": "purchased",
+        "token": "CondTokTokTok1",
+        "at": "2026-10-28T12:00:00+09:00",
+        "action": "purchased",
+        "title": "Cond商品",
+        "asin": "B0CONDFORMA",
+        "url": "https://jp.mercari.com/item/m999",
+        "keyword": "XYZ",
+        "source": "mercari",
+        "buy_yen": 2000,
+        "sell_yen": 5000,
+        "raw": {
+            "condition": "new",
+            "condition_label": "新品",
+            "condition_amazon": "新品(新品)",
+            "referral_fee_yen": 400,
+            "fba_fulfillment_yen": 300,
+            "fba_inbound_shipping_yen": 0,
+            "outbound_shipping_yen": 0,
+            "misc_cost_yen": 0,
+            "fulfillment_mode": "fba",
+        },
+    }
+    row = purchase_to_inventory_row(item)
+    assert row["コンディション"] == "新品(新品)"
 
 
 def test_load_and_mark_imported(tmp_path: Path, monkeypatch) -> None:

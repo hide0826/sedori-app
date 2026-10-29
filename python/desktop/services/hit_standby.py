@@ -237,6 +237,38 @@ def _as_float(value: Any) -> Optional[float]:
         return None
 
 
+# Discord 購入フォーム Cond. → 仕入一覧の Amazon ラベル
+_CONDITION_AMAZON_BY_KEY = {
+    "new": "新品(新品)",
+    "very_good": "中古(非常に良い)",
+    "good": "中古(良い)",
+    "acceptable": "中古(可)",
+}
+_CONDITION_AMAZON_BY_SHORT = {
+    "新品": "新品(新品)",
+    "非常に良い": "中古(非常に良い)",
+    "良い": "中古(良い)",
+    "可": "中古(可)",
+}
+_DEFAULT_CONDITION_AMAZON = "中古(良い)"
+
+
+def _condition_for_inventory(raw: Dict[str, Any]) -> str:
+    """購入台帳の Cond. を仕入一覧用ラベルにする（無ければ従来どおり良い）。"""
+    amazon = str(raw.get("condition_amazon") or "").strip()
+    if amazon.startswith("中古(") or amazon.startswith("新品") or amazon == "再生品":
+        return amazon
+    key = str(raw.get("condition") or "").strip().lower().replace("-", "_")
+    if key in _CONDITION_AMAZON_BY_KEY:
+        return _CONDITION_AMAZON_BY_KEY[key]
+    short = str(raw.get("condition_label") or "").strip()
+    if short in _CONDITION_AMAZON_BY_SHORT:
+        return _CONDITION_AMAZON_BY_SHORT[short]
+    if short.startswith("中古(") or short.startswith("新品"):
+        return short
+    return _DEFAULT_CONDITION_AMAZON
+
+
 def purchase_to_inventory_row(item: Dict[str, Any]) -> Dict[str, Any]:
     """
     スタンバイ1件 → ネット仕入一覧（出品CSV生成可能）の1行。
@@ -287,7 +319,7 @@ def purchase_to_inventory_row(item: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "仕入れ日": purchase_date,
-        "コンディション": "中古(良い)",
+        "コンディション": _condition_for_inventory(raw),
         "SKU": "未実装",
         "ASIN": asin,
         "JAN": "",
