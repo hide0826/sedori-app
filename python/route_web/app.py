@@ -42,9 +42,11 @@ from route_web.route_purchases import list_route_purchases, lookup_photo_jan, ne
 from route_web.scan_requests import enqueue_scan
 from route_web.receipts import (
     append_receipt_file,
+    append_warranty_file,
     find_store,
     receipt_dir,
     save_receipt_upload,
+    save_warranty_upload,
 )
 from route_web.registry import (
     list_route_summaries,
@@ -383,6 +385,49 @@ def get_receipt_file(web_id: str, filename: str):
     if not path.is_file():
         raise HTTPException(status_code=404, detail="file not found")
     return FileResponse(path)
+
+
+@app.post("/api/route/{web_id}/stores/{store_code}/warranties")
+async def upload_warranty(
+    web_id: str,
+    store_code: str,
+    file: UploadFile = File(...),
+) -> JSONResponse:
+    """保証書画像。保存先はレシート画像/、ファイル名に war- を付ける。"""
+    doc = _require_doc(web_id)
+    folder = _require_folder(web_id)
+    if find_store(doc, store_code) is None:
+        raise HTTPException(status_code=404, detail=f"store not found: {store_code}")
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="empty file")
+    try:
+        filename = save_warranty_upload(
+            folder,
+            str(doc.get("route_date") or ""),
+            store_code,
+            raw,
+            original_name=file.filename or "",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"save failed: {exc}") from exc
+
+    try:
+        doc = append_warranty_file(doc, store_code, filename)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    doc = stamp_updated(doc)
+    save_route_json(web_id, doc)
+    return JSONResponse(
+        {
+            "ok": True,
+            "filename": filename,
+            "store_code": store_code,
+            "warranty_files": find_store(doc, store_code).get("warranty_files") or [],
+            "route": doc,
+        }
+    )
 
 
 @app.post("/api/route/{web_id}/stores/{store_code}/products")

@@ -77,6 +77,8 @@ from .support import (
     _RECEIPT_WORKFLOW_PIPELINE_SEGMENTS,
     _format_receipt_status_prefix_html,
     _format_receipt_workflow_pipeline_html,
+    classify_evidence_doc_type,
+    classify_receipt_record,
     AccountTitleDelegate,
     StoreNameDelegate,
     WarrantyProductDelegate,
@@ -244,11 +246,8 @@ class ReceiptTableMixin:
     
     @staticmethod
     def _is_receipt_document(receipt: Dict[str, Any]) -> bool:
-        """OCRテキストからレシート（保証書以外）か判定"""
-        ocr_text = receipt.get('ocr_text') or ""
-        if "保証書" in ocr_text or "保証期間" in ocr_text or "保証規定" in ocr_text:
-            return False
-        return True
+        """レシート（保証書以外）か判定。ファイル名の war- を優先。"""
+        return classify_receipt_record(receipt) == "レシート"
 
     @staticmethod
     def _extract_purchase_date_key(purchase_date: str) -> Optional[str]:
@@ -397,11 +396,8 @@ class ReceiptTableMixin:
         threshold = total_receipts * 0.5
 
         for receipt in receipts:
-            # 種別判定（OCRテキストから簡易判定）
-            doc_type = "レシート"
-            ocr_text = receipt.get('ocr_text') or ""
-            if "保証書" in ocr_text or "保証期間" in ocr_text or "保証規定" in ocr_text:
-                doc_type = "保証書"
+            # 種別判定（ファイル名 war- 優先、新形式レシート名は OCR 誤認しない）
+            doc_type = classify_receipt_record(receipt)
 
             file_path = receipt.get('original_file_path') or receipt.get('file_path') or ""
             file_name = ""

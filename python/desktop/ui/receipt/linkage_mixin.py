@@ -77,6 +77,7 @@ from .support import (
     _RECEIPT_WORKFLOW_PIPELINE_SEGMENTS,
     _format_receipt_status_prefix_html,
     _format_receipt_workflow_pipeline_html,
+    classify_receipt_record,
     AccountTitleDelegate,
     StoreNameDelegate,
     WarrantyProductDelegate,
@@ -2572,14 +2573,8 @@ class ReceiptLinkageMixin:
                 
                 receipt_id = receipt.get('id')
                 
-                # 種別判定（OCRテキストから簡易判定）- レシートのみを対象にする
-                ocr_text = receipt.get('ocr_text') or ""
-                doc_type = "レシート"
-                if "保証書" in ocr_text or "保証期間" in ocr_text or "保証規定" in ocr_text:
-                    doc_type = "保証書"
-                
-                # 保証書はスキップ（レシートのみを処理）
-                if doc_type == "保証書":
+                # 種別判定（ファイル名 war- 優先）- レシートのみを対象にする
+                if classify_receipt_record(receipt) == "保証書":
                     continue
                 
                 # 画像ファイルパスを取得（original_file_pathを優先、なければfile_path）
@@ -3037,13 +3032,8 @@ class ReceiptLinkageMixin:
                     QCoreApplication.processEvents()  # UIを更新
                     receipt_id = receipt.get('id')
                     
-                    # 種別判定（レシートのみを対象）
-                    ocr_text = receipt.get('ocr_text') or ""
-                    doc_type = "レシート"
-                    if "保証書" in ocr_text or "保証期間" in ocr_text or "保証規定" in ocr_text:
-                        doc_type = "保証書"
-                    
-                    if doc_type == "保証書":
+                    # 種別判定（ファイル名 war- 優先・レシートのみを対象）
+                    if classify_receipt_record(receipt) == "保証書":
                         skipped_reasons["保証書"] += 1
                         continue
                     
@@ -3345,8 +3335,7 @@ class ReceiptLinkageMixin:
         for idx, receipt in enumerate(all_receipts, 1):
             tick(f"確定処理中... (レシート集約: {idx}/{len(all_receipts)})")
 
-            ocr_text = receipt.get('ocr_text') or ""
-            if "保証書" in ocr_text or "保証期間" in ocr_text or "保証規定" in ocr_text:
+            if classify_receipt_record(receipt) == "保証書":
                 continue
 
             file_path = receipt.get('original_file_path') or receipt.get('file_path', '')
@@ -3579,8 +3568,7 @@ class ReceiptLinkageMixin:
         receipts_for_journal = []
         dates_needed = set()
         for receipt in all_receipts:
-            ocr_text = receipt.get('ocr_text') or ""
-            if "保証書" in ocr_text or "保証期間" in ocr_text or "保証規定" in ocr_text:
+            if classify_receipt_record(receipt) == "保証書":
                 continue
             raw_purchase_date = (receipt.get('purchase_date', '') or '').strip()
             if not raw_purchase_date:

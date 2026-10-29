@@ -2,11 +2,19 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-10-28（ルート時刻・店舗名からMaps案内）
+更新日: 2026-10-28（レシート／保証書の撮影分離）
 
 ---
 
 ## いまの状態
+
+**2026-10-28（レシート／保証書の撮影分離）:** 店舗ルートWebで「レシートを撮る」と「保証書を撮る」を分離。保証書は `レシート画像/YYYY-MM-DD-war-CODE-NN.jpg`。証憑管理の種別判定はファイル名 `-war-` を最優先し、新形式レシート名は OCR で保証書扱いにしない。ルートWeb再起動済み。スマホは再読み込み、HIRIOデスクトップは再起動。
+
+主なファイル: `route_web/receipts.py` / `route_web/app.py` / `route_web/static/route.html` / `desktop/ui/receipt/support.py` / `table_mixin.py` / `rename_mixin.py` / `linkage_mixin.py`
+
+**2026-10-28（Discord購入 Cond.→スタンバイ）:** 購入台帳の Cond. をネット仕入行の「コンディション」に渡す（旧レコードは従来どおり「中古(良い)」）。反映は **HIRIO 再起動**。
+
+主なファイル: `python/desktop/services/hit_standby.py` / `python/desktop/tests/test_hit_standby.py`
 
 **2026-10-28（ルート時刻Web・店舗名タップでMaps案内）:** 巡回画面の店舗名をタップすると、現在地→その店の Google マップ車案内が開く。座標は GET 時に店舗マスタから補完（既存ルートも作り直し不要）。無い店は住所→店名の順。新規 `route.json` にも座標があれば保存。ルートWeb再起動済み。スマホは画面を再読み込み。
 

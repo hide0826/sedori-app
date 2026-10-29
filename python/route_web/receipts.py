@@ -24,15 +24,8 @@ def _safe_store_code(store_code: str) -> str:
     return code or "XX-00"
 
 
-def next_receipt_filename(folder: Path, route_date: str, store_code: str) -> str:
-    """YYYY-MM-DD-STORE-NN.jpg の次の連番。"""
-    date = (route_date or "").strip() or "0000-00-00"
-    code = _safe_store_code(store_code)
+def _next_seq_for_pattern(folder: Path, pattern: re.Pattern[str]) -> int:
     dest = receipt_dir(folder)
-    pattern = re.compile(
-        rf"^{re.escape(date)}-(?:war-)?{re.escape(code)}-(\d+)\.",
-        re.IGNORECASE,
-    )
     max_n = 0
     for p in dest.iterdir():
         if not p.is_file():
@@ -40,7 +33,30 @@ def next_receipt_filename(folder: Path, route_date: str, store_code: str) -> str
         m = pattern.match(p.name)
         if m:
             max_n = max(max_n, int(m.group(1)))
-    return f"{date}-{code}-{max_n + 1:02d}.jpg"
+    return max_n + 1
+
+
+def next_receipt_filename(folder: Path, route_date: str, store_code: str) -> str:
+    """YYYY-MM-DD-STORE-NN.jpg の次の連番（保証書 war- は別連番）。"""
+    date = (route_date or "").strip() or "0000-00-00"
+    code = _safe_store_code(store_code)
+    # レシートのみ（war- を含めない）
+    pattern = re.compile(
+        rf"^{re.escape(date)}-{re.escape(code)}-(\d+)\.",
+        re.IGNORECASE,
+    )
+    return f"{date}-{code}-{_next_seq_for_pattern(folder, pattern):02d}.jpg"
+
+
+def next_warranty_filename(folder: Path, route_date: str, store_code: str) -> str:
+    """YYYY-MM-DD-war-STORE-NN.jpg の次の連番。"""
+    date = (route_date or "").strip() or "0000-00-00"
+    code = _safe_store_code(store_code)
+    pattern = re.compile(
+        rf"^{re.escape(date)}-war-{re.escape(code)}-(\d+)\.",
+        re.IGNORECASE,
+    )
+    return f"{date}-war-{code}-{_next_seq_for_pattern(folder, pattern):02d}.jpg"
 
 
 def _to_jpeg_bytes(raw: bytes, max_side: int = 1920) -> bytes:
@@ -98,16 +114,44 @@ def save_receipt_upload(
     return filename
 
 
-def append_receipt_file(doc: Dict[str, Any], store_code: str, filename: str) -> Dict[str, Any]:
+def save_warranty_upload(
+    folder: Path,
+    route_date: str,
+    store_code: str,
+    raw: bytes,
+    original_name: str = "",
+) -> str:
+    """保証書画像を レシート画像/ に war- 付きファイル名で保存する。"""
+    if not raw:
+        raise ValueError("empty upload")
+    filename = next_warranty_filename(folder, route_date, store_code)
+    suffix = Path(original_name or "").suffix.lower()
+    data = raw
+    if suffix in IMAGE_SUFFIXES or not suffix:
+        data = _to_jpeg_bytes(raw)
+        if not filename.lower().endswith(".jpg"):
+            filename = Path(filename).with_suffix(".jpg").name
+    dest = receipt_dir(folder) / filename
+    dest.write_bytes(data)
+    return filename
+
+
+def _append_store_file_list(
+    doc: Dict[str, Any],
+    store_code: str,
+    filename: str,
+    *,
+    key: str,
+) -> Dict[str, Any]:
     code = (store_code or "").strip()
     stores: List[Dict[str, Any]] = list(doc.get("stores") or [])
     found = False
     for st in stores:
         if str(st.get("store_code") or "").strip().upper() == code.upper():
-            files = list(st.get("receipt_files") or [])
+            files = list(st.get(key) or [])
             if filename not in files:
                 files.append(filename)
-            st["receipt_files"] = files
+            st[key] = files
             found = True
             break
     if not found:
@@ -115,6 +159,14 @@ def append_receipt_file(doc: Dict[str, Any], store_code: str, filename: str) -> 
     doc = dict(doc)
     doc["stores"] = stores
     return doc
+
+
+def append_receipt_file(doc: Dict[str, Any], store_code: str, filename: str) -> Dict[str, Any]:
+    return _append_store_file_list(doc, store_code, filename, key="receipt_files")
+
+
+def append_warranty_file(doc: Dict[str, Any], store_code: str, filename: str) -> Dict[str, Any]:
+    return _append_store_file_list(doc, store_code, filename, key="warranty_files")
 
 
 def find_store(doc: Dict[str, Any], store_code: str) -> Optional[Dict[str, Any]]:

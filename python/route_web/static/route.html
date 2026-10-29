@@ -89,7 +89,7 @@
       font-weight: 600;
     }
     a.store-maps-link:active { opacity: 0.85; }
-    .receipt-block, .product-block { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+    .receipt-block, .warranty-block, .product-block { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
     .thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
     .thumbs a {
       display: block;
@@ -249,20 +249,32 @@
     }
 
     function thumbsHtml(st, kind) {
-      const isProduct = kind === "product";
-      const files = isProduct ? (st.product_files || []) : (st.receipt_files || []);
-      const apiSeg = isProduct ? "products" : "receipts";
-      const emptyLabel = isProduct ? "商品画像未登録" : "レシート未登録";
+      let files = [];
+      let apiSeg = "receipts";
+      let emptyLabel = "未登録";
+      if (kind === "product") {
+        files = st.product_files || [];
+        apiSeg = "products";
+        emptyLabel = "商品画像未登録";
+      } else if (kind === "warranty") {
+        files = st.warranty_files || [];
+        apiSeg = "receipts"; // 保存先はレシート画像/ と同じ
+        emptyLabel = "保証書未登録";
+      } else {
+        files = st.receipt_files || [];
+        apiSeg = "receipts";
+        emptyLabel = "レシート未登録";
+      }
       if (!files.length) {
         return '<div class="sub" style="margin:6px 0 0">' + emptyLabel + "</div>";
       }
       let html = '<div class="thumbs">';
       files.forEach((item) => {
-        const fn = isProduct ? productFileName(item) : item;
+        const fn = kind === "product" ? productFileName(item) : item;
         if (!fn) return;
         const url =
           "/api/route/" + encodeURIComponent(WEB_ID) + "/" + apiSeg + "/" + encodeURIComponent(fn);
-        const jan = isProduct ? productJan(item) : "";
+        const jan = kind === "product" ? productJan(item) : "";
         const title = jan ? fn + " JAN:" + jan : fn;
         html +=
           '<a href="' + url + '" target="_blank" rel="noopener" title="' + escapeHtml(title) + '">' +
@@ -372,6 +384,17 @@
           'アルバムから<input type="file" accept="image/*" data-upload="receipt" data-store="' + i + '" data-code="' + escapeHtml(code) + '" />' +
           "</label></div>" +
           thumbsHtml(st, "receipt") +
+          "</div>" +
+          '<div class="warranty-block">' +
+          '<div class="sub" style="margin:0 0 6px">保証書</div>' +
+          '<div class="row" style="margin-bottom:4px">' +
+          '<label class="btn" style="min-width:auto;flex:1">' +
+          '保証書を撮る<input type="file" accept="image/*" capture="environment" data-upload="warranty" data-store="' + i + '" data-code="' + escapeHtml(code) + '" />' +
+          "</label>" +
+          '<label class="btn secondary" style="min-width:auto;flex:1">' +
+          'アルバムから<input type="file" accept="image/*" data-upload="warranty" data-store="' + i + '" data-code="' + escapeHtml(code) + '" />' +
+          "</label></div>" +
+          thumbsHtml(st, "warranty") +
           "</div>";
         wrap.appendChild(card);
       });
@@ -406,6 +429,7 @@
         }
         copy.notes = notesEl ? String(notesEl.value || "").trim() : (st.notes || "");
         copy.receipt_files = st.receipt_files || [];
+        copy.warranty_files = st.warranty_files || [];
         copy.product_files = st.product_files || [];
         return copy;
       });
@@ -467,6 +491,30 @@
       const data = await res.json();
       fillForm(data.route);
       setStatus("レシート保存: " + data.filename, "ok");
+    }
+
+    async function uploadWarranty(storeCode, file) {
+      setStatus("保証書送信中… " + (file.name || ""));
+      let blob = file;
+      try {
+        blob = await resizeToJpegBlob(file, 1920);
+      } catch (e) {
+        blob = file;
+      }
+      const fd = new FormData();
+      fd.append("file", blob, (file.name || "warranty").replace(/\.\w+$/, "") + ".jpg");
+      const res = await fetch(
+        "/api/route/" + encodeURIComponent(WEB_ID) +
+          "/stores/" + encodeURIComponent(storeCode) + "/warranties",
+        { method: "POST", body: fd }
+      );
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(res.status + " " + t);
+      }
+      const data = await res.json();
+      fillForm(data.route);
+      setStatus("保証書保存: " + data.filename, "ok");
     }
 
     async function uploadProduct(storeCode, file, jan) {
@@ -652,6 +700,8 @@
       try {
         if (kind === "receipt") {
           await uploadReceipt(code, file);
+        } else if (kind === "warranty") {
+          await uploadWarranty(code, file);
         } else if (kind === "product") {
           const janEl = document.querySelector(
             'input[data-store="' + storeIdx + '"][data-field="jan_draft"]'

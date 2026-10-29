@@ -109,6 +109,49 @@ _RECEIPT_ACTION_TO_PIPELINE_STEP = {
     "確定": 8,
 }
 
+_WARRANTY_OCR_KEYWORDS = ("保証書", "保証期間", "保証規定")
+# 店舗Webの新形式レシート名: YYYY-MM-DD-店舗コード-連番.jpg（war なし）
+_ROUTE_RECEIPT_FILENAME_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}-(?!war-)[A-Za-z0-9\-]+-\d+\.",
+    re.IGNORECASE,
+)
+
+
+def classify_evidence_doc_type(
+    file_path: Any = "",
+    ocr_text: str = "",
+) -> str:
+    """証憑の種別を返す（レシート / 保証書）。
+
+    優先順:
+      1. ファイル名に -war- → 保証書（店舗Webの保証書撮影／一括リネーム）
+      2. 新形式レシート名（日付-店舗-連番・warなし）→ レシート（OCR誤認を防ぐ）
+      3. 旧データ互換: OCR文言キーワード → 保証書
+      4. それ以外 → レシート
+    """
+    name = Path(str(file_path or "")).name
+    name_l = name.lower()
+    if "-war-" in name_l:
+        return "保証書"
+    if name and _ROUTE_RECEIPT_FILENAME_RE.match(name):
+        return "レシート"
+    text = ocr_text or ""
+    if any(k in text for k in _WARRANTY_OCR_KEYWORDS):
+        return "保証書"
+    return "レシート"
+
+
+def classify_receipt_record(receipt: Optional[Dict[str, Any]]) -> str:
+    """receipts テーブル行から種別を判定する。"""
+    if not receipt:
+        return "レシート"
+    file_path = (
+        receipt.get("original_file_path")
+        or receipt.get("file_path")
+        or ""
+    )
+    return classify_evidence_doc_type(file_path, receipt.get("ocr_text") or "")
+
 
 def _format_receipt_status_prefix_html(text: str, emphasize: bool) -> str:
     from html import escape

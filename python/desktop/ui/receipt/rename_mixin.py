@@ -77,6 +77,7 @@ from .support import (
     _RECEIPT_WORKFLOW_PIPELINE_SEGMENTS,
     _format_receipt_status_prefix_html,
     _format_receipt_workflow_pipeline_html,
+    classify_receipt_record,
     AccountTitleDelegate,
     StoreNameDelegate,
     WarrantyProductDelegate,
@@ -104,8 +105,7 @@ class ReceiptRenameMixin:
         receipt_count = 0
         warranty_count = 0
         for receipt in receipts:
-            ocr_text = receipt.get('ocr_text') or ""
-            if "保証書" in ocr_text or "保証期間" in ocr_text or "保証規定" in ocr_text:
+            if classify_receipt_record(receipt) == "保証書":
                 warranty_count += 1
             else:
                 receipt_count += 1
@@ -137,11 +137,8 @@ class ReceiptRenameMixin:
             try:
                 receipt_id = receipt.get('id')
                 
-                # 種別判定（レシートと保証書の両方を対象）
-                ocr_text = receipt.get('ocr_text') or ""
-                doc_type = "レシート"
-                if "保証書" in ocr_text or "保証期間" in ocr_text or "保証規定" in ocr_text:
-                    doc_type = "保証書"
+                # 種別判定（ファイル名 war- 優先）
+                doc_type = classify_receipt_record(receipt)
                 
                 # 日付を取得
                 purchase_date = receipt.get('purchase_date') or ""
@@ -302,11 +299,7 @@ class ReceiptRenameMixin:
                     
             except Exception as e:
                 error_count += 1
-                doc_type_fallback = receipt.get('ocr_text', '')
-                if "保証書" in doc_type_fallback or "保証期間" in doc_type_fallback or "保証規定" in doc_type_fallback:
-                    doc_type_fallback = "保証書"
-                else:
-                    doc_type_fallback = "レシート"
+                doc_type_fallback = classify_receipt_record(receipt)
                 error_messages.append(f"{doc_type_fallback}ID {receipt.get('id', '不明')}: 処理エラー: {str(e)}")
                 continue
         
@@ -360,11 +353,8 @@ class ReceiptRenameMixin:
             try:
                 receipt_id = receipt.get('id')
                 
-                # 種別判定
-                ocr_text = receipt.get('ocr_text') or ""
-                doc_type = "レシート"
-                if "保証書" in ocr_text or "保証期間" in ocr_text or "保証規定" in ocr_text:
-                    doc_type = "保証書"
+                # 種別判定（ファイル名 war- 優先）
+                doc_type = classify_receipt_record(receipt)
                 
                 # 日付を取得
                 purchase_date = receipt.get('purchase_date') or ""
@@ -447,11 +437,7 @@ class ReceiptRenameMixin:
                     
             except Exception as e:
                 error_count += 1
-                doc_type_fallback = receipt.get('ocr_text', '')
-                if "保証書" in doc_type_fallback or "保証期間" in doc_type_fallback or "保証規定" in doc_type_fallback:
-                    doc_type_fallback = "保証書"
-                else:
-                    doc_type_fallback = "レシート"
+                doc_type_fallback = classify_receipt_record(receipt)
                 error_messages.append(f"{doc_type_fallback}ID {receipt.get('id', '不明')}: 処理エラー: {str(e)}")
                 continue
         
