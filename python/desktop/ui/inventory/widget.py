@@ -298,6 +298,10 @@ class InventoryWidget(
         if create_box is not None:
             create_box.setVisible(True)
             create_box.setEnabled(True)
+        info_all = getattr(self, "info_capture_all_btn", None)
+        if info_all is not None:
+            info_all.setVisible(True)
+            info_all.setEnabled(True)
         combo = getattr(self, "view_mode_combo", None)
         if combo is not None:
             idx = combo.findText("ルートテンプレートビュー")
@@ -375,7 +379,21 @@ class InventoryWidget(
         self.create_online_box_btn.setVisible(self.is_online_mode)
         workflow_layout.addWidget(self.create_online_box_btn)
 
-        # 「情報撮影」はネット仕入の「行の編集」ダイアログ側へ移動済み
+        self.info_capture_all_btn = QPushButton("情報撮影")
+        self.info_capture_all_btn.setToolTip(
+            "一覧の出品URLがある全商品を、ログイン済みChromeで撮影し、\n"
+            "フリマ仕入証憑（商品ページ2枚＋取引画面）へ保存します。\n"
+            "すでに揃っている証憑は上書きしません。行の編集の情報撮影と同じ仕組みです。"
+        )
+        self.info_capture_all_btn.clicked.connect(
+            lambda: self.capture_mercari_listing_evidence(
+                all_rows=True,
+                busy_button=self.info_capture_all_btn,
+            )
+        )
+        self.info_capture_all_btn.setStyleSheet(green_button_style)
+        self.info_capture_all_btn.setVisible(self.is_online_mode)
+        workflow_layout.addWidget(self.info_capture_all_btn)
 
         self.route_box_import_btn = QPushButton("ルート箱から取込")
         self.route_box_import_btn.setToolTip(

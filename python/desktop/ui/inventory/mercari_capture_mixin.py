@@ -522,10 +522,12 @@ class InventoryMercariCaptureMixin:
         on_fail: Optional[Callable[[], None]] = None,
         confirm_message: Optional[str] = None,
         quiet: bool = False,
+        all_rows: bool = False,
     ) -> None:
         """出品URLがあるメルカリ行を撮影し、証憑列へ保存する。
 
         jobs を渡すと一覧選択ではなく、そのジョブだけを撮る（行の編集用）。
+        all_rows=True のときは表の選択に関係なく、フィルタ後の全行を対象にする。
         """
         def _give_up() -> None:
             if on_fail is None:
@@ -548,7 +550,7 @@ class InventoryMercariCaptureMixin:
                 QMessageBox.information(self, "情報撮影", "仕入データがありません。")
                 _give_up()
                 return
-            jobs, skipped_complete = self._mercari_capture_jobs()
+            jobs, skipped_complete = self._mercari_capture_jobs(all_rows=all_rows)
         if not jobs:
             if skipped_complete > 0:
                 QMessageBox.information(
@@ -641,15 +643,18 @@ class InventoryMercariCaptureMixin:
             "existing_folder": str(row.get(EVIDENCE_FOLDER_COL) or "").strip(),
         }, False
 
-    def _mercari_capture_jobs(self) -> tuple[List[Dict[str, Any]], int]:
+    def _mercari_capture_jobs(self, *, all_rows: bool = False) -> tuple[List[Dict[str, Any]], int]:
         """
         撮影ジョブ一覧と、証憑3枚そろい済みでスキップした件数を返す。
         すでに画像があるスロットはジョブに残し、保存時に上書きしない。
+
+        all_rows=False のとき: 行選択があれば選択行のみ。無ければ全行。
+        all_rows=True のとき: 選択に関係なくフィルタ後の全行。
         """
         data = self.filtered_data
         table = getattr(self, "data_table", None)
         positions: List[int] = []
-        if table is not None and table.selectionModel() is not None:
+        if not all_rows and table is not None and table.selectionModel() is not None:
             positions = sorted({index.row() for index in table.selectionModel().selectedRows()})
         if not positions:
             positions = list(range(len(data)))
