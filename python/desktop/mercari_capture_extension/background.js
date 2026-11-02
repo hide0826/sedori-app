@@ -127,11 +127,15 @@ async function waitForProductImages(tabId) {
   await sleep(1200);
 }
 
+/**
+ * JPEG で撮る（PNGフル画面は数MB〜十数MBになり、HIRIO側の受信・保存で数分待ち／固まりの原因になる）。
+ */
 async function shotWithDebugger(tabId) {
   await chrome.debugger.attach({ tabId }, "1.3");
   try {
     const result = await chrome.debugger.sendCommand({ tabId }, "Page.captureScreenshot", {
-      format: "png",
+      format: "jpeg",
+      quality: 85,
     });
     return result.data;
   } finally {
@@ -143,19 +147,61 @@ async function shotWithDebugger(tabId) {
   }
 }
 
+/**
+ * ほぼ真っ白なショットか（描画前の白画面対策）。
+ * service worker では Image/canvas が使えないことがあるので、先頭付近の輝度サンプルで判定する。
+ */
+function looksMostlyWhiteJpeg(base64Data) {
+  try {
+    const binary = atob(base64Data);
+    // JPEG は圧縮されるので厳密ではないが、極端に小さい／短いデータは失敗扱い
+    if (binary.length < 8000) {
+      return true;
+    }
+    // SOF0/SOF2 付近のサイズが取れなくても、バイト分布が極端に偏っていたら白寄りとみなす
+    let brightish = 0;
+    let samples = 0;
+    const step = Math.max(1, Math.floor(binary.length / 200));
+    for (let i = 0; i < binary.length; i += step) {
+      const v = binary.charCodeAt(i);
+      samples += 1;
+      if (v > 200) {
+        brightish += 1;
+      }
+    }
+    return samples > 0 && brightish / samples > 0.92;
+  } catch (err) {
+    return false;
+  }
+}
+
+async function captureOnce(tab) {
+  try {
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
+      format: "jpeg",
+      quality: 85,
+    });
+    const comma = dataUrl.indexOf(",");
+    return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+  } catch (err) {
+    return await shotWithDebugger(tab.id);
+  }
+}
+
 async function shot(tab) {
   await ensureMaximizedWindow(tab.windowId);
   await chrome.windows.update(tab.windowId, { focused: true });
   await chrome.tabs.update(tab.id, { active: true });
   // フォーカス・描画が落ち着くまで待つ
   await sleep(1400);
-  try {
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-    const comma = dataUrl.indexOf(",");
-    return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
-  } catch (err) {
-    return await shotWithDebugger(tab.id);
+  let data = await captureOnce(tab);
+  // 白飛びなら少し待って1回だけ撮り直す
+  if (looksMostlyWhiteJpeg(data)) {
+    await sleep(1600);
+    await waitForProductImages(tab.id);
+    data = await captureOnce(tab);
   }
+  return data;
 }
 
 async function scrollToDescription(tabId) {

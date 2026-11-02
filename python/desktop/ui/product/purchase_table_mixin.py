@@ -155,6 +155,11 @@ class PurchaseTableMixin:
         self.purchase_all_records_master = copy.deepcopy(records)
         self.purchase_all_records = copy.deepcopy(records)
         self.purchase_records = copy.deepcopy(records)
+        # スナップショット由来の重複 _row_id をここで必ず解消
+        if hasattr(self, "_ensure_unique_purchase_row_ids"):
+            self._ensure_unique_purchase_row_ids(self.purchase_all_records_master)
+            self._ensure_unique_purchase_row_ids(self.purchase_all_records)
+            self._ensure_unique_purchase_row_ids(self.purchase_records)
         self._invalidate_purchase_table_full_master()
         self.populate_purchase_table(self.purchase_records)
         self._purchase_table_full_master_built = bool(self.purchase_records)

@@ -827,11 +827,52 @@ class StoreDatabase:
             "store_id": physical.get("id"),
         }
 
+    def _sku_result_from_flea(self, flea: Dict[str, Any], fallback_code: str) -> Dict[str, Any]:
+        """フリママスタ1件から SKU 用 supplier_code（英字接頭辞）を作る。"""
+        sku_token = (flea.get("code_prefix") or flea.get("platform_code") or "").strip().upper()
+        if not sku_token:
+            # 日本語のままだと SKU sanitize で消えるので、英数字だけのときだけ使う
+            raw = (fallback_code or "").strip().upper()
+            sku_token = raw if re.fullmatch(r"[0-9A-Z\-_]+", raw or "") else ""
+        pname = (flea.get("platform_name") or "").strip()
+        return {
+            "supplier_code": sku_token or (flea.get("platform_code") or "").strip().upper() or "FLEA",
+            "store_name": pname or sku_token,
+            "store_id": None,
+        }
+
+    def _sku_result_from_ec_platform(
+        self, plat: Dict[str, Any], fallback_code: str
+    ) -> Dict[str, Any]:
+        """ECコード1件から SKU 用 supplier_code を作る。"""
+        sku_token = (plat.get("code_prefix") or plat.get("platform_code") or "").strip().upper()
+        if not sku_token:
+            raw = (fallback_code or "").strip().upper()
+            sku_token = raw if re.fullmatch(r"[0-9A-Z\-_]+", raw or "") else ""
+        pname = (plat.get("platform_name") or "").strip()
+        return {
+            "supplier_code": sku_token or (plat.get("platform_code") or "").strip().upper() or "EC",
+            "store_name": pname or sku_token,
+            "store_id": None,
+        }
+
+    def _find_flea_for_sku(self, code: str) -> Optional[Dict[str, Any]]:
+        """フリマコード／名称／「フリマ:メルカリ」形式から flea_markets を探す。"""
+        flea = self.get_flea_market_by_platform_code(code)
+        if not flea and ":" in code:
+            flea = self.get_flea_market_by_platform_name(code.split(":", 1)[-1].strip())
+        if not flea:
+            flea = self.get_flea_market_by_platform_name(code)
+        return flea
+
     def resolve_supplier_for_sku(self, supplier_code: str) -> Optional[Dict[str, Any]]:
         """
         SKU生成向けに仕入先を解決する。
         実店舗(stores) → 電脳店舗(online_stores) → フリマ(flea_markets)
         → ECコード(online_platforms) の順で検索する。
+
+        ただし店舗マスタに「メルカリ」などが誤登録されている場合は、
+        フリマ／ECの名称一致を優先する（日本語コードは SKU から消えてしまうため）。
 
         フリマは「設定 > 店舗コード設定 > フリマコード」、
         ECは「設定 > 店舗コード設定 > ECコード」で一致させる。
@@ -842,6 +883,22 @@ class StoreDatabase:
         code = (supplier_code or "").strip()
         if not code:
             return None
+
+        # フリマ／ECの「名称」一致は、実店舗より先に見る。
+        # （店舗マスタへ「メルカリ」が誤登録されると MERCARI が入らなくなる）
+        flea_by_name = self.get_flea_market_by_platform_name(
+            code.split(":", 1)[-1].strip() if ":" in code else code
+        )
+        if flea_by_name:
+            return self._sku_result_from_flea(flea_by_name, code)
+
+        plat_key = code.split(":", 1)[-1].strip() if ":" in code else code
+        plat_by_name = self.get_online_platform_for_sku(plat_key)
+        if plat_by_name:
+            pname = (plat_by_name.get("platform_name") or "").strip()
+            if pname and pname.lower() == plat_key.lower():
+                return self._sku_result_from_ec_platform(plat_by_name, plat_key)
+
         physical = self.get_store_by_code(code)
         if physical:
             return self._resolve_from_physical_store(physical, code)
@@ -862,38 +919,17 @@ class StoreDatabase:
                 "store_name": display_name,
                 "store_id": online.get("id"),
             }
-        # フリマ（単品仕入で仕入先に platform_code が入るケース、または「フリマ:メルカリ」形式）
-        flea = self.get_flea_market_by_platform_code(code)
-        if not flea and ":" in code:
-            flea = self.get_flea_market_by_platform_name(code.split(":", 1)[-1].strip())
-        if not flea:
-            flea = self.get_flea_market_by_platform_name(code)
+        # フリマ（platform_code / code_prefix。名称は上で処理済み）
+        flea = self._find_flea_for_sku(code)
         if flea:
-            sku_token = (flea.get("code_prefix") or flea.get("platform_code") or "").strip().upper()
-            if not sku_token:
-                sku_token = code.upper()
-            pname = (flea.get("platform_name") or "").strip()
-            return {
-                "supplier_code": sku_token,
-                "store_name": pname or sku_token,
-                "store_id": None,
-            }
+            return self._sku_result_from_flea(flea, code)
 
-        # ECコード（仕入チャネルに「オフモール」などの名称が入る）
-        plat_key = code.split(":", 1)[-1].strip() if ":" in code else code
+        # ECコード（コード・短縮名。名称一致は上で処理済み）
         plat = self.get_online_platform_for_sku(code)
         if not plat and plat_key != code:
             plat = self.get_online_platform_for_sku(plat_key)
         if plat:
-            sku_token = (plat.get("code_prefix") or plat.get("platform_code") or "").strip().upper()
-            if not sku_token:
-                sku_token = plat_key.upper()
-            pname = (plat.get("platform_name") or "").strip()
-            return {
-                "supplier_code": sku_token,
-                "store_name": pname or sku_token,
-                "store_id": None,
-            }
+            return self._sku_result_from_ec_platform(plat, plat_key)
 
         # ルート訪問で使われている店舗コード（照合後の仕入先）を最小マスタとして登録
         if self._is_route_visit_store_code(code):

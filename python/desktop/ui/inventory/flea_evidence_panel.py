@@ -8,8 +8,8 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QEvent, Signal
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import Qt, QEvent, QSize, Signal
+from PySide6.QtGui import QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -79,13 +79,19 @@ class _SlotWidget(QWidget):
         return super().eventFilter(watched, event)
 
     def _open_large(self) -> None:
-        if self.image is None or self.image.isNull():
+        # サムネは縮小済みなので、拡大時はファイルから読み直す
+        image = QImage()
+        if self.source_path and Path(self.source_path).is_file():
+            image = QImage(self.source_path)
+        if image.isNull() and self.image is not None:
+            image = self.image
+        if image is None or image.isNull():
             return
         dialog = QDialog(self)
         dialog.setWindowTitle(self.title)
         label = QLabel()
         label.setAlignment(Qt.AlignCenter)
-        pixmap = QPixmap.fromImage(self.image)
+        pixmap = QPixmap.fromImage(image)
         screen = QApplication.primaryScreen()
         if screen is not None:
             area = screen.availableGeometry()
@@ -122,10 +128,21 @@ class _SlotWidget(QWidget):
         self.thumb.setText("")
 
     def load_path(self, path: str) -> None:
+        """サムネ用に縮小して読む（フル解像度PNGの読込で画面が白く固まる対策）。"""
         p = (path or "").strip()
         if not p or not Path(p).is_file():
             return
-        img = QImage(p)
+        reader = QImageReader(p)
+        reader.setAutoTransform(True)
+        size = reader.size()
+        # サムネ表示に足りる大きさまで先に縮小してデコードする
+        if size.isValid() and (size.width() > 320 or size.height() > 220):
+            scaled = size.scaled(QSize(320, 220), Qt.KeepAspectRatio)
+            reader.setScaledSize(scaled)
+        img = reader.read()
+        if img.isNull():
+            # 一部の形式で scaledSize が失敗することがあるので通常読込へ
+            img = QImage(p)
         if img.isNull():
             return
         self.set_image(img, p)

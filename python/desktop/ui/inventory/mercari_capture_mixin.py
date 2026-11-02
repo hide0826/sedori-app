@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import secrets
 import subprocess
@@ -33,7 +34,13 @@ from services.flea_market_evidence_service import (
 )
 from services.mercari_evidence_capture import normalize_mercari_item_url
 
+logger = logging.getLogger(__name__)
+
 _EXTENSION_DIR = Path(__file__).resolve().parents[2] / "mercari_capture_extension"
+# 撮影後の GCS は完了ダイアログを待たせない（裏で上げる）。1枚あたりの上限秒。
+_GCS_UPLOAD_TIMEOUT_SEC = 45
+# OCR はフル解像度だと極端に遅い／メモリを食うので縮小して読む
+_OCR_MAX_EDGE_PX = 1600
 
 
 def _chrome_executable() -> Optional[str]:
@@ -123,7 +130,8 @@ class _MercariCaptureThread(QThread):
         by_id = {str(index): job for index, job in enumerate(self.jobs)}
         pending = set(by_id)
         results: List[Dict[str, Any]] = []
-        deadline = time.time() + max(90, 90 * len(self.jobs))
+        # Chrome側の待ち＋転送時間。保存・OCRはループ内で別途進める。
+        deadline = time.time() + max(180, 120 * len(self.jobs))
         while pending and time.time() < deadline:
             item = None
             with self._lock:
@@ -159,10 +167,12 @@ class _MercariCaptureThread(QThread):
             if status != "ok":
                 results.append({**job, "error": item.get("message") or "撮影に失敗しました。"})
                 continue
+            self.status.emit("撮影画像を受け取っています…")
             paths = self._write_images(item.get("images") or [])
             if len(paths) < 3:
                 results.append({**job, "error": "3枚そろいませんでした。"})
                 continue
+            self.status.emit("撮影画像を保存しています…")
             fields = self._save_job(
                 job,
                 paths,
@@ -189,12 +199,19 @@ class _MercariCaptureThread(QThread):
         for raw in images[:3]:
             text = str(raw or "")
             if "," in text and text.strip().startswith("data:"):
-                text = text.split(",", 1)[1]
+                header, text = text.split(",", 1)
+                suffix = ".jpg" if "jpeg" in header.lower() or "jpg" in header.lower() else ".png"
+            else:
+                suffix = ".png"
             try:
                 blob = base64.b64decode(text)
             except Exception:
                 continue
-            handle, name = tempfile.mkstemp(prefix="hirio_mercari_", suffix=".png")
+            if blob.startswith(b"\xff\xd8\xff"):
+                suffix = ".jpg"
+            elif blob.startswith(b"\x89PNG"):
+                suffix = ".png"
+            handle, name = tempfile.mkstemp(prefix="hirio_mercari_", suffix=suffix)
             os.close(handle)
             Path(name).write_bytes(blob)
             paths.append(name)
@@ -300,21 +317,17 @@ class _MercariCaptureThread(QThread):
                 slot_sources.append(paths[i] if i < len(paths) else None)
         try:
             existing_folder = str(job.get("existing_folder") or "").strip()
+            # 完了ダイアログを GCS 待ちで止めない。先にローカル保存だけ行う。
             if existing_folder and Path(existing_folder).is_dir():
                 local_paths = save_slot_images(Path(existing_folder), slot_sources)
-                gcs_urls, gcs_error = upload_saved_images_to_gcs(
-                    Path(existing_folder).name,
-                    local_paths,
-                    upload_fn=None,
-                )
                 from services.flea_market_evidence_service import EvidenceSaveResult
 
                 result = EvidenceSaveResult(
                     folder_path=str(Path(existing_folder).resolve()),
                     folder_name=Path(existing_folder).name,
                     local_paths=local_paths,
-                    gcs_urls=gcs_urls,
-                    gcs_error=gcs_error,
+                    gcs_urls=["", "", ""],
+                    gcs_error="",
                 )
             else:
                 result = save_evidence_bundle(
@@ -324,8 +337,15 @@ class _MercariCaptureThread(QThread):
                     asin=job.get("asin"),
                     slot_sources=slot_sources,
                     flea_markets=None,
-                    upload_to_gcs=True,
+                    upload_to_gcs=False,
                 )
+            # GCS は裏で短時間だけ試し、終わらなければ行のOK時などに任せる
+            gcs_urls, gcs_error = _upload_gcs_with_timeout(
+                result.folder_name,
+                result.local_paths,
+            )
+            result.gcs_urls = gcs_urls
+            result.gcs_error = gcs_error
             fields = record_fields_from_save(result)
             # 行に既にある画像／URLは必ず残す（保存結果で空になっても戻す）
             if existing_folder:
@@ -348,9 +368,8 @@ class _MercariCaptureThread(QThread):
         # 取引画面を新規に撮ったときだけ OCR（既存スロットは触らない）
         try:
             if not _evidence_slot_filled(existing_images[2]) and len(paths) >= 3 and paths[2]:
-                from services.ocr_service import OCRService
-
-                text = str(OCRService().extract_text(paths[2]).get("text") or "")
+                self.status.emit("取引画面を読み取っています…")
+                text = _ocr_transaction_text_fast(paths[2])
                 parsed = parse_transaction_ocr_text(text)
                 if parsed.item_id and not str(job.get("transaction_id") or "").strip():
                     fields["取引ID"] = parsed.item_id
@@ -373,6 +392,123 @@ def _evidence_slot_filled(path: Any) -> bool:
         return Path(text).is_file()
     except OSError:
         return False
+
+
+def _upload_gcs_with_timeout(
+    folder_name: str,
+    local_paths: List[str],
+    *,
+    timeout_sec: float = _GCS_UPLOAD_TIMEOUT_SEC,
+) -> tuple:
+    """
+    GCS アップロードを時間制限付きで行う。
+    遅い／ハングしても完了ダイアログを何分も待たせない。
+    タイムアウト後も裏のアップロードは続行してよい（daemon）。
+    """
+    if not any(local_paths):
+        return ["", "", ""], ""
+
+    holder: Dict[str, Any] = {
+        "urls": ["", "", ""],
+        "error": "",
+        "done": False,
+    }
+
+    def _run() -> None:
+        try:
+            urls, err = upload_saved_images_to_gcs(
+                folder_name, local_paths, upload_fn=None
+            )
+            holder["urls"] = urls
+            holder["error"] = err or ""
+        except Exception as exc:
+            holder["error"] = str(exc)
+            logger.warning("Evidence GCS upload failed: %s", exc)
+        finally:
+            holder["done"] = True
+
+    worker = threading.Thread(target=_run, name="hirio-evidence-gcs", daemon=True)
+    worker.start()
+    worker.join(timeout=timeout_sec)
+    if not holder["done"]:
+        logger.warning(
+            "Evidence GCS upload timed out after %ss (folder=%s); continuing in background",
+            timeout_sec,
+            folder_name,
+        )
+        return (
+            ["", "", ""],
+            f"GCSアップロードが{int(timeout_sec)}秒以内に終わりませんでした（裏で継続）",
+        )
+    return holder["urls"], holder["error"]
+
+
+def _ocr_transaction_text_fast(image_path: str, *, timeout_sec: float = 60.0) -> str:
+    """
+    取引画面 OCR。フル解像度のままだと数分かかることがあるため縮小して読む。
+    タイムアウトしたら空文字（DOMの出品者名などは別途入る）。
+    """
+    ocr_path = image_path
+    tmp_path: Optional[str] = None
+    holder: Dict[str, Any] = {"text": "", "done": False}
+    try:
+        try:
+            from PIL import Image
+        except ImportError:
+            Image = None  # type: ignore
+        if Image is not None:
+            with Image.open(image_path) as img:
+                width, height = img.size
+                longest = max(width, height)
+                if longest > _OCR_MAX_EDGE_PX:
+                    scale = _OCR_MAX_EDGE_PX / float(longest)
+                    try:
+                        resample = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
+                    except AttributeError:
+                        resample = Image.LANCZOS
+                    resized = img.resize(
+                        (max(1, int(width * scale)), max(1, int(height * scale))),
+                        resample,
+                    )
+                    handle, tmp_path = tempfile.mkstemp(
+                        prefix="hirio_ocr_",
+                        suffix=".jpg",
+                    )
+                    os.close(handle)
+                    rgb = resized.convert("RGB") if resized.mode != "RGB" else resized
+                    rgb.save(tmp_path, format="JPEG", quality=85, optimize=True)
+                    ocr_path = tmp_path
+
+        def _run() -> None:
+            try:
+                from services.ocr_service import OCRService
+
+                # 縮小済みなので前処理オフ（フル解像度前処理が固まりやすい）
+                holder["text"] = str(
+                    OCRService()
+                    .extract_text(ocr_path, use_preprocessing=False)
+                    .get("text")
+                    or ""
+                )
+            except Exception as exc:
+                logger.warning("Transaction OCR failed: %s", exc)
+            finally:
+                holder["done"] = True
+
+        worker = threading.Thread(target=_run, name="hirio-evidence-ocr", daemon=True)
+        worker.start()
+        worker.join(timeout=timeout_sec)
+        if not holder["done"]:
+            logger.warning("Transaction OCR timed out after %ss", timeout_sec)
+            return ""
+        return str(holder["text"] or "")
+    finally:
+        # OCRスレッドがまだ読んでいるときは消さない（タイムアウト時）
+        if tmp_path and holder.get("done"):
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 class InventoryMercariCaptureMixin:
@@ -659,12 +795,17 @@ class InventoryMercariCaptureMixin:
             self._write_mercari_fields(item.get("index"), fields)
             saved_items.append(item)
             saved += 1
-        if saved:
+        callback = getattr(self, "_info_capture_on_done", None)
+        # 行の編集から撮ったときは、巨大な一覧テーブル再描画でダイアログが白く固まるのを避ける
+        if saved and callback is None:
             try:
                 self.update_table()
             except Exception:
                 pass
-        lines = [f"保存しました: {saved} 件"]
+        if saved:
+            lines = [f"撮影しました（保存 {saved} 件）"]
+        else:
+            lines = ["撮影できませんでした"]
         if stopped:
             lines.append("ログインが完了しなかったため、残りは撮っていません。")
         if errors:
@@ -675,7 +816,6 @@ class InventoryMercariCaptureMixin:
         self._info_capture_on_fail = None
         if not quiet:
             QMessageBox.information(self, "情報撮影", "\n".join(lines))
-        callback = getattr(self, "_info_capture_on_done", None)
         self._info_capture_on_done = None
         if callback is not None:
             try:

@@ -626,6 +626,40 @@ class PurchaseEditMixin:
         except Exception as e:
             print(f"スナップショット保存エラー: {e}")
 
+    def _ensure_unique_purchase_row_ids(
+        self, records: Optional[List[Dict[str, Any]]]
+    ) -> int:
+        """
+        _row_id の欠落・重複を解消する。
+        重複したままだと「行削除」で別商品まで消える。
+        戻り値: 採番し直した件数。
+        """
+        if not records:
+            return 0
+        counter = int(getattr(self, "_purchase_row_id_counter", 1) or 1)
+        seen: set[int] = set()
+        fixed = 0
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            rid_raw = rec.get("_row_id")
+            try:
+                rid = int(rid_raw) if rid_raw is not None else None
+            except (TypeError, ValueError):
+                rid = None
+            if rid is None or rid in seen or rid < 1:
+                while counter in seen:
+                    counter += 1
+                rid = counter
+                counter += 1
+                rec["_row_id"] = rid
+                fixed += 1
+            seen.add(rid)
+            if rid >= counter:
+                counter = rid + 1
+        self._purchase_row_id_counter = max(counter, 1)
+        return fixed
+
     def restore_latest_purchase_snapshot(self):
         """最新のスナップショットを復元"""
         try:
@@ -643,6 +677,10 @@ class PurchaseEditMixin:
                     self.purchase_all_records_master = list(data)
                     self.purchase_all_records = list(data)
                     self.purchase_records = list(self.purchase_all_records)
+                    # 保存済みの重複 _row_id を読み込み時に必ず直す
+                    self._ensure_unique_purchase_row_ids(self.purchase_all_records_master)
+                    self._ensure_unique_purchase_row_ids(self.purchase_all_records)
+                    self._ensure_unique_purchase_row_ids(self.purchase_records)
                     return
         except Exception as e:
             print(f"スナップショット復元エラー: {e}")
@@ -696,57 +734,105 @@ class PurchaseEditMixin:
         )
 
     def on_delete_purchase_row(self):
-        """選択行を削除"""
+        """選択行を削除。
+
+        注意: 過去データでは _row_id が複数行で重複していることがある。
+        その状態で ID だけで消すと、選んでいない商品までまとめて消える。
+        そのため選択行の SKU（無ければ仕入れ日+ASIN+商品名）で消す。
+        """
         rows = sorted({index.row() for index in self.purchase_table.selectedIndexes()})
         if not rows:
             QMessageBox.warning(self, "選択なし", "削除する行を選択してください。")
             return
 
-        # 行ID（_row_id）を取得して削除対象を特定
-        row_ids_to_delete = set()
+        sku_targets: set[str] = set()
+        fallback_targets: set[tuple] = set()
         for row in rows:
+            sku = ""
             try:
-                for c in range(self.purchase_table.columnCount()):
-                    it = self.purchase_table.item(row, c)
-                    if it is None:
-                        continue
-                    v = it.data(Qt.UserRole + 1)
-                    if v is None:
-                        continue
-                    try:
-                        row_ids_to_delete.add(int(v))
-                    except (TypeError, ValueError):
-                        continue
-                    break
+                sku = str(self._purchase_table_row_sku(row) or "").strip()
+            except Exception:
+                sku = ""
+            if sku:
+                sku_targets.add(sku)
+                continue
+            # SKUが空の行だけ、表示中の主要項目で特定する
+            try:
+                cols = list(getattr(self, "purchase_columns", []) or [])
+                def _cell(name: str) -> str:
+                    if name not in cols:
+                        return ""
+                    it = self.purchase_table.item(row, cols.index(name))
+                    return str(it.text() if it is not None else "").strip()
+
+                fallback_targets.add(
+                    (_cell("仕入れ日"), _cell("ASIN"), _cell("商品名"), _cell("仕入れ価格"))
+                )
             except Exception:
                 continue
 
-        # フォールバック: 行IDがない場合は削除不可
-        if not row_ids_to_delete:
+        if not sku_targets and not fallback_targets:
             QMessageBox.warning(self, "削除不可", "削除対象の行情報が取得できませんでした。")
             return
 
-        if QMessageBox.question(self, "確認", f"{len(row_ids_to_delete)}件のデータを削除しますか？") != QMessageBox.Yes:
+        def _is_target(rec: Dict[str, Any]) -> bool:
+            sku = str(rec.get("SKU") or rec.get("sku") or "").strip()
+            if sku and sku in sku_targets:
+                return True
+            if not fallback_targets:
+                return False
+            key = (
+                str(rec.get("仕入れ日") or rec.get("purchase_date") or "").strip(),
+                str(rec.get("ASIN") or rec.get("asin") or "").strip(),
+                str(rec.get("商品名") or rec.get("product_name") or "").strip()[:50],
+                str(rec.get("仕入れ価格") or rec.get("purchase_price") or "").strip(),
+            )
+            # 商品名は表示が省略されている場合があるので先頭一致でも見る
+            for date_s, asin_s, name_s, price_s in fallback_targets:
+                if date_s and date_s != key[0]:
+                    continue
+                if asin_s and asin_s != key[1]:
+                    continue
+                if price_s and price_s != key[3]:
+                    continue
+                if name_s and key[2] and not (
+                    key[2].startswith(name_s[:40]) or name_s.startswith(key[2][:40])
+                ):
+                    continue
+                if date_s or asin_s or name_s:
+                    return True
+            return False
+
+        master = self._purchase_master_records()
+        matched = [rec for rec in master if _is_target(rec)]
+        if not matched:
+            QMessageBox.warning(self, "削除不可", "削除対象の行を内部データから特定できませんでした。")
             return
 
-        # _row_id をキーに、内部リストから該当レコードを削除（スナップショット用DBのみ）
-        def _filter_by_row_id(lst):
-            out = []
-            for rec in lst or []:
-                try:
-                    rid = int(rec.get("_row_id")) if rec.get("_row_id") is not None else None
-                except (TypeError, ValueError):
-                    rid = None
-                if rid is None or rid not in row_ids_to_delete:
-                    out.append(rec)
-            return out
+        # 重複SKUなどで件数がずれるときは明示確認
+        msg = f"{len(matched)}件のデータを削除しますか？"
+        if len(matched) != len(rows):
+            msg = (
+                f"選択は {len(rows)} 行ですが、同じSKUなどのため削除対象は {len(matched)} 件です。\n"
+                "このまま削除しますか？"
+            )
+        if QMessageBox.question(self, "確認", msg) != QMessageBox.Yes:
+            return
+
+        def _filter_keep(lst):
+            return [rec for rec in (lst or []) if not _is_target(rec)]
 
         if hasattr(self, "purchase_records"):
-            self.purchase_records = _filter_by_row_id(getattr(self, "purchase_records", []))
+            self.purchase_records = _filter_keep(getattr(self, "purchase_records", []))
 
         for attr_name in ["purchase_all_records", "purchase_all_records_master"]:
             if hasattr(self, attr_name):
-                setattr(self, attr_name, _filter_by_row_id(getattr(self, attr_name, [])))
+                setattr(self, attr_name, _filter_keep(getattr(self, attr_name, [])))
+
+        # 残った行の _row_id 重複も解消（次の編集・削除の誤爆防止）
+        for attr_name in ["purchase_all_records_master", "purchase_all_records", "purchase_records"]:
+            if hasattr(self, attr_name):
+                self._ensure_unique_purchase_row_ids(getattr(self, attr_name, []))
 
         master = self._purchase_master_records()
         self._invalidate_purchase_table_full_master()
@@ -757,19 +843,46 @@ class PurchaseEditMixin:
         self.save_purchase_snapshot()
 
     def on_delete_all_purchase(self):
-        """全行削除"""
+        """全行削除（表示中＝フィルタ後の行だけを消す）"""
         if not self.purchase_records:
             return
-            
-        if QMessageBox.question(self, "確認", "表示中の全データを削除しますか？") != QMessageBox.Yes:
+
+        visible = list(self.purchase_records)
+        if QMessageBox.question(
+            self,
+            "確認",
+            f"表示中の {len(visible)} 件を削除しますか？\n"
+            "（検索で絞り込んでいる場合は、見えている行だけ消えます）",
+        ) != QMessageBox.Yes:
             return
-            
+
+        def _rec_key(rec: Dict[str, Any]) -> tuple:
+            return (
+                str(rec.get("SKU") or rec.get("sku") or "").strip(),
+                str(rec.get("仕入れ日") or rec.get("purchase_date") or "").strip(),
+                str(rec.get("ASIN") or rec.get("asin") or "").strip(),
+                str(rec.get("商品名") or rec.get("product_name") or "").strip(),
+            )
+
+        visible_keys = {_rec_key(r) for r in visible}
+
+        def _keep(lst):
+            return [r for r in (lst or []) if _rec_key(r) not in visible_keys]
+
         self.purchase_records = []
-        self.purchase_all_records = []
+        self.purchase_all_records = _keep(getattr(self, "purchase_all_records", []))
+        self.purchase_all_records_master = _keep(
+            getattr(self, "purchase_all_records_master", [])
+        )
+        self._ensure_unique_purchase_row_ids(self.purchase_all_records_master)
+        self._ensure_unique_purchase_row_ids(self.purchase_all_records)
         self._invalidate_purchase_table_full_master()
-        self.populate_purchase_table(self.purchase_records)
+        master = self._purchase_master_records()
+        self.populate_purchase_table(master)
+        self._purchase_table_full_master_built = bool(master)
+        self.filter_purchase_records()
         self.update_purchase_count_label()
-        self.save_purchase_snapshot()
+        self.save_purchase_snapshot(skip_master_sync=True)
 
     _PURCHASE_ROW_EDIT_SYNC_KEYS = (
         "コンディション",

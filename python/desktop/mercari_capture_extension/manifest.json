@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "HIRIO メルカリ撮影",
-  "version": "1.0.6",
-  "description": "ログイン済みのChromeで、HIRIOの情報撮影を行います。撮影後はウィンドウを最小化します。",
+  "version": "1.0.7",
+  "description": "ログイン済みのChromeで、HIRIOの情報撮影を行います。JPEG撮影で転送を軽くし、撮影後はウィンドウを最小化します。",
   "permissions": ["tabs", "windows", "scripting", "debugger"],
   "host_permissions": [
     "<all_urls>"

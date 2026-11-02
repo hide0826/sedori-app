@@ -74,6 +74,31 @@ def test_resolve_supplier_for_sku_matches_ec_platform_name(temp_store_db: StoreD
     assert resolved["store_name"] == "オフモール"
 
 
+def test_resolve_supplier_prefers_flea_over_bogus_physical_store(temp_store_db: StoreDatabase):
+    """店舗マスタに『メルカリ』が誤登録されていても、フリマ接頭辞 MERCARI を使う。"""
+    temp_store_db.add_store(
+        {
+            "store_code": "メルカリ",
+            "supplier_code": "メルカリ",
+            "store_name": "メルカリ",
+        }
+    )
+    temp_store_db.add_flea_market(
+        {
+            "platform_code": "MRC",
+            "platform_name": "メルカリ",
+            "category": "フリマ",
+            "code_prefix": "MERCARI",
+            "is_active": 1,
+        }
+    )
+    resolved = temp_store_db.resolve_supplier_for_sku("メルカリ")
+    assert resolved is not None
+    assert resolved["supplier_code"] == "MERCARI"
+    assert resolved["store_name"] == "メルカリ"
+    assert resolved["store_id"] is None
+
+
 def test_resolve_supplier_for_sku_matches_ec_platform_code_and_prefix(temp_store_db: StoreDatabase):
     """ECコード本体と短縮名のどちらでも同じ短縮名を返す。"""
     temp_store_db.add_online_platform(
