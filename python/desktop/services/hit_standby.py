@@ -146,6 +146,10 @@ def load_standby_items(
         token = str(row.get("token") or "").strip()
         if not token:
             continue
+        # アマサーチCSV突合で Amazon 登録済みになったものはスタンバイ送信対象外
+        if str(row.get("amazon_registered_at") or "").strip():
+            seen_tokens.add(token)
+            continue
         seen_tokens.add(token)
         items.append(
             {

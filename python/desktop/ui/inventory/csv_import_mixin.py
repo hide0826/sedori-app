@@ -241,6 +241,27 @@ class InventoryCsvImportMixin:
             if getattr(self, "purchase_mode", "store") != "online":
                 self._auto_register_stores_from_inventory()
 
+            match_summary: List[str] = []
+            if getattr(self, "purchase_mode", "store") == "online":
+                try:
+                    from services.hit_amasearch_match import apply_hit_purchase_match
+
+                    match_result = apply_hit_purchase_match(
+                        self.inventory_data,
+                        csv_paths=paths,
+                    )
+                    if (
+                        match_result.url_filled
+                        or match_result.images_saved
+                        or match_result.registered
+                        or match_result.errors
+                    ):
+                        match_summary = match_result.summary_lines()
+                        self.filtered_data = self.inventory_data.copy()
+                except Exception as e:
+                    print(f"購入一覧との突合でエラー: {e}")
+                    match_summary = [f"購入一覧との突合に失敗しました: {e}"]
+
             self.update_table()
             self.export_btn.setEnabled(True)
             self.clear_btn.setEnabled(True)
@@ -263,6 +284,8 @@ class InventoryCsvImportMixin:
                     msg = f"{file_count}件のCSVを読み込みました（{total_rows}行）"
                 else:
                     msg = f"CSVファイルを読み込みました（{total_rows}行）"
+                if match_summary:
+                    msg += "\n\n" + "\n".join(match_summary)
                 QMessageBox.information(self, "取込完了", msg)
 
             self.data_loaded.emit(total_rows)

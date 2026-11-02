@@ -2,11 +2,23 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-11-02（ネット仕入／仕入DBまわり実機OK）
+更新日: 2026-11-02（アマサーチCSV統合）
 
 ---
 
 ## いまの状態
+
+**2026-11-02（アマサーチCSV統合）:** ネット仕入の CSV 取込後、購入一覧（`hit_purchases.jsonl`）と **同一ASIN・日付±3日** で突合。
+
+1. 出品URLが空の行へ購入側メルカリURLを自動入力
+2. 購入側で「画像を使用する」ONなら、採用画像をネット仕入箱の `商品画像/` へ `YYYY-MM-DD-NET-item-NN.jpg` で保存（`route.json` の product_files にも ASIN 付きで追記）
+3. 突合した購入を Amazon登録済みにし、状況画面の購入一覧ではカード全体を暗く表示
+4. スタンバイ送信候補からは登録済みを除外
+
+箱の決定: 取込CSVが `箱/仕入CSV/` 配下ならその箱、なければ `last_box`。  
+主なファイル: `services/hit_amasearch_match.py` / `ui/inventory/csv_import_mixin.py` / `services/hit_standby.py`  
+テスト: `tests/test_hit_amasearch_match.py`（5件）／`tests/test_hit_standby_registered.py`（1件）OK。  
+**反映は HIRIO 再起動**＋状況画面（:8790）再起動。実機確認は未。
 
 **2026-11-02（実機確認OK）:** 仕入DB行削除の巻き込み復旧・SKUの MERCARI 欠落・情報撮影の応答改善をユーザー確認済み。コードを `feature/sp-api` へ commit / push。
 
