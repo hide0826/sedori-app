@@ -128,7 +128,7 @@ _CUSTOM_CHECKBOXES_PER_ROW = 3
 
 
 class InventoryRowEditDialog(QDialog):
-    """仕入データ1行を編集するダイアログ（コンディション説明は1行・呼び出しボタン付き）"""
+    """仕入データ1行を編集するダイアログ（コンディション説明は複数行表示・保存時は1行）"""
     
     def __init__(
         self,
@@ -291,9 +291,15 @@ class InventoryRowEditDialog(QDialog):
                 self._widgets["その他詳細"] = self.other_details_edit
                 form.addRow("その他詳細:", self.other_details_edit)
 
-                # Amazonは改行非対応のため1行入力
-                w = QLineEdit()
-                w.setPlaceholderText("1行で入力（Amazonでは改行が反映されません）")
+                # 編集時は複数行で全体を見やすく（保存・出品時は1行に正規化）
+                w = QPlainTextEdit()
+                w.setPlaceholderText(
+                    "編集中は折り返して全体を表示します。"
+                    "保存・Amazon出品時は1行にまとめます（改行は反映されません）。"
+                )
+                w.setMinimumHeight(110)
+                w.setTabChangesFocus(True)
+                w.setLineWrapMode(QPlainTextEdit.WidgetWidth)
                 self._widgets[col] = w
                 form.addRow(QLabel(col + ":"), w)
             elif col == "コメント":
@@ -324,9 +330,9 @@ class InventoryRowEditDialog(QDialog):
         btn_layout.setContentsMargins(0, 0, 0, 0)
         self.call_condition_note_btn = QPushButton("コンディション説明呼び出し")
         self.call_condition_note_btn.setToolTip(
-            "欠品・詳細にチェックがあるときは、詳細説明の文だけを入れます。\n"
-            "チェックが無いときは、良い・非常に良いなどのテンプレートを入れます。\n"
-            "「その他詳細」に入力がある場合は、AI が説明文を生成します。"
+            "「その他詳細」に入力があるときは、欠品・詳細のチェック内容と組み合わせて AI が説明文を生成します。\n"
+            "その他詳細が空で欠品・詳細にチェックがあるときは、詳細説明の文だけを入れます。\n"
+            "どちらも無いときは、良い・非常に良いなどのテンプレートを入れます。"
         )
         self.call_condition_note_btn.clicked.connect(self._on_call_condition_note)
         clear_condition_note_btn = QPushButton("クリア")
@@ -360,7 +366,7 @@ class InventoryRowEditDialog(QDialog):
                 val = ""
             val = str(val).strip() if val != "" else ""
             if col == "コンディション説明":
-                # 旧・段落保存分も含め1行に揃えて表示
+                # 保存値は1行。表示は複数行ウィジェットで折り返して見やすくする
                 val = _normalize_condition_note_newlines(val)
             if isinstance(w, QPlainTextEdit):
                 w.setPlainText(val)
@@ -412,6 +418,16 @@ class InventoryRowEditDialog(QDialog):
 
     def _on_call_condition_note(self):
         note_w = self._widgets.get("コンディション説明")
+        other_details = ""
+        if self.other_details_edit is not None:
+            other_details = self.other_details_edit.text().strip()
+
+        # その他詳細あり → 欠品チェック有無に関わらず AI で組み合わせ生成
+        if other_details:
+            self._start_ai_condition_note_generation(other_details)
+            return
+
+        # その他詳細なし＋欠品チェックあり → 詳細説明の文だけ
         detail = self._checked_detail_description()
         if detail is not None:
             if not detail:
@@ -424,13 +440,7 @@ class InventoryRowEditDialog(QDialog):
             self._set_condition_note_text(detail)
             return
 
-        other_details = ""
-        if self.other_details_edit is not None:
-            other_details = self.other_details_edit.text().strip()
-        if other_details:
-            self._start_ai_condition_note_generation(other_details)
-            return
-
+        # どちらも無し → コンディションテンプレート
         cond_w = self._widgets.get("コンディション")
         if not cond_w or not note_w:
             return

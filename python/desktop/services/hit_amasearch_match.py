@@ -191,13 +191,12 @@ def _pick_purchase(
     purchases: Sequence[Dict[str, Any]],
     used_tokens: Set[str],
 ) -> Optional[Dict[str, Any]]:
-    best: Optional[Tuple[int, str, Dict[str, Any]]] = None
+    best: Optional[Tuple[int, int, str, Dict[str, Any]]] = None
     for row in purchases:
         token = str(row.get("token") or "").strip()
         if not token or token in used_tokens:
             continue
-        if _is_registered_row(row):
-            continue
+        # Amazon登録済みでも、CSV再取込で同じURLを再度埋めるため候補に含める
         row_asin = normalize_asin(row.get("asin"))
         if not row_asin or row_asin != asin:
             continue
@@ -212,14 +211,19 @@ def _pick_purchase(
         if delta > DATE_MATCH_DAYS:
             continue
         at = str(row.get("at") or "")
-        # 差が小さいほど良い。同差なら新しい at を優先
+        # 差が小さいほど良い。同差なら未登録を優先、さらに新しい at を優先
+        registered_rank = 1 if _is_registered_row(row) else 0
         if best is None:
-            best = (delta, at, row)
+            best = (delta, registered_rank, at, row)
             continue
-        b_delta, b_at, _ = best
-        if delta < b_delta or (delta == b_delta and at > b_at):
-            best = (delta, at, row)
-    return best[2] if best else None
+        b_delta, b_reg, b_at, _ = best
+        if (
+            delta < b_delta
+            or (delta == b_delta and registered_rank < b_reg)
+            or (delta == b_delta and registered_rank == b_reg and at > b_at)
+        ):
+            best = (delta, registered_rank, at, row)
+    return best[3] if best else None
 
 
 def _route_meta(box: Path) -> Tuple[str, str]:
@@ -410,8 +414,10 @@ def apply_hit_purchase_match(
         inventory_data.at[idx, "出品URL"] = url
         result.url_filled += 1
         used_tokens.add(token)
+        already_registered = _is_registered_row(purchase)
 
-        if box is not None:
+        # 登録済みの再取込では画像の二重保存を避け、URL埋めだけ行う
+        if box is not None and not already_registered:
             try:
                 n = _copy_selected_images(
                     token=token,

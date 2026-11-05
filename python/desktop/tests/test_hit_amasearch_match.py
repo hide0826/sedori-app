@@ -80,7 +80,8 @@ class PickPurchaseTest(unittest.TestCase):
             _pick_purchase("B0TESTASIN1", date(2026, 10, 20), purchases, set())
         )
 
-    def test_pick_skips_registered_and_used(self) -> None:
+    def test_pick_allows_registered_for_url_refill(self) -> None:
+        """登録済みでもCSV再取込で同じURLを埋められる。未登録があればそちら優先。"""
         purchases = [
             {
                 "token": "TokUsedTokUse1",
@@ -100,14 +101,29 @@ class PickPurchaseTest(unittest.TestCase):
         self.assertIsNotNone(picked)
         assert picked is not None
         self.assertEqual(picked["token"], "TokFreeTokFre1")
-        self.assertIsNone(
-            _pick_purchase(
-                "B0TESTASIN1",
-                date(2026, 10, 15),
-                purchases,
-                {"TokFreeTokFre1"},
-            )
+
+        # 未登録を使い切ったあとは登録済みでも拾う
+        picked2 = _pick_purchase(
+            "B0TESTASIN1",
+            date(2026, 10, 15),
+            purchases,
+            {"TokFreeTokFre1"},
         )
+        self.assertIsNotNone(picked2)
+        assert picked2 is not None
+        self.assertEqual(picked2["token"], "TokUsedTokUse1")
+        self.assertEqual(picked2["url"], "https://jp.mercari.com/item/m1")
+
+        # 登録済みだけの場合も拾える
+        only_reg = _pick_purchase(
+            "B0TESTASIN1",
+            date(2026, 10, 15),
+            [purchases[0]],
+            set(),
+        )
+        self.assertIsNotNone(only_reg)
+        assert only_reg is not None
+        self.assertEqual(only_reg["token"], "TokUsedTokUse1")
 
 
 class ApplyMatchTest(unittest.TestCase):
