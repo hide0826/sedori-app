@@ -137,22 +137,46 @@ _CONDITION_BY_CODE = {
 }
 
 
+def _looks_like_condition_note(text: str) -> bool:
+    """Amazon出品の長いコンディション説明は一覧に出さない。"""
+    value = str(text or "").strip()
+    if not value:
+        return False
+    if len(value) > 40:
+        return True
+    if value.startswith("[") and ("動作確認" in value or "付属品" in value or "発送" in value):
+        return True
+    return False
+
+
 def _condition_text(*sources: Dict[str, Any]) -> str:
     """仕入行のコンディション文言。番号だけのときは画面と同じ名前にする。"""
     for source in sources:
         if not isinstance(source, dict):
             continue
-        for key in ("condition", "コンディション", "condition_note"):
+        # 説明文（condition_note）より短い Cond. を優先する
+        for key in ("condition", "コンディション"):
             text = str(source.get(key) or "").strip()
-            if text and text.lower() not in ("nan", "none"):
-                return text
+            if not text or text.lower() in ("nan", "none"):
+                continue
+            if _looks_like_condition_note(text):
+                continue
+            if text.isdigit():
+                label = _CONDITION_BY_CODE.get(int(text))
+                if label:
+                    return label
+            return text
         try:
             code = int(source.get("condition_code"))
         except (TypeError, ValueError):
-            continue
-        label = _CONDITION_BY_CODE.get(code)
-        if label:
-            return label
+            code = None
+        if code is not None:
+            label = _CONDITION_BY_CODE.get(code)
+            if label:
+                return label
+        note = str(source.get("condition_note") or "").strip()
+        if note and not _looks_like_condition_note(note):
+            return note
     return ""
 
 

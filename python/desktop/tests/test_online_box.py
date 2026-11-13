@@ -163,7 +163,23 @@ def test_records_from_listing_export(tmp_path: Path):
     assert len(rows) == 1
     assert rows[0]["SKU"] == "20261111-MERCARI-1"
     assert rows[0]["ASIN"] == "B00TESTASIN"
+    assert rows[0]["商品名"] == "テスト商品"
     assert group_records_by_box_ymd(rows)["20261111"]
+
+
+def test_records_from_listing_export_cp932(tmp_path: Path):
+    path = tmp_path / "listing_export.csv"
+    path.write_bytes(
+        (
+            "SKU,ASIN,JAN,title,condition,conditionNote\r\n"
+            '20261113-MERCARI-1,="B00TESTASIN",,パナソニック 電話機,3,[動作確認]動作確認済みです。長い説明\r\n'
+        ).encode("cp932")
+    )
+    rows = records_from_listing_export(path)
+    assert len(rows) == 1
+    assert "パナソニック" in rows[0]["商品名"]
+    assert rows[0]["コンディション"] == "中古(良い)"
+    assert "動作確認" not in rows[0]["コンディション"]
 
 
 def test_register_online_box_and_candidates(tmp_path: Path, monkeypatch=None):

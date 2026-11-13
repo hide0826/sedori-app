@@ -382,13 +382,72 @@ def normalize_listing_asin(value: Any) -> str:
     return "".join(ch for ch in text.upper() if ch.isalnum())[:16]
 
 
+# 出品CSVの condition 番号 → 短い表示名（コンディション説明文は使わない）
+_LISTING_CONDITION_BY_CODE = {
+    1: "中古(ほぼ新品)",
+    2: "中古(非常に良い)",
+    3: "中古(良い)",
+    4: "中古(可)",
+    5: "コレクター商品(ほぼ新品)",
+    6: "コレクター商品(非常に良い)",
+    7: "コレクター商品(良い)",
+    8: "コレクター商品(可)",
+    10: "再生品",
+    11: "新品",
+}
+
+
+def looks_like_condition_note(value: Any) -> bool:
+    """Amazon出品の長いコンディション説明かどうか。"""
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if len(text) > 40:
+        return True
+    if text.startswith("[") and ("動作確認" in text or "付属品" in text or "発送" in text):
+        return True
+    return False
+
+
+def short_condition_label(value: Any = "", *, code: Any = None) -> str:
+    """撮影候補用の短い Cond. 表示。説明文は捨てる。"""
+    for raw in (value, code):
+        text = str(raw or "").strip()
+        if not text or text.lower() in ("nan", "none"):
+            continue
+        if looks_like_condition_note(text):
+            continue
+        if text.isdigit():
+            mapped = _LISTING_CONDITION_BY_CODE.get(int(text))
+            if mapped:
+                return mapped
+            return f"中古({text})"
+        return text
+    return ""
+
+
+def _read_text_auto(path: Path) -> str:
+    """UTF-8 / CP932 を自動判定して読む（出品CSVは CP932 が多い）。"""
+    raw = path.read_bytes()
+    for enc in ("utf-8-sig", "utf-8", "cp932", "shift_jis"):
+        try:
+            text = raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        # 置換文字が多い読みは失敗扱い
+        if text.count("\ufffd") > 0 and enc.startswith("utf"):
+            continue
+        return text
+    return raw.decode("cp932", errors="replace")
+
+
 def records_from_listing_export(path: Union[str, Path]) -> List[Dict[str, Any]]:
     """出品CSV（listing_export / *_出品用CSV）から撮影候補用レコードを読む。"""
     file_path = Path(path)
     if not file_path.is_file():
         return []
     try:
-        raw = file_path.read_text(encoding="utf-8-sig", errors="replace")
+        raw = _read_text_auto(file_path)
     except OSError:
         return []
     rows = list(csv.reader(raw.splitlines()))
@@ -419,10 +478,10 @@ def records_from_listing_export(path: Union[str, Path]) -> List[Dict[str, Any]]:
         title = _cell(data, "title", "商品名", "product_name")
         if not (sku or asin or jan or title):
             continue
-        condition_note = _cell(data, "conditionNote", "condition_note")
-        condition_code = _cell(data, "condition", "コンディション")
-        condition = condition_note or (
-            f"中古({condition_code})" if condition_code else ""
+        # conditionNote（長い説明文）は使わず、condition 番号／短い Cond. だけ
+        condition = short_condition_label(
+            _cell(data, "コンディション"),
+            code=_cell(data, "condition"),
         )
         out.append(
             {
@@ -539,7 +598,10 @@ def build_photo_candidate_rows(
                 "jan": jan,
                 "asin": asin,
                 "product_name": name,
-                "condition": _cell(record, "コンディション", "condition", "condition_note"),
+                "condition": short_condition_label(
+                    _cell(record, "コンディション", "condition"),
+                    code=_cell(record, "condition_code"),
+                ),
                 "store_code": ONLINE_ROUTE_CODE,
                 "store_name": "ネット仕入",
                 "purchase_date": route_date or _cell(record, "仕入れ日", "purchase_date"),
