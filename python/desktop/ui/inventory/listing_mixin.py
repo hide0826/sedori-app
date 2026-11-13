@@ -1091,18 +1091,59 @@ class InventoryListingMixin:
                 except Exception:
                     pass
 
-                # 保存先フォルダを取得（CSV取込時に選択したフォルダ、なければデフォルト）
+                # 保存先フォルダを取得（ネット仕入は SKU/仕入れ日の日付箱を優先）
                 from pathlib import Path
                 from utils.file_naming import resolve_unique_path
                 
                 default_dir = None
-                try:
-                    s = self._get_qsettings()
-                    saved_folder = s.value("inventory/last_csv_folder", None, type=str)
-                    if saved_folder and Path(saved_folder).exists():
-                        default_dir = saved_folder
-                except Exception:
-                    pass
+                if getattr(self, "purchase_mode", "store") == "online":
+                    try:
+                        from services.online_box import (
+                            extract_record_box_ymd,
+                            resolve_or_create_online_box_for_ymd,
+                        )
+                        from utils.settings_helper import get_online_purchase_root
+                    except ImportError:
+                        from desktop.services.online_box import (  # type: ignore
+                            extract_record_box_ymd,
+                            resolve_or_create_online_box_for_ymd,
+                        )
+                        from desktop.utils.settings_helper import (  # type: ignore
+                            get_online_purchase_root,
+                        )
+                    from services.online_box import resolve_default_online_root
+
+                    ymd_counts: dict[str, int] = {}
+                    source = self.filtered_data if len(self.filtered_data) > 0 else self.inventory_data
+                    try:
+                        for _, row in source.iterrows():
+                            ymd = extract_record_box_ymd(row.to_dict())
+                            if ymd:
+                                ymd_counts[ymd] = ymd_counts.get(ymd, 0) + 1
+                    except Exception:
+                        ymd_counts = {}
+                    if ymd_counts:
+                        best_ymd = sorted(
+                            ymd_counts.items(), key=lambda kv: (-kv[1], kv[0])
+                        )[0][0]
+                        base_dir = (get_online_purchase_root() or "").strip()
+                        if not base_dir or not Path(base_dir).is_dir():
+                            root = resolve_default_online_root()
+                            base_dir = str(root) if root is not None else ""
+                        if base_dir:
+                            created = resolve_or_create_online_box_for_ymd(
+                                base_dir, best_ymd, label="フリマ", register_web=False
+                            )
+                            default_dir = str(created.box_dir)
+                            default_name = f"{best_ymd}_出品用CSV.csv"
+                if default_dir is None:
+                    try:
+                        s = self._get_qsettings()
+                        saved_folder = s.value("inventory/last_csv_folder", None, type=str)
+                        if saved_folder and Path(saved_folder).exists():
+                            default_dir = saved_folder
+                    except Exception:
+                        pass
                 
                 # デフォルトフォルダが設定されていない場合は、仕入処理用の基準フォルダを使用
                 if default_dir is None:

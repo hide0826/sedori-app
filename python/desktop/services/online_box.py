@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import csv
 import json
+import re
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 CSV_DIR_NAME = "仕入CSV"
 PRODUCT_DIR_NAME = "商品画像"
@@ -234,6 +237,275 @@ def _cell(record: Dict[str, Any], *keys: str) -> str:
         if text and text.lower() not in ("nan", "none"):
             return text
     return ""
+
+
+_SKU_YMD_RE = re.compile(r"^(\d{8})(?:-|_|$)")
+_ASIN_EXCEL_RE = re.compile(r'^="?([A-Za-z0-9]+)"?$')
+
+
+def extract_ymd_from_text(value: Any) -> str:
+    """文字列から箱用 YYYYMMDD を取り出す。無ければ空文字。"""
+    text = str(value or "").strip()
+    if not text or text.lower() in ("nan", "none"):
+        return ""
+    # Excel 由来の ="20261113-..." や ="B0..." を剥がす
+    if text.startswith("="):
+        text = text.lstrip("=").strip().strip('"').strip("'")
+    match = _SKU_YMD_RE.match(text)
+    if match:
+        return match.group(1)
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) >= 8:
+        ymd = digits[:8]
+        try:
+            datetime.strptime(ymd, "%Y%m%d")
+            return ymd
+        except ValueError:
+            return ""
+    return ""
+
+
+def extract_record_box_ymd(record: Dict[str, Any]) -> str:
+    """
+    仕入1行から紐付け先の箱日付 YYYYMMDD を決める。
+
+    優先順: SKU先頭8桁 → 仕入れ日系の列。
+    """
+    if not isinstance(record, dict):
+        return ""
+    sku = _cell(record, "SKU", "sku")
+    ymd = extract_ymd_from_text(sku)
+    if ymd:
+        return ymd
+    for key in (
+        "仕入れ日",
+        "仕入日",
+        "purchase_date",
+        "purchased_at",
+        "purchase_datetime",
+    ):
+        ymd = extract_ymd_from_text(_cell(record, key))
+        if ymd:
+            return ymd
+    return ""
+
+
+def extract_box_ymd_from_name(name: str) -> str:
+    """フォルダ名（例: フリマ20261113）から YYYYMMDD を取る。"""
+    text = str(name or "").strip()
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) >= 8:
+        ymd = digits[-8:]
+        try:
+            datetime.strptime(ymd, "%Y%m%d")
+            return ymd
+        except ValueError:
+            return ""
+    return ""
+
+
+def group_records_by_box_ymd(
+    records: Iterable[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """箱日付ごとに仕入行を分ける。日付不明はキー ''。"""
+    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        grouped[extract_record_box_ymd(record)].append(record)
+    return dict(grouped)
+
+
+def find_online_box_dir_for_ymd(
+    base_dir: Union[str, Path],
+    ymd: str,
+    *,
+    label: str = "フリマ",
+) -> Optional[Path]:
+    """親フォルダ配下で YYYYMMDD に対応する箱を探す。無ければ None。"""
+    root = Path(base_dir)
+    needle = format_box_date(ymd)
+    if not root.is_dir() or len(needle) != 8:
+        return None
+    preferred = root / build_online_box_name(label=label, box_date=needle)
+    if preferred.is_dir():
+        return preferred
+    matches: List[Path] = []
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return None
+    for child in children:
+        if not child.is_dir():
+            continue
+        if extract_box_ymd_from_name(child.name) == needle and looks_like_online_box_dir(child):
+            matches.append(child)
+    if not matches:
+        return None
+    matches.sort(key=lambda p: (0 if p.name.startswith(sanitize_folder_label(label)) else 1, p.name))
+    return matches[0]
+
+
+def resolve_or_create_online_box_for_ymd(
+    base_dir: Union[str, Path],
+    ymd: str,
+    *,
+    label: str = "フリマ",
+    register_web: bool = True,
+) -> OnlineBoxResult:
+    """YYYYMMDD に対応する箱を取得（無ければ作成）。"""
+    needle = format_box_date(ymd)
+    existing = find_online_box_dir_for_ymd(base_dir, needle, label=label)
+    if existing is not None:
+        return create_online_purchase_box(
+            base_dir,
+            label=label,
+            box_date=needle,
+            box_name=existing.name,
+            register_web=register_web,
+        )
+    return create_online_purchase_box(
+        base_dir,
+        label=label,
+        box_date=needle,
+        register_web=register_web,
+    )
+
+
+def normalize_listing_asin(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or text.lower() in ("nan", "none"):
+        return ""
+    match = _ASIN_EXCEL_RE.match(text)
+    if match:
+        text = match.group(1)
+    return "".join(ch for ch in text.upper() if ch.isalnum())[:16]
+
+
+def records_from_listing_export(path: Union[str, Path]) -> List[Dict[str, Any]]:
+    """出品CSV（listing_export / *_出品用CSV）から撮影候補用レコードを読む。"""
+    file_path = Path(path)
+    if not file_path.is_file():
+        return []
+    try:
+        raw = file_path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return []
+    rows = list(csv.reader(raw.splitlines()))
+    if not rows:
+        return []
+    header_idx = None
+    for i, row in enumerate(rows):
+        if not row:
+            continue
+        head = [str(c).strip().lower() for c in row]
+        if "sku" in head and ("asin" in head or "jan" in head or "title" in head):
+            header_idx = i
+            break
+    if header_idx is None:
+        return []
+    headers = [str(c).strip() for c in rows[header_idx]]
+    out: List[Dict[str, Any]] = []
+    for row in rows[header_idx + 1 :]:
+        if not row or all(not str(c).strip() for c in row):
+            continue
+        data = {
+            headers[i]: (row[i] if i < len(row) else "")
+            for i in range(len(headers))
+        }
+        sku = _cell(data, "SKU", "sku")
+        asin = normalize_listing_asin(_cell(data, "ASIN", "asin"))
+        jan = "".join(ch for ch in _cell(data, "JAN", "jan") if ch.isdigit())
+        title = _cell(data, "title", "商品名", "product_name")
+        if not (sku or asin or jan or title):
+            continue
+        condition_note = _cell(data, "conditionNote", "condition_note")
+        condition_code = _cell(data, "condition", "コンディション")
+        condition = condition_note or (
+            f"中古({condition_code})" if condition_code else ""
+        )
+        out.append(
+            {
+                "SKU": sku,
+                "ASIN": asin,
+                "JAN": jan,
+                "商品名": title,
+                "コンディション": condition,
+                "仕入れ日": extract_ymd_from_text(sku),
+            }
+        )
+    return out
+
+
+def rebuild_photo_candidates_from_listing_export(
+    box_dir: Union[str, Path],
+    *,
+    listing_path: Optional[Union[str, Path]] = None,
+) -> Tuple[Path, List[Dict[str, Any]]]:
+    """箱内の出品CSVから撮影候補を作り直す。"""
+    folder = Path(box_dir)
+    path: Optional[Path] = Path(listing_path) if listing_path else None
+    if path is None:
+        for candidate in (
+            folder / "listing_export.csv",
+            *sorted(folder.glob("*_出品用CSV.csv"), reverse=True),
+            *sorted(folder.glob("*.csv"), reverse=True),
+        ):
+            if candidate.is_file() and candidate.name != PHOTO_CANDIDATES_FILE:
+                path = candidate
+                break
+    if path is None or not path.is_file():
+        raise FileNotFoundError(f"出品CSVが見つかりません: {folder}")
+    records = records_from_listing_export(path)
+    if not records:
+        raise ValueError(f"出品CSVから商品を読めませんでした: {path}")
+    ymd = extract_box_ymd_from_name(folder.name) or extract_record_box_ymd(records[0])
+    ensure_online_route_registration(folder, box_date=ymd or None, route_name=folder.name)
+    return write_photo_candidates(
+        folder,
+        records,
+        route_date=box_date_iso(ymd) if ymd else "",
+        route_name=folder.name,
+    )
+
+
+def write_photo_candidates_grouped_by_box(
+    base_dir: Union[str, Path],
+    records: Iterable[Dict[str, Any]],
+    *,
+    label: str = "フリマ",
+    fallback_ymd: str = "",
+    register_web: bool = True,
+) -> List[Tuple[Path, List[Dict[str, Any]], str]]:
+    """
+    仕入行を箱日付ごとに分け、各 フリマYYYYMMDD へ撮影候補を書く。
+
+    Returns:
+        [(box_dir, rows, ymd), ...]
+    """
+    grouped = group_records_by_box_ymd(records)
+    unknown = grouped.pop("", [])
+    if unknown:
+        fb = format_box_date(fallback_ymd) if fallback_ymd else format_box_date()
+        grouped.setdefault(fb, []).extend(unknown)
+
+    results: List[Tuple[Path, List[Dict[str, Any]], str]] = []
+    for ymd in sorted(grouped.keys()):
+        rows_in = grouped[ymd]
+        created = resolve_or_create_online_box_for_ymd(
+            base_dir,
+            ymd,
+            label=label,
+            register_web=register_web,
+        )
+        _path, rows = write_photo_candidates(
+            created.box_dir,
+            rows_in,
+            route_date=box_date_iso(ymd),
+            route_name=created.box_dir.name,
+        )
+        results.append((created.box_dir, rows, ymd))
+    return results
 
 
 def build_photo_candidate_rows(

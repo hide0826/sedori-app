@@ -667,6 +667,23 @@ class InventoryWorkflowMixin:
             s.setValue("inventory/last_csv_folder", str(folder_path))
         except Exception:
             pass
+        try:
+            from utils.settings_helper import (
+                set_online_purchase_last_box,
+                set_purchase_evidence_local_root,
+            )
+        except ImportError:
+            from desktop.utils.settings_helper import (  # type: ignore
+                set_online_purchase_last_box,
+                set_purchase_evidence_local_root,
+            )
+        from services.online_box import looks_like_online_box_dir
+
+        if looks_like_online_box_dir(folder_path):
+            set_online_purchase_last_box(str(folder_path))
+            evidence = folder_path / "証憑スクショ"
+            if evidence.is_dir():
+                set_purchase_evidence_local_root(str(evidence))
 
         layout = resolve_route_folder_layout(folder_path)
         if layout.csv_path is None:
@@ -952,7 +969,7 @@ class InventoryWorkflowMixin:
     def prepare_online_phone_photos_after_db_save(self) -> List[str]:
         """
         ネット仕入の DB保存後に呼ぶ。
-        箱登録・撮影候補書き出し・Web起動確認まで行い、メッセージ行を返す。
+        SKU／仕入れ日の YYYYMMDD ごとに フリマYYYYMMDD へ撮影候補を書き出す。
         """
         try:
             from utils.settings_helper import (
@@ -969,9 +986,8 @@ class InventoryWorkflowMixin:
                 set_purchase_evidence_local_root,
             )
         from services.online_box import (
-            create_online_purchase_box,
-            ensure_online_route_registration,
-            write_photo_candidates,
+            extract_box_ymd_from_name,
+            write_photo_candidates_grouped_by_box,
         )
 
         lines: List[str] = []
@@ -989,25 +1005,23 @@ class InventoryWorkflowMixin:
             return lines
 
         last_box = get_online_purchase_last_box()
-        box_dir = Path(last_box) if last_box and Path(last_box).is_dir() else None
+        fallback_ymd = ""
+        if last_box and Path(last_box).is_dir():
+            fallback_ymd = extract_box_ymd_from_name(Path(last_box).name)
         try:
-            if box_dir is None:
-                created = create_online_purchase_box(base_dir, label="フリマ")
-                box_dir = created.box_dir
-                set_purchase_evidence_local_root(str(created.evidence_dir))
-            web_id, _ = ensure_online_route_registration(box_dir, route_name=box_dir.name)
-            set_online_purchase_root(base_dir)
-            set_online_purchase_last_box(str(box_dir))
-            _path, rows = write_photo_candidates(
-                box_dir,
+            written = write_photo_candidates_grouped_by_box(
+                base_dir,
                 records,
-                route_name=box_dir.name,
+                label="フリマ",
+                fallback_ymd=fallback_ymd,
+                register_web=True,
             )
+            set_online_purchase_root(base_dir)
         except Exception as exc:
             lines.append(f"スマホ撮影準備エラー: {exc}")
             return lines
 
-        if not rows:
+        if not written:
             lines.append("スマホ撮影準備: 候補を作れませんでした（商品名・JAN・ASIN・SKUが空）")
             return lines
 
@@ -1026,18 +1040,34 @@ class InventoryWorkflowMixin:
                 home_url,
                 route_photos_url,
             )
+        from route_web.registry import make_web_id
 
         web_ok, web_message = ensure_route_web_running()
-        photos_url = route_photos_url(web_id)
         home = home_url()
-        lines.append(f"スマホ撮影準備: 候補 {len(rows)} 件 → {box_dir.name}")
-        lines.append(f"撮影URL: {photos_url}")
+        total_rows = 0
+        last_box_dir: Optional[Path] = None
+        for box_dir, rows, ymd in written:
+            total_rows += len(rows)
+            last_box_dir = box_dir
+            set_online_purchase_last_box(str(box_dir))
+            set_purchase_evidence_local_root(str(box_dir / "証憑スクショ"))
+            web_id = make_web_id(ymd, box_dir.name)
+            photos_url = route_photos_url(web_id)
+            lines.append(f"スマホ撮影準備: 候補 {len(rows)} 件 → {box_dir.name}")
+            lines.append(f"撮影URL: {photos_url}")
         lines.append(f"一覧: {home}")
+        if len(written) > 1:
+            lines.append(
+                f"日付箱 {len(written)} 件へ分けて書き出しました（合計 {total_rows} 件）"
+            )
         if not web_ok:
             lines.append(f"Web起動注意: {web_message}")
+        if last_box_dir is None:
+            return lines
         try:
+            box_names = " / ".join(path.name for path, _rows, _ymd in written)
             self._update_workflow_status(
-                f"スマホ撮影準備: 候補{len(rows)}件 → {box_dir.name}",
+                f"スマホ撮影準備: 候補{total_rows}件 → {box_names}",
                 emphasize=True,
             )
         except Exception:

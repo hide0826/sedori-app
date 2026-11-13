@@ -26,11 +26,15 @@ from services.online_box import (
     build_photo_candidate_rows,
     create_online_purchase_box,
     ensure_online_route_registration,
+    extract_record_box_ymd,
     format_box_date,
+    group_records_by_box_ymd,
     load_photo_candidates,
+    records_from_listing_export,
     resolve_default_online_root,
     sanitize_folder_label,
     write_photo_candidates,
+    write_photo_candidates_grouped_by_box,
 )
 from route_web import registry as route_registry
 from route_web.product_images import save_product_upload
@@ -112,6 +116,54 @@ def test_photo_candidate_keeps_condition_and_sku():
     assert rows[0]["sku"] == "20261017-14200-OFM-6P-001"
     assert rows[0]["condition"] == "中古(非常に良い)"
     assert rows[0]["jan"] == "4571157325181"
+
+
+def test_extract_record_box_ymd_from_sku_and_date():
+    assert extract_record_box_ymd({"SKU": "20261113-MERCARI-1000-6P-001"}) == "20261113"
+    assert extract_record_box_ymd({"sku": "x", "仕入れ日": "2026-11-11"}) == "20261111"
+    assert extract_record_box_ymd({"商品名": "only name"}) == ""
+
+
+def test_group_and_write_photo_candidates_by_box(tmp_path: Path):
+    route_registry.DATA_DIR = tmp_path  # type: ignore
+    route_registry.INDEX_PATH = tmp_path / "index.json"  # type: ignore
+    root = tmp_path / "ネット仕入れリスト"
+    root.mkdir()
+    written = write_photo_candidates_grouped_by_box(
+        root,
+        [
+            {"SKU": "20261111-MERCARI-1", "ASIN": "B00AAAAAAA", "商品名": "11の商品"},
+            {"SKU": "20261113-MERCARI-2", "ASIN": "B00BBBBBBB", "商品名": "13の商品"},
+            {"SKU": "20261113-MERCARI-3", "JAN": "4901234567890", "商品名": "13の別商品"},
+        ],
+        label="フリマ",
+        register_web=True,
+    )
+    names = {path.name: len(rows) for path, rows, _ymd in written}
+    assert names["フリマ20261111"] == 1
+    assert names["フリマ20261113"] == 2
+    assert (root / "フリマ20261111" / PHOTO_CANDIDATES_FILE).is_file()
+    assert len(load_photo_candidates(root / "フリマ20261113")) == 2
+
+
+def test_records_from_listing_export(tmp_path: Path):
+    path = tmp_path / "listing_export.csv"
+    path.write_text(
+        "\n".join(
+            [
+                '"ASINかJANのどちらかを記載してください。","","",""',
+                "SKU,ASIN,JAN,title,condition,conditionNote",
+                '20261111-MERCARI-1,="B00TESTASIN",,テスト商品,3,[動作確認]OK',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rows = records_from_listing_export(path)
+    assert len(rows) == 1
+    assert rows[0]["SKU"] == "20261111-MERCARI-1"
+    assert rows[0]["ASIN"] == "B00TESTASIN"
+    assert group_records_by_box_ymd(rows)["20261111"]
 
 
 def test_register_online_box_and_candidates(tmp_path: Path, monkeypatch=None):

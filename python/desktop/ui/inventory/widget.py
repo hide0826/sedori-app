@@ -433,7 +433,8 @@ class InventoryWidget(
         if self.is_online_mode:
             self.db_save_btn.setToolTip(
                 "仕入をDBに保存します。"
-                "ネット仕入では、保存後にスマホ商品撮影の候補書き出しも自動で行います。"
+                "ネット仕入では、保存後に SKU／仕入れ日の日付箱（フリマYYYYMMDD）へ"
+                "スマホ商品撮影の候補を自動で書き出します。"
             )
         self.db_save_btn.clicked.connect(
             lambda: self._run_action_with_status("DB保存", self._confirm_condition_edit_then_save_to_databases)
