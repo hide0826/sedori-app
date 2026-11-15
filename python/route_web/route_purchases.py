@@ -76,9 +76,23 @@ def _list_online_photo_candidates(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
     """ネット箱は店舗コードではなく photo_candidates から候補を返す。"""
     ensure_desktop_importable()
     try:
-        from services.online_box import load_photo_candidates
+        from services.online_box import (
+            ensure_photo_candidates_from_csvs,
+            load_photo_candidates,
+        )
     except ImportError:
-        from desktop.services.online_box import load_photo_candidates  # type: ignore
+        from desktop.services.online_box import (  # type: ignore
+            ensure_photo_candidates_from_csvs,
+            load_photo_candidates,
+        )
+
+    # 仕入CSVだけ入っている箱でも、開き直すだけで候補を自動生成
+    folder = str(doc.get("folder_path") or "").strip()
+    if folder:
+        try:
+            ensure_photo_candidates_from_csvs(folder, register_web=False)
+        except Exception:
+            pass
 
     route_meta = _doc_route(doc)
     rows = load_photo_candidates(doc=doc)
@@ -369,7 +383,10 @@ def list_route_purchases(doc: Dict[str, Any], *, db_path: str | None = None) -> 
         purchases.close()
     except Exception:
         pass
-    return found
+    if found:
+        return found
+    # DB未取込でも 仕入CSV があれば仮候補で撮影できるようにする
+    return _list_online_photo_candidates(doc)
 
 
 def _close_quietly(*dbs: Any) -> None:

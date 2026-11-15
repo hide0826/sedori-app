@@ -441,47 +441,93 @@ def _read_text_auto(path: Path) -> str:
     return raw.decode("cp932", errors="replace")
 
 
-def records_from_listing_export(path: Union[str, Path]) -> List[Dict[str, Any]]:
-    """出品CSV（listing_export / *_出品用CSV）から撮影候補用レコードを読む。"""
-    file_path = Path(path)
-    if not file_path.is_file():
-        return []
+def _parse_csv_table(path: Path) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """CSVをヘッダ＋行dictに。見つからなければ ([], [])。"""
     try:
-        raw = _read_text_auto(file_path)
+        raw = _read_text_auto(path)
     except OSError:
-        return []
+        return [], []
     rows = list(csv.reader(raw.splitlines()))
     if not rows:
-        return []
+        return [], []
     header_idx = None
     for i, row in enumerate(rows):
         if not row:
             continue
         head = [str(c).strip().lower() for c in row]
+        head_raw = [str(c).strip() for c in row]
+        # 出品CSV
         if "sku" in head and ("asin" in head or "jan" in head or "title" in head):
             header_idx = i
             break
+        # アマサーチ仕入れ済み／StockList 系
+        if ("asin" in head or "jan" in head) and (
+            "商品名" in head_raw or "title" in head or "product_name" in head
+        ):
+            header_idx = i
+            break
+        if "asin" in head and "コンディション" in head_raw:
+            header_idx = i
+            break
     if header_idx is None:
-        return []
+        return [], []
     headers = [str(c).strip() for c in rows[header_idx]]
     out: List[Dict[str, Any]] = []
     for row in rows[header_idx + 1 :]:
         if not row or all(not str(c).strip() for c in row):
             continue
-        data = {
-            headers[i]: (row[i] if i < len(row) else "")
-            for i in range(len(headers))
-        }
+        out.append(
+            {
+                headers[i]: (row[i] if i < len(row) else "")
+                for i in range(len(headers))
+            }
+        )
+    return headers, out
+
+
+def records_from_listing_export(path: Union[str, Path]) -> List[Dict[str, Any]]:
+    """出品CSV（listing_export / *_出品用CSV）から撮影候補用レコードを読む。"""
+    return records_from_purchase_csv(path)
+
+
+def records_from_purchase_csv(
+    path: Union[str, Path],
+    *,
+    fallback_ymd: str = "",
+) -> List[Dict[str, Any]]:
+    """
+    出品CSV／アマサーチ仕入れ済みCSV／StockList から撮影候補用レコードを読む。
+
+    SKUが空のときは TMP-YYYYMMDD-NNN を仮付け（あとで HIRIO 仕入処理で差し替え可）。
+    """
+    file_path = Path(path)
+    if not file_path.is_file():
+        return []
+    _headers, data_rows = _parse_csv_table(file_path)
+    if not data_rows:
+        return []
+    box_ymd = format_box_date(fallback_ymd) if fallback_ymd else extract_ymd_from_text(
+        file_path.stem
+    )
+    out: List[Dict[str, Any]] = []
+    for index, data in enumerate(data_rows, start=1):
         sku = _cell(data, "SKU", "sku")
         asin = normalize_listing_asin(_cell(data, "ASIN", "asin"))
-        jan = "".join(ch for ch in _cell(data, "JAN", "jan") if ch.isdigit())
-        title = _cell(data, "title", "商品名", "product_name")
+        jan = "".join(ch for ch in _cell(data, "JAN", "jan", "JANコード") if ch.isdigit())
+        title = _cell(data, "title", "商品名", "product_name", "name")
         if not (sku or asin or jan or title):
             continue
-        # conditionNote（長い説明文）は使わず、condition 番号／短い Cond. だけ
+        purchase_ymd = (
+            extract_ymd_from_text(sku)
+            or extract_ymd_from_text(_cell(data, "仕入れ日", "purchase_date", "仕入日"))
+            or box_ymd
+        )
+        if not sku:
+            ymd = purchase_ymd or format_box_date()
+            sku = f"TMP-{ymd}-{index:03d}"
         condition = short_condition_label(
-            _cell(data, "コンディション"),
-            code=_cell(data, "condition"),
+            _cell(data, "コンディション", "状態"),
+            code=_cell(data, "condition", "condition_code"),
         )
         out.append(
             {
@@ -490,10 +536,222 @@ def records_from_listing_export(path: Union[str, Path]) -> List[Dict[str, Any]]:
                 "JAN": jan,
                 "商品名": title,
                 "コンディション": condition,
-                "仕入れ日": extract_ymd_from_text(sku),
+                "仕入れ日": purchase_ymd,
             }
         )
     return out
+
+
+def iter_box_csv_sources(box_dir: Union[str, Path]) -> List[Path]:
+    """撮影候補の元になるCSVを新しい順で返す（出品CSV優先、次に仕入CSV）。"""
+    folder = Path(box_dir)
+    found: List[Path] = []
+    seen = set()
+
+    def _add(path: Path) -> None:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        if resolved in seen or not path.is_file():
+            return
+        if path.name == PHOTO_CANDIDATES_FILE:
+            return
+        if path.suffix.lower() != ".csv":
+            return
+        seen.add(resolved)
+        found.append(path)
+
+    for candidate in (
+        folder / "listing_export.csv",
+        *sorted(folder.glob("*_出品用CSV.csv"), reverse=True),
+    ):
+        _add(candidate)
+    csv_dir = folder / CSV_DIR_NAME
+    if csv_dir.is_dir():
+        for candidate in sorted(csv_dir.glob("*.csv"), reverse=True):
+            _add(candidate)
+    for candidate in sorted(folder.glob("*.csv"), reverse=True):
+        _add(candidate)
+    return found
+
+
+def _is_tmp_sku(value: Any) -> bool:
+    return str(value or "").strip().upper().startswith("TMP-")
+
+
+def _record_match_keys(record: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """同一商品判定用キー（本SKU → ASIN → JAN）。"""
+    keys: List[Tuple[str, str]] = []
+    sku = _cell(record, "SKU", "sku")
+    if sku and not _is_tmp_sku(sku):
+        keys.append(("sku", sku.upper()))
+    asin = normalize_listing_asin(_cell(record, "ASIN", "asin"))
+    if asin:
+        keys.append(("asin", asin))
+    jan = "".join(ch for ch in _cell(record, "JAN", "jan") if ch.isdigit())
+    if jan:
+        keys.append(("jan", jan))
+    return keys
+
+
+def _prefer_purchase_record(
+    left: Dict[str, Any],
+    right: Dict[str, Any],
+) -> Dict[str, Any]:
+    """重複時は本SKU付き・埋まった項目を優先して1行にまとめる。"""
+    out = dict(left)
+    left_sku = _cell(left, "SKU", "sku")
+    right_sku = _cell(right, "SKU", "sku")
+    if _is_tmp_sku(left_sku) and right_sku and not _is_tmp_sku(right_sku):
+        out["SKU"] = right_sku
+    for key in ("ASIN", "JAN", "商品名", "コンディション", "仕入れ日"):
+        if not _cell(out, key) and _cell(right, key):
+            out[key] = _cell(right, key)
+    return out
+
+
+def merge_purchase_records(
+    batches: Iterable[Iterable[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """複数CSVの行を同一商品でまとめる（出品CSVの本SKUを優先）。"""
+    merged: List[Dict[str, Any]] = []
+    index_by_key: Dict[Tuple[str, str], int] = {}
+    for batch in batches:
+        for raw in batch:
+            if not isinstance(raw, dict):
+                continue
+            record = dict(raw)
+            hit: Optional[int] = None
+            for key in _record_match_keys(record):
+                if key in index_by_key:
+                    hit = index_by_key[key]
+                    break
+            if hit is None:
+                idx = len(merged)
+                merged.append(record)
+                for key in _record_match_keys(record):
+                    index_by_key[key] = idx
+                # 仮SKU同士の取り違え防止用にも索引
+                sku = _cell(record, "SKU", "sku")
+                if sku:
+                    index_by_key[("sku", sku.upper())] = idx
+                continue
+            merged[hit] = _prefer_purchase_record(merged[hit], record)
+            for key in _record_match_keys(merged[hit]):
+                index_by_key[key] = hit
+    return merged
+
+
+def collect_box_csv_records(
+    box_dir: Union[str, Path],
+    *,
+    fallback_ymd: str = "",
+) -> Tuple[List[Dict[str, Any]], float, List[Path]]:
+    """
+    箱内の読めるCSVをすべて読み、商品行を合算する。
+
+    Returns:
+        (records, newest_mtime, used_paths)
+    """
+    folder = Path(box_dir)
+    ymd = fallback_ymd or extract_box_ymd_from_name(folder.name) or ""
+    batches: List[List[Dict[str, Any]]] = []
+    used: List[Path] = []
+    newest = 0.0
+    for path in iter_box_csv_sources(folder):
+        rows = records_from_purchase_csv(path, fallback_ymd=ymd)
+        if not rows:
+            continue
+        batches.append(rows)
+        used.append(path)
+        try:
+            newest = max(newest, path.stat().st_mtime)
+        except OSError:
+            pass
+    return merge_purchase_records(batches), newest, used
+
+
+def pick_best_box_csv(box_dir: Union[str, Path]) -> Optional[Path]:
+    """互換用。合算対象のうち先頭（出品CSV優先）を返す。"""
+    _records, _mtime, used = collect_box_csv_records(box_dir)
+    return used[0] if used else None
+
+
+def ensure_photo_candidates_from_csvs(
+    box_dir: Union[str, Path],
+    *,
+    force: bool = False,
+    register_web: bool = True,
+) -> Optional[Tuple[Path, List[Dict[str, Any]]]]:
+    """
+    仕入CSV／出品CSVが候補より新しければ photo_candidates を自動生成する。
+
+    複数CSVがあるときは中身を合算して表示する。
+    HIRIOのDB保存前でも、スマホ撮影一覧を出せるようにする。
+    """
+    folder = Path(box_dir)
+    if not folder.is_dir():
+        return None
+    ymd = extract_box_ymd_from_name(folder.name) or ""
+    records, src_mtime, used = collect_box_csv_records(folder, fallback_ymd=ymd)
+    if not records or not used:
+        return None
+    candidates_path = folder / PHOTO_CANDIDATES_FILE
+    if candidates_path.is_file() and not force:
+        try:
+            cand_mtime = candidates_path.stat().st_mtime
+        except OSError:
+            cand_mtime = 0.0
+        # 候補の方が新しい／同じなら触らない（HIRIO仕入後のSKU付きを守る）
+        if cand_mtime >= src_mtime - 0.01:
+            existing = load_photo_candidates(folder)
+            if existing:
+                return candidates_path, existing
+    if not ymd:
+        ymd = extract_record_box_ymd(records[0]) or format_box_date()
+
+    route_name = folder.name
+    route_code = ONLINE_ROUTE_CODE
+    box_kind = ONLINE_BOX_KIND
+    is_online_box = True
+    route_path = folder / "route.json"
+    if route_path.is_file():
+        try:
+            existing = json.loads(route_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+        if isinstance(existing, dict):
+            route_name = str(existing.get("route_name") or route_name).strip() or route_name
+            existing_code = str(existing.get("route_code") or "").strip()
+            existing_kind = str(existing.get("box_kind") or "").strip().lower()
+            if existing_code:
+                route_code = existing_code
+            if existing_kind and existing_kind != ONLINE_BOX_KIND:
+                box_kind = existing_kind
+                is_online_box = False
+            elif existing_code.upper() not in ("", ONLINE_ROUTE_CODE):
+                is_online_box = False
+                box_kind = existing_kind or "store"
+            iso_existing = str(existing.get("route_date") or "").strip()
+            if iso_existing and not ymd:
+                ymd = format_box_date(iso_existing)
+
+    if register_web and is_online_box:
+        try:
+            ensure_online_route_registration(
+                folder, box_date=ymd or None, route_name=route_name
+            )
+        except Exception:
+            pass
+    return write_photo_candidates(
+        folder,
+        records,
+        route_date=box_date_iso(ymd) if ymd else "",
+        route_name=route_name,
+        route_code=route_code,
+        box_kind=box_kind,
+    )
 
 
 def rebuild_photo_candidates_from_listing_export(
@@ -501,24 +759,22 @@ def rebuild_photo_candidates_from_listing_export(
     *,
     listing_path: Optional[Union[str, Path]] = None,
 ) -> Tuple[Path, List[Dict[str, Any]]]:
-    """箱内の出品CSVから撮影候補を作り直す。"""
+    """箱内の出品CSV／仕入CSVから撮影候補を作り直す（複数CSVは合算）。"""
     folder = Path(box_dir)
-    path: Optional[Path] = Path(listing_path) if listing_path else None
-    if path is None:
-        for candidate in (
-            folder / "listing_export.csv",
-            *sorted(folder.glob("*_出品用CSV.csv"), reverse=True),
-            *sorted(folder.glob("*.csv"), reverse=True),
-        ):
-            if candidate.is_file() and candidate.name != PHOTO_CANDIDATES_FILE:
-                path = candidate
-                break
-    if path is None or not path.is_file():
-        raise FileNotFoundError(f"出品CSVが見つかりません: {folder}")
-    records = records_from_listing_export(path)
-    if not records:
-        raise ValueError(f"出品CSVから商品を読めませんでした: {path}")
-    ymd = extract_box_ymd_from_name(folder.name) or extract_record_box_ymd(records[0])
+    ymd = extract_box_ymd_from_name(folder.name) or ""
+    if listing_path is not None:
+        path = Path(listing_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"仕入／出品CSVが見つかりません: {path}")
+        records = records_from_purchase_csv(path, fallback_ymd=ymd)
+        if not records:
+            raise ValueError(f"CSVから商品を読めませんでした: {path}")
+    else:
+        records, _mtime, used = collect_box_csv_records(folder, fallback_ymd=ymd)
+        if not records or not used:
+            raise FileNotFoundError(f"仕入／出品CSVが見つかりません: {folder}")
+    if not ymd:
+        ymd = extract_record_box_ymd(records[0]) or format_box_date()
     ensure_online_route_registration(folder, box_date=ymd or None, route_name=folder.name)
     return write_photo_candidates(
         folder,
@@ -619,19 +875,28 @@ def write_photo_candidates(
     *,
     route_date: str = "",
     route_name: str = "",
+    route_code: str = ONLINE_ROUTE_CODE,
+    box_kind: str = ONLINE_BOX_KIND,
 ) -> tuple[Path, List[Dict[str, Any]]]:
     """撮影候補を photo_candidates.json と route.json に書く。"""
     folder = Path(box_dir)
     name = route_name or folder.name
+    code = (route_code or ONLINE_ROUTE_CODE).strip() or ONLINE_ROUTE_CODE
+    kind = (box_kind or ONLINE_BOX_KIND).strip() or ONLINE_BOX_KIND
     iso = route_date or box_date_iso(name[-8:] if len(name) >= 8 else None)
     rows = build_photo_candidate_rows(
         records,
         route_date=iso,
         route_name=name,
-        route_code=ONLINE_ROUTE_CODE,
+        route_code=code,
     )
+    # 候補行の店舗コードはルート記号に合わせる（店舗箱でも仮撮影できる）
+    for row in rows:
+        row["store_code"] = code if code != ONLINE_ROUTE_CODE else ONLINE_ROUTE_CODE
+        if code != ONLINE_ROUTE_CODE:
+            row["store_name"] = name
     payload = {
-        "box_kind": ONLINE_BOX_KIND,
+        "box_kind": kind,
         "route_date": iso,
         "route_name": name,
         "candidates": rows,
@@ -650,7 +915,9 @@ def write_photo_candidates(
             doc = {}
         if isinstance(doc, dict):
             doc["photo_candidates"] = rows
-            doc["box_kind"] = ONLINE_BOX_KIND
+            # 店舗ルートを online に潰さない（未設定のときだけ補う）
+            if not str(doc.get("box_kind") or "").strip():
+                doc["box_kind"] = kind
             route_path.write_text(
                 json.dumps(doc, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
@@ -741,6 +1008,10 @@ def sync_online_boxes_into_registry(
             web_id, _ = ensure_online_route_registration(child, route_name=child.name)
         except Exception:
             continue
+        try:
+            ensure_photo_candidates_from_csvs(child, register_web=False)
+        except Exception:
+            pass
         if web_id:
             registered.append(web_id)
     return registered

@@ -98,6 +98,19 @@ def ensure_online_box_registered(folder: Path) -> str:
     return web_id
 
 
+def _ensure_photo_candidates(folder: Path) -> None:
+    """仕入CSVがあれば HIRIO 未処理でも撮影候補を自動生成。"""
+    try:
+        from route_web.desktop_bridge import ensure_desktop_importable
+
+        ensure_desktop_importable()
+        from services.online_box import ensure_photo_candidates_from_csvs
+
+        ensure_photo_candidates_from_csvs(folder, register_web=False)
+    except Exception as exc:
+        print(f"[route_web] photo candidates skip {folder.name}: {exc}")
+
+
 def sync_online_boxes_into_registry(root: Optional[Path] = None) -> List[str]:
     base = root or resolve_online_root()
     if base is None or not base.is_dir():
@@ -108,6 +121,7 @@ def sync_online_boxes_into_registry(root: Optional[Path] = None) -> List[str]:
             continue
         try:
             registered.append(ensure_online_box_registered(child))
+            _ensure_photo_candidates(child)
         except Exception as exc:
             print(f"[route_web] online box skip {child}: {exc}")
     return registered

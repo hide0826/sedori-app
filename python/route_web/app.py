@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+import logging
+import sys
 import threading
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -13,6 +15,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from route_web import ROUTE_WEB_PORT
+
+_log = logging.getLogger(__name__)
 from route_web.date_rename import RouteDateRenameError, change_route_date, parse_route_date
 from route_web.csv_inbox import (
     append_csv_file,
@@ -748,13 +752,51 @@ def get_prepare(web_id: str) -> JSONResponse:
     return JSONResponse(status)
 
 
+def _ensure_shared_on_path() -> Path:
+    """C:\\HIRIO\\shared を import 可能にする。"""
+    shared = Path(__file__).resolve().parents[4] / "shared"
+    path = str(shared)
+    if path not in sys.path:
+        sys.path.insert(0, path)
+    return shared
+
+
+def _enrich_purchase_images(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """ASIN がある行に SP-API メイン画像 URL を付ける（キャッシュ優先）。"""
+    if not rows:
+        return rows
+    try:
+        _ensure_shared_on_path()
+        from asin_image_cache import enrich_rows_with_main_images
+
+        return enrich_rows_with_main_images(rows, max_fetch=40)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("購入一覧の画像付与に失敗: %s", exc)
+        return rows
+
+
+def _enrich_nearby_images(groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for group in groups or []:
+        if not isinstance(group, dict):
+            continue
+        item = dict(group)
+        purchases = item.get("purchases") or []
+        if isinstance(purchases, list) and purchases:
+            item["purchases"] = _enrich_purchase_images(
+                [row for row in purchases if isinstance(row, dict)]
+            )
+        out.append(item)
+    return out
+
+
 @app.get("/api/route/{web_id}/purchases")
 def get_route_purchases(web_id: str) -> JSONResponse:
     doc = _require_doc(web_id)
-    rows = list_route_purchases(doc)
+    rows = _enrich_purchase_images(list_route_purchases(doc))
     kind = str(doc.get("box_kind") or "").strip().lower()
     is_online = kind == "online" or str(doc.get("route_code") or "").strip().upper() == "NET"
-    nearby = [] if rows or is_online else nearby_route_products(doc)
+    nearby = [] if rows or is_online else _enrich_nearby_images(nearby_route_products(doc))
     if rows:
         message = ""
     elif is_online:
@@ -787,12 +829,20 @@ async def read_route_barcode(
 
     decoded = decode_jan_bytes(raw)
     looked = lookup_photo_jan(doc, (jan or "").strip() or decoded)
+    candidates = looked.get("candidates") or []
+    if isinstance(candidates, list):
+        candidates = _enrich_purchase_images(
+            [row for row in candidates if isinstance(row, dict)]
+        )
+    nearby = looked.get("nearby_routes") or []
+    if isinstance(nearby, list):
+        nearby = _enrich_nearby_images(nearby)
     return JSONResponse(
         {
             "jan": looked.get("jan") or "",
             "level": looked.get("level") or "none",
-            "candidates": looked.get("candidates") or [],
-            "nearby_routes": looked.get("nearby_routes") or [],
+            "candidates": candidates,
+            "nearby_routes": nearby,
             "message": looked.get("message") or "",
         }
     )

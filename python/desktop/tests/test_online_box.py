@@ -26,11 +26,13 @@ from services.online_box import (
     build_photo_candidate_rows,
     create_online_purchase_box,
     ensure_online_route_registration,
+    ensure_photo_candidates_from_csvs,
     extract_record_box_ymd,
     format_box_date,
     group_records_by_box_ymd,
     load_photo_candidates,
     records_from_listing_export,
+    records_from_purchase_csv,
     resolve_default_online_root,
     sanitize_folder_label,
     write_photo_candidates,
@@ -246,3 +248,107 @@ def test_ensure_preserves_product_files(tmp_path: Path):
     again = json.loads(path2.read_text(encoding="utf-8"))
     assert again["product_files"][0]["file"] == "a.jpg"
     assert again["box_kind"] == ONLINE_BOX_KIND
+
+
+def test_records_from_amasearch_purchase_csv_assigns_tmp_sku(tmp_path: Path):
+    path = tmp_path / "仕入れ済み商品一覧_20261114_standard.csv"
+    path.write_bytes(
+        (
+            "仕入れ日,コンディション,ASIN,JAN,商品名,仕入れ個数,仕入れ価格,SKU\r\n"
+            "2026/11/9 6:59,中古(非常に良い),B0B12JPQ6Y,4981747075680,コイズミ ドライヤー,1,2760,\r\n"
+            "2026/11/12 12:30,中古(良い),B00CTJLIYC,4902704218995,パナソニック 電話機,1,3999,\r\n"
+        ).encode("cp932")
+    )
+    rows = records_from_purchase_csv(path, fallback_ymd="20261114")
+    assert len(rows) == 2
+    assert rows[0]["SKU"].startswith("TMP-")
+    assert rows[0]["ASIN"] == "B0B12JPQ6Y"
+    assert "コイズミ" in rows[0]["商品名"]
+    assert rows[0]["コンディション"] == "中古(非常に良い)"
+    assert rows[1]["コンディション"] == "中古(良い)"
+
+
+def test_ensure_photo_candidates_from_shiire_csv(tmp_path: Path):
+    route_registry.DATA_DIR = tmp_path  # type: ignore
+    route_registry.INDEX_PATH = tmp_path / "index.json"  # type: ignore
+
+    box = tmp_path / "フリマ20261114"
+    box.mkdir()
+    (box / CSV_DIR_NAME).mkdir()
+    csv_path = box / CSV_DIR_NAME / "仕入れ済み商品一覧_20261114.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "仕入れ日,コンディション,ASIN,JAN,商品名,SKU",
+                "2026/11/14,中古(良い),B00TESTASIN,4901234567890,テスト商品,",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    ensure_online_route_registration(box, box_date="20261114", route_name=box.name)
+    result = ensure_photo_candidates_from_csvs(box, register_web=False)
+    assert result is not None
+    _path, rows = result
+    assert len(rows) == 1
+    assert rows[0]["asin"] == "B00TESTASIN"
+    assert rows[0]["sku"].startswith("TMP-")
+    assert (box / PHOTO_CANDIDATES_FILE).is_file()
+
+    # 候補の方が新しいときは上書きしない
+    older = box / CSV_DIR_NAME / "古い.csv"
+    older.write_text(
+        "仕入れ日,コンディション,ASIN,JAN,商品名,SKU\n2026/11/14,中古(可),B00OLDASIN,,古いだけ,\n",
+        encoding="utf-8",
+    )
+    import os
+    import time
+
+    cand = box / PHOTO_CANDIDATES_FILE
+    now = time.time()
+    os.utime(cand, (now + 10, now + 10))
+    os.utime(older, (now - 10, now - 10))
+    os.utime(csv_path, (now - 10, now - 10))
+    again = ensure_photo_candidates_from_csvs(box, register_web=False)
+    assert again is not None
+    assert again[1][0]["asin"] == "B00TESTASIN"
+
+
+def test_ensure_photo_candidates_merges_multiple_csvs(tmp_path: Path):
+    route_registry.DATA_DIR = tmp_path  # type: ignore
+    route_registry.INDEX_PATH = tmp_path / "index.json"  # type: ignore
+
+    box = tmp_path / "フリマ20261115"
+    box.mkdir()
+    (box / CSV_DIR_NAME).mkdir()
+    (box / CSV_DIR_NAME / "a.csv").write_text(
+        "仕入れ日,コンディション,ASIN,JAN,商品名,SKU\n"
+        "2026/11/15,中古(良い),B00AAAAAAA,4901111111111,商品A,\n",
+        encoding="utf-8",
+    )
+    (box / CSV_DIR_NAME / "b.csv").write_text(
+        "仕入れ日,コンディション,ASIN,JAN,商品名,SKU\n"
+        "2026/11/15,中古(可),B00BBBBBBB,4902222222222,商品B,\n",
+        encoding="utf-8",
+    )
+    # 同じASINは出品CSVの本SKUに寄せる
+    (box / "20261115_出品用CSV.csv").write_text(
+        "\n".join(
+            [
+                "SKU,ASIN,JAN,title,condition",
+                '20261115-MERCARI-1,="B00AAAAAAA",,商品A正式,3',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    ensure_online_route_registration(box, box_date="20261115", route_name=box.name)
+    result = ensure_photo_candidates_from_csvs(box, force=True, register_web=False)
+    assert result is not None
+    rows = result[1]
+    asins = {row["asin"] for row in rows}
+    assert asins == {"B00AAAAAAA", "B00BBBBBBB"}
+    by_asin = {row["asin"]: row for row in rows}
+    assert by_asin["B00AAAAAAA"]["sku"] == "20261115-MERCARI-1"
+    assert by_asin["B00BBBBBBB"]["sku"].startswith("TMP-")
+    assert len(rows) == 2

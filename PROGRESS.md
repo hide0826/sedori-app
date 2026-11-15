@@ -2,11 +2,15 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-11-13（ネット仕入・撮影候補を日付箱へ紐付け）
+更新日: 2026-11-15（仕入CSVから撮影候補を自動生成）
 
 ---
 
 ## いまの状態
+
+**2026-11-15（仕入CSV→撮影候補自動）:** `仕入CSV` のアマサーチ仕入れ済み／StockList、または箱直下の出品CSVを検知し、`photo_candidates.json` を自動生成。**複数CSVは合算**（同一ASIN等は本SKU優先で1件に）。HIRIOのDB保存前でもスマホ撮影可。SKU空は `TMP-YYYYMMDD-NNN` 仮付け。画像名は仮の `日付-コード-item-NN.jpg`。一覧／箱オープン時に同期。関連: `online_box.py` / `online_sync.py` / `route_purchases.py`。試験 `test_online_box.py` 14件 OK。**反映はルートWeb再起動**。  
+
+**2026-11-15（撮影リスト・Amazonメイン画像）:** `/api/route/.../purchases` と JAN読取候補に `image_url` を付与（`shared/asin_image_cache.py`・ディスクキャッシュ）。`route_photos.html` でタイトル横にサムネ表示。初回は ASIN 単位で SP-API `get_catalog_item(images)`、以降はキャッシュ。**反映はルートWeb再起動**＋スマホ再読み込み。unittest `shared/test_asin_image_cache.py` 3件 OK。  
 
 **2026-11-13（ネット仕入・撮影候補の Cond.）:** 長いコンディション説明（conditionNote）を出さず、短い Cond.（中古(良い) 等）だけ表示。11／13箱を再生成済み。関連: `online_box.py` / `route_purchases.py`。スマホは箱を開き直し。  
 
