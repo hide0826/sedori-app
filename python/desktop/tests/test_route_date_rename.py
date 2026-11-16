@@ -88,3 +88,41 @@ def test_change_route_date_renames_box_files_and_insurance(tmp_path: Path):
     indexed = load_index()["routes"][web_id]
     assert indexed["folder_path"] == str(new_box)
     assert indexed["route_date"] == "2026-10-17"
+
+
+def test_change_route_date_keeps_sku_indexed_product_filename(tmp_path: Path):
+    """本SKU付き商品画像は、ルート日付変更でSKU内の日付を壊さない。"""
+    registry.DATA_DIR = tmp_path / "webdata"
+    registry.INDEX_PATH = registry.DATA_DIR / "index.json"
+
+    box = tmp_path / "仕入帳" / "20261016テスト"
+    (box / "商品画像").mkdir(parents=True)
+    sku_file = "20261016-MERCARI-6P-001_1.jpg"
+    (box / "商品画像" / sku_file).write_bytes(b"p")
+    legacy = "2026-10-16-R046-item-01.jpg"
+    (box / "商品画像" / legacy).write_bytes(b"legacy")
+
+    web_id = "20261016_テスト"
+    register_route(web_id, str(box), route_name="テスト", route_date="2026-10-16")
+    doc = {
+        "web_id": web_id,
+        "folder_path": str(box),
+        "route_date": "2026-10-16",
+        "route_name": "テスト",
+        "product_files": [
+            {"file": sku_file, "sku": "20261016-MERCARI-6P-001"},
+            {"file": legacy, "jan": "4901234567890"},
+        ],
+        "photo_candidates": [
+            {"sku": "20261016-MERCARI-6P-001", "asin": "B00AAAAAAA"},
+        ],
+    }
+    updated = change_route_date(box, doc, "2026-10-16", "2026-10-17")
+    new_box = tmp_path / "仕入帳" / "20261017テスト"
+    assert (new_box / "商品画像" / sku_file).is_file()
+    assert not (new_box / "商品画像" / "20261017-MERCARI-6P-001_1.jpg").exists()
+    assert (new_box / "商品画像" / "2026-10-17-R046-item-01.jpg").is_file()
+    files = {item["file"]: item for item in updated["product_files"]}
+    assert files[sku_file]["sku"] == "20261016-MERCARI-6P-001"
+    assert "2026-10-17-R046-item-01.jpg" in files
+    assert updated["photo_candidates"][0]["sku"] == "20261016-MERCARI-6P-001"

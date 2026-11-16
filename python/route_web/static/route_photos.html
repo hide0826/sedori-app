@@ -585,7 +585,9 @@
       }
       const fd = new FormData();
       fd.append("file", file, file.name || "product.jpg");
-      if (skuKey(selected)) fd.append("sku", skuKey(selected));
+      // 仮SKUでも必ず送る（仕入CSVだけの撮影でも {SKU}_N.jpg にする）
+      const sku = skuKey(selected);
+      if (sku) fd.append("sku", sku);
       if (selected.jan) fd.append("jan", selected.jan);
       if (selected.asin) fd.append("asin", selected.asin);
       const res = await fetch(

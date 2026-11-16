@@ -284,6 +284,13 @@ def _copy_selected_images(
     snap_root = snapshots_dir()
     route_date, route_code = _route_meta(box)
     saved = 0
+    sku_for_file = str(sku or "").strip()
+    if not sku_for_file or sku_for_file == "未実装":
+        # CSVにSKUが無いときも仮SKUでファイル名に刻む（同一商品の複数枚は同じ仮SKU）
+        ymd = "".join(ch for ch in str(route_date or "") if ch.isdigit())[:8] or "00000000"
+        asin_tail = "".join(ch for ch in str(asin or "X").upper() if ch.isalnum())[-4:] or "X"
+        token_tail = "".join(ch for ch in str(token or "X").upper() if ch.isalnum())[-4:] or "X"
+        sku_for_file = f"TMP-{ymd}-{asin_tail}-{token_tail}"
 
     try:
         route_path = route_json_path(box)
@@ -319,13 +326,14 @@ def _copy_selected_images(
                 route_code,
                 raw_bytes,
                 original_name=src.name,
+                sku=sku_for_file,
             )
             doc = append_route_product_file(
                 doc,
                 filename,
                 jan=jan,
                 asin=asin,
-                sku=sku if sku and sku != "未実装" else "",
+                sku=sku_for_file,
             )
             saved += 1
         except Exception as exc:  # noqa: BLE001

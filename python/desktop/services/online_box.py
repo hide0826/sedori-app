@@ -869,6 +869,91 @@ def build_photo_candidate_rows(
     return rows
 
 
+def _candidate_match_keys(row: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """仮SKU→本SKU付け替えの突き合わせキー。"""
+    keys: List[Tuple[str, str]] = []
+    asin = normalize_listing_asin(_cell(row, "ASIN", "asin"))
+    if asin:
+        keys.append(("asin", asin))
+    jan = "".join(ch for ch in _cell(row, "JAN", "jan") if ch.isdigit())
+    if jan:
+        keys.append(("jan", jan))
+    sku = _cell(row, "SKU", "sku")
+    if sku:
+        keys.append(("sku", sku.upper()))
+    return keys
+
+
+def _sku_upgrades_from_rows(
+    old_rows: Iterable[Dict[str, Any]],
+    new_rows: Iterable[Dict[str, Any]],
+) -> List[Tuple[str, str]]:
+    """
+    旧候補／画像メタの仮SKUが、新候補の本SKUに置き換わる組を返す。
+    本SKU→仮SKU や 本SKU同士の無関係な変更は含めない。
+    """
+    old_by_key: Dict[Tuple[str, str], str] = {}
+    for row in old_rows:
+        if not isinstance(row, dict):
+            continue
+        sku = _cell(row, "SKU", "sku")
+        if not sku:
+            continue
+        for key in _candidate_match_keys(row):
+            # 同じキーに本SKUと仮SKUが両方来る場合は本SKUを優先保持
+            prev = old_by_key.get(key)
+            if prev and not _is_tmp_sku(prev) and _is_tmp_sku(sku):
+                continue
+            old_by_key[key] = sku
+
+    upgrades: List[Tuple[str, str]] = []
+    seen: set[Tuple[str, str]] = set()
+    for row in new_rows:
+        if not isinstance(row, dict):
+            continue
+        new_sku = _cell(row, "SKU", "sku")
+        if not new_sku or _is_tmp_sku(new_sku):
+            continue
+        old_sku = ""
+        for key in _candidate_match_keys(row):
+            candidate = old_by_key.get(key) or ""
+            if candidate and _is_tmp_sku(candidate):
+                old_sku = candidate
+                break
+        if not old_sku or old_sku.upper() == new_sku.upper():
+            continue
+        pair = (old_sku, new_sku)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        upgrades.append(pair)
+    return upgrades
+
+
+def _product_file_sku_rows(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """route.json の product_files から sku/jan/asin 行を拾う。"""
+    rows: List[Dict[str, Any]] = []
+    lists: List[Any] = [doc.get("product_files") or []]
+    for store in doc.get("stores") or []:
+        if isinstance(store, dict):
+            lists.append(store.get("product_files") or [])
+    for files in lists:
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            sku = _cell(item, "sku", "SKU")
+            if not sku:
+                continue
+            rows.append(
+                {
+                    "sku": sku,
+                    "jan": _cell(item, "jan", "JAN"),
+                    "asin": _cell(item, "asin", "ASIN"),
+                }
+            )
+    return rows
+
+
 def write_photo_candidates(
     box_dir: Union[str, Path],
     records: Iterable[Dict[str, Any]],
@@ -895,6 +980,32 @@ def write_photo_candidates(
         row["store_code"] = code if code != ONLINE_ROUTE_CODE else ONLINE_ROUTE_CODE
         if code != ONLINE_ROUTE_CODE:
             row["store_name"] = name
+
+    old_rows = load_photo_candidates(folder)
+    route_path = folder / "route.json"
+    doc: Dict[str, Any] = {}
+    if route_path.is_file():
+        try:
+            loaded = json.loads(route_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                doc = loaded
+        except (OSError, json.JSONDecodeError):
+            doc = {}
+    old_rows = list(old_rows) + _product_file_sku_rows(doc)
+    upgrades = _sku_upgrades_from_rows(old_rows, rows)
+    if upgrades:
+        try:
+            from route_web.product_images import apply_sku_upgrades_to_box
+        except ImportError:
+            try:
+                from desktop.route_web.product_images import (  # type: ignore
+                    apply_sku_upgrades_to_box,
+                )
+            except ImportError:
+                apply_sku_upgrades_to_box = None  # type: ignore
+        if apply_sku_upgrades_to_box is not None:
+            doc, _renamed = apply_sku_upgrades_to_box(folder, doc, upgrades)
+
     payload = {
         "box_kind": kind,
         "route_date": iso,
@@ -907,22 +1018,49 @@ def write_photo_candidates(
         encoding="utf-8",
     )
 
-    route_path = folder / "route.json"
-    if route_path.is_file():
-        try:
-            doc = json.loads(route_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+    if route_path.is_file() or doc:
+        if not isinstance(doc, dict):
             doc = {}
-        if isinstance(doc, dict):
-            doc["photo_candidates"] = rows
-            # 店舗ルートを online に潰さない（未設定のときだけ補う）
-            if not str(doc.get("box_kind") or "").strip():
-                doc["box_kind"] = kind
+        doc["photo_candidates"] = rows
+        # 店舗ルートを online に潰さない（未設定のときだけ補う）
+        if not str(doc.get("box_kind") or "").strip():
+            doc["box_kind"] = kind
+        try:
+            route_path.parent.mkdir(parents=True, exist_ok=True)
             route_path.write_text(
                 json.dumps(doc, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
+        except OSError:
+            pass
     return candidates_path, rows
+
+
+def _ensure_candidate_sku(
+    row: Dict[str, Any],
+    *,
+    route_date: str = "",
+    index: int = 1,
+) -> Dict[str, Any]:
+    """候補にSKUが無いときは仮SKUを補う（仕入CSVだけの撮影用）。"""
+    out = dict(row)
+    sku = _cell(out, "SKU", "sku")
+    if sku and sku != "未実装":
+        out["sku"] = sku
+        return out
+    ymd = "".join(ch for ch in str(route_date or "") if ch.isdigit())[:8]
+    if len(ymd) != 8:
+        ymd = format_box_date() or date.today().strftime("%Y%m%d")
+    asin = normalize_listing_asin(_cell(out, "ASIN", "asin"))
+    jan = "".join(ch for ch in _cell(out, "JAN", "jan") if ch.isdigit())
+    if asin:
+        tail = asin[-6:]
+    elif jan:
+        tail = jan[-6:]
+    else:
+        tail = f"{index:03d}"
+    out["sku"] = f"TMP-{ymd}-{tail}"
+    return out
 
 
 def load_photo_candidates(
@@ -930,33 +1068,44 @@ def load_photo_candidates(
     doc: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """route.json または photo_candidates.json から候補を読む。"""
+    route_date = ""
+    raw_rows: List[Dict[str, Any]] = []
     if isinstance(doc, dict):
+        route_date = str(doc.get("route_date") or "")
         embedded = doc.get("photo_candidates")
         if isinstance(embedded, list) and embedded:
-            return [row for row in embedded if isinstance(row, dict)]
+            raw_rows = [row for row in embedded if isinstance(row, dict)]
 
     folder: Optional[Path] = None
-    if box_dir is not None:
-        folder = Path(box_dir)
-    elif isinstance(doc, dict) and doc.get("folder_path"):
-        folder = Path(str(doc.get("folder_path")))
-    if folder is None or not folder.is_dir():
-        return []
+    if not raw_rows:
+        if box_dir is not None:
+            folder = Path(box_dir)
+        elif isinstance(doc, dict) and doc.get("folder_path"):
+            folder = Path(str(doc.get("folder_path")))
+        if folder is None or not folder.is_dir():
+            return []
 
-    path = folder / PHOTO_CANDIDATES_FILE
-    if not path.is_file():
-        return []
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    if isinstance(raw, list):
-        return [row for row in raw if isinstance(row, dict)]
-    if isinstance(raw, dict):
-        rows = raw.get("candidates")
-        if isinstance(rows, list):
-            return [row for row in rows if isinstance(row, dict)]
-    return []
+        path = folder / PHOTO_CANDIDATES_FILE
+        if not path.is_file():
+            return []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        if isinstance(raw, list):
+            raw_rows = [row for row in raw if isinstance(row, dict)]
+        elif isinstance(raw, dict):
+            if not route_date:
+                route_date = str(raw.get("route_date") or "")
+            rows = raw.get("candidates")
+            if isinstance(rows, list):
+                raw_rows = [row for row in rows if isinstance(row, dict)]
+    if not route_date and folder is not None:
+        route_date = box_date_iso(extract_box_ymd_from_name(folder.name) or "") or ""
+    return [
+        _ensure_candidate_sku(row, route_date=route_date, index=i)
+        for i, row in enumerate(raw_rows, start=1)
+    ]
 
 
 def is_online_box_doc(doc: Optional[Dict[str, Any]]) -> bool:

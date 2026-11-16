@@ -352,3 +352,50 @@ def test_ensure_photo_candidates_merges_multiple_csvs(tmp_path: Path):
     assert by_asin["B00AAAAAAA"]["sku"] == "20261115-MERCARI-1"
     assert by_asin["B00BBBBBBB"]["sku"].startswith("TMP-")
     assert len(rows) == 2
+
+
+def test_write_photo_candidates_remaps_tmp_sku_files(tmp_path: Path):
+    """仮SKUで撮った画像が、本SKU候補書き込み時にファイル名ごと付け替わる。"""
+    route_registry.DATA_DIR = tmp_path  # type: ignore
+    route_registry.INDEX_PATH = tmp_path / "index.json"  # type: ignore
+
+    box = tmp_path / "フリマ20261116"
+    box.mkdir()
+    ensure_online_route_registration(box, box_date="20261116", route_name=box.name)
+    raw = b"\xff\xd8\xff\xd9"
+    tmp_sku = "TMP-20261116-001"
+    fn = save_product_upload(
+        box, "2026-11-16", ONLINE_ROUTE_CODE, raw, sku=tmp_sku
+    )
+    route_path = box / "route.json"
+    doc = json.loads(route_path.read_text(encoding="utf-8"))
+    doc["product_files"] = [{"file": fn, "sku": tmp_sku, "asin": "B00CCCCCCC"}]
+    doc["photo_candidates"] = [
+        {"sku": tmp_sku, "asin": "B00CCCCCCC", "jan": "", "product_name": "仮"}
+    ]
+    route_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    (box / PHOTO_CANDIDATES_FILE).write_text(
+        json.dumps({"candidates": doc["photo_candidates"]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    real = "20261116-MERCARI-6P-009"
+    write_photo_candidates(
+        box,
+        [
+            {
+                "SKU": real,
+                "ASIN": "B00CCCCCCC",
+                "JAN": "",
+                "商品名": "本SKU商品",
+            }
+        ],
+        route_date="2026-11-16",
+        route_name=box.name,
+    )
+    assert (box / PRODUCT_DIR_NAME / f"{real}_1.jpg").is_file()
+    assert not (box / PRODUCT_DIR_NAME / fn).exists()
+    updated = json.loads(route_path.read_text(encoding="utf-8"))
+    assert updated["product_files"][0]["file"] == f"{real}_1.jpg"
+    assert updated["product_files"][0]["sku"] == real
+    assert updated["photo_candidates"][0]["sku"] == real

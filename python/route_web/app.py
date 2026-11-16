@@ -28,6 +28,7 @@ from route_web.csv_inbox import (
 )
 from route_web.product_images import (
     product_dir,
+    resolve_sku_for_product_upload,
     save_product_upload,
     append_product_file,
     append_route_product_file,
@@ -451,13 +452,22 @@ async def upload_product(
     raw = await file.read()
     if not raw:
         raise HTTPException(status_code=400, detail="empty file")
+    route_date = str(doc.get("route_date") or "")
+    sku_resolved = resolve_sku_for_product_upload(
+        doc,
+        sku=sku or "",
+        jan=jan or "",
+        asin=asin or "",
+        route_date=route_date,
+    )
     try:
         filename = save_product_upload(
             folder,
-            str(doc.get("route_date") or ""),
+            route_date,
             store_code,
             raw,
             original_name=file.filename or "",
+            sku=sku_resolved,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"save failed: {exc}") from exc
@@ -469,7 +479,7 @@ async def upload_product(
             filename,
             jan=jan or "",
             asin=asin or "",
-            sku=sku or "",
+            sku=sku_resolved,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -481,7 +491,7 @@ async def upload_product(
             "ok": True,
             "filename": filename,
             "store_code": store_code,
-            "sku": (sku or "").strip(),
+            "sku": sku_resolved,
             "jan": (jan or "").strip(),
             "asin": (asin or "").strip(),
             "product_files": (st or {}).get("product_files") or [],
@@ -526,13 +536,22 @@ async def upload_route_product(
     if not raw:
         raise HTTPException(status_code=400, detail="empty file")
     code = route_file_code(doc)
+    route_date = str(doc.get("route_date") or "")
+    sku_resolved = resolve_sku_for_product_upload(
+        doc,
+        sku=sku or "",
+        jan=jan or "",
+        asin=asin or "",
+        route_date=route_date,
+    )
     try:
         filename = save_product_upload(
             folder,
-            str(doc.get("route_date") or ""),
+            route_date,
             code,
             raw,
             original_name=file.filename or "",
+            sku=sku_resolved,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"save failed: {exc}") from exc
@@ -541,7 +560,7 @@ async def upload_route_product(
         filename,
         jan=jan or "",
         asin=asin or "",
-        sku=sku or "",
+        sku=sku_resolved,
     )
     doc = stamp_updated(doc)
     save_route_json(web_id, doc)
@@ -550,7 +569,7 @@ async def upload_route_product(
         {
             "ok": True,
             "filename": filename,
-            "sku": (sku or "").strip(),
+            "sku": sku_resolved,
             "jan": (jan or "").strip(),
             "asin": (asin or "").strip(),
             "image_db": seeded,

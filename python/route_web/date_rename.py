@@ -57,13 +57,30 @@ def renamed_directory_name(name: str, old_iso: str, new_iso: str) -> str:
     return replace_route_date_text(name, old_iso, new_iso)
 
 
-def _rewrite_tree(value: Any, old_iso: str, new_iso: str) -> Any:
+def _rewrite_tree(value: Any, old_iso: str, new_iso: str, *, parent_key: str = "") -> Any:
+    """JSON内の日付文字列を付け替える。sku / SKU付きファイル名は触らない。"""
     if isinstance(value, str):
+        key = (parent_key or "").lower()
+        if key == "sku":
+            return value
+        if key == "file":
+            try:
+                from route_web.product_images import is_sku_indexed_product_filename
+
+                if is_sku_indexed_product_filename(value):
+                    return value
+            except ImportError:
+                pass
         return replace_route_date_text(value, old_iso, new_iso)
     if isinstance(value, list):
-        return [_rewrite_tree(item, old_iso, new_iso) for item in value]
+        return [
+            _rewrite_tree(item, old_iso, new_iso, parent_key=parent_key) for item in value
+        ]
     if isinstance(value, dict):
-        return {key: _rewrite_tree(item, old_iso, new_iso) for key, item in value.items()}
+        return {
+            key: _rewrite_tree(item, old_iso, new_iso, parent_key=str(key))
+            for key, item in value.items()
+        }
     return value
 
 
@@ -71,8 +88,17 @@ def _planned_file_renames(root: Path, old_iso: str, new_iso: str) -> list[tuple[
     planned: list[tuple[Path, Path]] = []
     if not root.is_dir():
         return planned
+    try:
+        from route_web.product_images import is_sku_indexed_product_filename
+    except ImportError:
+        is_sku_indexed_product_filename = None  # type: ignore
     for path in root.rglob("*"):
         if not path.is_file():
+            continue
+        # 本SKU／仮SKU付き商品画像は日付変更でSKU文字列を壊さない
+        if is_sku_indexed_product_filename is not None and is_sku_indexed_product_filename(
+            path.name
+        ):
             continue
         new_name = replace_route_date_text(path.name, old_iso, new_iso)
         if new_name == path.name:
@@ -101,6 +127,23 @@ def _rewrite_sidecar_json(root: Path, old_iso: str, new_iso: str) -> None:
         return
     for path in root.rglob("*.json"):
         if path.name == "route.json":
+            continue
+        # photo_candidates は sku を含むので、全文置換ではなく木構造で更新する
+        if path.name == "photo_candidates.json":
+            import json
+
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            updated = _rewrite_tree(data, old_iso, new_iso)
+            try:
+                path.write_text(
+                    json.dumps(updated, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
             continue
         try:
             raw = path.read_text(encoding="utf-8")

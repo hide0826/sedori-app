@@ -51,8 +51,57 @@ def _safe_sku(sku: str) -> str:
     return text[:96]
 
 
+def is_tmp_sku(sku: str) -> bool:
+    """仮SKU（TMP-…）かどうか。"""
+    return _safe_sku(sku).upper().startswith("TMP-")
+
+
+_SKU_INDEXED_NAME_RE = re.compile(
+    r"^(.+)_(\d+)(\.[^.]+)$",
+    re.IGNORECASE,
+)
+
+
+def is_sku_indexed_product_filename(filename: str) -> bool:
+    """
+    {SKU}_数字.拡張子 形式か。
+    ルート日付変更時に本SKUの日付部分を誤って書き換えないための判定に使う。
+    旧形式 YYYY-MM-DD-CODE-item-NN は対象外。
+    """
+    name = Path(str(filename or "")).name
+    match = _SKU_INDEXED_NAME_RE.match(name)
+    if not match:
+        return False
+    prefix = match.group(1)
+    # 旧 item 連番（…-item-01）を SKU 扱いしない
+    if re.search(r"-item$", prefix, re.IGNORECASE):
+        return False
+    sku = _safe_sku(prefix)
+    return bool(sku) and ("-" in sku or sku.upper().startswith("TMP-"))
+
+
+def next_sku_product_filename(folder: Path, sku: str) -> str:
+    """{SKU}_1.jpg, {SKU}_2.jpg … の次の連番。"""
+    sku_s = _safe_sku(sku)
+    if not sku_s:
+        raise ValueError("sku required")
+    dest = product_dir(folder)
+    pattern = re.compile(
+        rf"^{re.escape(sku_s)}_(\d+)\.",
+        re.IGNORECASE,
+    )
+    max_n = 0
+    for p in dest.iterdir():
+        if not p.is_file():
+            continue
+        m = pattern.match(p.name)
+        if m:
+            max_n = max(max_n, int(m.group(1)))
+    return f"{sku_s}_{max_n + 1}.jpg"
+
+
 def next_product_filename(folder: Path, route_date: str, store_code: str) -> str:
-    """YYYY-MM-DD-STORE-item-NN.jpg の次の連番。"""
+    """YYYY-MM-DD-STORE-item-NN.jpg の次の連番（SKU未指定時の互換用）。"""
     date = (route_date or "").strip() or "0000-00-00"
     code = _safe_store_code(store_code)
     dest = product_dir(folder)
@@ -101,16 +150,124 @@ def _to_jpeg_bytes(raw: bytes, max_side: int = 1920) -> bytes:
         return raw
 
 
+def _mint_tmp_sku(route_date: str, jan: str = "", asin: str = "", hint: str = "") -> str:
+    """仕入処理前でもファイル名に刻む仮SKUを作る。"""
+    ymd = "".join(ch for ch in str(route_date or "") if ch.isdigit())[:8]
+    if len(ymd) != 8:
+        from datetime import date as _date
+
+        ymd = _date.today().strftime("%Y%m%d")
+    jan_s = _safe_jan(jan)
+    asin_s = _safe_asin(asin)
+    hint_s = re.sub(r"[^A-Za-z0-9]", "", str(hint or "").upper())[:8]
+    if jan_s:
+        tail = jan_s[-6:]
+    elif asin_s:
+        tail = asin_s[-6:]
+    elif hint_s:
+        tail = hint_s
+    else:
+        tail = "X"
+    return f"TMP-{ymd}-{tail}"
+
+
+def _sku_from_product_entries(
+    entries: List[Any],
+    *,
+    jan: str = "",
+    asin: str = "",
+) -> str:
+    jan_s = _safe_jan(jan)
+    asin_s = _safe_asin(asin)
+    if not jan_s and not asin_s:
+        return ""
+    for item in entries or []:
+        if not isinstance(item, dict):
+            continue
+        item_sku = _safe_sku(str(item.get("sku") or ""))
+        if not item_sku:
+            continue
+        item_jan = _safe_jan(str(item.get("jan") or ""))
+        item_asin = _safe_asin(str(item.get("asin") or ""))
+        if jan_s and item_jan and item_jan == jan_s:
+            return item_sku
+        if asin_s and item_asin and item_asin == asin_s:
+            return item_sku
+    return ""
+
+
+def resolve_sku_for_product_upload(
+    doc: Optional[Dict[str, Any]],
+    *,
+    sku: str = "",
+    jan: str = "",
+    asin: str = "",
+    route_date: str = "",
+) -> str:
+    """
+    商品画像保存用のSKUを決める。
+
+    仕入CSVの撮影候補だけで撮る（仕入管理未処理）ときも、仮SKUを必ず返す。
+    優先: 送信SKU → 撮影候補 → 既存 product_files → 新規仮SKU。
+    """
+    sku_s = _safe_sku(sku)
+    if sku_s:
+        return sku_s
+
+    jan_s = _safe_jan(jan)
+    asin_s = _safe_asin(asin)
+    doc = doc if isinstance(doc, dict) else {}
+
+    candidates = list(doc.get("photo_candidates") or [])
+    found = _sku_from_product_entries(candidates, jan=jan_s, asin=asin_s)
+    if found:
+        return found
+
+    found = _sku_from_product_entries(
+        list(doc.get("product_files") or []), jan=jan_s, asin=asin_s
+    )
+    if found:
+        return found
+    for store in doc.get("stores") or []:
+        if not isinstance(store, dict):
+            continue
+        found = _sku_from_product_entries(
+            list(store.get("product_files") or []), jan=jan_s, asin=asin_s
+        )
+        if found:
+            return found
+
+    # 仕入CSVリスト由来（JAN/ASIN付き）は仕入管理前でも必ず仮SKUを付ける
+    if jan_s or asin_s:
+        return _mint_tmp_sku(
+            route_date or str(doc.get("route_date") or ""),
+            jan=jan_s,
+            asin=asin_s,
+        )
+    return ""
+
+
 def save_product_upload(
     folder: Path,
     route_date: str,
     store_code: str,
     raw: bytes,
     original_name: str = "",
+    sku: str = "",
 ) -> str:
+    """
+    商品画像を保存する。
+    sku（仮SKU含む）があれば {SKU}_N.jpg。
+    CSV撮影候補からの保存では resolve_sku_for_product_upload で仮SKUを先に決めること。
+    """
     if not raw:
         raise ValueError("empty upload")
-    filename = next_product_filename(folder, route_date, store_code)
+    sku_s = _safe_sku(sku)
+    if sku_s:
+        filename = next_sku_product_filename(folder, sku_s)
+    else:
+        # 識別子が一切無いレガシー経路のみ。CSVリスト撮影では使わない。
+        filename = next_product_filename(folder, route_date, store_code)
     suffix = Path(original_name or "").suffix.lower()
     data = raw
     if suffix in IMAGE_SUFFIXES or not suffix:
@@ -120,6 +277,141 @@ def save_product_upload(
     dest = product_dir(folder) / filename
     dest.write_bytes(data)
     return filename
+
+
+def _rewrite_product_file_entries(
+    files: List[Any],
+    *,
+    name_map: Dict[str, str],
+    old_sku: str,
+    new_sku: str,
+) -> List[Any]:
+    """product_files 配列の file / sku を付け替える。"""
+    out: List[Any] = []
+    for item in files or []:
+        if isinstance(item, dict):
+            updated = dict(item)
+            fname = str(updated.get("file") or "")
+            if fname in name_map:
+                updated["file"] = name_map[fname]
+            item_sku = _safe_sku(str(updated.get("sku") or ""))
+            if item_sku and item_sku.upper() == old_sku.upper():
+                updated["sku"] = new_sku
+            out.append(updated)
+        elif isinstance(item, str) and item in name_map:
+            out.append(name_map[item])
+        else:
+            out.append(item)
+    return out
+
+
+def remap_product_files_sku(
+    folder: Path,
+    doc: Dict[str, Any],
+    old_sku: str,
+    new_sku: str,
+) -> tuple[Dict[str, Any], int]:
+    """
+    仮SKU→本SKU（またはSKU変更）に合わせて商品画像ファイル名と route.json を更新する。
+
+    - 対象ファイル: {old_sku}_N.ext
+    - 本SKUファイルを誤って TMP に戻さない（new が TMP で old が本SKUなら何もしない）
+    - 行き先が既存ならその1枚はスキップ（壊さない）
+    """
+    old_s = _safe_sku(old_sku)
+    new_s = _safe_sku(new_sku)
+    if not old_s or not new_s or old_s.upper() == new_s.upper():
+        return doc, 0
+    # 本SKU → 仮SKU への逆変換は拒否
+    if (not is_tmp_sku(old_s)) and is_tmp_sku(new_s):
+        return doc, 0
+
+    dest = product_dir(folder)
+    pattern = re.compile(
+        rf"^{re.escape(old_s)}_(\d+)(\.[^.]+)$",
+        re.IGNORECASE,
+    )
+    name_map: Dict[str, str] = {}
+    renamed = 0
+    if dest.is_dir():
+        for path in list(dest.iterdir()):
+            if not path.is_file():
+                continue
+            match = pattern.match(path.name)
+            if not match:
+                continue
+            new_name = f"{new_s}_{match.group(1)}{match.group(2)}"
+            target = dest / new_name
+            if target.exists() and target.resolve() != path.resolve():
+                continue
+            if path.name == new_name:
+                name_map[path.name] = new_name
+                continue
+            path.rename(target)
+            name_map[path.name] = new_name
+            renamed += 1
+
+    out = dict(doc or {})
+    if "product_files" in out or name_map:
+        out["product_files"] = _rewrite_product_file_entries(
+            list(out.get("product_files") or []),
+            name_map=name_map,
+            old_sku=old_s,
+            new_sku=new_s,
+        )
+    stores: List[Dict[str, Any]] = []
+    for store in out.get("stores") or []:
+        if not isinstance(store, dict):
+            stores.append(store)
+            continue
+        copied = dict(store)
+        if copied.get("product_files") is not None or name_map:
+            copied["product_files"] = _rewrite_product_file_entries(
+                list(copied.get("product_files") or []),
+                name_map=name_map,
+                old_sku=old_s,
+                new_sku=new_s,
+            )
+        stores.append(copied)
+    if stores or out.get("stores") is not None:
+        out["stores"] = stores
+
+    candidates = list(out.get("photo_candidates") or [])
+    if candidates:
+        updated_rows: List[Any] = []
+        for row in candidates:
+            if isinstance(row, dict):
+                copied = dict(row)
+                if _safe_sku(str(copied.get("sku") or "")).upper() == old_s.upper():
+                    copied["sku"] = new_s
+                updated_rows.append(copied)
+            else:
+                updated_rows.append(row)
+        out["photo_candidates"] = updated_rows
+
+    # メタデータだけ（ファイル無し）でも sku フィールドは更新したい
+    if renamed == 0 and name_map:
+        renamed = len(name_map)
+    return out, renamed
+
+
+def apply_sku_upgrades_to_box(
+    folder: Path,
+    doc: Dict[str, Any],
+    upgrades: List[tuple[str, str]],
+) -> tuple[Dict[str, Any], int]:
+    """複数の old→new SKU 付け替えを順に適用する。"""
+    out = dict(doc or {})
+    total = 0
+    seen: set[tuple[str, str]] = set()
+    for old_sku, new_sku in upgrades:
+        key = (_safe_sku(old_sku).upper(), _safe_sku(new_sku).upper())
+        if not key[0] or not key[1] or key[0] == key[1] or key in seen:
+            continue
+        seen.add(key)
+        out, n = remap_product_files_sku(folder, out, old_sku, new_sku)
+        total += n
+    return out, total
 
 
 def append_product_file(
