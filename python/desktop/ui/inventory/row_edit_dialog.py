@@ -92,6 +92,7 @@ from services.purchase_cost_calc import (
 )
 
 from .support import (
+    CONDITION_OPTIONS,
     SALES_CHANNEL_OPTIONS,
     SHIPPING_METHOD_OPTIONS,
     _ConditionNoteAiGenerateThread,
@@ -307,6 +308,14 @@ class InventoryRowEditDialog(QDialog):
                 w.setMinimumHeight(60)
                 self._widgets[col] = w
                 form.addRow(QLabel(col + ":"), w)
+            elif col == "コンディション":
+                # 間違えたときの修正用。選択肢から選ぶ（手入力も可）
+                w = QComboBox()
+                w.setEditable(True)
+                w.addItems(CONDITION_OPTIONS)
+                w.setToolTip("間違えたときに変更できます。一覧から選ぶか、手入力もできます。")
+                self._widgets[col] = w
+                form.addRow(QLabel(col + ":"), w)
             elif col == "発送方法":
                 w = QComboBox()
                 w.addItems(SHIPPING_METHOD_OPTIONS)
@@ -373,13 +382,16 @@ class InventoryRowEditDialog(QDialog):
             elif isinstance(w, QComboBox):
                 if col == "発送方法" and not val:
                     val = "FBA"
-                if not val:
+                elif col == "販売チャネル" and not val:
                     val = "Amazon"
-                idx = w.findText(val)
-                if idx < 0:
-                    w.addItem(val)
+                if val:
                     idx = w.findText(val)
-                w.setCurrentIndex(max(0, idx))
+                    if idx < 0:
+                        w.addItem(val)
+                        idx = w.findText(val)
+                    w.setCurrentIndex(max(0, idx))
+                elif w.count() > 0:
+                    w.setCurrentIndex(0)
             elif isinstance(w, QCheckBox):
                 w.setChecked(_is_repricing_enabled_value(val))
             else:
@@ -441,12 +453,11 @@ class InventoryRowEditDialog(QDialog):
             return
 
         # どちらも無し → コンディションテンプレート
-        cond_w = self._widgets.get("コンディション")
-        if not cond_w or not note_w:
+        condition_text = self._condition_text()
+        if not note_w:
             return
-        condition_text = cond_w.text().strip() if isinstance(cond_w, QLineEdit) else cond_w.toPlainText().strip()
         if not condition_text:
-            QMessageBox.information(self, "呼び出し", "先に「コンディション」を入力してください。")
+            QMessageBox.information(self, "呼び出し", "先に「コンディション」を選択してください。")
             return
         condition_key = self.get_condition_key(condition_text)
         text = self.condition_template_db.get_condition_description_text(condition_key)
@@ -493,13 +504,14 @@ class InventoryRowEditDialog(QDialog):
                 })
         return items
 
+    def _condition_text(self) -> str:
+        """フォーム上のコンディション文言（コンボ／テキスト両対応）。"""
+        return self._widget_text("コンディション")
+
     def _start_ai_condition_note_generation(self, other_details: str) -> None:
-        cond_w = self._widgets.get("コンディション")
-        if not cond_w:
-            return
-        condition_text = cond_w.text().strip() if isinstance(cond_w, QLineEdit) else cond_w.toPlainText().strip()
+        condition_text = self._condition_text()
         if not condition_text:
-            QMessageBox.information(self, "呼び出し", "先に「コンディション」を入力してください。")
+            QMessageBox.information(self, "呼び出し", "先に「コンディション」を選択してください。")
             return
 
         if self._ai_generate_thread is not None and self._ai_generate_thread.isRunning():
@@ -617,6 +629,12 @@ class InventoryRowEditDialog(QDialog):
             w.setText(value)
         elif isinstance(w, QPlainTextEdit):
             w.setPlainText(value)
+        elif isinstance(w, QComboBox):
+            idx = w.findText(value)
+            if idx < 0:
+                w.addItem(value)
+                idx = w.findText(value)
+            w.setCurrentIndex(max(0, idx))
 
     def _attach_evidence_panel(self) -> None:
         """スクショ貼付パネルをスクロール先頭に出す（判定漏れで消えないように常時表示）。"""

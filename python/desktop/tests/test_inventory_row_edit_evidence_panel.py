@@ -7,9 +7,10 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QGroupBox, QLineEdit, QPushButton
+from PySide6.QtWidgets import QApplication, QComboBox, QGroupBox, QLineEdit, QPushButton
 
 from desktop.ui.inventory.row_edit_dialog import InventoryRowEditDialog
+from desktop.ui.inventory.support import CONDITION_OPTIONS
 
 
 class _DummyTemplateDb:
@@ -100,3 +101,44 @@ def test_store_inventory_headers_keep_platform_column():
     assert "仕入チャネル" not in headers
     assert "プラットフォーム" in headers
     assert headers.index("コメント") + 1 == headers.index("発送方法")
+
+
+def test_row_edit_condition_is_editable_combo_and_saves_change():
+    """行の編集でコンディションを選択肢から変更できること（間違い修正用）。"""
+    _app()
+    headers = [
+        "仕入れ日",
+        "コンディション",
+        "SKU",
+        "ASIN",
+        "発送方法",
+        "販売チャネル",
+    ]
+    dlg = InventoryRowEditDialog(
+        headers,
+        {
+            "仕入れ日": "2026/11/20 12:00",
+            "コンディション": "新品(新品)",
+            "SKU": "TEST-SKU",
+            "ASIN": "B00TEST",
+            "発送方法": "FBA",
+            "販売チャネル": "Amazon",
+        },
+        _DummyTemplateDb(),
+        lambda text: "new",
+    )
+    cond = dlg._widgets.get("コンディション")
+    assert isinstance(cond, QComboBox)
+    assert cond.isEditable()
+    for option in ("新品(新品)", "中古(良い)", "中古(可)"):
+        assert option in CONDITION_OPTIONS
+        assert cond.findText(option) >= 0
+    assert cond.currentText() == "新品(新品)"
+
+    cond.setCurrentText("中古(良い)")
+    result = dlg.get_result()
+    assert result["コンディション"] == "中古(良い)"
+    assert result["SKU"] == "TEST-SKU"
+    assert result["発送方法"] == "FBA"
+    assert result["販売チャネル"] == "Amazon"
+    dlg.close()

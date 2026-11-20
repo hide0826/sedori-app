@@ -2,11 +2,13 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-11-16（商品画像ファイル名に仮SKU／本SKU）
+更新日: 2026-11-20（行の編集でコンディション変更可）
 
 ---
 
 ## いまの状態
+
+**2026-11-20（行の編集・コンディション変更）:** 仕入データ／ネット仕入の「行の編集」でコンディションを **プルダウン選択**（手入力も可）に変更。間違い修正用。選択肢は `CONDITION_OPTIONS`（新品／新品(新品)／中古各ランク／コレクター／再生品）。説明呼び出し用の `_get_condition_key` も `新品(新品)` 等を認識。関連: `row_edit_dialog.py` / `support.py` / `listing_mixin.py`。試験 `test_inventory_row_edit_evidence_panel.py`（コンディション変更含む）OK。**反映は HIRIO 再起動**。  
 
 **2026-11-16（商品画像を SKU 付きファイル名に）:** 仕入CSVの撮影候補だけで撮る（仕入管理未処理）ときも `{仮SKU}_1.jpg` にする。保存APIはSKU未送信でも候補／JAN／ASINから仮SKUを解決。候補読込時もSKU空ならTMPを補う。本SKU確定時はファイル名を付け替え（本SKU→TMPは拒否）。ルート日付変更でSKU名を壊さない。関連: `route_web/product_images.py` / `app.py` / `date_rename.py` / `services/online_box.py` / `hit_amasearch_match.py`。試験 `test_product_images_sku.py` 等 OK。**反映はルートWeb再起動**＋HIRIO再起動。  
 
@@ -1478,6 +1480,7 @@ ok phase1-api-verify（GET/PUT departure_time・HTMLに今の時刻）
 
 ## 次
 
+0. **行の編集・コンディション** … HIRIO再起動後、仕入データ／ネット仕入で行を開き、コンディションを選び直してOK→一覧反映を実機確認
 1. HIRIO とルートWebを再起動し、巡回画面に商品撮影が無いこと、事前処理、撮影画面を実機で見る
 2. 次の仕入で、CSV送信 → 事前処理 → 帰宅後の箱取込 → 照合 → プライスター → 商品撮影
 3. 不具合は都度 `feature/sp-api` で修正

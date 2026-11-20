@@ -146,6 +146,20 @@ def _is_repricing_enabled_value(value: Any) -> bool:
 
 SALES_CHANNEL_OPTIONS = ["Amazon", "メルカリ", "ヤフオク", "ラクマ", "その他"]
 SHIPPING_METHOD_OPTIONS = ["FBA", "自己発送"]
+# 行の編集・単品仕入で使う Amazon コンディション表示名（間違い修正用の選択肢）
+CONDITION_OPTIONS = [
+    "新品",
+    "新品(新品)",
+    "中古(ほぼ新品)",
+    "中古(非常に良い)",
+    "中古(良い)",
+    "中古(可)",
+    "コレクター商品(ほぼ新品)",
+    "コレクター商品(非常に良い)",
+    "コレクター商品(良い)",
+    "コレクター商品(可)",
+    "再生品",
+]
 
 class _ConditionNoteAiGenerateThread(QThread):
     finished_ok = Signal(str)

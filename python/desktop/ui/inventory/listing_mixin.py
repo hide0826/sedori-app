@@ -885,14 +885,20 @@ class InventoryListingMixin:
         """
         condition_map = {
             '新品': 'new',
+            '新品(新品)': 'new',
             'ほぼ新品': 'like_new',
             '中古(ほぼ新品)': 'like_new',
+            'コレクター商品(ほぼ新品)': 'like_new',
             '非常に良い': 'very_good',
             '中古(非常に良い)': 'very_good',
+            'コレクター商品(非常に良い)': 'very_good',
             '良い': 'good',
             '中古(良い)': 'good',
+            'コレクター商品(良い)': 'good',
             '可': 'acceptable',
             '中古(可)': 'acceptable',
+            'コレクター商品(可)': 'acceptable',
+            '再生品': 'acceptable',
         }
         return condition_map.get(condition_text, 'new')  # デフォルトは新品
 
