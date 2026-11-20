@@ -77,11 +77,19 @@
     <p id="routeDoneHint">このルートの商品撮影は終わりました。</p>
     <p class="hint">商品を長押しすると「画像不要にしますか？」と聞きます。はいを選ぶと、写真なしで撮影済みへ移ります。</p>
     <div id="janBox">
-      <label class="btn">JANを撮る<input id="janShot" type="file" accept="image/*" capture="environment" /></label>
+      <div class="row">
+        <label class="btn">JANを撮る<input id="janShot" type="file" accept="image/*" capture="environment" /></label>
+        <label class="btn secondary">型番を撮る<input id="modelShotJan" type="file" accept="image/*" capture="environment" /></label>
+      </div>
       <p class="hint" id="janRead">まだ読んでいません</p>
       <ul id="candidates"></ul>
     </div>
     <div id="noJanBox" style="display:none">
+      <div class="row">
+        <label class="btn">型番を撮る<input id="modelShotNoJan" type="file" accept="image/*" capture="environment" /></label>
+      </div>
+      <p class="hint" id="modelRead">型番はまだ読んでいません。箱や本体の型番を撮ると、商品名にその型番がある候補を出します。</p>
+      <ul id="modelCandidates"></ul>
       <p class="hint" id="noJanHint">このルートの商品から選んでください。</p>
       <ul id="productList"></ul>
     </div>
@@ -578,6 +586,92 @@
       setStatus(data.message || "同じJANは無いので、商品一覧から選んでください", groups.length || purchases.length ? "ok" : "err");
     }
 
+    function setModelReadText(model, jan, errorText) {
+      const el = document.getElementById("modelRead");
+      const janEl = document.getElementById("janRead");
+      let text = "";
+      if (model) text = "読めた型番: " + model;
+      else if (jan) text = "型番は読めず、JAN: " + jan;
+      else text = errorText || "型番を読めませんでした";
+      if (el) el.textContent = text;
+      if (janEl && document.getElementById("janBox").style.display !== "none") {
+        janEl.textContent = text;
+      }
+    }
+
+    function showModelCandidates(data) {
+      const level = data.level || "";
+      const hits = openRows(data.candidates || []);
+      const groups = (data.nearby_routes && data.nearby_routes.length) ? data.nearby_routes : [];
+      const inJanMode = document.getElementById("janBox").style.display !== "none";
+      candidateRows = [];
+      candidateGroups = [];
+
+      if ((level === "route" || level === "db" || level === "nearby") && hits.length) {
+        candidateRows = hits;
+        if (inJanMode) {
+          renderCandidates();
+        } else {
+          const ul = document.getElementById("modelCandidates");
+          ul.innerHTML = "";
+          hits.forEach((row) => {
+            const li = document.createElement("li");
+            li.appendChild(productButton(row, ""));
+            ul.appendChild(li);
+          });
+        }
+        if (hits.length === 1) {
+          chooseProduct(hits[0]);
+          setStatus(data.message || "型番から商品を選びました", "ok");
+        } else {
+          setStatus(data.message || ("候補が " + hits.length + " 件あります"), "ok");
+        }
+        return;
+      }
+
+      if (inJanMode) {
+        candidateGroups = groups.length ? groups : nearbyRoutes;
+        appendChoices(document.getElementById("candidates"), purchases, candidateGroups);
+      } else {
+        const ul = document.getElementById("modelCandidates");
+        ul.innerHTML = "";
+        if (groups.length) {
+          appendChoices(ul, [], groups);
+        }
+      }
+      setStatus(
+        data.message || "型番の候補が無いので、一覧から選んでください",
+        (hits.length || groups.length || purchases.length) ? "ok" : "err"
+      );
+    }
+
+    async function readModelFile(file) {
+      setStatus("型番を読んでいます…", "");
+      setModelReadText("", "", "型番を読んでいます…");
+      const fd = new FormData();
+      fd.append("file", file, file.name || "model.jpg");
+      const res = await fetch(
+        "/api/route/" + encodeURIComponent(WEB_ID) + "/model-ocr",
+        { method: "POST", body: fd }
+      );
+      let data = {};
+      try {
+        data = await res.json();
+      } catch (e) {
+        setStatus("型番の応答を読めませんでした", "err");
+        return;
+      }
+      if (!res.ok) {
+        setModelReadText("", "", data.detail || data.error || "型番の読み取りに失敗しました");
+        setStatus(data.detail || data.error || "型番の読み取りに失敗しました", "err");
+        return;
+      }
+      const model = data.model || "";
+      const jan = data.jan || "";
+      setModelReadText(model, jan, data.error || data.message || "");
+      showModelCandidates(data);
+    }
+
     async function uploadProduct(file) {
       if (!selected || !linkId(selected)) {
         setStatus("先に商品を選んでください", "err");
@@ -621,6 +715,13 @@
       ev.target.value = "";
       if (file) await readJanFile(file);
     });
+    async function onModelShot(ev) {
+      const file = ev.target.files && ev.target.files[0];
+      ev.target.value = "";
+      if (file) await readModelFile(file);
+    }
+    document.getElementById("modelShotJan").addEventListener("change", onModelShot);
+    document.getElementById("modelShotNoJan").addEventListener("change", onModelShot);
     document.getElementById("shutterBtn").addEventListener("click", () => { shootLive(); });
     document.getElementById("productShot").addEventListener("change", async (ev) => {
       const file = ev.target.files && ev.target.files[0];

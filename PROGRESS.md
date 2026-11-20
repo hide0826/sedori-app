@@ -2,11 +2,19 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-11-20（行の編集でコンディション変更可）
+更新日: 2026-11-20（商品撮影・型番OCR候補）
 
 ---
 
 ## いまの状態
+
+**2026-11-20（商品撮影・型番OCR候補）:** ルート商品撮影（`/route/{web_id}/photos`）に「型番を撮る」を追加。箱・本体ラベルを Gemini OCR → 撮影候補の **商品名（タイトル）に型番が含まれる** ものを候補表示。1件なら自動選択。短すぎる型番は除外（watcher と同方針）。型番が取れず JAN だけ読めた場合は既存 JAN 照合へフォールバック。  
+- API: `POST /api/route/{web_id}/model-ocr`  
+- 実装: `route_web/model_ocr.py` / `route_purchases.lookup_photo_model` / `app.py` / `static/route_photos.html`  
+- キー: `watcher/.env` または `store-cam/.env` の `GEMINI_API_KEY`（値札OCRとは別プロンプト）  
+- 試験: `python -m unittest route_web.test_model_ocr_match -v`（6件 OK）  
+- 仕様追記: `docs/specs/field_route_web_spec.md`  
+**反映はルートWeb再起動**＋スマホ再読み込み。実機の型番写真確認は未。  
 
 **2026-11-20（行の編集・コンディション変更）:** 仕入データ／ネット仕入の「行の編集」でコンディションを **プルダウン選択**（手入力も可）に変更。間違い修正用。選択肢は `CONDITION_OPTIONS`（新品／新品(新品)／中古各ランク／コレクター／再生品）。説明呼び出し用の `_get_condition_key` も `新品(新品)` 等を認識。関連: `row_edit_dialog.py` / `support.py` / `listing_mixin.py`。試験 `test_inventory_row_edit_evidence_panel.py`（コンディション変更含む）OK。**反映は HIRIO 再起動**。  
 

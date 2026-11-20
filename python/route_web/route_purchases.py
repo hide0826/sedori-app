@@ -726,3 +726,106 @@ def lookup_photo_jan(
         "nearby_routes": [],
         "message": "該当するJANはDBにありません",
     }
+
+
+def _rows_matching_model(rows: List[Dict[str, Any]], model: str) -> List[Dict[str, Any]]:
+    """商品名に型番が含まれる行。より長い一致（具体的な型番）を先に。"""
+    from route_web.model_ocr import normalize_for_match, title_has_model
+
+    model_norm = normalize_for_match(model)
+    hits: List[Tuple[int, Dict[str, Any]]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("product_name") or "").strip()
+        if not title_has_model(name, model):
+            continue
+        # タイトルが短いほど型番の比重が高い、と同点時は名前順
+        hits.append((len(normalize_for_match(name)), row))
+    hits.sort(key=lambda item: (item[0], str(item[1].get("product_name") or "")))
+    return [row for _, row in hits]
+
+
+def lookup_photo_model(
+    doc: Dict[str, Any],
+    model: str,
+    *,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """OCRした型番が商品タイトルに載っている候補を返す。
+
+    1. いま開いているルートの仕入／撮影候補
+    2. 無ければ日付の近いルートの商品
+    """
+    from route_web.model_ocr import is_strong_model
+
+    model_s = str(model or "").strip()
+    if not model_s or not is_strong_model(model_s):
+        return {
+            "model": model_s,
+            "level": "none",
+            "candidates": [],
+            "nearby_routes": [],
+            "message": "型番が短すぎるか、読めませんでした",
+        }
+
+    route_rows = list_route_purchases(doc, db_path=db_path)
+    hits = _rows_matching_model(route_rows, model_s)
+    if hits:
+        return {
+            "model": model_s,
+            "level": "route",
+            "candidates": hits,
+            "nearby_routes": [],
+            "message": f"このルートの商品名に「{model_s}」があります（{len(hits)}件）",
+        }
+
+    nearby = nearby_route_products(doc, db_path=db_path)
+    nearby_hits: List[Dict[str, Any]] = []
+    matched_groups: List[Dict[str, Any]] = []
+    for group in nearby or []:
+        if not isinstance(group, dict):
+            continue
+        purchases = group.get("purchases") or []
+        if not isinstance(purchases, list):
+            continue
+        group_hits = _rows_matching_model(
+            [row for row in purchases if isinstance(row, dict)],
+            model_s,
+        )
+        if not group_hits:
+            continue
+        nearby_hits.extend(group_hits)
+        matched_groups.append(
+            {
+                "route_name": group.get("route_name") or "",
+                "route_date": group.get("route_date") or "",
+                "route_code": group.get("route_code") or "",
+                "purchases": group_hits,
+            }
+        )
+
+    if nearby_hits:
+        return {
+            "model": model_s,
+            "level": "nearby",
+            "candidates": nearby_hits,
+            "nearby_routes": matched_groups,
+            "message": f"このルートには無いので、近いルートから「{model_s}」を探しました（{len(nearby_hits)}件）",
+        }
+
+    if nearby:
+        return {
+            "model": model_s,
+            "level": "nearby",
+            "candidates": [],
+            "nearby_routes": nearby,
+            "message": f"「{model_s}」は見つかりませんでした。日付の近いルートの商品です",
+        }
+    return {
+        "model": model_s,
+        "level": "none",
+        "candidates": [],
+        "nearby_routes": [],
+        "message": f"商品名に「{model_s}」を含む候補はありません",
+    }

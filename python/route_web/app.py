@@ -43,7 +43,12 @@ from route_web.product_images import (
 )
 from route_web.quick_photos import list_recent as list_quick_photos, save_quick_upload
 from route_web.prepare import load_prep_status, prepare_route_folder
-from route_web.route_purchases import list_route_purchases, lookup_photo_jan, nearby_route_products
+from route_web.route_purchases import (
+    list_route_purchases,
+    lookup_photo_jan,
+    lookup_photo_model,
+    nearby_route_products,
+)
 from route_web.scan_requests import enqueue_scan
 from route_web.receipts import (
     append_receipt_file,
@@ -863,6 +868,89 @@ async def read_route_barcode(
             "candidates": candidates,
             "nearby_routes": nearby,
             "message": looked.get("message") or "",
+        }
+    )
+
+
+@app.post("/api/route/{web_id}/model-ocr")
+async def read_route_model_ocr(
+    web_id: str,
+    file: UploadFile = File(...),
+) -> JSONResponse:
+    """箱・本体の型番を OCR し、商品タイトルに型番が載っている候補を返す。"""
+    doc = _require_doc(web_id)
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="empty file")
+
+    from route_web.model_ocr import extract_model_from_image
+
+    mime = (file.content_type or "image/jpeg").strip() or "image/jpeg"
+    ocr = extract_model_from_image(raw, mime_type=mime)
+    model = (ocr.model_raw or "").strip()
+    jan = (ocr.jan or "").strip()
+
+    looked: Dict[str, Any] = {
+        "model": model,
+        "level": "none",
+        "candidates": [],
+        "nearby_routes": [],
+        "message": ocr.error or "型番を読み取れませんでした",
+    }
+    if model:
+        looked = lookup_photo_model(doc, model)
+    elif jan:
+        # 型番が取れなくても JAN が読めたらバーコード照合に回す
+        jan_looked = lookup_photo_jan(doc, jan)
+        looked = {
+            "model": "",
+            "level": jan_looked.get("level") or "none",
+            "candidates": jan_looked.get("candidates") or [],
+            "nearby_routes": jan_looked.get("nearby_routes") or [],
+            "message": jan_looked.get("message") or "",
+        }
+    elif not ocr.ok:
+        looked["message"] = ocr.error or looked["message"]
+
+    # 型番候補が空で JAN があるときは JAN 候補を足す
+    if model and jan and not (looked.get("candidates") or []):
+        jan_looked = lookup_photo_jan(doc, jan)
+        if jan_looked.get("candidates"):
+            looked = {
+                "model": model,
+                "level": jan_looked.get("level") or "none",
+                "candidates": jan_looked.get("candidates") or [],
+                "nearby_routes": jan_looked.get("nearby_routes") or [],
+                "message": (
+                    f"型番「{model}」はタイトルに見つからず、"
+                    f"写真の JAN で候補を出しました"
+                ),
+            }
+
+    candidates = looked.get("candidates") or []
+    if isinstance(candidates, list):
+        candidates = _enrich_purchase_images(
+            [row for row in candidates if isinstance(row, dict)]
+        )
+    nearby = looked.get("nearby_routes") or []
+    if isinstance(nearby, list):
+        nearby = _enrich_nearby_images(nearby)
+
+    return JSONResponse(
+        {
+            "ok": bool(ocr.ok or candidates),
+            "model": looked.get("model") or model,
+            "model_norm": ocr.model_norm or "",
+            "jan": jan,
+            "confidence": ocr.confidence,
+            "evidence": ocr.evidence or "",
+            "ocr_text": ocr.ocr_text or "",
+            "elapsed_ms": ocr.elapsed_ms,
+            "level": looked.get("level") or "none",
+            "candidates": candidates,
+            "nearby_routes": nearby,
+            "message": looked.get("message") or "",
+            "error": "" if (ocr.ok or candidates) else (ocr.error or ""),
         }
     )
 
