@@ -569,8 +569,10 @@ class InventoryWidget(
 
         self.standby_btn = QPushButton("スタンバイ")
         self.standby_btn.setToolTip(
-            "Discordの仕入れ候補（画像・購入入力済み）を見ます。\n"
-            "「仕入一覧に送る」でネット仕入一覧へ足し、出品CSV生成できます。"
+            "購入台帳（Discord／電脳拡張）の購入済みを見ます。\n"
+            "チェック送信・削除・3/6/9・TP0。\n"
+            "AIは届くまで Keepa 本取得してから判定（定時／手動消化）。\n"
+            "仕入一覧へ送ったあと、SKU生成〜出品CSVまで進められます。"
         )
         self.standby_btn.clicked.connect(
             lambda: self._run_action_with_status("スタンバイ", self.open_hit_standby_dialog)

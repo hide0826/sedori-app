@@ -151,6 +151,12 @@ def load_standby_items(
             seen_tokens.add(token)
             continue
         seen_tokens.add(token)
+        ai_status = str(row.get("ai_plan_status") or "").strip().lower()
+        if not ai_status:
+            if row.get("ai_rule369") and row.get("ai_tp0_yen"):
+                ai_status = "done"
+            else:
+                ai_status = "pending"
         items.append(
             {
                 "kind": "purchased",
@@ -169,6 +175,12 @@ def load_standby_items(
                 "fee_note": str(row.get("fee_note") or row.get("fee_source") or ""),
                 "image_files": _image_abs_paths(row, shared_root),
                 "imported": token in imported,
+                "ai_plan_status": ai_status,
+                "ai_rule369": str(row.get("ai_rule369") or "").strip(),
+                "ai_tp0_yen": _as_int(row.get("ai_tp0_yen")),
+                "ai_reason": str(row.get("ai_reason") or "").strip(),
+                "ai_source": str(row.get("ai_source") or "").strip(),
+                "keepa_notes": str(row.get("keepa_notes") or "").strip(),
                 "raw": row,
             }
         )
@@ -273,11 +285,44 @@ def _condition_for_inventory(raw: Dict[str, Any]) -> str:
     return _DEFAULT_CONDITION_AMAZON
 
 
-def purchase_to_inventory_row(item: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_rule369(value: Any, *, default: str = "6") -> str:
+    """3 / 6 / 9 のいずれかに正規化（SKUコメント先頭用）。"""
+    text = str(value or "").strip().lower()
+    if text in ("3", "3p", "4", "3n") or text.startswith("3"):
+        return "3"
+    if text in ("9", "9p", "10", "9n") or text.startswith("9"):
+        return "9"
+    if text in ("6", "6p", "7", "6n") or text.startswith("6"):
+        return "6"
+    return default if default in ("3", "6", "9") else "6"
+
+
+def purchase_date_yyyy_mm_dd(item: Dict[str, Any]) -> str:
+    """購入レコードの日付（YYYY-MM-DD）。"""
+    raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+    at = str(item.get("at") or raw.get("at") or "")
+    return _date_from_iso(at) or ""
+
+
+def is_purchase_on_local_date(item: Dict[str, Any], day: Optional[str] = None) -> bool:
+    """購入日が指定日（既定はローカル今日）か。"""
+    want = (day or datetime.now().strftime("%Y-%m-%d")).strip()[:10]
+    got = purchase_date_yyyy_mm_dd(item)
+    return bool(want and got == want)
+
+
+def purchase_to_inventory_row(
+    item: Dict[str, Any],
+    *,
+    rule369: Optional[str] = None,
+    tp0: Optional[int] = None,
+) -> Dict[str, Any]:
     """
     スタンバイ1件 → ネット仕入一覧（出品CSV生成可能）の1行。
 
     単品仕入の get_row_data と同じ列名を使う。
+    rule369 はコメント先頭に置き、SKU の {rule369} が読めるようにする。
+    tp0 は TP0 / tp0 列に載せる（DB保存側が読めば引き継ぐ）。
     """
     # purchase_cost_calc は pandas 依存のため、列名だけここに持つ
     col_platform_fee = "プラットフォーム手数料"
@@ -314,14 +359,45 @@ def purchase_to_inventory_row(item: Dict[str, Any]) -> Dict[str, Any]:
 
     action = str(item.get("action") or raw.get("action") or "purchased")
     action_label = "購入" if action == "purchased" else ("入札" if action == "bid" else action)
-    comment = f"[Discord監視][フリマ:{channel}][{action_label}]"
+
+    rule = normalize_rule369(
+        rule369
+        if rule369 is not None
+        else item.get("rule369")
+        or raw.get("rule369")
+        or raw.get("rule_369")
+    )
+    tp0_val: Optional[int] = None
+    if tp0 is not None:
+        try:
+            tp0_val = int(tp0)
+        except (TypeError, ValueError):
+            tp0_val = None
+    if tp0_val is None:
+        for key in ("tp0", "TP0"):
+            raw_tp = item.get(key)
+            if raw_tp is None and isinstance(raw, dict):
+                raw_tp = raw.get(key)
+            try:
+                n = int(raw_tp)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                continue
+            if n > 0:
+                tp0_val = n
+                break
+    if tp0_val is None or tp0_val <= 0:
+        tp0_val = sell if sell > 0 else None
+
+    comment = f"{rule} [監視][フリマ:{channel}][{action_label}]"
     if keyword:
         comment += f"[KW:{keyword}]"
     token = str(item.get("token") or "")
     if token:
         comment += f"[token:{token[:12]}]"
+    if tp0_val:
+        comment += f"[TP0:{tp0_val}]"
 
-    return {
+    row: Dict[str, Any] = {
         "仕入れ日": purchase_date,
         "コンディション": _condition_for_inventory(raw),
         "SKU": "未実装",
@@ -352,7 +428,11 @@ def purchase_to_inventory_row(item: Dict[str, Any]) -> Dict[str, Any]:
         "受取都道府県": "東京都",
         "価格改定": "ON",
         "コンディション説明": str(raw.get("condition_note") or "").strip(),
+        "3-6-9": rule,
+        "TP0": tp0_val if tp0_val else "",
+        "tp0": tp0_val if tp0_val else "",
     }
+    return row
 
 
 def _date_from_iso(value: str) -> str:

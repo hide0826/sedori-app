@@ -2,11 +2,20 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-11-21（スタンバイ／突合で condition_note 引き継ぎ）
+更新日: 2026-11-21（スタンバイ最大化・削除・3/6/9・TP0・今日分AI）
 
 ---
 
 ## いまの状態
+
+**2026-11-21（スタンバイ拡張＋届くまでKeepa→AI）:** ネット仕入「スタンバイ」を強化。  
+- **最大化**／**削除**／**選**チェック送信／**3／6／9・TP0**（送信時コメント先頭＋行）  
+- **AIは即時不要**: 仕入れ確定で `ai_plan_status=pending`。届くまでの数日で Keepa **本取得**→Gemini→台帳へ（自動で仕入一覧へは送らない）  
+- 定時: `HIRIO_purchase_ai_plan`（6時間ごと）。手動: スタンバイ「準備中を今すぐ消化」または `watcher\process_purchase_ai_plans.cmd`  
+- 状態表示: 準備中／判定済／送済。「提案を反映」で入力欄へ  
+- 実装: `standby_dialog.py` / `hit_standby.py` / `shared/hit_snapshot.py`（pending・patch）／`watcher/process_purchase_ai_plans.py`  
+- 試験: `test_hit_standby.py` OK。Keepa本取得＋AI 2件実機OK（tokens消費1件ずつ）  
+**反映は HIRIO 再起動** → ネット仕入 → スタンバイ。タスク登録済。  
 
 **2026-11-21（電脳仕入れのコンディション説明引き継ぎ）:** `hit_standby.purchase_to_inventory_row` が台帳の `condition_note` → 一覧の「コンディション説明」へ。アマサーチCSV突合（`hit_amasearch_match`）でも空欄なら同じ文を埋める。電脳リサーチ v0.3.9 用。**反映は HIRIO 再起動**。  
 **2026-11-20（商品撮影・型番OCR候補）:** ルート商品撮影（`/route/{web_id}/photos`）に「型番を撮る」を追加。箱・本体ラベルを Gemini OCR → 撮影候補の **商品名（タイトル）に型番が含まれる** ものを候補表示。1件なら自動選択。短すぎる型番は除外（watcher と同方針）。型番が取れず JAN だけ読めた場合は既存 JAN 照合へフォールバック。  
