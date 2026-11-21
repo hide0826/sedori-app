@@ -66,6 +66,7 @@ def test_purchase_to_inventory_row_uses_saved_condition() -> None:
             "condition": "new",
             "condition_label": "新品",
             "condition_amazon": "新品(新品)",
+            "condition_note": "【動作確認】問題なく使用できます",
             "referral_fee_yen": 400,
             "fba_fulfillment_yen": 300,
             "fba_inbound_shipping_yen": 0,
@@ -76,6 +77,7 @@ def test_purchase_to_inventory_row_uses_saved_condition() -> None:
     }
     row = purchase_to_inventory_row(item)
     assert row["コンディション"] == "新品(新品)"
+    assert row["コンディション説明"] == "【動作確認】問題なく使用できます"
 
 
 def test_load_and_mark_imported(tmp_path: Path, monkeypatch) -> None:

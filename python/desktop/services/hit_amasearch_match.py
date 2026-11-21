@@ -395,6 +395,8 @@ def apply_hit_purchase_match(
     used_tokens: Set[str] = set()
     if "出品URL" not in inventory_data.columns:
         inventory_data["出品URL"] = ""
+    if "コンディション説明" not in inventory_data.columns:
+        inventory_data["コンディション説明"] = ""
 
     for idx in indices:
         try:
@@ -420,6 +422,10 @@ def apply_hit_purchase_match(
             continue
 
         inventory_data.at[idx, "出品URL"] = url
+        note = str(purchase.get("condition_note") or "").strip()
+        existing_note = _cell(row, "コンディション説明", "condition_note", "conditionNote")
+        if note and not existing_note:
+            inventory_data.at[idx, "コンディション説明"] = note
         result.url_filled += 1
         used_tokens.add(token)
         already_registered = _is_registered_row(purchase)

@@ -2,12 +2,13 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-11-20（商品撮影・型番OCR候補）
+更新日: 2026-11-21（スタンバイ／突合で condition_note 引き継ぎ）
 
 ---
 
 ## いまの状態
 
+**2026-11-21（電脳仕入れのコンディション説明引き継ぎ）:** `hit_standby.purchase_to_inventory_row` が台帳の `condition_note` → 一覧の「コンディション説明」へ。アマサーチCSV突合（`hit_amasearch_match`）でも空欄なら同じ文を埋める。電脳リサーチ v0.3.9 用。**反映は HIRIO 再起動**。  
 **2026-11-20（商品撮影・型番OCR候補）:** ルート商品撮影（`/route/{web_id}/photos`）に「型番を撮る」を追加。箱・本体ラベルを Gemini OCR → 撮影候補の **商品名（タイトル）に型番が含まれる** ものを候補表示。1件なら自動選択。短すぎる型番は除外（watcher と同方針）。型番が取れず JAN だけ読めた場合は既存 JAN 照合へフォールバック。  
 - API: `POST /api/route/{web_id}/model-ocr`  
 - 実装: `route_web/model_ocr.py` / `route_purchases.lookup_photo_model` / `app.py` / `static/route_photos.html`  

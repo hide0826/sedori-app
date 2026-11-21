@@ -351,7 +351,7 @@ def purchase_to_inventory_row(item: Dict[str, Any]) -> Dict[str, Any]:
         "伝票番号": "",
         "受取都道府県": "東京都",
         "価格改定": "ON",
-        "コンディション説明": "",
+        "コンディション説明": str(raw.get("condition_note") or "").strip(),
     }
 
 
