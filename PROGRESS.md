@@ -2,12 +2,17 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-11-25（電脳仕入れ月別改定の引き継ぎ）
+更新日: 2026-11-25（電脳仕入れ TP0〜TP3 の引き継ぎ）
 
 ---
 
 ## いまの状態
 
+**2026-11-25（電脳仕入れ・TP0〜TP3 引き継ぎ）:** 仕入れ確認の TP をスタンバイ→ネット仕入一覧→仕入DBへ渡す。  
+- `hit_standby.purchase_to_inventory_row` が `TP0`〜`TP3` を行へ載せる  
+- ネット仕入の隠し列＋DB保存列に TP を追加  
+- 仕入DB保存時の hirio.db upsert に `tp0`〜`tp3`  
+- **反映は HIRIO 再起動**（:8789 再起動＋仕入れ確認 F5）  
 **2026-11-25（電脳仕入れ・月別30日刻み引き継ぎ）:** 仕入れ確認で保存した `ladder_enabled`／`ladder_rules`／`repricing_enabled` をスタンバイ→ネット仕入一覧→仕入DBへ渡す。  
 - `hit_standby.purchase_to_inventory_row` が台帳の月別を行へ載せる  
 - ネット仕入の隠し列＋DB保存列に `ladder_*`／`repricing_enabled`  

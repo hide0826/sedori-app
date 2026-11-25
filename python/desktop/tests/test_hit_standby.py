@@ -116,6 +116,9 @@ def test_purchase_to_inventory_row_rule_and_tp0() -> None:
         "source": "mercari",
         "buy_yen": 2000,
         "sell_yen": 5000,
+        "tp1": 4600,
+        "tp2": 4400,
+        "tp3": 4200,
         "raw": {
             "referral_fee_yen": 400,
             "fba_fulfillment_yen": 300,
@@ -130,6 +133,9 @@ def test_purchase_to_inventory_row_rule_and_tp0() -> None:
     assert row["3-6-9"] == "3"
     assert row["TP0"] == 4800
     assert row["tp0"] == 4800
+    assert row["TP1"] == 4600
+    assert row["TP2"] == 4400
+    assert row["TP3"] == 4200
     assert normalize_rule369("6P") == "6"
     assert normalize_rule369("9n") == "9"
 

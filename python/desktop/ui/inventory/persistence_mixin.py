@@ -397,6 +397,7 @@ class InventoryPersistenceMixin:
                 "発送方法", "販売チャネル", COL_PLATFORM_FEE, COL_SHIPPING, COL_TOTAL_COST,
                 "在庫保管手数料",
                 "仕入先", "価格改定", "repricing_enabled", "ladder_enabled", "ladder_rules",
+                "TP0", "TP1", "TP2", "TP3",
                 "その他詳細", "コンディション説明",
                 *PURCHASE_DB_FLEA_COLUMNS,
             ]
@@ -546,11 +547,25 @@ class InventoryPersistenceMixin:
                                 sku = str(rec.get("SKU") or rec.get("sku") or "").strip()
                                 if not sku or sku.endswith("..."):
                                     continue
+                                has_tp = any(
+                                    str(rec.get(k) or "").strip()
+                                    for k in (
+                                        "TP0",
+                                        "tp0",
+                                        "TP1",
+                                        "tp1",
+                                        "TP2",
+                                        "tp2",
+                                        "TP3",
+                                        "tp3",
+                                    )
+                                )
                                 if (
                                     rec.get("ladder_rules") in (None, "")
                                     and rec.get("ladder_enabled") in (None, "", 0, "0", "OFF")
                                     and rec.get("repricing_enabled") in (None, "")
                                     and str(rec.get("価格改定") or "").strip() == ""
+                                    and not has_tp
                                 ):
                                     continue
                                 try:
@@ -576,10 +591,14 @@ class InventoryPersistenceMixin:
                                             "repricing_enabled": 1 if repricing_on else 0,
                                             "ladder_enabled": 1 if ladder_on else 0,
                                             "ladder_rules": ladder_rules if ladder_on else "",
+                                            "tp0": rec.get("TP0") or rec.get("tp0") or "",
+                                            "tp1": rec.get("TP1") or rec.get("tp1") or "",
+                                            "tp2": rec.get("TP2") or rec.get("tp2") or "",
+                                            "tp3": rec.get("TP3") or rec.get("tp3") or "",
                                         }
                                     )
                                 except Exception as db_exc:  # noqa: BLE001
-                                    print(f"月別改定のDB反映スキップ ({sku}): {db_exc}")
+                                    print(f"月別／TPのDB反映スキップ ({sku}): {db_exc}")
                     except Exception as e:
                         print(f"仕入DBタブの表示更新エラー: {e}")
                 

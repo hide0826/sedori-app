@@ -367,14 +367,8 @@ def purchase_to_inventory_row(
         or raw.get("rule369")
         or raw.get("rule_369")
     )
-    tp0_val: Optional[int] = None
-    if tp0 is not None:
-        try:
-            tp0_val = int(tp0)
-        except (TypeError, ValueError):
-            tp0_val = None
-    if tp0_val is None:
-        for key in ("tp0", "TP0"):
+    def _pick_tp_yen(*keys: str) -> Optional[int]:
+        for key in keys:
             raw_tp = item.get(key)
             if raw_tp is None and isinstance(raw, dict):
                 raw_tp = raw.get(key)
@@ -383,10 +377,24 @@ def purchase_to_inventory_row(
             except (TypeError, ValueError):
                 continue
             if n > 0:
-                tp0_val = n
-                break
+                return n
+        return None
+
+    tp0_val: Optional[int] = None
+    if tp0 is not None:
+        try:
+            tp0_val = int(tp0)
+        except (TypeError, ValueError):
+            tp0_val = None
+        if tp0_val is not None and tp0_val <= 0:
+            tp0_val = None
+    if tp0_val is None:
+        tp0_val = _pick_tp_yen("tp0", "TP0")
     if tp0_val is None or tp0_val <= 0:
         tp0_val = sell if sell > 0 else None
+    tp1_val = _pick_tp_yen("tp1", "TP1", "ta1", "TA1")
+    tp2_val = _pick_tp_yen("tp2", "TP2", "ta2", "TA2")
+    tp3_val = _pick_tp_yen("tp3", "TP3")
 
     def _pick_repricing_raw() -> Any:
         if item.get("repricing_enabled") is not None:
@@ -493,6 +501,12 @@ def purchase_to_inventory_row(
         "3-6-9": rule,
         "TP0": tp0_val if tp0_val else "",
         "tp0": tp0_val if tp0_val else "",
+        "TP1": tp1_val if tp1_val else "",
+        "tp1": tp1_val if tp1_val else "",
+        "TP2": tp2_val if tp2_val else "",
+        "tp2": tp2_val if tp2_val else "",
+        "TP3": tp3_val if tp3_val else "",
+        "tp3": tp3_val if tp3_val else "",
     }
     return row
 

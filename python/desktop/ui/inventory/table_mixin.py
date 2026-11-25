@@ -212,6 +212,10 @@ class InventoryTableMixin:
                 "repricing_enabled",
                 "ladder_enabled",
                 "ladder_rules",
+                "TP0",
+                "TP1",
+                "TP2",
+                "TP3",
                 "その他詳細",
                 "コンディション説明",
             ]
@@ -295,7 +299,15 @@ class InventoryTableMixin:
         for col in EVIDENCE_HIDDEN_COLUMNS:
             if col in self.column_headers:
                 self.data_table.setColumnHidden(self.column_headers.index(col), True)
-        for col in ("repricing_enabled", "ladder_enabled", "ladder_rules"):
+        for col in (
+            "repricing_enabled",
+            "ladder_enabled",
+            "ladder_rules",
+            "TP0",
+            "TP1",
+            "TP2",
+            "TP3",
+        ):
             if col in self.column_headers:
                 self.data_table.setColumnHidden(self.column_headers.index(col), True)
         
