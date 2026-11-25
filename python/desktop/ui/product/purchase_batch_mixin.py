@@ -747,10 +747,68 @@ class PurchaseBatchMixin:
         self.purchase_all_records_master = copy.deepcopy(new_all_records)
         self.purchase_records = copy.deepcopy(new_all_records)
 
+        # hirio.db purchases にも月別／価格改定を残す（スナップショットだけでは不足）
+        db_errors: List[str] = []
+        if hasattr(self, "purchase_history_db") and self.purchase_history_db is not None:
+            for rec in new_all_records:
+                if not isinstance(rec, dict):
+                    continue
+                sku = str(rec.get("SKU") or rec.get("sku") or "").strip()
+                if not sku or sku.endswith("..."):
+                    continue
+                try:
+                    repricing_raw = rec.get("repricing_enabled")
+                    if repricing_raw is None or repricing_raw == "":
+                        repricing_raw = rec.get("価格改定")
+                    repricing_text = str(repricing_raw).strip().lower() if repricing_raw is not None else ""
+                    repricing_on = repricing_text not in ("0", "off", "false", "no", "無効")
+                    ladder_raw = rec.get("ladder_enabled")
+                    ladder_text = str(ladder_raw).strip().lower() if ladder_raw is not None else ""
+                    if ladder_raw is None or ladder_raw == "":
+                        ladder_on = False
+                    else:
+                        ladder_on = ladder_text not in ("0", "off", "false", "no", "無効")
+                    ladder_rules = rec.get("ladder_rules") or ""
+                    if isinstance(ladder_rules, list):
+                        import json as _json
+
+                        ladder_rules = _json.dumps(ladder_rules, ensure_ascii=False)
+                    payload = {
+                        "sku": sku,
+                        "repricing_enabled": 1 if repricing_on else 0,
+                        "ladder_enabled": 1 if ladder_on else 0,
+                        "ladder_rules": ladder_rules if ladder_on else "",
+                        "tp0": rec.get("TP0") or rec.get("tp0") or "",
+                        "tp1": rec.get("TP1") or rec.get("tp1") or "",
+                        "tp2": rec.get("TP2") or rec.get("tp2") or "",
+                        "tp3": rec.get("TP3") or rec.get("tp3") or "",
+                        "sales_channel": rec.get("sales_channel")
+                        or rec.get("販売チャネル")
+                        or "Amazon",
+                    }
+                    status = rec.get("ステータス") or rec.get("status")
+                    if status:
+                        payload["status"] = status
+                        payload["status_reason"] = (
+                            rec.get("ステータス理由") or rec.get("status_reason") or ""
+                        )
+                    self.purchase_history_db.upsert(payload)
+                except Exception as e:  # noqa: BLE001
+                    db_errors.append(f"{sku}: {e}")
+
         # スナップショット保存
         try:
             self.save_purchase_snapshot()
-            QMessageBox.information(self, "保存完了", "仕入DBの現在の内容を保存しました。")
+            if db_errors:
+                QMessageBox.warning(
+                    self,
+                    "保存完了（一部DBエラー）",
+                    "仕入DBの現在の内容を保存しました。\n"
+                    "ただし hirio.db への月別反映で一部失敗:\n"
+                    + "\n".join(db_errors[:5]),
+                )
+            else:
+                QMessageBox.information(self, "保存完了", "仕入DBの現在の内容を保存しました。")
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"仕入DBの保存に失敗しました:\n{e}")
 

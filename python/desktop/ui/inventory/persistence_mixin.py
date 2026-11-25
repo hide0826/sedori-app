@@ -396,7 +396,8 @@ class InventoryPersistenceMixin:
                 "仕入れ価格", "販売予定価格", "見込み利益", "損益分岐点", "想定利益率", "想定ROI", "コメント",
                 "発送方法", "販売チャネル", COL_PLATFORM_FEE, COL_SHIPPING, COL_TOTAL_COST,
                 "在庫保管手数料",
-                "仕入先", "価格改定", "その他詳細", "コンディション説明",
+                "仕入先", "価格改定", "repricing_enabled", "ladder_enabled", "ladder_rules",
+                "その他詳細", "コンディション説明",
                 *PURCHASE_DB_FLEA_COLUMNS,
             ]
             if self.filtered_data is not None and len(self.filtered_data) > 0:
@@ -536,6 +537,49 @@ class InventoryPersistenceMixin:
                         if hasattr(self.product_widget, "purchase_table") and self.product_widget.purchase_table is not None:
                             self.product_widget.purchase_table.viewport().update()
                             self.product_widget.purchase_table.updateGeometry()
+                        # 月別／価格改定を hirio.db purchases にも残す
+                        hist_db = getattr(self.product_widget, "purchase_history_db", None)
+                        if hist_db is not None:
+                            for rec in existing_all_records:
+                                if not isinstance(rec, dict):
+                                    continue
+                                sku = str(rec.get("SKU") or rec.get("sku") or "").strip()
+                                if not sku or sku.endswith("..."):
+                                    continue
+                                if (
+                                    rec.get("ladder_rules") in (None, "")
+                                    and rec.get("ladder_enabled") in (None, "", 0, "0", "OFF")
+                                    and rec.get("repricing_enabled") in (None, "")
+                                    and str(rec.get("価格改定") or "").strip() == ""
+                                ):
+                                    continue
+                                try:
+                                    repricing_raw = rec.get("repricing_enabled")
+                                    if repricing_raw is None or repricing_raw == "":
+                                        repricing_raw = rec.get("価格改定")
+                                    rtxt = str(repricing_raw).strip().lower() if repricing_raw is not None else ""
+                                    repricing_on = rtxt not in ("0", "off", "false", "no", "無効")
+                                    ladder_raw = rec.get("ladder_enabled")
+                                    if ladder_raw is None or ladder_raw == "":
+                                        ladder_on = False
+                                    else:
+                                        ltxt = str(ladder_raw).strip().lower()
+                                        ladder_on = ltxt not in ("0", "off", "false", "no", "無効")
+                                    ladder_rules = rec.get("ladder_rules") or ""
+                                    if isinstance(ladder_rules, list):
+                                        import json as _json
+
+                                        ladder_rules = _json.dumps(ladder_rules, ensure_ascii=False)
+                                    hist_db.upsert(
+                                        {
+                                            "sku": sku,
+                                            "repricing_enabled": 1 if repricing_on else 0,
+                                            "ladder_enabled": 1 if ladder_on else 0,
+                                            "ladder_rules": ladder_rules if ladder_on else "",
+                                        }
+                                    )
+                                except Exception as db_exc:  # noqa: BLE001
+                                    print(f"月別改定のDB反映スキップ ({sku}): {db_exc}")
                     except Exception as e:
                         print(f"仕入DBタブの表示更新エラー: {e}")
                 

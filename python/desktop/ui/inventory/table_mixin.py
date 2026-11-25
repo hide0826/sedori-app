@@ -206,7 +206,15 @@ class InventoryTableMixin:
             ]
             if getattr(self, "dev_mode", False):
                 headers.append("3-6-9")
-            headers += [*EVIDENCE_HIDDEN_COLUMNS, "価格改定", "その他詳細", "コンディション説明"]
+            headers += [
+                *EVIDENCE_HIDDEN_COLUMNS,
+                "価格改定",
+                "repricing_enabled",
+                "ladder_enabled",
+                "ladder_rules",
+                "その他詳細",
+                "コンディション説明",
+            ]
             return headers
 
         headers += ["仕入先", "価格改定", "その他詳細", "コンディション説明"]
@@ -285,6 +293,9 @@ class InventoryTableMixin:
         if "在庫保管手数料" in self.column_headers:
             self.data_table.setColumnHidden(self.column_headers.index("在庫保管手数料"), True)
         for col in EVIDENCE_HIDDEN_COLUMNS:
+            if col in self.column_headers:
+                self.data_table.setColumnHidden(self.column_headers.index(col), True)
+        for col in ("repricing_enabled", "ladder_enabled", "ladder_rules"):
             if col in self.column_headers:
                 self.data_table.setColumnHidden(self.column_headers.index(col), True)
         

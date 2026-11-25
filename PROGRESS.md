@@ -2,12 +2,17 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-11-21（スタンバイ最大化・削除・3/6/9・TP0・今日分AI）
+更新日: 2026-11-25（電脳仕入れ月別改定の引き継ぎ）
 
 ---
 
 ## いまの状態
 
+**2026-11-25（電脳仕入れ・月別30日刻み引き継ぎ）:** 仕入れ確認で保存した `ladder_enabled`／`ladder_rules`／`repricing_enabled` をスタンバイ→ネット仕入一覧→仕入DBへ渡す。  
+- `hit_standby.purchase_to_inventory_row` が台帳の月別を行へ載せる  
+- ネット仕入の隠し列＋DB保存列に `ladder_*`／`repricing_enabled`  
+- 仕入DB保存時に `purchase_history_db`（hirio.db）へ月別も upsert  
+- **反映は HIRIO 再起動**（:8789 も再起動＋仕入れ確認 F5）  
 **2026-11-21（スタンバイ拡張＋届くまでKeepa→AI）:** ネット仕入「スタンバイ」を強化。  
 - **最大化**／**削除**／**選**チェック送信／**3／6／9・TP0**（送信時コメント先頭＋行）  
 - **AIは即時不要**: 仕入れ確定で `ai_plan_status=pending`。届くまでの数日で Keepa **本取得**→Gemini→台帳へ（自動で仕入一覧へは送らない）  

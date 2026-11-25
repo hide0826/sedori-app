@@ -36,6 +36,21 @@ def test_purchase_to_inventory_row_has_listing_columns(tmp_path: Path) -> None:
             "outbound_shipping_yen": 0,
             "misc_cost_yen": 0,
             "fulfillment_mode": "fba",
+            "repricing_enabled": 1,
+            "ladder_enabled": 1,
+            "ladder_rules": json.dumps(
+                [
+                    {
+                        "days_from": 30,
+                        "action": "priceTrace",
+                        "value": 1,
+                        "target_price": 7500,
+                        "akaji_drop_percent": 2,
+                        "takane_rise_percent": 1,
+                    }
+                ],
+                ensure_ascii=False,
+            ),
         },
     }
     row = purchase_to_inventory_row(item)
@@ -50,6 +65,11 @@ def test_purchase_to_inventory_row_has_listing_columns(tmp_path: Path) -> None:
     assert row["コンディション"] == "中古(良い)"  # 旧レコード互換の既定
     assert "見込み利益" in row
     assert "損益分岐点" in row
+    assert row["価格改定"] == "ON"
+    assert row["repricing_enabled"] == 1
+    assert row["ladder_enabled"] == 1
+    assert "7500" in str(row.get("ladder_rules") or "")
+    assert "[月別ON]" in str(row.get("コメント") or "")
 
 
 def test_purchase_to_inventory_row_uses_saved_condition() -> None:

@@ -388,6 +388,63 @@ def purchase_to_inventory_row(
     if tp0_val is None or tp0_val <= 0:
         tp0_val = sell if sell > 0 else None
 
+    def _pick_repricing_raw() -> Any:
+        if item.get("repricing_enabled") is not None:
+            return item.get("repricing_enabled")
+        if item.get("価格改定") is not None:
+            return item.get("価格改定")
+        if isinstance(raw, dict) and raw.get("repricing_enabled") is not None:
+            return raw.get("repricing_enabled")
+        if isinstance(raw, dict) and raw.get("価格改定") is not None:
+            return raw.get("価格改定")
+        return None
+
+    def _pick_ladder_enabled() -> Any:
+        if item.get("ladder_enabled") is not None:
+            return item.get("ladder_enabled")
+        if isinstance(raw, dict) and raw.get("ladder_enabled") is not None:
+            return raw.get("ladder_enabled")
+        return None
+
+    def _pick_ladder_rules() -> Any:
+        if item.get("ladder_rules") is not None:
+            return item.get("ladder_rules")
+        if isinstance(raw, dict):
+            return raw.get("ladder_rules")
+        return None
+
+    def _as_on_off(value: Any, *, default_on: bool = True) -> str:
+        if value is None or value == "":
+            return "ON" if default_on else "OFF"
+        text = str(value).strip().lower()
+        if text in ("0", "off", "false", "no", "無効"):
+            return "OFF"
+        if text in ("1", "on", "true", "yes", "有効"):
+            return "ON"
+        try:
+            return "ON" if int(float(text)) else "OFF"
+        except (TypeError, ValueError):
+            return "ON" if default_on else "OFF"
+
+    def _as_flag01(value: Any, *, default: int = 0) -> int:
+        return 1 if _as_on_off(value, default_on=bool(default)) == "ON" else 0
+
+    def _ladder_rules_text(value: Any) -> str:
+        if value is None or value == "":
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            try:
+                return json.dumps(value, ensure_ascii=False)
+            except (TypeError, ValueError):
+                return ""
+        return str(value)
+
+    repricing_label = _as_on_off(_pick_repricing_raw(), default_on=True)
+    ladder_on = _as_flag01(_pick_ladder_enabled(), default=0)
+    ladder_rules_text = _ladder_rules_text(_pick_ladder_rules()) if ladder_on else ""
+
     comment = f"{rule} [監視][フリマ:{channel}][{action_label}]"
     if keyword:
         comment += f"[KW:{keyword}]"
@@ -396,6 +453,8 @@ def purchase_to_inventory_row(
         comment += f"[token:{token[:12]}]"
     if tp0_val:
         comment += f"[TP0:{tp0_val}]"
+    if ladder_on:
+        comment += "[月別ON]"
 
     row: Dict[str, Any] = {
         "仕入れ日": purchase_date,
@@ -426,7 +485,10 @@ def purchase_to_inventory_row(
         "出品URL": url,
         "伝票番号": "",
         "受取都道府県": "東京都",
-        "価格改定": "ON",
+        "価格改定": repricing_label,
+        "repricing_enabled": 1 if repricing_label == "ON" else 0,
+        "ladder_enabled": ladder_on,
+        "ladder_rules": ladder_rules_text,
         "コンディション説明": str(raw.get("condition_note") or "").strip(),
         "3-6-9": rule,
         "TP0": tp0_val if tp0_val else "",
