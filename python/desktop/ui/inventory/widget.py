@@ -168,8 +168,12 @@ class InventoryWidget(
         # UIの初期化
         self.route_template_btn = None
         self.matching_btn = None
+        self._standby_queue_timer: Optional[QTimer] = None
+        self._standby_queue_draining = False
         self.setup_ui()
         self._apply_purchase_mode_ui()
+        if self.is_online_mode and not self.dev_mode:
+            self._start_standby_queue_watcher()
 
     @property
     def is_online_mode(self) -> bool:
@@ -895,17 +899,101 @@ class InventoryWidget(
             import traceback
             traceback.print_exc()
 
+    def _ensure_shared_on_path(self) -> Optional[Path]:
+        """C:\\HIRIO\\shared を sys.path に入れる。"""
+        candidates = [
+            Path(os.getenv("HIRIO_SHARED_DIR") or ""),
+            Path(r"C:\HIRIO\shared"),
+            Path(r"D:\HIRIO\shared"),
+        ]
+        here = Path(__file__).resolve()
+        for parent in here.parents:
+            cand = parent / "shared"
+            if cand.is_dir():
+                candidates.append(cand)
+            if parent.name.upper() == "HIRIO":
+                candidates.append(parent / "shared")
+        for shared in candidates:
+            if not shared or not shared.is_dir():
+                continue
+            if not (shared / "hit_standby_queue.py").is_file():
+                continue
+            text = str(shared)
+            if text not in sys.path:
+                sys.path.insert(0, text)
+            return shared
+        return None
+
+    def drain_standby_send_queue(self, *, quiet: bool = False) -> int:
+        """
+        スマホ／Web スタンバイから送られたキューをネット仕入一覧へ取り込む。
+
+        Returns:
+            取り込んだ件数
+        """
+        if not self.is_online_mode or self.dev_mode:
+            return 0
+        if self._standby_queue_draining:
+            return 0
+        self._standby_queue_draining = True
+        try:
+            shared = self._ensure_shared_on_path()
+            if shared is None:
+                return 0
+            from hit_standby_queue import drain_all  # noqa: WPS433
+
+            rows = drain_all(shared=shared)
+            if not rows:
+                return 0
+            count = 0
+            for entry in rows:
+                inv = entry.get("inventory_row") if isinstance(entry, dict) else None
+                if not isinstance(inv, dict):
+                    continue
+                try:
+                    self.append_single_purchase_row(inv, notify=False)
+                    count += 1
+                except Exception:
+                    continue
+            if count > 0:
+                text = f"スマホ／Webスタンバイから {count} 件をネット仕入へ取り込みました。"
+                label = getattr(self, "workflow_status_label", None)
+                if label is not None:
+                    label.setText(text)
+                if not quiet:
+                    QMessageBox.information(self, "スタンバイ取込", text)
+            return count
+        except Exception:
+            return 0
+        finally:
+            self._standby_queue_draining = False
+
+    def _start_standby_queue_watcher(self) -> None:
+        """起動時＋約5秒ごとに共有キューを取り込む。"""
+        # 起動直後に1回
+        QTimer.singleShot(800, lambda: self.drain_standby_send_queue(quiet=False))
+        timer = QTimer(self)
+        timer.setInterval(5000)
+        timer.timeout.connect(lambda: self.drain_standby_send_queue(quiet=True))
+        timer.start()
+        self._standby_queue_timer = timer
+
     def open_hit_standby_dialog(self) -> None:
         """Discord仕入れ候補のスタンバイ画面を開く（ネット仕入のみ）。"""
         if not self.is_online_mode:
             QMessageBox.information(self, "スタンバイ", "ネット仕入タブだけで使えます。")
             return
 
+        # 開く直前にスマホ送信分を取り込む
+        self.drain_standby_send_queue(quiet=True)
+
         def _send(row: Dict[str, Any]) -> None:
             self.append_single_purchase_row(row, notify=False)
 
         dlg = HitStandbyDialog(on_send_row=_send, parent=self)
         dlg.exec()
+        # ダイアログ中に送られた分も回収
+        self.drain_standby_send_queue(quiet=True)
 
     def open_single_purchase_dialog(self):
         """単品仕入ダイアログを開き、入力データを仕入一覧へ1行追加する"""

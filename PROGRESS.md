@@ -2,12 +2,13 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-11-25（電脳仕入れ TP0〜TP3 の引き継ぎ）
+更新日: 2026-11-26（スマホ・スタンバイキュー自動取込）
 
 ---
 
 ## いまの状態
 
+**2026-11-26（スマホ・スタンバイキュー自動取込）:** Web `:8790/standby` が書いた `shared/hit_standby_send_queue.jsonl` を、ネット仕入タブが起動時＋約5秒ごとに `drain_all` → `append_single_purchase_row`。スタンバイダイアログを開く直前／閉じた後も drain。実装: `ui/inventory/widget.py`（本番 online・非devのみ）。試験: `tests/test_hit_standby_queue.py` 2件 OK。**反映は HIRIO 再起動**。  
 **2026-11-25（電脳仕入れ・TP0〜TP3 引き継ぎ）:** 仕入れ確認の TP をスタンバイ→ネット仕入一覧→仕入DBへ渡す。  
 - `hit_standby.purchase_to_inventory_row` が `TP0`〜`TP3` を行へ載せる  
 - ネット仕入の隠し列＋DB保存列に TP を追加  
