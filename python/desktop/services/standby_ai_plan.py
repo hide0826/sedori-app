@@ -72,9 +72,13 @@ class StandbyAiPlan:
     rule369: str
     tp0_yen: int
     reason: str
-    source: str  # gemini | fallback
+    source: str  # gemini | fallback | ledger | gemini_error
     keepa_notes: str = ""
     at: str = ""
+    tp1_yen: int = 0
+    tp2_yen: int = 0
+    tp3_yen: int = 0
+    ai_error: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

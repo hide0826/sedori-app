@@ -178,8 +178,17 @@ def load_standby_items(
                 "ai_plan_status": ai_status,
                 "ai_rule369": str(row.get("ai_rule369") or "").strip(),
                 "ai_tp0_yen": _as_int(row.get("ai_tp0_yen")),
+                "ai_tp1_yen": _as_int(row.get("ai_tp1_yen")),
+                "ai_tp2_yen": _as_int(row.get("ai_tp2_yen")),
+                "ai_tp3_yen": _as_int(row.get("ai_tp3_yen")),
                 "ai_reason": str(row.get("ai_reason") or "").strip(),
                 "ai_source": str(row.get("ai_source") or "").strip(),
+                "ai_error": str(row.get("ai_error") or "").strip(),
+                "memo": str(row.get("memo") or "").strip(),
+                "tp0": _as_int(row.get("tp0") or row.get("TP0")),
+                "tp1": _as_int(row.get("tp1") or row.get("TP1")),
+                "tp2": _as_int(row.get("tp2") or row.get("TP2")),
+                "tp3": _as_int(row.get("tp3") or row.get("TP3")),
                 "keepa_notes": str(row.get("keepa_notes") or "").strip(),
                 "raw": row,
             }
@@ -316,13 +325,16 @@ def purchase_to_inventory_row(
     *,
     rule369: Optional[str] = None,
     tp0: Optional[int] = None,
+    tp1: Optional[int] = None,
+    tp2: Optional[int] = None,
+    tp3: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     スタンバイ1件 → ネット仕入一覧（出品CSV生成可能）の1行。
 
     単品仕入の get_row_data と同じ列名を使う。
     rule369 はコメント先頭に置き、SKU の {rule369} が読めるようにする。
-    tp0 は TP0 / tp0 列に載せる（DB保存側が読めば引き継ぐ）。
+    tp0〜tp3 は TP／tp 列に載せる（DB保存側が読めば引き継ぐ）。
     """
     # purchase_cost_calc は pandas 依存のため、列名だけここに持つ
     col_platform_fee = "プラットフォーム手数料"
@@ -380,21 +392,22 @@ def purchase_to_inventory_row(
                 return n
         return None
 
-    tp0_val: Optional[int] = None
-    if tp0 is not None:
-        try:
-            tp0_val = int(tp0)
-        except (TypeError, ValueError):
-            tp0_val = None
-        if tp0_val is not None and tp0_val <= 0:
-            tp0_val = None
-    if tp0_val is None:
-        tp0_val = _pick_tp_yen("tp0", "TP0")
+    def _coerce_tp(value: Optional[int], *keys: str) -> Optional[int]:
+        if value is not None:
+            try:
+                n = int(value)
+            except (TypeError, ValueError):
+                n = None
+            if n is not None and n > 0:
+                return n
+        return _pick_tp_yen(*keys)
+
+    tp0_val = _coerce_tp(tp0, "tp0", "TP0", "ai_tp0_yen")
     if tp0_val is None or tp0_val <= 0:
         tp0_val = sell if sell > 0 else None
-    tp1_val = _pick_tp_yen("tp1", "TP1", "ta1", "TA1")
-    tp2_val = _pick_tp_yen("tp2", "TP2", "ta2", "TA2")
-    tp3_val = _pick_tp_yen("tp3", "TP3")
+    tp1_val = _coerce_tp(tp1, "tp1", "TP1", "ai_tp1_yen", "ta1", "TA1")
+    tp2_val = _coerce_tp(tp2, "tp2", "TP2", "ai_tp2_yen", "ta2", "TA2")
+    tp3_val = _coerce_tp(tp3, "tp3", "TP3", "ai_tp3_yen")
 
     def _pick_repricing_raw() -> Any:
         if item.get("repricing_enabled") is not None:

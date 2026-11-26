@@ -5,10 +5,11 @@
 
 購入台帳（Discord／電脳拡張）→ ここに表示 → ネット仕入一覧へ送る。
 購入済みだけを表示し、チェックした複数件をまとめて送れる。
-3/6/9・TP0 を指定可能。
+3/6/9・TP0〜TP3 を指定可能。
 
 AI提案は「届くまでの数日」に Keepa 本取得してから裏で用意する（即時必須ではない）。
 定時タスク HIRIO_purchase_ai_plan／手動「準備中を今すぐ消化」。
+失敗時は「失敗」表示＋理由。再度判定で1件だけ再実行できる。
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional
 from PySide6.QtCore import Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QHBoxLayout,
@@ -79,9 +81,16 @@ class _ProcessPendingWorker(QThread):
     finished_ok = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, limit: int = 10, parent=None) -> None:
+    def __init__(
+        self,
+        limit: int = 10,
+        *,
+        token: str = "",
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._limit = max(1, int(limit))
+        self._token = (token or "").strip()
 
     def run(self) -> None:
         try:
@@ -91,8 +100,13 @@ class _ProcessPendingWorker(QThread):
                 raise RuntimeError(
                     f"watcher の実行環境が見つかりません:\n{py}\n{script}"
                 )
+            cmd = [str(py), "-u", str(script)]
+            if self._token:
+                cmd.extend(["--token", self._token])
+            else:
+                cmd.extend(["--limit", str(self._limit)])
             proc = subprocess.run(
-                [str(py), "-u", str(script), "--limit", str(self._limit)],
+                cmd,
                 cwd=str(_WATCHER_DIR),
                 capture_output=True,
                 text=True,
@@ -107,6 +121,54 @@ class _ProcessPendingWorker(QThread):
             self.finished_ok.emit(out[-1500:] if out else "完了")
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
+
+
+def _reset_ai_plan(token: str) -> tuple[str, Optional[Dict[str, Any]]]:
+    shared = resolve_hirio_shared_dir()
+    text = str(shared)
+    if text not in sys.path:
+        sys.path.insert(0, text)
+    import hit_snapshot as hs  # noqa: WPS433
+
+    return hs.reset_purchase_ai_plan(token)
+
+
+def _ai_plan_enabled() -> bool:
+    shared = resolve_hirio_shared_dir()
+    if str(shared) not in sys.path:
+        sys.path.insert(0, str(shared))
+    import hit_snapshot as hs  # noqa: WPS433
+
+    return bool(hs.is_purchase_ai_plan_enabled())
+
+
+def _set_ai_plan_enabled(enabled: bool) -> Dict[str, Any]:
+    shared = resolve_hirio_shared_dir()
+    if str(shared) not in sys.path:
+        sys.path.insert(0, str(shared))
+    import hit_snapshot as hs  # noqa: WPS433
+
+    return hs.set_purchase_ai_plan_enabled(bool(enabled))
+
+
+def _ai_plan_env_overrides() -> bool:
+    shared = resolve_hirio_shared_dir()
+    if str(shared) not in sys.path:
+        sys.path.insert(0, str(shared))
+    import hit_snapshot as hs  # noqa: WPS433
+
+    return bool(hs.purchase_ai_plan_env_overrides())
+
+
+def _status_label(item: Dict[str, Any]) -> str:
+    if item.get("imported"):
+        return "送済"
+    shared = resolve_hirio_shared_dir()
+    if str(shared) not in sys.path:
+        sys.path.insert(0, str(shared))
+    import hit_snapshot as hs  # noqa: WPS433
+
+    return hs.ai_plan_display_status(item)
 
 
 class HitStandbyDialog(QDialog):
@@ -130,7 +192,7 @@ class HitStandbyDialog(QDialog):
         self._items: List[Dict[str, Any]] = []
         self._current: Optional[Dict[str, Any]] = None
         self._current_idx: int = -1
-        # token -> {rule369, tp0, ai: StandbyAiPlan|None}
+        # token -> {rule369, tp0..tp3, ai: StandbyAiPlan|None}
         self._plans: Dict[str, Dict[str, Any]] = {}
         self._ai_worker: Optional[_ProcessPendingWorker] = None
         self._updating_editors = False
@@ -139,9 +201,9 @@ class HitStandbyDialog(QDialog):
         shared = resolve_hirio_shared_dir()
         self.hint = QLabel(
             "購入入力済みの候補だけを表示します。"
-            "「選」にチェック →「仕入一覧に送る」。3/6/9 と TP0 は送信時にコメント／行へ載せます。\n"
-            "AI提案は届くまでの数日で Keepa を本取得してから用意します（入れた直後の即時結果は不要）。"
-            "定時タスク、または「準備中を今すぐ消化」で進めます。自動では仕入一覧へ送りません。\n"
+            "「選」にチェック →「仕入一覧に送る」。3/6/9 と TP0〜TP3 は送信時にコメント／行へ載せます。\n"
+            "AI提案は届くまでの数日で Keepa 本取得してから用意します。"
+            "失敗時は「失敗」表示＋理由。再判定できます。自動では仕入一覧へ送りません。\n"
             f"データ場所: {shared}"
         )
         self.hint.setWordWrap(True)
@@ -164,12 +226,20 @@ class HitStandbyDialog(QDialog):
         check_row.addWidget(self.clear_check_btn)
         self.ai_today_btn = QPushButton("準備中を今すぐ消化")
         self.ai_today_btn.setToolTip(
-            "届く前の準備用。Keepa を本取得してから Gemini で 3/6/9・TP0 を台帳に書きます。\n"
+            "届く前の準備用。Keepa を本取得してから Gemini で 3/6/9・TP0〜TP3 を台帳に書きます。\n"
             "通常は定時タスク（6時間ごと）で十分です。急ぐときだけ押してください。\n"
             "入力欄への反映は「提案を反映」を押したときだけです。"
         )
         self.ai_today_btn.clicked.connect(self._run_process_pending)
         check_row.addWidget(self.ai_today_btn)
+        self.ai_enabled_cb = QCheckBox("AI判定ON")
+        self.ai_enabled_cb.setToolTip(
+            "オフにすると Keepa／Gemini の自動判定と「再度判定」を止めます。\n"
+            "料金を抑えたいときや、しばらく使わないときにOFF。\n"
+            "ONに戻すと、準備中の商品は定時タスク／手動消化で再開します。"
+        )
+        self.ai_enabled_cb.toggled.connect(self._on_ai_enabled_toggled)
+        check_row.addWidget(self.ai_enabled_cb)
         check_row.addStretch()
         left_layout.addLayout(check_row)
 
@@ -209,29 +279,54 @@ class HitStandbyDialog(QDialog):
         self.rule_combo.setCurrentIndex(1)
         self.rule_combo.currentIndexChanged.connect(self._on_editors_changed)
         plan_row.addWidget(self.rule_combo)
-        plan_row.addWidget(QLabel("TP0"))
-        self.tp0_spin = QSpinBox()
-        self.tp0_spin.setRange(0, 9_999_999)
-        self.tp0_spin.setSingleStep(100)
-        self.tp0_spin.setSuffix(" 円")
-        self.tp0_spin.valueChanged.connect(self._on_editors_changed)
-        plan_row.addWidget(self.tp0_spin)
         plan_row.addStretch()
         right_layout.addLayout(plan_row)
+
+        tp_row = QHBoxLayout()
+        self.tp0_spin = QSpinBox()
+        self.tp1_spin = QSpinBox()
+        self.tp2_spin = QSpinBox()
+        self.tp3_spin = QSpinBox()
+        for label, spin in (
+            ("TP0", self.tp0_spin),
+            ("TP1", self.tp1_spin),
+            ("TP2", self.tp2_spin),
+            ("TP3", self.tp3_spin),
+        ):
+            spin.setRange(0, 9_999_999)
+            spin.setSingleStep(100)
+            spin.setSuffix(" 円")
+            spin.valueChanged.connect(self._on_editors_changed)
+            tp_row.addWidget(QLabel(label))
+            tp_row.addWidget(spin)
+        right_layout.addLayout(tp_row)
 
         self.ai_label = QLabel("AI提案: （Keepa取得後に定時／手動消化で用意）")
         self.ai_label.setWordWrap(True)
         self.ai_label.setStyleSheet("color: #a5b4c8; font-size: 11px;")
         right_layout.addWidget(self.ai_label)
 
+        self.error_label = QLabel("")
+        self.error_label.setWordWrap(True)
+        self.error_label.setStyleSheet("color: #fca5a5; font-size: 11px;")
+        self.error_label.hide()
+        right_layout.addWidget(self.error_label)
+
         ai_btn_row = QHBoxLayout()
         self.apply_ai_btn = QPushButton("提案を反映")
         self.apply_ai_btn.setToolTip(
-            "台帳に保存済みの AI提案（ルール／TP0）を上の入力欄に入れます（まだ送信しません）"
+            "台帳に保存済みの AI提案（ルール／TP0〜TP3）を上の入力欄に入れます（まだ送信しません）"
         )
         self.apply_ai_btn.clicked.connect(self._apply_ai_suggestion)
         self.apply_ai_btn.setEnabled(False)
         ai_btn_row.addWidget(self.apply_ai_btn)
+        self.rejudge_btn = QPushButton("再度判定")
+        self.rejudge_btn.setToolTip(
+            "この1件だけ Keepa 再取得→AI判定し直します。失敗時や見直したいときに使います。"
+        )
+        self.rejudge_btn.clicked.connect(self._rejudge_current)
+        self.rejudge_btn.setEnabled(False)
+        ai_btn_row.addWidget(self.rejudge_btn)
         ai_btn_row.addStretch()
         right_layout.addLayout(ai_btn_row)
 
@@ -293,10 +388,79 @@ class HitStandbyDialog(QDialog):
         bottom.addWidget(close_btn)
         root.addLayout(bottom)
 
+        self._sync_ai_enabled_ui()
         self.reload()
+
+    def _sync_ai_enabled_ui(self) -> None:
+        """チェックボックスと消化／再判定ボタンを AI ON/OFF に合わせる。"""
+        try:
+            enabled = _ai_plan_enabled()
+            env_lock = _ai_plan_env_overrides()
+        except Exception as exc:  # noqa: BLE001
+            self.ai_status.setText(f"AI設定の読込失敗: {exc}")
+            return
+        self.ai_enabled_cb.blockSignals(True)
+        try:
+            self.ai_enabled_cb.setChecked(enabled)
+            self.ai_enabled_cb.setEnabled(not env_lock)
+            if env_lock:
+                self.ai_enabled_cb.setToolTip(
+                    "環境変数 PURCHASE_AI_PLAN_ENABLED で固定されています。\n"
+                    "画面からは変更できません（.env を編集してください）。"
+                )
+            else:
+                self.ai_enabled_cb.setToolTip(
+                    "オフにすると Keepa／Gemini の自動判定と「再度判定」を止めます。\n"
+                    "料金を抑えたいときや、しばらく使わないときにOFF。\n"
+                    "ONに戻すと、準備中の商品は定時タスク／手動消化で再開します。"
+                )
+        finally:
+            self.ai_enabled_cb.blockSignals(False)
+        busy = self._ai_worker is not None and self._ai_worker.isRunning()
+        self.ai_today_btn.setEnabled(bool(enabled) and not busy)
+        # 再判定は行選択時に別途有効化。ここではOFFなら必ず無効
+        if not enabled:
+            self.rejudge_btn.setEnabled(False)
+        if not enabled:
+            self.ai_status.setText("AI判定OFF（自動・手動とも停止）")
+        elif env_lock:
+            self.ai_status.setText("AI判定ON（環境変数で固定）")
+
+    def _on_ai_enabled_toggled(self, checked: bool) -> None:
+        try:
+            info = _set_ai_plan_enabled(bool(checked))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "スタンバイ", f"AI判定の設定保存に失敗しました:\n{exc}")
+            self._sync_ai_enabled_ui()
+            return
+        if info.get("env_overrides"):
+            QMessageBox.information(
+                self,
+                "スタンバイ",
+                "設定ファイルは更新しましたが、環境変数 PURCHASE_AI_PLAN_ENABLED が優先されます。\n"
+                "画面のON/OFFを効かせるには .env からその行を削除してください。",
+            )
+        self._sync_ai_enabled_ui()
+        self._plans.clear()
+        self.reload()
+        if checked:
+            self.ai_status.setText("AI判定ON → 準備中は定時／手動消化で判定します")
+        else:
+            self.ai_status.setText("AI判定OFF → Keepa／Gemini を止めました")
 
     def _token_of(self, item: Dict[str, Any]) -> str:
         return str(item.get("token") or "").strip()
+
+    def _pick_tp(self, item: Dict[str, Any], *keys: str, default: int = 0) -> int:
+        for key in keys:
+            raw = item.get(key)
+            try:
+                n = int(raw) if raw is not None else 0
+            except (TypeError, ValueError):
+                continue
+            if n > 0:
+                return n
+        return max(int(default or 0), 0)
 
     def _plan_from_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """台帳の AI 結果があれば初期値にする。"""
@@ -306,16 +470,16 @@ class HitStandbyDialog(QDialog):
         except (TypeError, ValueError):
             default_tp0 = 0
         rule = normalize_rule369(item.get("ai_rule369") or "6")
-        tp0 = item.get("ai_tp0_yen")
-        try:
-            tp0_n = int(tp0) if tp0 is not None else 0
-        except (TypeError, ValueError):
-            tp0_n = 0
+        tp0_n = self._pick_tp(item, "ai_tp0_yen", "tp0", "TP0", default=default_tp0)
         if tp0_n <= 0:
             tp0_n = default_tp0
+        tp1_n = self._pick_tp(item, "ai_tp1_yen", "tp1", "TP1", default=int(tp0_n * 0.85) if tp0_n else 0)
+        tp2_n = self._pick_tp(item, "ai_tp2_yen", "tp2", "TP2", default=int(tp0_n * 0.70) if tp0_n else 0)
+        tp3_n = self._pick_tp(item, "ai_tp3_yen", "tp3", "TP3", default=int(tp0_n * 0.55) if tp0_n else 0)
         ai: Optional[StandbyAiPlan] = None
         status = str(item.get("ai_plan_status") or "").lower()
-        if status == "done" or (item.get("ai_rule369") and item.get("ai_tp0_yen")):
+        has_plan = bool(item.get("ai_rule369") and item.get("ai_tp0_yen"))
+        if status in ("done", "error") or has_plan:
             ai = StandbyAiPlan(
                 token=self._token_of(item),
                 asin=str(item.get("asin") or ""),
@@ -324,12 +488,23 @@ class HitStandbyDialog(QDialog):
                 sell_yen=item.get("sell_yen") if isinstance(item.get("sell_yen"), int) else None,
                 rule369=rule,
                 tp0_yen=tp0_n if tp0_n > 0 else max(default_tp0, 1),
+                tp1_yen=tp1_n,
+                tp2_yen=tp2_n,
+                tp3_yen=tp3_n,
                 reason=str(item.get("ai_reason") or "台帳のAI提案"),
                 source=str(item.get("ai_source") or "ledger"),
                 keepa_notes=str(item.get("keepa_notes") or ""),
+                ai_error=str(item.get("ai_error") or ""),
                 at=str(item.get("at") or ""),
             )
-        return {"rule369": rule, "tp0": tp0_n if tp0_n > 0 else 0, "ai": ai}
+        return {
+            "rule369": rule,
+            "tp0": tp0_n if tp0_n > 0 else 0,
+            "tp1": tp1_n if tp1_n > 0 else 0,
+            "tp2": tp2_n if tp2_n > 0 else 0,
+            "tp3": tp3_n if tp3_n > 0 else 0,
+            "ai": ai,
+        }
 
     def _ensure_plan(self, item: Dict[str, Any]) -> Dict[str, Any]:
         token = self._token_of(item)
@@ -354,17 +529,9 @@ class HitStandbyDialog(QDialog):
         try:
             self.table.setRowCount(len(self._items))
             for row, item in enumerate(self._items):
-                imported = bool(item.get("imported"))
-                ai_st = str(item.get("ai_plan_status") or "").lower()
-                if imported:
-                    status = "送済"
-                elif ai_st == "done" or (item.get("ai_rule369") and item.get("ai_tp0_yen")):
-                    status = "判定済"
-                elif ai_st == "error":
-                    status = "AI失敗"
-                else:
-                    status = "準備中"
+                status = _status_label(item)
                 plan = self._ensure_plan(item)
+                imported = bool(item.get("imported"))
 
                 check = QTableWidgetItem()
                 check.setFlags(
@@ -490,28 +657,32 @@ class HitStandbyDialog(QDialog):
         margin_txt = (
             f"{float(margin) * 100:.1f}%" if isinstance(margin, (int, float)) else "-"
         )
+        status_txt = _status_label(item)
         if item.get("imported"):
-            status = "ネット仕入へ送済"
+            status = f"ネット仕入へ送済（{status_txt}）"
         else:
-            status = "購入済・未送信"
+            status = f"購入済・未送信（{status_txt}）"
         buy_txt = f"{buy:,}円" if isinstance(buy, int) else "-"
         sell_txt = f"{sell:,}円" if isinstance(sell, int) else "-"
         profit_txt = f"{profit:,}円（{margin_txt}）" if isinstance(profit, int) else "-"
-        ai_st = str(item.get("ai_plan_status") or "").lower()
-        if ai_st == "done" or (item.get("ai_rule369") and item.get("ai_tp0_yen")):
-            ai_mark = "　【AI判定済・Keepa取得済】"
-        elif ai_st == "error":
-            ai_mark = "　【AI失敗・再消化可】"
-        else:
-            ai_mark = "　【準備中＝届くまでKeepa待ち可】"
+        memo = str(item.get("memo") or "").strip()
+        memo_line = f"\nメモ: {memo}" if memo else ""
         self.detail_meta.setText(
-            f"状態: {status}{ai_mark}\n"
+            f"状態: {status}\n"
             f"ASIN: {item.get('asin') or '-'}　KW: {item.get('keyword') or '-'}\n"
             f"仕入: {buy_txt}　販売予定: {sell_txt}　粗利: {profit_txt}\n"
             f"{item.get('fee_note') or ''}"
+            f"{memo_line}"
         )
         self.open_url_btn.setEnabled(bool(str(item.get("url") or "").strip()))
         self.delete_btn.setEnabled(bool(self._token_of(item)))
+        try:
+            ai_on = _ai_plan_enabled()
+        except Exception:  # noqa: BLE001
+            ai_on = True
+        self.rejudge_btn.setEnabled(
+            bool(ai_on) and bool(self._token_of(item)) and not item.get("imported")
+        )
 
         self._updating_editors = True
         try:
@@ -519,17 +690,36 @@ class HitStandbyDialog(QDialog):
             idx_map = {"3": 0, "6": 1, "9": 2}
             self.rule_combo.setCurrentIndex(idx_map.get(rule, 1))
             self.tp0_spin.setValue(int(plan.get("tp0") or 0))
+            self.tp1_spin.setValue(int(plan.get("tp1") or 0))
+            self.tp2_spin.setValue(int(plan.get("tp2") or 0))
+            self.tp3_spin.setValue(int(plan.get("tp3") or 0))
         finally:
             self._updating_editors = False
 
         ai: Optional[StandbyAiPlan] = plan.get("ai")
-        if ai is not None:
+        ai_st = str(item.get("ai_plan_status") or "").lower()
+        err_txt = str(item.get("ai_error") or "").strip()
+        if ai_st == "error" or err_txt:
+            self.error_label.setText(f"失敗理由: {err_txt or (ai.ai_error if ai else '') or '不明'}")
+            self.error_label.show()
+        else:
+            self.error_label.hide()
+            self.error_label.setText("")
+
+        if ai is not None and ai_st == "done":
             self.ai_label.setText(
-                f"AI提案: ルール{ai.rule369} / TP0 {ai.tp0_yen:,}円（{ai.source}）\n"
-                f"{ai.reason}"
+                f"AI提案: ルール{ai.rule369} / "
+                f"TP0 {ai.tp0_yen:,} / TP1 {ai.tp1_yen:,} / TP2 {ai.tp2_yen:,} / TP3 {ai.tp3_yen:,}円"
+                f"（{ai.source}）\n{ai.reason}"
                 + (f"\nKeepa: {ai.keepa_notes}" if ai.keepa_notes else "")
             )
             self.apply_ai_btn.setEnabled(True)
+        elif ai is not None and ai_st == "error":
+            self.ai_label.setText(
+                "AI提案: 失敗しています。下の失敗理由を確認し、「再度判定」でやり直せます。\n"
+                f"（仮値ルール{ai.rule369} TP0 {ai.tp0_yen:,}円は参考。判定済ではありません）"
+            )
+            self.apply_ai_btn.setEnabled(False)
         else:
             self.ai_label.setText(
                 "AI提案: まだありません。"
@@ -543,10 +733,12 @@ class HitStandbyDialog(QDialog):
     def _on_editors_changed(self, *_args) -> None:
         if self._updating_editors or not self._current:
             return
-        token = self._token_of(self._current)
         plan = self._ensure_plan(self._current)
         plan["rule369"] = normalize_rule369(self.rule_combo.currentData())
         plan["tp0"] = int(self.tp0_spin.value())
+        plan["tp1"] = int(self.tp1_spin.value())
+        plan["tp2"] = int(self.tp2_spin.value())
+        plan["tp3"] = int(self.tp3_spin.value())
         if self._current_idx >= 0:
             self._refresh_row_plan_cells(self._current_idx)
 
@@ -557,17 +749,94 @@ class HitStandbyDialog(QDialog):
         ai: Optional[StandbyAiPlan] = plan.get("ai")
         if ai is None:
             return
+        if str(self._current.get("ai_plan_status") or "").lower() == "error":
+            QMessageBox.information(
+                self,
+                "スタンバイ",
+                "失敗状態のため「提案を反映」は使えません。先に「再度判定」してください。",
+            )
+            return
         plan["rule369"] = normalize_rule369(ai.rule369)
         plan["tp0"] = int(ai.tp0_yen)
+        plan["tp1"] = int(ai.tp1_yen or 0)
+        plan["tp2"] = int(ai.tp2_yen or 0)
+        plan["tp3"] = int(ai.tp3_yen or 0)
         self._updating_editors = True
         try:
             idx_map = {"3": 0, "6": 1, "9": 2}
             self.rule_combo.setCurrentIndex(idx_map.get(plan["rule369"], 1))
             self.tp0_spin.setValue(plan["tp0"])
+            self.tp1_spin.setValue(plan["tp1"])
+            self.tp2_spin.setValue(plan["tp2"])
+            self.tp3_spin.setValue(plan["tp3"])
         finally:
             self._updating_editors = False
         if self._current_idx >= 0:
             self._refresh_row_plan_cells(self._current_idx)
+
+    def _rejudge_current(self) -> None:
+        if not self._current:
+            return
+        if not _ai_plan_enabled():
+            QMessageBox.information(
+                self,
+                "スタンバイ",
+                "AI判定がOFFです。上の「AI判定ON」にチェックを入れてから再度判定してください。",
+            )
+            return
+        if self._ai_worker is not None and self._ai_worker.isRunning():
+            QMessageBox.information(self, "スタンバイ", "いま Keepa／AI 消化を実行中です。")
+            return
+        token = self._token_of(self._current)
+        if not token:
+            return
+        title = (str(self._current.get("title") or "")[:40]) or "(無題)"
+        ok = QMessageBox.question(
+            self,
+            "再度判定",
+            f"この商品を Keepa＋AI で再判定しますか？\n\n{title}\nASIN: {self._current.get('asin') or '-'}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ok != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            status, _ = _reset_ai_plan(token)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "スタンバイ", f"再判定の準備に失敗しました:\n{exc}")
+            return
+        if status != "updated":
+            QMessageBox.warning(self, "スタンバイ", f"再判定を開始できません（{status}）")
+            return
+
+        self.ai_today_btn.setEnabled(False)
+        self.rejudge_btn.setEnabled(False)
+        self.ai_status.setText(f"再度判定中… {token[:12]}")
+        worker = _ProcessPendingWorker(token=token, parent=self)
+        self._ai_worker = worker
+
+        def on_ok(msg: str) -> None:
+            self.ai_status.setText("再判定完了 → 再読込")
+            self._plans.clear()
+            self.reload()
+            self._sync_ai_enabled_ui()
+            QMessageBox.information(
+                self,
+                "スタンバイ",
+                "再判定が終わりました。状態が「判定済」か「失敗」かを確認してください。\n\n"
+                f"（ログ抜粋）\n{msg[-800:]}",
+            )
+
+        def on_fail(err: str) -> None:
+            self.ai_status.setText("再判定失敗")
+            self._plans.clear()
+            self.reload()
+            self._sync_ai_enabled_ui()
+            QMessageBox.warning(self, "スタンバイ", f"再判定に失敗しました:\n{err}")
+
+        worker.finished_ok.connect(on_ok)
+        worker.failed.connect(on_fail)
+        worker.start()
 
     def _checked_rows(self) -> List[int]:
         rows: List[int] = []
@@ -679,6 +948,13 @@ class HitStandbyDialog(QDialog):
         self.reload()
 
     def _run_process_pending(self) -> None:
+        if not _ai_plan_enabled():
+            QMessageBox.information(
+                self,
+                "スタンバイ",
+                "AI判定がOFFです。上の「AI判定ON」にチェックを入れると再開できます。",
+            )
+            return
         if self._ai_worker is not None and self._ai_worker.isRunning():
             QMessageBox.information(self, "スタンバイ", "いま Keepa／AI 消化を実行中です。")
             return
@@ -686,8 +962,7 @@ class HitStandbyDialog(QDialog):
             1
             for it in self._items
             if (not it.get("imported"))
-            and str(it.get("ai_plan_status") or "").lower() != "done"
-            and not (it.get("ai_rule369") and it.get("ai_tp0_yen"))
+            and _status_label(it) == "準備中"
             and it.get("asin")
         )
         if pending_n <= 0:
@@ -695,31 +970,33 @@ class HitStandbyDialog(QDialog):
                 self,
                 "スタンバイ",
                 "準備中の購入がありません。\n"
+                "失敗の再実行は行を選んで「再度判定」を使ってください。\n"
                 "新しい仕入れは自動で pending になり、定時タスクが Keepa→AI します。",
             )
             return
         self.ai_today_btn.setEnabled(False)
+        self.rejudge_btn.setEnabled(False)
         self.ai_status.setText(f"Keepa本取得＋AI消化中…（最大10件・準備中 {pending_n}）")
         worker = _ProcessPendingWorker(limit=10, parent=self)
         self._ai_worker = worker
 
         def on_ok(msg: str) -> None:
-            self.ai_today_btn.setEnabled(True)
             self.ai_status.setText("消化完了 → 再読込")
             self._plans.clear()
             self.reload()
+            self._sync_ai_enabled_ui()
             QMessageBox.information(
                 self,
                 "スタンバイ",
                 "Keepa本取得とAI提案の消化が終わりました。\n"
-                "「判定済」になった行を開き、「提案を反映」で入力欄に入れられます。\n"
+                "「判定済」は提案を反映、「失敗」は理由を確認して再度判定できます。\n"
                 "自動では仕入一覧へ送りません。\n\n"
                 f"（ログ抜粋）\n{msg[-800:]}",
             )
 
         def on_fail(err: str) -> None:
-            self.ai_today_btn.setEnabled(True)
             self.ai_status.setText("消化失敗")
+            self._sync_ai_enabled_ui()
             QMessageBox.warning(self, "スタンバイ", f"消化に失敗しました:\n{err}")
 
         worker.finished_ok.connect(on_ok)
@@ -755,6 +1032,9 @@ class HitStandbyDialog(QDialog):
                     item,
                     rule369=str(plan.get("rule369") or "6"),
                     tp0=int(plan.get("tp0") or 0) or None,
+                    tp1=int(plan.get("tp1") or 0) or None,
+                    tp2=int(plan.get("tp2") or 0) or None,
+                    tp3=int(plan.get("tp3") or 0) or None,
                 )
                 self._on_send_row(inv_row)
                 mark_imported(str(item.get("token") or ""))
