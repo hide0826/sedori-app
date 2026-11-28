@@ -32,7 +32,10 @@ from services.flea_market_evidence_service import (
     save_slot_images,
     upload_saved_images_to_gcs,
 )
-from services.mercari_evidence_capture import normalize_mercari_item_url
+from services.mercari_evidence_capture import (
+    is_mercari_shops_url,
+    normalize_mercari_item_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -169,8 +172,16 @@ class _MercariCaptureThread(QThread):
                 continue
             self.status.emit("撮影画像を受け取っています…")
             paths = self._write_images(item.get("images") or [])
-            if len(paths) < 3:
-                results.append({**job, "error": "3枚そろいませんでした。"})
+            skip_tx = bool(
+                job.get("skip_transaction") or is_mercari_shops_url(job.get("url"))
+            )
+            need = 2 if skip_tx else 3
+            filled = sum(1 for p in paths if str(p or "").strip())
+            if filled < need:
+                results.append({
+                    **job,
+                    "error": f"証憑が{need}枚そろいませんでした（取得{filled}枚）。",
+                })
                 continue
             self.status.emit("撮影画像を保存しています…")
             fields = self._save_job(
@@ -180,6 +191,8 @@ class _MercariCaptureThread(QThread):
             )
             results.append({**job, "fields": fields})
             for path in paths:
+                if not str(path or "").strip():
+                    continue
                 try:
                     Path(path).unlink(missing_ok=True)
                 except OSError:
@@ -195,10 +208,14 @@ class _MercariCaptureThread(QThread):
         return results
 
     def _write_images(self, images: List[str]) -> List[str]:
+        """スロット位置を保つ（空文字は空スロット。SHOPの取引枠など）。"""
         paths: List[str] = []
-        for raw in images[:3]:
-            text = str(raw or "")
-            if "," in text and text.strip().startswith("data:"):
+        for raw in list(images or [])[:3]:
+            text = str(raw or "").strip()
+            if not text:
+                paths.append("")
+                continue
+            if "," in text and text.startswith("data:"):
                 header, text = text.split(",", 1)
                 suffix = ".jpg" if "jpeg" in header.lower() or "jpg" in header.lower() else ".png"
             else:
@@ -206,6 +223,10 @@ class _MercariCaptureThread(QThread):
             try:
                 blob = base64.b64decode(text)
             except Exception:
+                paths.append("")
+                continue
+            if not blob:
+                paths.append("")
                 continue
             if blob.startswith(b"\xff\xd8\xff"):
                 suffix = ".jpg"
@@ -215,6 +236,8 @@ class _MercariCaptureThread(QThread):
             os.close(handle)
             Path(name).write_bytes(blob)
             paths.append(name)
+        while len(paths) < 3:
+            paths.append("")
         return paths
 
     def _make_handler(self):
@@ -248,7 +271,14 @@ class _MercariCaptureThread(QThread):
                 parsed = urlparse(self.path)
                 if parsed.path == "/go":
                     jobs = [
-                        {"id": str(index), "url": job["url"]}
+                        {
+                            "id": str(index),
+                            "url": job["url"],
+                            "skip_transaction": bool(
+                                job.get("skip_transaction")
+                                or is_mercari_shops_url(job.get("url"))
+                            ),
+                        }
                         for index, job in enumerate(owner.jobs)
                     ]
                     payload = json.dumps({
@@ -309,12 +339,15 @@ class _MercariCaptureThread(QThread):
         while len(existing_urls) < 3:
             existing_urls.append("")
         # 既に入っているスロットは上書きしない（None = 既存ファイルを維持）
+        # SHOPは取引スロットを空のまま残す
         slot_sources: List[Optional[str]] = []
         for i in range(3):
             if _evidence_slot_filled(existing_images[i]):
                 slot_sources.append(None)
             else:
-                slot_sources.append(paths[i] if i < len(paths) else None)
+                cand = paths[i] if i < len(paths) else None
+                text = str(cand or "").strip()
+                slot_sources.append(text if text else None)
         try:
             existing_folder = str(job.get("existing_folder") or "").strip()
             # 完了ダイアログを GCS 待ちで止めない。先にローカル保存だけ行う。
@@ -367,7 +400,12 @@ class _MercariCaptureThread(QThread):
 
         # 取引画面を新規に撮ったときだけ OCR（既存スロットは触らない）
         try:
-            if not _evidence_slot_filled(existing_images[2]) and len(paths) >= 3 and paths[2]:
+            if (
+                not job.get("skip_transaction")
+                and not _evidence_slot_filled(existing_images[2])
+                and len(paths) >= 3
+                and paths[2]
+            ):
                 self.status.emit("取引画面を読み取っています…")
                 text = _ocr_transaction_text_fast(paths[2])
                 parsed = parse_transaction_ocr_text(text)
@@ -380,7 +418,64 @@ class _MercariCaptureThread(QThread):
                         fields["ユーザー名"] = parsed.seller_name
         except Exception:
             pass
+        # 必要枚数がそろったら購入台帳へ証憑OKを同期（未登録のみ）
+        merged_images = [
+            str(fields.get(col) or existing_images[i] or "").strip()
+            for i, col in enumerate(EVIDENCE_IMAGE_COLS)
+        ]
+        if _evidence_complete(
+            merged_images,
+            url=job.get("url"),
+            skip_transaction=bool(job.get("skip_transaction")),
+        ):
+            _sync_purchase_evidence_ok(job, fields)
         return fields
+
+
+def _evidence_required_slots(url: Any = None, *, skip_transaction: bool = False) -> int:
+    """必要スロット数。SHOP／skip_transaction なら2、それ以外は3。"""
+    if skip_transaction or is_mercari_shops_url(url):
+        return 2
+    return 3
+
+
+def _evidence_complete(
+    images: Any,
+    *,
+    url: Any = None,
+    skip_transaction: bool = False,
+) -> bool:
+    """必要枚数がそろっているか（SHOPは先頭2枚）。"""
+    paths = list(images or [])
+    need = _evidence_required_slots(url, skip_transaction=skip_transaction)
+    for i in range(need):
+        if i >= len(paths) or not _evidence_slot_filled(paths[i]):
+            return False
+    return True
+
+
+def _sync_purchase_evidence_ok(job: Dict[str, Any], fields: Dict[str, str]) -> None:
+    """情報撮影成功後、購入台帳の未登録レコードへ証憑OKを付ける。"""
+    try:
+        shared_candidates = [Path(r"C:\HIRIO\shared"), Path(r"D:\HIRIO\shared")]
+        for shared in shared_candidates:
+            if shared.is_dir() and (shared / "hit_snapshot.py").is_file():
+                import sys
+
+                if str(shared) not in sys.path:
+                    sys.path.insert(0, str(shared))
+                break
+        from hit_snapshot import mark_purchase_evidence_ok_by_listing_url
+
+        paths = [str(fields.get(col) or "").strip() for col in EVIDENCE_IMAGE_COLS]
+        mark_purchase_evidence_ok_by_listing_url(
+            str(job.get("url") or ""),
+            image_paths=[p for p in paths if p],
+            source="screenshot",
+            via="info_capture",
+        )
+    except Exception:
+        logger.exception("購入台帳への証憑OK同期に失敗")
 
 
 def _evidence_slot_filled(path: Any) -> bool:
@@ -627,7 +722,8 @@ class InventoryMercariCaptureMixin:
         if not any(images):
             images = [str(row.get(col) or "").strip() for col in EVIDENCE_IMAGE_COLS]
         urls = [str(row.get(col) or "").strip() for col in EVIDENCE_URL_COLS]
-        if all(_evidence_slot_filled(path) for path in images):
+        skip_tx = is_mercari_shops_url(url)
+        if _evidence_complete(images, url=url, skip_transaction=skip_tx):
             return None, True
         return {
             "index": row_label,
@@ -641,12 +737,13 @@ class InventoryMercariCaptureMixin:
             "existing_images": images,
             "existing_urls": urls,
             "existing_folder": str(row.get(EVIDENCE_FOLDER_COL) or "").strip(),
+            "skip_transaction": skip_tx,
         }, False
 
     def _mercari_capture_jobs(self, *, all_rows: bool = False) -> tuple[List[Dict[str, Any]], int]:
         """
-        撮影ジョブ一覧と、証憑3枚そろい済みでスキップした件数を返す。
-        すでに画像があるスロットはジョブに残し、保存時に上書きしない。
+        撮影ジョブ一覧と、証憑そろい済みでスキップした件数を返す。
+        SHOPは2枚、個人は3枚。すでに画像があるスロットはジョブに残し、保存時に上書きしない。
 
         all_rows=False のとき: 行選択があれば選択行のみ。無ければ全行。
         all_rows=True のとき: 選択に関係なくフィルタ後の全行。
@@ -673,7 +770,8 @@ class InventoryMercariCaptureMixin:
             existing_urls = [
                 str(row.get(col) or "").strip() for col in EVIDENCE_URL_COLS
             ]
-            if all(_evidence_slot_filled(path) for path in existing_images):
+            skip_tx = is_mercari_shops_url(url)
+            if _evidence_complete(existing_images, url=url, skip_transaction=skip_tx):
                 skipped_complete += 1
                 continue
             label = data.index[pos]
@@ -689,6 +787,7 @@ class InventoryMercariCaptureMixin:
                 "existing_images": existing_images,
                 "existing_urls": existing_urls,
                 "existing_folder": str(row.get(EVIDENCE_FOLDER_COL) or "").strip(),
+                "skip_transaction": skip_tx,
             })
         return jobs, skipped_complete
 

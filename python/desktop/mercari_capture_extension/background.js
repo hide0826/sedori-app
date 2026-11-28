@@ -450,6 +450,26 @@ async function captureJob(job, baseUrl, token) {
   tab = await chrome.tabs.get(created.id);
   const desc = await shot(tab);
   await sleep(1200);
+
+  // メルカリSHOPは商品ページ2枚で足りる（取引画面なし）
+  const skipTransaction = !!(job && (job.skip_transaction || job.skipTransaction));
+  if (skipTransaction) {
+    await postJson(baseUrl, "/result", {
+      token,
+      id: job.id,
+      status: "ok",
+      images: [top, desc, ""],
+      seller_name: "",
+    });
+    try {
+      await chrome.tabs.remove(created.id);
+    } catch (err) {
+      // タブが残っていても撮影結果は届いている
+    }
+    await sleep(1600);
+    return true;
+  }
+
   const clicked = await openTransaction(created.id);
   if (!clicked) {
     await postJson(baseUrl, "/result", {

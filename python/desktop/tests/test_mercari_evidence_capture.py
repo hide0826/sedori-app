@@ -6,12 +6,21 @@ from desktop.services.mercari_evidence_capture import (
 
 
 def test_normalize_mercari_item_url():
+    from desktop.services.mercari_evidence_capture import is_mercari_shops_url
+
     assert normalize_mercari_item_url(
         "https://jp.mercari.com/item/m97420345081"
     ) == "https://jp.mercari.com/item/m97420345081"
     assert normalize_mercari_item_url("  https://jp.mercari.com/item/m123456789?ref=x ") == (
         "https://jp.mercari.com/item/m123456789"
     )
+    assert normalize_mercari_item_url(
+        "https://jp.mercari.com/shops/product/2JZweEZnYmQhMgrzAbCdEf"
+    ) == "https://jp.mercari.com/shops/product/2JZweEZnYmQhMgrzAbCdEf"
+    assert is_mercari_shops_url(
+        "https://jp.mercari.com/shops/product/2JZweEZnYmQhMgrzAbCdEf"
+    )
+    assert not is_mercari_shops_url("https://jp.mercari.com/item/m97420345081")
     assert normalize_mercari_item_url("https://auctions.yahoo.co.jp/jp/auction/x") == ""
     assert normalize_mercari_item_url("") == ""
 

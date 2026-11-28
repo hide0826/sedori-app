@@ -11,6 +11,10 @@ _ITEM_URL_RE = re.compile(
     r"https?://(?:www\.)?(?:jp\.)?mercari\.com/item/(m\d{6,})",
     re.IGNORECASE,
 )
+_SHOPS_URL_RE = re.compile(
+    r"https?://(?:www\.)?(?:jp\.)?mercari\.com/shops/product/([A-Za-z0-9_-]+)",
+    re.IGNORECASE,
+)
 
 
 class MercariLoginRequired(Exception):
@@ -31,9 +35,20 @@ def normalize_mercari_item_url(value: object) -> str:
     if not text or text.lower() in ("nan", "none"):
         return ""
     match = _ITEM_URL_RE.search(text)
-    if not match:
-        return ""
-    return f"https://jp.mercari.com/item/{match.group(1)}"
+    if match:
+        return f"https://jp.mercari.com/item/{match.group(1)}"
+    shop = _SHOPS_URL_RE.search(text)
+    if shop:
+        return f"https://jp.mercari.com/shops/product/{shop.group(1)}"
+    return ""
+
+
+def is_mercari_shops_url(value: object) -> bool:
+    """メルカリShopsの商品URLか。"""
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return bool(_SHOPS_URL_RE.search(text) or "/shops/product/" in text.lower())
 
 
 def looks_like_mercari_login(url: str, body_text: str = "") -> bool:

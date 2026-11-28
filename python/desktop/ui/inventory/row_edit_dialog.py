@@ -706,7 +706,7 @@ class InventoryRowEditDialog(QDialog):
                 QMessageBox.information(
                     self,
                     "情報撮影",
-                    "証憑画像がすでに3枚そろっているため、撮影しません。\n"
+                    "証憑画像がすでにそろっているため、撮影しません。\n"
                     "撮り直したい枠は「削除」してから、もう一度押してください。",
                 )
             else:

@@ -997,6 +997,40 @@ class InventoryListingMixin:
         # 科学的記数法でない場合は、そのまま返す（ただし文字列として）
         return str_value
 
+    def _online_listing_receive_gate(self, row: Dict[str, Any]) -> tuple[bool, str]:
+        """
+        ネット仕入の出品CSV関所。
+
+        購入台帳に未登録（SKU付きAmazon登録前）の対応行があるときだけ、
+        検品OK＋証憑OKを要求する。台帳に無い行・登録済みは従来どおり通す。
+        """
+        try:
+            shared_candidates = [Path(r"C:\HIRIO\shared"), Path(r"D:\HIRIO\shared")]
+            for shared in shared_candidates:
+                if shared.is_dir() and (shared / "hit_snapshot.py").is_file():
+                    if str(shared) not in sys.path:
+                        sys.path.insert(0, str(shared))
+                    break
+            from hit_snapshot import (
+                find_purchase_for_inventory_row,
+                listing_csv_block_reason,
+                purchase_receive_workflow_applies,
+            )
+        except Exception:
+            return True, ""
+        try:
+            purchase = find_purchase_for_inventory_row(row)
+        except Exception:
+            return True, ""
+        if purchase is None:
+            return True, ""
+        if not purchase_receive_workflow_applies(purchase):
+            return True, ""
+        reason = listing_csv_block_reason(purchase)
+        if reason:
+            return False, reason
+        return True, ""
+
     def export_listing_csv(self):
         """出品CSV生成（conditionNote統合版）"""
         if self.filtered_data is None:
@@ -1020,6 +1054,33 @@ class InventoryListingMixin:
                     status_excluded_count += 1
             
             included_list = status_included_list
+            # ネット仕入: 購入台帳と突合し、未登録は検品OK＋証憑OKのみCSVへ（足りない行だけ除外）
+            receive_skipped: List[str] = []
+            if getattr(self, "purchase_mode", "store") == "online":
+                gated: List[dict] = []
+                for r in included_list:
+                    ok, reason = self._online_listing_receive_gate(r)
+                    if ok:
+                        gated.append(r)
+                    else:
+                        title = str(r.get("商品名") or r.get("ASIN") or "")[:40]
+                        receive_skipped.append(f"{title or '（無名）'}: {reason}")
+                included_list = gated
+            if not included_list:
+                detail = ""
+                if receive_skipped:
+                    detail = "\n\n除外:\n- " + "\n- ".join(receive_skipped[:12])
+                    if len(receive_skipped) > 12:
+                        detail += f"\n- …他 {len(receive_skipped) - 12} 件"
+                QMessageBox.warning(
+                    self,
+                    "出品CSV生成",
+                    "出力できる行がありません。"
+                    "未登録の購入は検品OKと証憑OKが必要です。"
+                    "購入一覧で印を付けるか、ネット仕入の情報撮影を行ってください。"
+                    + detail,
+                )
+                return
             excluded_count = len(data_list) - len(included_list)
             
             # 列名をマッピング（日本語→英語）
@@ -1180,10 +1241,17 @@ class InventoryListingMixin:
                     
                     self._set_listing_csv_drag_file(str(target))
                     auto_hint = "「ブラウザで開く」後、CSVアイコンをドラッグしてプライスターへ送ってください。"
+                    receive_note = ""
+                    if receive_skipped:
+                        receive_note = (
+                            f"\n検品／証憑不足で除外: {len(receive_skipped)}件"
+                            "（購入一覧で検品OK・証憑OK、または情報撮影）"
+                        )
                     QMessageBox.information(
                         self,
                         "出品CSV生成完了",
-                        f"出品CSV生成が完了しました\n出力数: {result['exported_count']}件 (除外 {excluded_count}件)\n"
+                        f"出品CSV生成が完了しました\n出力数: {result['exported_count']}件 (除外 {excluded_count}件)"
+                        f"{receive_note}\n"
                         f"保存先: {str(target)}\n\n"
                         f"{auto_hint}",
                     )

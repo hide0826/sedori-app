@@ -2,12 +2,13 @@
 
 本体デスクトップ（PySide6）＋事務PWA の詳細。HIRIO 全体の地図は [`C:\HIRIO\PROGRESS.md`](../../PROGRESS.md)。
 
-更新日: 2026-11-26（スタンバイ AI判定 ON/OFF）
+更新日: 2026-11-28（証憑SHOP分岐・CSV関所）
 
 ---
 
 ## いまの状態
 
+**2026-11-28（情報撮影 SHOP=2／CSV関所）:** メルカリSHOPは商品ページ2枚のみ（拡張 **1.0.8** `skip_transaction`）。個人は従来3枚。撮影成功で購入台帳へ証憑OK同期。出品CSVは未登録の対応購入が検品／証憑不足なら**その行だけ除外**。`normalize_mercari_item_url` が shops URL対応。関連: `mercari_capture_mixin.py`／`mercari_evidence_capture.py`／`listing_mixin.py`／拡張 `background.js`。**反映は HIRIO 再起動**＋ chrome://extensions で拡張再読み込み。  
 **2026-11-26（スタンバイ AI判定 ON/OFF）:** 左上に「AI判定ON」チェック。OFFで Keepa／Gemini の自動・手動判定を停止（状態「AIオフ」）。設定は shared 側。**反映は HIRIO 再起動**。  
 **2026-11-26（スタンバイ TP0〜TP3・失敗・再判定）:** 右ペインに TP0〜TP3。失敗は一覧「失敗」＋理由。再度判定ボタン（`--token`）。送信時に TP1〜3 も仕入行へ。`purchase_to_inventory_row` が tp1〜3 引数対応。試験 `test_hit_standby.py` 等 OK。**反映は HIRIO 再起動**（AI消化は watcher 側）。  
 **2026-11-26（スマホ・スタンバイキュー自動取込）:** Web `:8790/standby` が書いた `shared/hit_standby_send_queue.jsonl` を、ネット仕入タブが起動時＋約5秒ごとに `drain_all` → `append_single_purchase_row`。スタンバイダイアログを開く直前／閉じた後も drain。実装: `ui/inventory/widget.py`（本番 online・非devのみ）。試験: `tests/test_hit_standby_queue.py` 2件 OK。**反映は HIRIO 再起動**。  

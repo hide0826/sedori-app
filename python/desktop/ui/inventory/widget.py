@@ -386,7 +386,8 @@ class InventoryWidget(
         self.info_capture_all_btn = QPushButton("情報撮影")
         self.info_capture_all_btn.setToolTip(
             "一覧の出品URLがある全商品を、ログイン済みChromeで撮影し、\n"
-            "フリマ仕入証憑（商品ページ2枚＋取引画面）へ保存します。\n"
+            "フリマ仕入証憑へ保存します。\n"
+            "個人出品: 商品ページ2枚＋取引画面／メルカリSHOP: 商品ページ2枚。\n"
             "すでに揃っている証憑は上書きしません。行の編集の情報撮影と同じ仕組みです。"
         )
         self.info_capture_all_btn.clicked.connect(
