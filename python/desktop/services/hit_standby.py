@@ -146,8 +146,21 @@ def load_standby_items(
         token = str(row.get("token") or "").strip()
         if not token:
             continue
-        # アマサーチCSV突合で Amazon 登録済みになったものはスタンバイ送信対象外
-        if str(row.get("amazon_registered_at") or "").strip():
+        # アマサーチCSV突合で Amazon 登録済み（SKU付き）になったものはスタンバイ送信対象外
+        try:
+            from hit_snapshot import is_amazon_registered as _is_amz_reg
+
+            registered = bool(_is_amz_reg(row))
+        except Exception:  # noqa: BLE001
+            sku = str(
+                row.get("amazon_registered_sku") or row.get("sku") or row.get("SKU") or ""
+            ).strip()
+            registered = bool(
+                str(row.get("amazon_registered_at") or "").strip()
+                and sku
+                and sku != "未実装"
+            )
+        if registered:
             seen_tokens.add(token)
             continue
         seen_tokens.add(token)

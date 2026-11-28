@@ -182,7 +182,16 @@ def _load_purchases() -> List[Dict[str, Any]]:
 
 
 def _is_registered_row(row: Dict[str, Any]) -> bool:
-    return bool(str(row.get("amazon_registered_at") or "").strip())
+    """SKU 付きの本登録のみ。仮の amazon_registered_at だけでは登録済みにしない。"""
+    try:
+        from hit_snapshot import is_amazon_registered
+
+        return bool(is_amazon_registered(row))
+    except Exception:  # noqa: BLE001
+        if not bool(str(row.get("amazon_registered_at") or "").strip()):
+            return False
+        sku = str(row.get("amazon_registered_sku") or row.get("sku") or row.get("SKU") or "").strip()
+        return bool(sku and sku != "未実装")
 
 
 def _pick_purchase(
@@ -459,6 +468,9 @@ def apply_hit_purchase_match(
             )
             if status in ("ok", "already"):
                 result.registered += 1
+            elif status == "no_sku":
+                # 未着などで SKU 未採番 → 登録済みにしない（エラー扱いしない）
+                pass
             else:
                 result.errors.append(f"登録済み更新失敗:{token[:8]}… ({status})")
         except Exception as exc:  # noqa: BLE001
