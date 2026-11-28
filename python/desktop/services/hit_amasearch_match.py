@@ -449,11 +449,13 @@ def apply_hit_purchase_match(
                 result.errors.append(f"画像:{token[:8]}… {exc}")
 
         inv_date_txt = inv_date.isoformat() if inv_date else ""
+        sku_txt = _cell(row, "SKU", "sku")
         try:
             status, _ = mark_amazon_registered(
                 token,
                 asin=asin,
                 inventory_date=inv_date_txt,
+                sku=sku_txt,
             )
             if status in ("ok", "already"):
                 result.registered += 1
